@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS turn_log (
   task_kind          TEXT,                       -- chat | reminder | plan | booking | site | group | other
   task_key           TEXT,
   task_status        TEXT NOT NULL,              -- none | started | progressed | completed | failed
-  outcome            TEXT NOT NULL,              -- acted | quiet | refused_budget | model_failed | poison | no_model
+  outcome            TEXT NOT NULL,              -- acted | quiet | refused_budget | model_failed | poison | no_model | stale
   refused_for_budget INTEGER NOT NULL CHECK (refused_for_budget IN (0, 1)),
   cost_micro         INTEGER NOT NULL,
   attempts           INTEGER NOT NULL,
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS model_call (
   agent_key          TEXT NOT NULL,
   purpose            TEXT NOT NULL,              -- turn | compaction | planning
   model              TEXT NOT NULL,
-  status             TEXT NOT NULL,              -- settled | refused_user_cap | refused_global_ceiling | recovered_after_crash
+  status             TEXT NOT NULL,              -- settled | refused_user_cap | refused_global_ceiling | recovered_after_crash | unavailable
   estimate_micro     INTEGER NOT NULL,
   cost_micro         INTEGER NOT NULL,
   input_tokens       INTEGER NOT NULL,
@@ -48,7 +48,7 @@ CREATE INDEX IF NOT EXISTS model_call_agent_time ON model_call (agent_key, at);
 CREATE TABLE IF NOT EXISTS unasked_message (
   id           TEXT PRIMARY KEY,                 -- outbox id
   agent_key    TEXT NOT NULL,
-  trigger_kind TEXT NOT NULL,                    -- wakeup | checkin | (week 2) job_result
+  trigger_kind TEXT NOT NULL,                    -- wakeup (agent-origin) | checkin | (week 2) job_result
   text         TEXT NOT NULL,
   status       TEXT NOT NULL,                    -- sent | dropped_budget | dropped_blocked | failed
   day          TEXT,                             -- local date it was admitted for

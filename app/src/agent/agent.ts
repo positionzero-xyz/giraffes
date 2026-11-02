@@ -152,8 +152,8 @@ export class Agent extends DurableObject<Env> {
     const clock = this.#deps.clock;
     const started = clock.now();
     try {
-      const { poisoned } = this.#store.recover(started);
-      if (poisoned) this.#commitWithoutCall(poisoned, { kind: "poison" });
+      const poisoned = this.#store.recover(started);
+      if (poisoned) this.#commitPoison(poisoned);
       this.#fireDueWakeups();
       while (clock.now() - started < DRAIN_BUDGET_MS) {
         const batch = this.#store.claimBatch(clock.now());
@@ -240,16 +240,24 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
-  #commit(commit: TurnCommit, view: TurnView, agent: AgentKey, call: TurnCall, settle: Settlement | null, extra: readonly LogRow[] = []): void {
+  #commit(
+    commit: TurnCommit,
+    view: TurnView,
+    agent: AgentKey,
+    call: TurnCall,
+    settle: Settlement | null,
+    extra: readonly LogRow[] = [],
+  ): void {
     const now = this.#deps.clock.now();
     const logs = [...logsForTurn({ agent, commit, view, call, startedAt: view.now, now }), ...extra];
     this.#store.commitTurn(commit, settle, logs, now);
   }
 
-  #commitWithoutCall(batch: Batch, why: { readonly kind: "poison" }): void {
+  /** A batch that crashed TURN.maxAttempts times commits a fixed apology, so it can't eat the queue. */
+  #commitPoison(batch: Batch): void {
     const a = this.#agent();
     const view = this.#view(batch, a);
-    this.#commit(planWithoutModel(view, why), view, a.key, { kind: "none" }, null);
+    this.#commit(planWithoutModel(view, { kind: "poison" }), view, a.key, { kind: "none" }, null);
   }
 
   /**

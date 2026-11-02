@@ -66,17 +66,6 @@ export type Reservation = {
 /** A reservation closed at its actual cost. */
 export type Settlement = { readonly reservation: Reservation; readonly cost: MicroUsd };
 
-export type Recovery = {
-  /** `processing` inbox rows put back to `pending` (attempts kept). */
-  readonly requeued: number;
-  /** The batch that was in flight when a run died, if it hit TURN.maxAttempts; the drain commits it as poison. */
-  readonly poisoned: Batch | null;
-  /** `sending` outbox rows put back to `pending` with in_doubt = 1. */
-  readonly inDoubt: number;
-  /** Open reservations, now settled at estimate, with their model_call log rows written. */
-  readonly settledAtEstimate: readonly Reservation[];
-};
-
 export type OutboxView = {
   readonly id: OutboxId;
   readonly intent: Intent;
@@ -216,10 +205,13 @@ export class AgentStore {
    * Called once at the start of every drain. Anything in `processing`/`sending` or any open reservation
    * belongs to a run that died: the in-memory drain guard guarantees no live run exists when this runs.
    * Only one batch is ever in flight, so every `processing` row belongs to the same batch.
+   *   processing inbox rows → pending, attempts kept; or, at TURN.maxAttempts, returned for a poison commit
+   *   sending outbox rows   → pending with in_doubt = 1
+   *   open reservations     → settled at their estimate, logged as recovered_after_crash
    */
-  recover(now: EpochMs): Recovery {
+  recover(now: EpochMs): Batch | null {
     const agent = this.agent();
-    if (!agent) return { requeued: 0, poisoned: null, inDoubt: 0, settledAtEstimate: [] };
+    if (!agent) return null;
     return this.tx(() => {
       const inFlight = this.sql
         .exec<InboxCols>("SELECT event_key, payload, attempts, received_at FROM inbox WHERE status = 'processing' ORDER BY seq")
@@ -227,8 +219,8 @@ export class AgentStore {
         .map(toInboxItem);
       const batch = toBatch(inFlight);
       const poisoned = batch && Math.max(...batch.items.map((i) => i.attempts)) >= TURN.maxAttempts ? batch : null;
-      const requeued = poisoned ? 0 : this.sql.exec("UPDATE inbox SET status = 'pending' WHERE status = 'processing'").rowsWritten;
-      const inDoubt = this.sql.exec("UPDATE outbox SET status = 'pending', in_doubt = 1 WHERE status = 'sending'").rowsWritten;
+      if (!poisoned) this.sql.exec("UPDATE inbox SET status = 'pending' WHERE status = 'processing'");
+      this.sql.exec("UPDATE outbox SET status = 'pending', in_doubt = 1 WHERE status = 'sending'");
       const open = this.sql
         .exec<ReservationCols>("SELECT id, month, purpose, model, estimate_micro FROM reservation")
         .toArray()
@@ -252,7 +244,7 @@ export class AgentStore {
           now,
         );
       }
-      return { requeued, poisoned, inDoubt, settledAtEstimate: open };
+      return poisoned;
     });
   }
 

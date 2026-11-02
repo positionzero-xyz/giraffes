@@ -1,0 +1,16 @@
+// Sketch. Secrets (ANTHROPIC_API_KEY, LINE_*, TELEGRAM_*) via `wrangler secret put`; dev values in .dev.vars.
+{
+  "name": "giraffes",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "AGENT", "class_name": "Agent" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Agent"] }],
+  "d1_databases": [
+    { "binding": "LEDGER", "database_name": "giraffes-ledger", "database_id": "<set on first deploy>" }  // schema: wrangler d1 execute giraffes-ledger --file src/ledger/d1-schema.sql
+  ],
+  "vars": { "MODEL_BACKEND": "anthropic" },
+  "rules": [{ "type": "Text", "globs": ["dev/*.html"] }]
+}

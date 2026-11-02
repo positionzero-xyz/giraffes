@@ -1,66 +1,159 @@
 /**
  * Drives a real Agent Durable Object through the real Worker route, with a scripted model, a fake clock
- * and an in-memory ledger. Runs under @cloudflare/vitest-pool-workers (isolated storage per test).
+ * and an in-memory ledger. Runs under @cloudflare/vitest-pool-workers.
  *
  * The test talks the way a channel does (POST /webhook/dev) and reads what the person would see
- * (delivered outbox texts). It never reaches into tables, so a refactor of the store doesn't break tests.
+ * (delivered outbox texts) and what the agent shipped to the ledger. It never reaches into tables, so a
+ * refactor of the store doesn't break tests.
+ *
+ * Scenarios use dates in 2099. The runtime fires a stored alarm on its own once the real clock passes
+ * it, which would race the test's explicit runs; far-future fake times keep every alarm in the future.
  */
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import type { Agent, AgentSnapshot } from "../src/agent/agent";
-import type { EpochMs } from "../src/domain";
-import type { LogRow, Ledger } from "../src/ledger/ledger";
+import { personAgentKey, type EpochMs, type LocalDateTime, type MicroUsd } from "../src/domain";
+import type { LeaseAnswer, Ledger, LogRow } from "../src/ledger/ledger";
 import { scripted, type ScriptStep, type ScriptedModel } from "../src/model/scripted";
+import { SPEND } from "../src/policy/spend";
+import { DEFAULT_TIME_ZONE, fromLocal } from "../src/policy/time";
 
 export { scripted };
 
+export const local = (s: string): EpochMs => fromLocal(s as LocalDateTime, DEFAULT_TIME_ZONE);
+
+export type FakeClock = { now(): EpochMs; set(t: EpochMs): void };
+
+export function fakeClock(start: EpochMs): FakeClock {
+  let t = start;
+  return {
+    now: () => t,
+    set(next) {
+      t = next;
+    },
+  };
+}
+
+export type MemoryLedger = Ledger & { readonly rows: readonly LogRow[] };
+
+/** Same contract as the D1 ledger: rows are idempotent by (stream, id), leases by (agent, month, seq). */
+export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): MemoryLedger {
+  const ceiling = opts.ceilingMicro ?? SPEND.globalCeilingMicro;
+  const rows: LogRow[] = [];
+  const seen = new Set<string>();
+  const leases = new Map<string, { month: string; micro: MicroUsd }>();
+  return {
+    rows,
+    async append(batch) {
+      for (const row of batch) {
+        const key = `${row.stream}:${row.id}`;
+        if (!seen.has(key)) rows.push(row);
+        seen.add(key);
+      }
+    },
+    async requestLease(req): Promise<LeaseAnswer> {
+      const key = `${req.agent}|${req.month}|${req.seq}`;
+      const existing = leases.get(key);
+      if (existing) return { kind: "granted", micro: existing.micro };
+      const used = [...leases.values()].filter((l) => l.month === req.month).reduce((sum, l) => sum + l.micro, 0);
+      if (used + req.micro > ceiling) return { kind: "ceiling" };
+      leases.set(key, { month: req.month, micro: req.micro });
+      return { kind: "granted", micro: req.micro };
+    },
+  };
+}
+
 export type DevChat = {
-  /** POST /webhook/dev, then run the alarm until the agent is idle at the current fake time. */
-  say(text: string): Promise<void>;
-  /** Move the fake clock to a local wall time and run every alarm due up to it, in order. */
+  readonly model: ScriptedModel;
+  readonly clock: FakeClock;
+  /** POST /webhook/dev without waiting for the agent. `at` is the platform timestamp (default: now). */
+  post(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<Response>;
+  /** post(), then run the agent until it is idle at the current fake time. */
+  say(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<void>;
+  /** Run drains until no alarm is due at the current fake time, joining a drain already in flight. */
+  settle(): Promise<void>;
+  /** Invoke the alarm handler once, as the runtime does (possibly again, possibly concurrently). */
+  alarm(): Promise<void>;
+  /** Move the fake clock to a local wall time, running every alarm due on the way, in order. */
   advanceTo(local: string): Promise<void>;
-  /** Texts delivered to the person since the last call, one string per outbox row (texts joined by \n). */
+  /** Texts delivered to the person since the last call, one string per delivery (texts joined by \n). */
   received(): Promise<string[]>;
   snapshot(): Promise<AgentSnapshot>;
   /** Rows the agent shipped to the ledger, by stream. */
   logs<S extends LogRow["stream"]>(stream: S): Extract<LogRow, { stream: S }>[];
-  /** Simulate a crash: drop the in-memory instance mid-turn (via a "hold" script step), then resume. */
-  crashDuringNextModelCall(): Promise<void>;
 };
+
+let messageIds = 0;
 
 export async function devChat(
   user: string,
-  opts: { readonly model: ScriptedModel; readonly at: string; readonly tz?: string },
+  opts: { readonly model: ScriptedModel; readonly at: string; readonly ledger?: MemoryLedger },
 ): Promise<DevChat> {
-  // TODO:
-  //   clock = fakeClock(fromLocal(opts.at, tz)); ledger = memoryLedger()
-  //   stub = env.AGENT.get(env.AGENT.idFromName(`p:dev:${user}`))
-  //   await runInDurableObject(stub, (agent: Agent) => agent.withDeps({ model: opts.model, clock, ledger }))
-  //   say:       await SELF.fetch("https://x/webhook/dev", { method: "POST", body: JSON.stringify({ user, text, id }) })
-  //              clock.advance(MESSAGE_DEBOUNCE_MS); await runUntilIdle()
-  //   runUntilIdle: loop { const next = await runInDurableObject(stub, (_, state) => state.storage.getAlarm())
-  //                        if (next === null || next > clock.now()) break; await runDurableObjectAlarm(stub) }
-  //   advanceTo: step the clock to each alarm time <= target, run it, then set the clock to target
-  void env; void runDurableObjectAlarm; void runInDurableObject; void SELF;
-  throw new Error("not implemented");
+  const clock = fakeClock(local(opts.at));
+  const ledger = opts.ledger ?? memoryLedger();
+  const stub = env.AGENT.get(env.AGENT.idFromName(personAgentKey({ channel: "dev", channelUserId: user })));
+  await runInDurableObject<Agent, void>(stub, (agent) => agent.withDeps({ model: opts.model, clock, ledger }));
+  const delivered = new Set<string>();
+  const nextAlarm = () => runInDurableObject(stub, (_agent, state) => state.storage.getAlarm());
+
+  const chat: DevChat = {
+    model: opts.model,
+    clock,
+    post(text, o = {}) {
+      const body = { user, text, id: o.id ?? `m${++messageIds}`, at: o.at ?? clock.now() };
+      return SELF.fetch("https://agent.test/webhook/dev", { method: "POST", body: JSON.stringify(body) });
+    },
+    async say(text, o) {
+      const res = await chat.post(text, o);
+      if (!res.ok) throw new Error(`webhook answered ${res.status}`);
+      await chat.settle();
+    },
+    async settle() {
+      for (let i = 0; i < 50; i++) {
+        await chat.alarm();
+        const next = await nextAlarm();
+        if (next === null || next > clock.now()) return;
+      }
+      throw new Error("the agent never went idle");
+    },
+    alarm: () => runInDurableObject<Agent, void>(stub, (agent) => agent.alarm()),
+    async advanceTo(to) {
+      const target = local(to);
+      for (;;) {
+        const next = await nextAlarm();
+        if (next === null || next > target) break;
+        clock.set(Math.max(next, clock.now()) as EpochMs);
+        await chat.settle();
+      }
+      clock.set(target);
+      await chat.settle();
+    },
+    async received() {
+      const fresh = (await chat.snapshot()).outbox.filter((o) => o.status === "sent" && !delivered.has(o.id));
+      for (const o of fresh) delivered.add(o.id);
+      return fresh.map((o) => o.texts.join("\n"));
+    },
+    snapshot: () => stub.snapshot(),
+    logs: (stream) => ledger.rows.filter((r): r is Extract<LogRow, { stream: typeof stream }> => r.stream === stream),
+  };
+  return chat;
 }
 
 /** Builds a ScriptStep whose value must satisfy TurnOutputSchema (checked when the agent calls). */
 export function turn(o: {
-  actions: unknown[];
-  lateNotice?: string;
-  task: [kind: string, key: string, status: string];
+  readonly actions: unknown[];
+  readonly lateNotice?: string;
+  readonly task: readonly [kind: string, key: string, status: string];
+  readonly usage?: Extract<ScriptStep, { kind: "output" }>["usage"];
 }): ScriptStep {
-  return { kind: "output", value: { actions: o.actions, lateNotice: o.lateNotice, task: { kind: o.task[0], key: o.task[1], status: o.task[2] } } };
+  const task = { kind: o.task[0], key: o.task[1], status: o.task[2] };
+  const value = o.lateNotice === undefined ? { actions: o.actions, task } : { actions: o.actions, lateNotice: o.lateNotice, task };
+  return o.usage ? { kind: "output", value, usage: o.usage } : { kind: "output", value };
 }
 export const send = (text: string) => ({ type: "send", text });
-export const schedule = (key: string, at: string, note: string) => ({ type: "schedule_wakeup", key, at, note });
+/** `asked` defaults to true: the person asked for this reminder. */
+export const schedule = (key: string, at: string, note: string, asked = true) => ({ type: "schedule_wakeup", key, at, note, asked });
 export const cancel = (key: string) => ({ type: "cancel_wakeup", key });
 export const quiet = () => ({ type: "quiet" });
-
-export function fakeClock(start: EpochMs): { now(): EpochMs; set(t: EpochMs): void; advance(ms: number): void } {
-  throw new Error("not implemented");
-}
-
-export function memoryLedger(opts?: { ceilingMicro?: number; failAppends?: boolean }): Ledger & { rows: LogRow[] } {
-  throw new Error("not implemented");
-}
+export const crash = (): ScriptStep => ({ kind: "crash" });
+export const hold = (then: ScriptStep): ScriptStep => ({ kind: "hold", then });
+export const chat = (text: string): ScriptStep => turn({ actions: [send(text)], task: ["chat", "chat", "none"] });

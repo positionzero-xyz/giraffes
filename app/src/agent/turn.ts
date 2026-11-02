@@ -16,6 +16,7 @@ import {
   intentOf,
   parseWakeupKey,
   type AgentEvent,
+  type AgentEventKind,
   type AgentKey,
   type EpochMs,
   type EventKey,
@@ -190,6 +191,8 @@ export type NewTurn = TurnRow & { readonly eventKey: EventKey };
 export type Outbound = {
   readonly texts: readonly [string, ...string[]];
   readonly intent: Intent;
+  /** What started the turn; the unasked log records it at delivery. */
+  readonly triggerKind: AgentEventKind;
   readonly reply?: ReplyHandle;
 };
 
@@ -264,8 +267,9 @@ function newestReply(view: TurnView): ReplyHandle | undefined {
 function outbound(texts: readonly string[], intent: Intent, view: TurnView): Outbound | null {
   const ts = nonEmpty(texts);
   if (ts === null) return null;
+  const triggerKind = trigger(view).kind;
   const reply = intent === "reply" ? newestReply(view) : undefined;
-  return reply ? { texts: ts, intent, reply } : { texts: ts, intent };
+  return reply ? { texts: ts, intent, triggerKind, reply } : { texts: ts, intent, triggerKind };
 }
 
 function personTurns(view: TurnView): NewTurn[] {

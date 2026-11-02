@@ -7,6 +7,8 @@
  */
 import type { z } from "zod";
 import type { Config } from "../config";
+import { anthropicModel } from "./anthropic";
+import { bridgeModel } from "./bridge";
 
 export type ModelId = "claude-haiku-5-5" | "claude-sonnet-5-5";
 export type Effort = "low" | "medium" | "high";
@@ -85,11 +87,22 @@ export interface ModelClient {
 }
 
 /** Picks the backend from validated config. The only place that knows all three exist. */
-export function makeModelClient(config: Config): ModelClient {
-  // TODO: switch (config.model.backend) {
-  //   case "anthropic": return anthropicModel(config.model.apiKey);
-  //   case "bridge":    return bridgeModel(config.model.bridgeUrl);
-  //   case "scripted":  throw new Error("scripted model must be injected by the test via Agent.withDeps");
-  // }
-  throw new Error("not implemented");
+export function makeModelClient(config: Config["model"]): ModelClient {
+  switch (config.backend) {
+    case "anthropic":
+      return anthropicModel(config.apiKey);
+    case "bridge":
+      return bridgeModel(config.bridgeUrl);
+    case "scripted":
+      return unscripted();
+  }
+}
+
+/** The scripted backend's default: a test must inject its script with `Agent.withDeps`. */
+function unscripted(): ModelClient {
+  return {
+    parse: async () => {
+      throw new Error("MODEL_BACKEND=scripted: the test didn't inject a script (Agent.withDeps)");
+    },
+  };
 }

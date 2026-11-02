@@ -11,17 +11,16 @@
 
 export const MIGRATIONS: readonly string[] = [
   /* 1 */ `
-  CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
-
   -- Exactly one row. Written on the first enqueue (the DO can't learn its own name otherwise).
   CREATE TABLE agent (
     one              INTEGER PRIMARY KEY CHECK (one = 1),
     agent_key        TEXT NOT NULL,
     channel          TEXT NOT NULL,
     channel_user_id  TEXT NOT NULL,
-    tz               TEXT NOT NULL DEFAULT 'Asia/Bangkok',
-    checkin_local    TEXT NOT NULL DEFAULT '09:00',
+    tz               TEXT NOT NULL,
+    checkin_local    TEXT NOT NULL,
     status           TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'blocked')),
+    status_at        INTEGER NOT NULL DEFAULT 0,      -- platform time of the last applied follow/block
     created_at       INTEGER NOT NULL
   );
 
@@ -33,7 +32,7 @@ export const MIGRATIONS: readonly string[] = [
     kind         TEXT NOT NULL,
     payload      TEXT NOT NULL,                       -- JSON AgentEvent
     received_at  INTEGER NOT NULL,
-    ready_at     INTEGER NOT NULL,                    -- received_at + debounce for messages
+    ready_at     INTEGER NOT NULL,                    -- moved later only by a model-unavailable backoff
     status       TEXT NOT NULL DEFAULT 'pending'
                  CHECK (status IN ('pending', 'processing', 'done', 'failed')),
     attempts     INTEGER NOT NULL DEFAULT 0,          -- incremented when a drain claims it
@@ -45,7 +44,7 @@ export const MIGRATIONS: readonly string[] = [
   -- Verbatim recent conversation. Compaction deletes the oldest rows after folding them into memory.
   CREATE TABLE turn (
     seq        INTEGER PRIMARY KEY AUTOINCREMENT,
-    role       TEXT NOT NULL CHECK (role IN ('person', 'agent', 'note')),   -- note: code notices, late markers
+    role       TEXT NOT NULL CHECK (role IN ('person', 'agent', 'note')),   -- note: code notices, wake-up markers
     text       TEXT NOT NULL,
     at         INTEGER NOT NULL,
     event_key  TEXT NOT NULL
@@ -72,13 +71,15 @@ export const MIGRATIONS: readonly string[] = [
     id          INTEGER PRIMARY KEY AUTOINCREMENT,   -- WakeupId; the firing's inbox key is 'wake:<id>'
     key         TEXT NOT NULL,                       -- WakeupKey
     kind        TEXT NOT NULL CHECK (kind IN ('reminder', 'checkin')),
+    origin      TEXT NOT NULL CHECK (origin IN ('person', 'agent', 'system')),
     note        TEXT NOT NULL,
     due_at      INTEGER NOT NULL,
     status      TEXT NOT NULL DEFAULT 'pending'
                 CHECK (status IN ('pending', 'fired', 'skipped', 'cancelled')),
     created_at  INTEGER NOT NULL,
     created_by  TEXT NOT NULL,                       -- event_key of the turn that scheduled it, or 'system'
-    closed_at   INTEGER
+    closed_at   INTEGER,
+    CHECK ((kind = 'checkin') = (origin = 'system'))
   );
   -- "Every wake-up has an ID, so a duplicate is dropped": a key can be pending at most once.
   CREATE UNIQUE INDEX wakeup_pending_key ON wakeup (key) WHERE status = 'pending';
@@ -90,7 +91,7 @@ export const MIGRATIONS: readonly string[] = [
     id             TEXT PRIMARY KEY,
     event_key      TEXT NOT NULL,
     trigger_kind   TEXT NOT NULL,
-    intent         TEXT NOT NULL CHECK (intent IN ('reply', 'unasked')),
+    intent         TEXT NOT NULL CHECK (intent IN ('reply', 'requested', 'unasked')),
     texts          TEXT NOT NULL,                    -- JSON string[1..3]
     reply_token    TEXT,
     reply_expires  INTEGER,
@@ -99,7 +100,8 @@ export const MIGRATIONS: readonly string[] = [
                    CHECK (status IN ('pending', 'sending', 'sent', 'dropped')),
     admitted_day   TEXT,                             -- unasked only: local date the budget was charged to
     in_doubt       INTEGER NOT NULL DEFAULT 0,       -- a 'sending' row recovered after a crash
-    attempts       INTEGER NOT NULL DEFAULT 0,
+    attempts       INTEGER NOT NULL DEFAULT 0,       -- incremented as each attempt starts
+    via            TEXT,                             -- reply | push, once sent
     drop_reason    TEXT,                             -- budget | blocked | failed | gone
     created_at     INTEGER NOT NULL,
     closed_at      INTEGER
@@ -131,7 +133,7 @@ export const MIGRATIONS: readonly string[] = [
 
   -- Transactional outbox for the D1 ledger. Written in the same transaction as the fact it records.
   CREATE TABLE log_outbox (
-    id         TEXT PRIMARY KEY,                     -- the LogRow id, unique per stream
+    id         TEXT PRIMARY KEY,                     -- '<stream>:<LogRow id>'
     stream     TEXT NOT NULL,
     row        TEXT NOT NULL,                        -- JSON LogRow
     created_at INTEGER NOT NULL
@@ -147,11 +149,19 @@ export const MIGRATIONS: readonly string[] = [
   // expires_at, ...), side_effect (idempotency_key PRIMARY KEY, status pending|done|unknown, ...).
 ];
 
-/** Runs pending migrations. Idempotent: reads meta.schema_version first. */
-export function migrate(sql: SqlStorage): void {
-  // TODO: create meta if missing; v = Number(meta['schema_version'] ?? 0);
-  //       for i in v..MIGRATIONS.length: sql.exec(MIGRATIONS[i]); set schema_version = i + 1.
-  //       Runs inside the constructor's blockConcurrencyWhile; SQLite DDL in a DO is transactional
-  //       per implicit transaction (no await between statements).
-  throw new Error("not implemented");
+/**
+ * Runs pending migrations. Idempotent: reads meta.schema_version first. Called inside the constructor's
+ * blockConcurrencyWhile; each migration and its version bump commit together.
+ */
+export function migrate(storage: DurableObjectStorage): void {
+  const sql = storage.sql;
+  sql.exec("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
+  const row = sql.exec<{ v: string }>("SELECT v FROM meta WHERE k = 'schema_version'").toArray()[0];
+  for (let i = row ? Number(row.v) : 0; i < MIGRATIONS.length; i++) {
+    const migration = MIGRATIONS[i];
+    storage.transactionSync(() => {
+      sql.exec(migration);
+      sql.exec("INSERT INTO meta (k, v) VALUES ('schema_version', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v", String(i + 1));
+    });
+  }
 }

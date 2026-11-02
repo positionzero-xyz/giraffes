@@ -1,4 +1,5 @@
-// Sketch. Secrets (ANTHROPIC_API_KEY, LINE_*, TELEGRAM_*) via `wrangler secret put`; dev values in .dev.vars.
+// Secrets (ANTHROPIC_API_KEY, LINE_*, TELEGRAM_*) via `wrangler secret put`; dev values in .dev.vars.
+// dev/chat.html is imported as text by wrangler's default module rules.
 {
   "name": "giraffes",
   "main": "src/worker.ts",
@@ -11,6 +12,5 @@
   "d1_databases": [
     { "binding": "LEDGER", "database_name": "giraffes-ledger", "database_id": "<set on first deploy>" }  // schema: wrangler d1 execute giraffes-ledger --file src/ledger/d1-schema.sql
   ],
-  "vars": { "MODEL_BACKEND": "anthropic" },
-  "rules": [{ "type": "Text", "globs": ["dev/*.html"] }]
+  "vars": { "MODEL_BACKEND": "anthropic" }
 }

@@ -1,11 +1,109 @@
 <!doctype html>
-<!-- Minimal dev chat. Sketch: a user picker, a transcript that polls GET /dev/transcript?user=…,
-     and a form that POSTs { user, text, id: crypto.randomUUID() } to /webhook/dev.
-     Shows per message: intent (reply/unasked), via (reply/push), status (sent/deferred/dropped),
-     and the pending wake-ups list, so quiet hours and the budget are visible while driving it. -->
+<!-- Dev chat: sends through POST /webhook/dev like any channel and polls GET /dev/transcript?user=….
+     "/follow" and "/block" send lifecycle events. Deliveries show intent, via and status, so quiet
+     hours and the budget are visible while driving it. -->
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent dev chat</title></head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent dev chat</title>
+<style>
+  :root { color-scheme: light dark; --muted: #888; --line: #8884; --me: #2b6cb0; --note: #a0782a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 system-ui, sans-serif; display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
+  header, form { display: flex; gap: 8px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  form { border-top: 1px solid var(--line); border-bottom: 0; }
+  header .meta { margin-left: auto; color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: 1fr 320px; min-height: 0; }
+  section { overflow-y: auto; padding: 12px 16px; }
+  aside { border-left: 1px solid var(--line); overflow-y: auto; padding: 12px 16px; font-size: 13px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 12px 0 6px; }
+  .turn { margin: 6px 0; white-space: pre-wrap; }
+  .turn .who { font-weight: 600; margin-right: 6px; }
+  .turn.person .who { color: var(--me); }
+  .turn.note { color: var(--note); font-style: italic; }
+  .turn time, .row .tag { color: var(--muted); font-size: 12px; margin-left: 6px; }
+  .row { padding: 6px 0; border-bottom: 1px solid var(--line); white-space: pre-wrap; }
+  input[name=text] { flex: 1; }
+  input, button { font: inherit; padding: 6px 10px; }
+  @media (max-width: 720px) { main { grid-template-columns: 1fr; } aside { border-left: 0; border-top: 1px solid var(--line); } }
+</style>
+</head>
 <body>
-  <!-- TODO -->
+<header>
+  <label>User <input name="user" value="alice" size="12" pattern="[A-Za-z0-9_\-]{1,64}"></label>
+  <span class="meta" id="meta"></span>
+</header>
+<main>
+  <section id="turns"></section>
+  <aside>
+    <h2>Deliveries</h2><div id="outbox"></div>
+    <h2>Pending wake-ups</h2><div id="wakeups"></div>
+  </aside>
+</main>
+<form id="send">
+  <input name="text" placeholder="Message, /follow or /block" autocomplete="off" autofocus>
+  <button>Send</button>
+</form>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const userInput = document.querySelector("input[name=user]");
+  const user = () => userInput.value.trim();
+  const time = (t) => new Date(t).toLocaleString();
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function render(s) {
+    const who = { person: "You", agent: "Agent", note: "" };
+    $("turns").replaceChildren(...s.turns.map((t) => {
+      const row = el("div", "turn " + t.role);
+      if (who[t.role]) row.append(el("span", "who", who[t.role]));
+      row.append(t.text, el("time", "", time(t.at)));
+      return row;
+    }));
+    $("outbox").replaceChildren(...s.outbox.slice().reverse().map((o) => {
+      const row = el("div", "row", o.texts.join("\n"));
+      row.append(el("div", "tag", [o.intent, o.status, o.via].filter(Boolean).join(" · ")));
+      return row;
+    }));
+    $("wakeups").replaceChildren(...(s.pendingWakeups.length ? s.pendingWakeups.map((w) => {
+      const row = el("div", "row", w.kind === "checkin" ? "Daily check-in" : `${w.key}: ${w.note}`);
+      row.append(el("div", "tag", `${time(w.dueAt)} · ${w.origin}`));
+      return row;
+    }) : [el("div", "tag", "none")]));
+    $("meta").textContent = s.agent
+      ? `${s.agent.status} · ${s.agent.tz} · unasked today ${s.unaskedSentToday}/3 · $${(s.spendThisMonthMicro / 1e6).toFixed(4)} this month`
+      : "no agent yet: say something";
+  }
+
+  let last = "";
+  async function poll() {
+    try {
+      const res = await fetch(`/dev/transcript?user=${encodeURIComponent(user())}`);
+      if (res.ok) {
+        const text = await res.text();
+        if (text !== last) { last = text; render(JSON.parse(text)); $("turns").scrollTop = 1e9; }
+      }
+    } finally {
+      setTimeout(poll, 1000);
+    }
+  }
+
+  $("send").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const input = e.target.elements.text;
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    await fetch("/webhook/dev", { method: "POST", body: JSON.stringify({ user: user(), text, id: crypto.randomUUID() }) });
+  });
+  userInput.addEventListener("change", () => { last = ""; });
+  poll();
+</script>
 </body>
 </html>

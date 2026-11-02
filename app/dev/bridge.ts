@@ -14,7 +14,7 @@ const PORT = Number(process.env.BRIDGE_PORT ?? 8789);
 const CLAUDE = process.env.CLAUDE_BIN ?? "claude";
 const ALIAS: Readonly<Record<string, string>> = { "claude-haiku-5-5": "haiku", "claude-sonnet-5-5": "sonnet" };
 
-const ParseRequest = z.object({ model: z.string(), system: z.string(), user: z.string(), jsonSchema: z.unknown() });
+const ParseRequest = z.object({ model: z.string(), system: z.string(), user: z.string(), jsonSchema: z.record(z.string(), z.unknown()) });
 const CliResult = z.object({
   is_error: z.boolean(),
   structured_output: z.unknown().optional(),
@@ -62,6 +62,8 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   const parsed = ParseRequest.safeParse(JSON.parse(await readBody(req)));
   if (!parsed.success) return json(res, 400, { error: parsed.error.message });
   const { model, system, user, jsonSchema } = parsed.data;
+  // The CLI's validator doesn't load zod's draft 2020-12 meta-schema; the keywords zod emits validate without it.
+  const { $schema: _, ...schema } = jsonSchema;
 
   const args = [
     "-p",
@@ -69,7 +71,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     "--tools", "",
     "--system-prompt", system,
     "--output-format", "json",
-    "--json-schema", JSON.stringify(jsonSchema),
+    "--json-schema", JSON.stringify(schema),
     "--no-session-persistence",
     "--setting-sources", "",
     "--strict-mcp-config",

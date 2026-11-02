@@ -20,6 +20,8 @@ export const SPEND = {
   leaseChunkMicro: 500_000 as MicroUsd,
 } as const;
 
+const CHARS_PER_TOKEN = 3;
+
 /** Local spend state for the current month, as derived from the agent's tables. */
 export type MonthSpend = {
   /** Settled actual cost (plus crash-recovered estimates). */
@@ -30,19 +32,34 @@ export type MonthSpend = {
   readonly leased: MicroUsd;
 };
 
+/** Token counts times per-million prices, rounded up to whole micro-dollars. */
+function priced(model: ModelId, usage: Usage): MicroUsd {
+  const p = priceOf(model);
+  const microTimesMillion =
+    usage.inputTokens * p.inputPerM +
+    usage.outputTokens * p.outputPerM +
+    usage.cacheWriteTokens * p.cacheWritePerM +
+    usage.cacheReadTokens * p.cacheReadPerM;
+  return Math.ceil(microTimesMillion / 1_000_000) as MicroUsd;
+}
+
 /**
  * Worst-case cost of a call before it is made: input estimated from characters (≈3 chars/token,
  * rounded up, all priced as uncached input) plus `maxTokens` of output. Over-estimates on purpose;
  * the reservation is released down to actual on settle.
  */
 export function estimate(model: ModelId, promptChars: number, maxTokens: number): MicroUsd {
-  void priceOf;
-  throw new Error("not implemented");
+  return priced(model, {
+    inputTokens: Math.ceil(promptChars / CHARS_PER_TOKEN),
+    outputTokens: maxTokens,
+    cacheWriteTokens: 0,
+    cacheReadTokens: 0,
+  });
 }
 
 /** Actual cost from the response's `usage`, including cache reads and writes at their own rates. */
 export function costOf(model: ModelId, usage: Usage): MicroUsd {
-  throw new Error("not implemented");
+  return priced(model, usage);
 }
 
 export type ReserveDecision =
@@ -58,5 +75,10 @@ export type ReserveDecision =
  * A "ceiling" answer from the ledger turns need_lease into refuse(global_ceiling) at the caller.
  */
 export function decideReservation(month: MonthSpend, est: MicroUsd): ReserveDecision {
-  throw new Error("not implemented");
+  const committed = month.spent + month.reserved + est;
+  if (committed > SPEND.userCapMicro) return { kind: "refuse", scope: "user_cap" };
+  if (committed > month.leased) {
+    return { kind: "need_lease", chunk: Math.min(SPEND.leaseChunkMicro, SPEND.userCapMicro - month.leased) as MicroUsd };
+  }
+  return { kind: "reserve" };
 }

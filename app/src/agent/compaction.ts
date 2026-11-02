@@ -11,7 +11,6 @@
  * second run recomputes the same plan.
  */
 import { z } from "zod";
-import type { EpochMs } from "../domain";
 import type { TurnRow } from "./turn";
 import { TURN } from "./turn";
 
@@ -40,13 +39,28 @@ export type CompactionPlan = {
   readonly user: string; // with COMPACTION_SYSTEM from prompt.ts
 };
 
+const SPEAKER: Readonly<Record<TurnRow["role"], string>> = { person: "Person", agent: "Assistant", note: "Note" };
+
 /** null when under both thresholds. */
-export function planCompaction(input: CompactionInput, now: EpochMs): CompactionPlan | null {
-  // TODO: if turns.length <= triggerTurns && notes.length <= maxNotes → null
-  //       foldThroughSeq = turns[turns.length - keepTurns - 1].seq   (or throughSeq if not over turn limit)
-  //       foldNoteIds = oldest (notes.length - maxNotes / 2) notes when over the note cap
-  //       user = "Current summary:\n…\n\nTurns being removed:\n…\n\nNotes being folded:\n…"
-  throw new Error("not implemented");
+export function planCompaction(input: CompactionInput): CompactionPlan | null {
+  const overTurns = input.turns.length > COMPACTION.triggerTurns;
+  const overNotes = input.notes.length > COMPACTION.maxNotes;
+  if (!overTurns && !overNotes) return null;
+
+  const folded = overTurns ? input.turns.slice(0, input.turns.length - COMPACTION.keepTurns) : [];
+  const foldedNotes = overNotes ? input.notes.slice(0, input.notes.length - COMPACTION.maxNotes / 2) : [];
+  const lastFolded = folded.at(-1);
+  const turnsText = folded.map((t) => `[${new Date(t.at).toISOString().slice(0, 16)}Z] ${SPEAKER[t.role]}: ${t.text}`);
+  return {
+    expectThroughSeq: input.throughSeq,
+    foldThroughSeq: lastFolded ? lastFolded.seq : input.throughSeq,
+    foldNoteIds: foldedNotes.map((n) => n.id),
+    user: [
+      `Current summary:\n${input.summary || "(empty)"}`,
+      `Turns being removed:\n${turnsText.join("\n") || "(none)"}`,
+      `Notes being folded:\n${foldedNotes.map((n) => `- ${n.text}`).join("\n") || "(none)"}`,
+    ].join("\n\n"),
+  };
 }
 
 export type CompactionCommit = {

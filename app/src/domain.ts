@@ -21,6 +21,8 @@ export type LocalDateTime = Brand<string, "LocalDateTime">;
 export type LocalDate = Brand<string, "LocalDate">;
 /** "YYYY-MM" in UTC. Keys the per-user cap and the global ceiling, so both use one calendar. */
 export type MonthKey = Brand<string, "MonthKey">;
+/** "HH:mm" wall clock time of day, such as the daily check-in time. */
+export type TimeOfDay = `${number}:${number}`;
 
 // ---------------------------------------------------------------------------------------------
 // Identity
@@ -38,9 +40,12 @@ export type Identity = { readonly channel: ChannelId; readonly channelUserId: st
  */
 export type AgentKey = Brand<string, "AgentKey">;
 
+/** Adapters pass only platform-issued ids, which never contain ':'. A ':' would let two people share a key. */
 export function personAgentKey(identity: Identity): AgentKey {
-  // TODO: reject ':' in channelUserId (LINE "U…" ids and Telegram numeric ids never contain one).
-  throw new Error("not implemented");
+  if (identity.channelUserId.length === 0 || identity.channelUserId.includes(":")) {
+    throw new Error(`invalid channel user id: ${JSON.stringify(identity.channelUserId)}`);
+  }
+  return `p:${identity.channel}:${identity.channelUserId}` as AgentKey;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -73,7 +78,18 @@ export type WakeupId = Brand<number, "WakeupId">;
  * `daily-checkin` is reserved for code.
  */
 export type WakeupKey = Brand<string, "WakeupKey">;
+export const WAKEUP_KEY_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
 export const CHECKIN_KEY = "daily-checkin" as WakeupKey;
+
+export function parseWakeupKey(raw: string): WakeupKey | null {
+  return WAKEUP_KEY_PATTERN.test(raw) ? (raw as WakeupKey) : null;
+}
+
+/**
+ * Who asked for a wake-up, set by code. A `person` wake-up is a requested reminder: on time, outside
+ * the budget. `agent` wake-ups and the `system` check-in are unasked.
+ */
+export type WakeupOrigin = "person" | "agent" | "system";
 
 /** UUID v4. Also the LINE `X-Line-Retry-Key`, so a retried push is deduplicated by LINE. */
 export type OutboxId = Brand<string, "OutboxId">;
@@ -90,8 +106,17 @@ export type ReplyHandle = { readonly token: string; readonly expiresAt: EpochMs 
 /** What a channel can tell the agent. Verified and parsed by the adapter. */
 export type ChannelEvent =
   | { readonly kind: "message"; readonly text: string; readonly reply?: ReplyHandle }
-  /** LINE follow/unfollow, Telegram /start and my_chat_member member/kicked. LINE unfollow *is* a block. */
-  | { readonly kind: "lifecycle"; readonly change: "follow" | "block"; readonly reply?: ReplyHandle };
+  /**
+   * LINE follow/unfollow, Telegram /start and my_chat_member member/kicked. LINE unfollow *is* a block.
+   * `at` is the platform's timestamp. Reachability follows the newest one, so a replayed or late older
+   * event can't undo a newer change.
+   */
+  | {
+      readonly kind: "lifecycle";
+      readonly change: "follow" | "block";
+      readonly at: EpochMs;
+      readonly reply?: ReplyHandle;
+    };
 
 /** What the adapter hands the core: authenticated, keyed, person-scoped. */
 export type InboundEnvelope = {
@@ -103,7 +128,7 @@ export type InboundEnvelope = {
 };
 
 /**
- * Everything an agent turn can be about. Stored as JSON in `inbox.payload` and parsed by `codec.ts`.
+ * Everything an agent turn can be about. Stored as JSON in `inbox.payload` and parsed by `store.ts`.
  * Adding a kind is additive: the inbox has no CHECK on kind, and `intentOf` / the turn planner are
  * exhaustive switches, so the compiler lists every place a new kind must be handled.
  */
@@ -113,6 +138,7 @@ export type AgentEvent =
       readonly kind: "wakeup";
       readonly wakeupId: WakeupId;
       readonly key: WakeupKey;
+      readonly origin: Exclude<WakeupOrigin, "system">;
       readonly note: string;
       readonly dueAt: EpochMs;
       readonly firedAt: EpochMs;
@@ -126,26 +152,31 @@ export type AgentEvent =
 
 export type AgentEventKind = AgentEvent["kind"];
 
-/** Lateness is derived from the event, never stored. */
-export const lateBy = (e: Extract<AgentEvent, { firedAt: EpochMs }>): number => e.firedAt - e.dueAt;
-
 // ---------------------------------------------------------------------------------------------
 // Outbound
 
 /**
- * Whether a send answers the person. Derived by code from the triggering event; the model never
+ * How a send relates to the person. Derived by code from the triggering event; the model never
  * chooses it, so the model cannot route around the unasked budget or quiet hours.
+ *   reply      answers something the person just did
+ *   requested  a reminder the person asked for: delivered at the chosen time, outside the budget
+ *   unasked    the agent speaking on its own: quiet hours and the daily budget apply
  */
-export type Intent = "reply" | "unasked";
+export type Intent = "reply" | "requested" | "unasked";
 
 export function intentOf(e: AgentEvent): Intent {
-  // TODO: switch (e.kind) {
-  //   case "message": return "reply";
-  //   case "lifecycle": return "reply";     // follow welcome; a block never sends
-  //   case "wakeup": case "checkin": return "unasked";
-  //   default: return assertNever(e);       // week 2 job_result → "unasked"
-  // }
-  throw new Error("not implemented");
+  switch (e.kind) {
+    case "message":
+      return "reply";
+    case "lifecycle":
+      return "reply";
+    case "wakeup":
+      return e.origin === "person" ? "requested" : "unasked";
+    case "checkin":
+      return "unasked";
+    default:
+      return assertNever(e);
+  }
 }
 
 /**
@@ -172,7 +203,8 @@ export type OutboundMessage = {
  */
 export const TASK_KINDS = ["chat", "reminder", "plan", "booking", "site", "group", "other"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
-export type TaskStatus = "none" | "started" | "progressed" | "completed" | "failed";
+export const TASK_STATUSES = ["none", "started", "progressed", "completed", "failed"] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
 export type TaskLabel = { readonly kind: TaskKind; readonly key: string; readonly status: TaskStatus };
 
 export type PersonStatus = "active" | "blocked";

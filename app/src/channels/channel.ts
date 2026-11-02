@@ -58,3 +58,13 @@ export function disabledChannel(id: ChannelId): ChannelAdapter {
     deliver: async () => ({ kind: "failed", detail: `channel ${id} not configured` }),
   };
 }
+
+/** Constant-time equality for secrets and signatures. Only the length can leak, and it is public. */
+export function sameSecret(a: string, b: string): boolean {
+  const x = new TextEncoder().encode(a);
+  const y = new TextEncoder().encode(b);
+  return x.byteLength === y.byteLength && crypto.subtle.timingSafeEqual(x, y);
+}
+
+/** Backoff for transient channel failures that don't say when to come back. */
+export const CHANNEL_RETRY_MS = 30_000;

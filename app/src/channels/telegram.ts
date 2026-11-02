@@ -1,41 +1,95 @@
 /**
  * Telegram Bot API, private chats only in week 1. Telegram wire types live in this file and nowhere else.
  */
-import { eventKey, type EpochMs, type OutboundMessage } from "../domain";
-import { disabledChannel, type ChannelAdapter, type Delivery, type Received } from "./channel";
+import { z } from "zod";
+import { eventKey, personAgentKey, type ChannelEvent, type EpochMs, type OutboundMessage } from "../domain";
+import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
+
+const Chat = z.object({ id: z.number().int(), type: z.string() });
+const Update = z.object({
+  update_id: z.number().int(),
+  message: z.looseObject({ date: z.number(), chat: Chat, text: z.string().optional() }).optional(),
+  my_chat_member: z
+    .object({ date: z.number(), chat: Chat, new_chat_member: z.object({ status: z.string() }) })
+    .optional(),
+});
+type Update = z.infer<typeof Update>;
+
+/** The media kinds a person is likely to send, named for the model when there is no text. */
+const MEDIA = ["photo", "sticker", "voice", "audio", "video", "video_note", "animation", "document", "location", "contact"] as const;
+
+function toEvent(u: Update): { readonly chatId: number; readonly at: EpochMs; readonly event: ChannelEvent } | null {
+  if (u.message && u.message.chat.type === "private") {
+    const m = u.message;
+    const at = (m.date * 1000) as EpochMs;
+    // "/start <payload>" also arrives here; week 3 reads the payload as an invite code.
+    if (m.text === "/start" || m.text?.startsWith("/start ")) return { chatId: m.chat.id, at, event: { kind: "lifecycle", change: "follow", at } };
+    const text = m.text ?? `[sent a ${MEDIA.find((k) => k in m) ?? "message"}]`;
+    return { chatId: m.chat.id, at, event: { kind: "message", text } };
+  }
+  const member = u.my_chat_member;
+  if (member && member.chat.type === "private") {
+    const at = (member.date * 1000) as EpochMs;
+    const status = member.new_chat_member.status;
+    if (status === "kicked") return { chatId: member.chat.id, at, event: { kind: "lifecycle", change: "block", at } };
+    if (status === "member") return { chatId: member.chat.id, at, event: { kind: "lifecycle", change: "follow", at } };
+  }
+  return null;
+}
+
+const SendError = z.object({ parameters: z.object({ retry_after: z.number() }).optional() });
 
 export function telegramChannel(secrets: { botToken: string; webhookSecret: string } | null): ChannelAdapter {
   if (!secrets) return disabledChannel("telegram");
+  const api = `https://api.telegram.org/bot${secrets.botToken}`;
+
   return {
     async receive(req: Request): Promise<Received> {
-      // TODO:
-      //   header X-Telegram-Bot-Api-Secret-Token must equal webhookSecret (constant-time) else rejected 401
-      //   update = await req.json(); key = eventKey.telegram(update.update_id)
-      //   update.message && chat.type === "private":
-      //     text === "/start" (or "/start <payload>") → lifecycle follow   (week 3: payload carries an invite code)
-      //     text                                       → message
-      //     non-text                                   → message "[sent a photo|…]"
-      //   update.my_chat_member && chat.type === "private":
-      //     new_chat_member.status === "kicked"        → lifecycle block
-      //     new_chat_member.status === "member" && old was "kicked" → lifecycle follow
-      //   else ignored++
-      //   identity.channelUserId = String(from.id)  (equals the private chat id)
-      //   No reply handle: Telegram has no free-reply concept.
-      void eventKey;
-      throw new Error("not implemented");
+      const given = req.headers.get("x-telegram-bot-api-secret-token");
+      if (given === null || !sameSecret(given, secrets.webhookSecret)) return { kind: "rejected", status: 401 };
+      const update = Update.safeParse(await req.json().catch(() => null));
+      const parsed = update.success ? toEvent(update.data) : null;
+      if (!update.success || !parsed) return { kind: "accepted", envelopes: [], ignored: 1 };
+      // In a private chat the chat id is the person's user id.
+      const identity = { channel: "telegram", channelUserId: String(parsed.chatId) } as const;
+      return {
+        kind: "accepted",
+        envelopes: [
+          { agent: personAgentKey(identity), identity, key: eventKey.telegram(update.data.update_id), receivedAt: parsed.at, event: parsed.event },
+        ],
+        ignored: 0,
+      };
     },
 
-    async deliver(msg: OutboundMessage, _now: EpochMs): Promise<Delivery> {
-      // TODO:
-      //   for each text: POST /bot{token}/sendMessage { chat_id, text }
-      //   403 "bot was blocked by the user" → recipient_gone
-      //   429 → retry(parameters.retry_after * 1000); 5xx → retry(backoff); 400 → failed
-      //
-      //   Telegram has no idempotency key. A crash after sendMessage succeeded but before the outbox row
-      //   was marked sent re-sends on recovery (msg.inDoubt = true): the person may see a duplicate.
-      //   We accept a rare duplicate over a lost reminder. A multi-text row that failed midway resends
-      //   from the first text; texts per turn are capped at 3 to keep that small.
-      throw new Error("not implemented");
+    /**
+     * Telegram has no idempotency key. A crash after sendMessage succeeded but before the outbox row was
+     * marked sent re-sends on recovery: the person may see a duplicate. We accept a rare duplicate over a
+     * lost reminder. A multi-text row that failed midway resends from the first text; texts per turn are
+     * capped at 3 to keep that small.
+     */
+    async deliver(msg: OutboundMessage): Promise<Delivery> {
+      try {
+        for (const text of msg.texts) {
+          const res = await fetch(`${api}/sendMessage`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ chat_id: msg.to.channelUserId, text }),
+          });
+          if (res.ok) continue;
+          const body: unknown = await res.json().catch(() => null);
+          const detail = `${res.status} ${JSON.stringify(body)}`;
+          if (res.status === 403) return { kind: "recipient_gone" };
+          if (res.status === 429) {
+            const retryAfter = SendError.safeParse(body).data?.parameters?.retry_after;
+            return { kind: "retry", afterMs: retryAfter === undefined ? CHANNEL_RETRY_MS : retryAfter * 1000, detail };
+          }
+          if (res.status >= 500) return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail };
+          return { kind: "failed", detail };
+        }
+        return { kind: "sent", via: "push" };
+      } catch (err) {
+        return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail: String(err) };
+      }
     },
   };
 }

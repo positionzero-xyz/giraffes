@@ -523,9 +523,9 @@ describe("connecting a Claude plan", () => {
     expect((await c.snapshot()).spendThisMonthMicro).toBeGreaterThan(0);
   });
 
-  test("an unavailable box sends the turn to the API, and the next turn tries the box again", async () => {
+  test("an unavailable box sends the turn to the API, turns for the next 5 minutes skip the box, and then it is tried again", async () => {
     const box = fakeBox({ signedIn: true });
-    const model = scripted([chat("From the API.")]);
+    const model = scripted([chat("From the API."), chat("Still the API.")]);
     const c = await devChat("hal", { model, at: "2099-11-04T10:00", box: box.deps });
     await c.say("/claude");
     await c.received();
@@ -535,11 +535,18 @@ describe("connecting a Claude plan", () => {
     expect(await c.received()).toEqual(["From the API."]);
     expect((await c.snapshot()).box?.state).toBe("signed_in");
 
-    box.replies.push({ kind: "reply", step: chat("Back on your plan.") });
+    c.clock.set(local("2099-11-04T10:04"));
     await c.say("again");
+    expect(await c.received()).toEqual(["Still the API."]);
+    expect(box.parses).toHaveLength(1);
+
+    c.clock.set(local("2099-11-04T10:05"));
+    box.replies.push({ kind: "reply", step: chat("Back on your plan.") });
+    await c.say("later");
     expect(await c.received()).toEqual(["Back on your plan."]);
     expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
       ["box", "unavailable"],
+      ["api", "settled"],
       ["api", "settled"],
       ["box", "settled"],
     ]);

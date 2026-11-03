@@ -145,6 +145,8 @@ export class Agent extends DurableObject<Env> {
   // A DO interleaves requests during `await fetch`. The guard is in memory on purpose: there is one live
   // instance per DO, and if it dies the drain dies with it, so the guard never outlives the work it protects.
   #drain: Promise<void> | null = null;
+  /** In memory on purpose: losing it on a restart costs one more try of a box that may still be wedged. */
+  #skipBoxUntil = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -540,7 +542,7 @@ export class Agent extends DurableObject<Env> {
   async #callBox<T>(system: string, user: string, schema: z.ZodType<T>, agent: AgentKey): Promise<BoxCall<T> | null> {
     const deps = this.#deps.box;
     const box = this.#store.box();
-    if (!boxServes(deps, agent) || box?.state !== "signed_in") return null;
+    if (!boxServes(deps, agent) || box?.state !== "signed_in" || this.#deps.clock.now() < this.#skipBoxUntil) return null;
     const id = crypto.randomUUID();
     const model = routeOf("turn").model;
     const res = await deps.client.parse(box.url, await boxToken(deps.secret, box.name), { purpose: "turn", system, user, schema });
@@ -562,6 +564,7 @@ export class Agent extends DurableObject<Env> {
         return null;
       case "unavailable":
         console.warn("box unavailable", res.detail);
+        this.#skipBoxUntil = now + BOX.skipAfterUnavailableMs;
         this.#store.appendLogs([missed("unavailable")], now);
         return null;
       default:

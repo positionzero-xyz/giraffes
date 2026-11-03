@@ -16,6 +16,7 @@ export const BOX = {
   reclaimRetryMaxMs: 60 * 60_000,
   retireAfterMs: 14 * 24 * 60 * 60_000,
   ensureRetryMs: 5 * 60_000,
+  skipAfterUnavailableMs: 5 * 60_000,
 } as const;
 
 export const BOX_STATES = ["provisioning", "signed_out", "signed_in", "reclaiming"] as const;

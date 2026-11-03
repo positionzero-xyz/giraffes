@@ -7,9 +7,10 @@ export const COMPACTION = {
   foldTurns: 30,
   maxNotes: 40,
   foldNotes: 40,
+  maxSummaryChars: 4_000,
 } as const;
 
-export const CompactionOutputSchema = z.object({ summary: z.string().min(1).max(12_000) });
+export const CompactionOutputSchema = z.object({ summary: z.string().min(1).max(COMPACTION.maxSummaryChars) });
 
 export type CompactionInput = {
   readonly summary: string;

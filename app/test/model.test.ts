@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import { anthropicModel } from "../src/model/anthropic";
 import { bridgeModel } from "../src/model/bridge";
+import { routeOf } from "../src/model/model";
 import { scripted } from "../src/model/scripted";
 
 const Answer = z.object({ answer: z.number() });
@@ -48,7 +49,7 @@ describe("anthropic", () => {
     expect(seen[0].url).toBe("https://api.anthropic.com/v1/messages");
     expect(seen[0].body).toMatchObject({
       model: "claude-haiku-5-5",
-      max_tokens: 1200,
+      max_tokens: routeOf("turn").maxTokens,
       system: [{ type: "text", text: "You answer in JSON.", cache_control: { type: "ephemeral" } }],
       messages: [{ role: "user", content: "What is six times seven?" }],
       output_config: { effort: "low", format: { type: "json_schema", schema: { type: "object", properties: { answer: { type: "number" } } } } },

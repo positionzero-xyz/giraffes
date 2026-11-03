@@ -40,9 +40,10 @@ export const TURN = {
   recentNotes: 50,
   maxBatchMessages: 10,
   maxSendsPerTurn: 3,
-  maxTextChars: 2000,
-  maxNoteChars: 500,
-  maxActions: 8,
+  maxTextChars: 600,
+  maxNoteChars: 300,
+  maxLateNoticeChars: 200,
+  maxActions: 6,
   maxClaimAttempts: 3,
   maxModelAttempts: 3,
 } as const;
@@ -65,7 +66,7 @@ const ActionSchema = z.discriminatedUnion("type", [
 
 export const TurnOutputSchema = z.object({
   actions: z.array(ActionSchema).max(TURN.maxActions),
-  lateNotice: z.string().max(300).optional(),
+  lateNotice: z.string().max(TURN.maxLateNoticeChars).optional(),
   task: z.object({
     kind: z.enum(TASK_KINDS),
     key: Slug,

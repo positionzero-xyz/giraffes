@@ -247,10 +247,26 @@ function personTurns(view: TurnView): NewTurn[] {
 
 function lifecycleEffects(view: TurnView): Pick<TurnCommit, "reachability" | "ensureCheckin"> {
   const e = trigger(view);
-  if (e.kind !== "lifecycle" || e.at < view.statusAt) return { reachability: null, ensureCheckin: null };
-  return e.change === "follow"
-    ? { reachability: { status: "active", at: e.at }, ensureCheckin: checkinWakeup(view.now, view.tz, view.checkinLocal) }
-    : { reachability: { status: "blocked", at: e.at }, ensureCheckin: null };
+  const none = { reachability: null, ensureCheckin: null };
+  const reachable = (at: EpochMs) => ({
+    reachability: { status: "active" as const, at },
+    ensureCheckin: checkinWakeup(view.now, view.tz, view.checkinLocal),
+  });
+  switch (e.kind) {
+    case "message": {
+      // A person who writes in can be reached, unless the platform has since told us they blocked.
+      const at = Math.max(...view.batch.items.map((i) => i.receivedAt)) as EpochMs;
+      return view.status === "blocked" && at >= view.statusAt ? reachable(at) : none;
+    }
+    case "lifecycle":
+      if (e.at < view.statusAt) return none;
+      return e.change === "follow" ? reachable(e.at) : { reachability: { status: "blocked", at: e.at }, ensureCheckin: null };
+    case "wakeup":
+    case "checkin":
+      return none;
+    default:
+      return assertNever(e);
+  }
 }
 
 function lateTrigger(view: TurnView): { readonly dueAt: EpochMs } | null {

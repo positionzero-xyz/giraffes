@@ -283,6 +283,17 @@ describe("lifecycle order", () => {
     expect(commit.reachability).toEqual({ status: "active", at: local("2026-11-04T09:30") });
     expect(commit.ensureCheckin?.dueAt).toBe(local("2026-11-05T09:00"));
   });
+
+  test("a message unblocks like a follow, but not one written before the platform's block", () => {
+    const written = (t: EpochMs): Batch => ({ items: [{ ...item(message("hi")), receivedAt: t }] });
+    const blocked = { status: "blocked" as const, statusAt: local("2026-11-04T09:00") };
+    const after = planTurn(output([send("Hi again!")]), view({ ...blocked, batch: written(local("2026-11-04T09:30")) }));
+    expect(after.reachability).toEqual({ status: "active", at: local("2026-11-04T09:30") });
+    expect(after.ensureCheckin?.dueAt).toBe(local("2026-11-05T09:00"));
+
+    const before = planTurn(output([send("Hi again!")]), view({ ...blocked, batch: written(local("2026-11-04T08:59")) }));
+    expect(before.reachability).toBeNull();
+  });
 });
 
 describe("spend", () => {

@@ -448,7 +448,8 @@ export class AgentStore {
   recipientGone(id: OutboxId, now: EpochMs, logs: readonly LogRow[]): void {
     this.tx(() => {
       this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'gone', closed_at = ? WHERE id = ?", now, id);
-      this.sql.exec("UPDATE agent SET status = 'blocked', status_at = MAX(status_at, ?)", now);
+      // status_at orders the platform's own events; our clock isn't comparable with their timestamps.
+      this.sql.exec("UPDATE agent SET status = 'blocked'");
       this.insertLogs(logs, now);
     });
   }

@@ -269,6 +269,46 @@ describe("corrections", () => {
   });
 });
 
+describe("caps", () => {
+  const over = (cap: number) => "x".repeat(cap + 1);
+
+  test("a send or a note past its cap is cut to fit and logged, and its action still applies", () => {
+    const commit = planTurn(
+      output([
+        send(over(TURN.maxTextChars)),
+        { type: "schedule_wakeup", key: "bins", at: "2026-11-04T23:00", note: over(TURN.maxNoteChars), asked: true },
+        { type: "remember", note: over(TURN.maxNoteChars) },
+      ]),
+      view(),
+    );
+    expect(commit.outbound?.texts.map((t) => t.length)).toEqual([TURN.maxTextChars]);
+    expect(commit.wakeupsAdd.map((w) => w.note.length)).toEqual([TURN.maxNoteChars]);
+    expect(commit.notes.map((n) => n.length)).toEqual([TURN.maxNoteChars]);
+    expect(commit.rejected).toEqual([
+      { action: "send", reason: "too_long" },
+      { action: "schedule_wakeup:bins", reason: "too_long" },
+      { action: "remember", reason: "too_long" },
+    ]);
+  });
+
+  test("a late notice past its cap is cut to fit and logged", () => {
+    const due = local("2026-11-04T08:00");
+    const late = view({ batch: { items: [item(wakeupEvent(due, NOW))] } });
+    const commit = planTurn(output([send("Call the clinic.")], over(TURN.maxLateNoticeChars)), late);
+    expect(commit.outbound?.texts[0].split("\n")[0].length).toBe(TURN.maxLateNoticeChars);
+    expect(commit.rejected).toEqual([{ action: "late_notice", reason: "too_long" }]);
+  });
+
+  test("actions past the cap are dropped and logged, and a dropped reminder the person asked for is corrected", () => {
+    const notes = Array.from({ length: TURN.maxActions - 1 }, (_, i) => ({ type: "remember", note: `fact ${i}` }) as const);
+    const commit = planTurn(output([send("All set."), ...notes, schedule("bins", "2026-11-04T23:00")]), view());
+    expect(commit.notes).toHaveLength(TURN.maxActions - 1);
+    expect(commit.wakeupsAdd).toEqual([]);
+    expect(commit.outbound?.texts).toEqual(["All set.", "(That was more than I can do in one message, so I skipped some of it.)"]);
+    expect(commit.rejected).toEqual([{ action: "schedule_wakeup:bins", reason: "too_many_actions" }]);
+  });
+});
+
 describe("lateness", () => {
   test("exactly one hour is on time; a minute more is late", () => {
     expect(isLate({ dueAt: at("2026-11-04T09:00Z"), firedAt: at("2026-11-04T10:00Z") })).toBe(false);

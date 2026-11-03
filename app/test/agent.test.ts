@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { NOTICE } from "../src/agent/turn";
+import { NOTICE, TURN } from "../src/agent/turn";
 import type { EpochMs } from "../src/domain";
 import { priceOf, routeOf } from "../src/model/model";
 import { costOf, SPEND } from "../src/policy/spend";
@@ -83,6 +83,20 @@ describe("reminders", () => {
     ]);
     const reminders = (await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder");
     expect(reminders.map((w) => [w.key, wall(w.dueAt)])).toEqual([["dentist", "2099-11-05T09:00"]]);
+  });
+
+  test("a send past the length cap is cut to fit and logged, and the reminder in the same answer is set", async () => {
+    const model = scripted([
+      turn({ actions: [schedule("call-mom", "2099-11-04T18:00", "Call mom"), send("x".repeat(TURN.maxTextChars + 1))], task: ["reminder", "call-mom", "started"] }),
+    ]);
+    const c = await devChat("kyo", { model, at: "2099-11-04T10:00" });
+
+    await c.say("remind me at 6pm to call mom, and tell me all about Kyoto");
+
+    expect((await c.received()).map((t) => t.length)).toEqual([TURN.maxTextChars]);
+    expect((await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder").map((w) => w.key)).toEqual(["call-mom"]);
+    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([["send", "too_long"]]);
+    model.assertDone();
   });
 
   test("'remind me at 18:00' fires through the alarm and is delivered", async () => {

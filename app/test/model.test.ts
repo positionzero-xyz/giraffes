@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
+import { TURN, TurnOutputSchema } from "../src/agent/turn";
 import { anthropicModel } from "../src/model/anthropic";
 import { bridgeModel } from "../src/model/bridge";
 import { routeOf } from "../src/model/model";
@@ -71,6 +72,13 @@ describe("anthropic", () => {
     vi.restoreAllMocks();
     stubFetch(() => Response.json(message('{"answer":"forty-two"}')));
     expect(await anthropicModel("sk-test").parse(request)).toMatchObject({ ok: false, failure: "invalid_output", usage: { outputTokens: 40 } });
+  });
+
+  test("a turn past the length caps still parses, because the API doesn't enforce them and code does", async () => {
+    const send = { type: "send", text: "x".repeat(TURN.maxTextChars + 1) };
+    const out = { actions: Array.from({ length: TURN.maxActions + 1 }, () => send), task: { kind: "chat", key: "chat", status: "none" } };
+    stubFetch(() => Response.json(message(JSON.stringify(out))));
+    expect(await anthropicModel("sk-test").parse({ ...request, schema: TurnOutputSchema })).toMatchObject({ ok: true, value: out });
   });
 
   test("a request whose response never arrived is in doubt, because it may have been billed", async () => {

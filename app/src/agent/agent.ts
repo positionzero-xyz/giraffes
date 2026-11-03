@@ -31,6 +31,7 @@ import {
   needsLink,
   newBox,
   onCommand,
+  onPlan,
   onSignedOut,
   type Box,
   type BoxSay,
@@ -466,6 +467,7 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #boxMessage(deps: BoxDeps, box: Box, say: BoxSay): Promise<{ readonly text: string; readonly note: string }> {
+    if (say === "retiring" && box.retireAt !== null) return boxMessage(say, null, longDate(box.retireAt, this.#agent().tz));
     if (!needsLink(say)) return boxMessage(say, null);
     const exp = (this.#deps.clock.now() + BOX.ticketForMs) as EpochMs;
     const ticket = await signinTicket(await boxToken(deps.secret, box.name), exp);
@@ -480,7 +482,11 @@ export class Agent extends DurableObject<Env> {
 
   async #stepBox(): Promise<void> {
     const deps = this.#deps.box;
-    if (!deps) return;
+    const box = this.#store.box();
+    if (!deps || !box) return;
+    const now = this.#deps.clock.now();
+    const planned = onPlan(box, !this.#deps.billing.config.on || planAllowsBox(this.#plan(now).kind), now);
+    if (planned.box !== box) this.#store.applyBox(planned.box, await this.#outboxMessage(deps, planned.box, planned.say), [], now);
     for (let i = 0; i < BOX_STEPS_PER_DRAIN; i++) {
       const current = this.#store.box();
       const step = current && beginStep(current, this.#deps.clock.now());
@@ -791,6 +797,10 @@ function callRow(
   at: EpochMs,
 ): LogRow {
   return modelCallRow({ id: r.id, agent, purpose: r.purpose, model: r.model, backend: "api", status, estimate: r.estimate, cost, usage, at });
+}
+
+function longDate(t: EpochMs, tz: TimeZone): string {
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: tz }).format(t);
 }
 
 function boxDeps(c: BoxConfig): BoxDeps | null {

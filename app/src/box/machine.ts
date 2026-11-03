@@ -14,12 +14,13 @@ export const BOX = {
   reclaimAfterMs: 48 * 60 * 60_000,
   lastLookRetryMs: 5 * 60_000,
   reclaimRetryMaxMs: 60 * 60_000,
+  retireAfterMs: 14 * 24 * 60 * 60_000,
 } as const;
 
 export const BOX_STATES = ["provisioning", "signed_out", "signed_in", "reclaiming"] as const;
 export type BoxState = (typeof BOX_STATES)[number];
 
-export const RECLAIM_REASONS = ["unused", "failed"] as const;
+export const RECLAIM_REASONS = ["unused", "failed", "retired"] as const;
 export type ReclaimReason = (typeof RECLAIM_REASONS)[number];
 
 export type BoxStatus =
@@ -34,7 +35,14 @@ export type BoxStatus =
   | { readonly state: "signed_in" }
   | { readonly state: "reclaiming"; readonly reason: ReclaimReason; readonly attempts: number; readonly retryAt: EpochMs };
 
-export type Box = { readonly name: BoxName; readonly host: BoxHostKind; readonly url: string; readonly stateAt: EpochMs } & BoxStatus;
+export type Box = {
+  readonly name: BoxName;
+  readonly host: BoxHostKind;
+  readonly url: string;
+  readonly stateAt: EpochMs;
+  /** Set while the person's plan doesn't allow a box; the box is reclaimed then unless the plan allows one again. */
+  readonly retireAt: EpochMs | null;
+} & BoxStatus;
 type Provisioning = Extract<Box, { state: "provisioning" }>;
 type SignedOut = Extract<Box, { state: "signed_out" }>;
 type Reclaiming = Extract<Box, { state: "reclaiming" }>;
@@ -54,6 +62,8 @@ export const BOX_SAYS = [
   "reclaimed",
   "resetting",
   "not_in_plan",
+  "retiring",
+  "retired",
 ] as const;
 export type BoxSay = (typeof BOX_SAYS)[number];
 
@@ -69,7 +79,7 @@ export type ProbeStep = Exclude<Step, { kind: "reclaim" }>;
 
 const LINK_NOTE = "<sign-in link>";
 
-const SAY: Readonly<Record<BoxSay, (link: string) => string>> = {
+const SAY: Readonly<Record<BoxSay, (link: string, until: string) => string>> = {
   unavailable: () => "Connecting your own Claude plan isn't available yet.",
   full: () => "I can't connect another Claude plan right now. Please try again later.",
   setting_up: () => "Setting up your Claude connection. I'll send you a sign-in link in a few minutes.",
@@ -83,20 +93,23 @@ const SAY: Readonly<Record<BoxSay, (link: string) => string>> = {
   reclaimed: () => "Nobody signed in to your Claude connection for 2 days, so I removed it. Send /claude to set it up again.",
   resetting: () => "I'm removing your old Claude connection. Send /claude again in a few minutes.",
   not_in_plan: () => "Your plan doesn't include connecting your own Claude plan. Send /plan to see the plans.",
+  retiring: (_, until) =>
+    `Your plan doesn't include connecting your own Claude plan, so I'll remove your Claude connection on ${until} unless your plan resumes. Send /plan to see the plans.`,
+  retired: () => "Your plan doesn't include connecting your own Claude plan, so I removed your Claude connection. Send /plan to see the plans.",
 };
 
 export const needsLink = (say: BoxSay): boolean => say === "link" || say === "signed_out_link";
 
-export function boxMessage(say: BoxSay, link: string | null): { readonly text: string; readonly note: string } {
-  return { text: SAY[say](link ?? LINK_NOTE), note: SAY[say](LINK_NOTE) };
+export function boxMessage(say: BoxSay, link: string | null, until: string = ""): { readonly text: string; readonly note: string } {
+  return { text: SAY[say](link ?? LINK_NOTE, until), note: SAY[say](LINK_NOTE, until) };
 }
 
-const GONE: Readonly<Record<ReclaimReason, BoxSay>> = { unused: "reclaimed", failed: "setup_failed" };
+const GONE: Readonly<Record<ReclaimReason, BoxSay>> = { unused: "reclaimed", failed: "setup_failed", retired: "retired" };
 
 export const goneMessage = (b: Reclaiming) => boxMessage(GONE[b.reason], null);
 
 function to(b: Box, status: BoxStatus, now: EpochMs): Box {
-  return { name: b.name, host: b.host, url: b.url, stateAt: status.state === b.state ? b.stateAt : now, ...status };
+  return { name: b.name, host: b.host, url: b.url, stateAt: status.state === b.state ? b.stateAt : now, retireAt: b.retireAt, ...status };
 }
 
 const provisioning = (attempts: number, retryAt: EpochMs): BoxStatus => ({ state: "provisioning", attempts, retryAt });
@@ -119,10 +132,16 @@ function reclaimAfterLink(reclaimAt: EpochMs, now: EpochMs): EpochMs {
 }
 
 export function newBox(name: BoxName, host: BoxHostKind, url: string, now: EpochMs): Box {
-  return { name, host, url, stateAt: now, ...provisioning(0, now) };
+  return { name, host, url, stateAt: now, retireAt: null, ...provisioning(0, now) };
 }
 
 export function dueAt(b: Box): EpochMs | null {
+  const own = stateDueAt(b);
+  if (b.state === "reclaiming" || b.retireAt === null) return own;
+  return own === null ? b.retireAt : (Math.min(own, b.retireAt) as EpochMs);
+}
+
+function stateDueAt(b: Box): EpochMs | null {
   switch (b.state) {
     case "provisioning":
     case "reclaiming":
@@ -140,6 +159,7 @@ export function dueAt(b: Box): EpochMs | null {
 export function beginStep(b: Box, now: EpochMs): Step | null {
   const due = dueAt(b);
   if (due === null || due > now) return null;
+  if (b.state !== "reclaiming" && b.retireAt !== null && b.retireAt <= now) return beginStep(reclaimNow(b, "retired", now), now);
   switch (b.state) {
     case "provisioning":
       if (b.attempts >= BOX.maxProvisionAttempts) return beginStep(reclaimNow(b, "failed", now), now);
@@ -184,6 +204,13 @@ export function onCommand(b: Box, now: EpochMs): Reply {
     case "reclaiming":
       return { box: b, say: "resetting" };
   }
+}
+
+/** With billing on, a box outlives the plan that allowed it by `retireAfterMs`, and the person is told once when that starts. */
+export function onPlan(b: Box, allowsBox: boolean, now: EpochMs): Transition {
+  if (b.state === "reclaiming" || allowsBox === (b.retireAt === null)) return { box: b, say: null };
+  if (allowsBox) return { box: { ...b, retireAt: null }, say: null };
+  return { box: { ...b, retireAt: (now + BOX.retireAfterMs) as EpochMs }, say: "retiring" };
 }
 
 export function onSignedOut(b: Box, now: EpochMs): Reply {

@@ -9,7 +9,8 @@ import { boxName, boxToken, signinTicket, type BoxName, type BoxToken } from "..
 import { MIGRATIONS } from "../src/agent/schema";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs } from "../src/domain";
-import { BOX_SECRET, chat, devChat, fakeBox, local, memoryLedger, quiet, scripted, turn } from "./testkit";
+import { NOTICE } from "../src/agent/turn";
+import { billingOn, BOX_SECRET, chat, devChat, fakeBox, local, memoryLedger, postStripe, quiet, scripted, subscriptionEvent, turn } from "./testkit";
 
 const say = (s: BoxSay) => boxMessage(s, null).text;
 const LINK = /^https:\/\/([a-z0-9-]+)\.box\.test\/signin#t=(\d+)\.([A-Za-z0-9_-]+)$/m;
@@ -537,6 +538,75 @@ describe("connecting a Claude plan", () => {
     expect(sent.slice(0, 2)).toEqual(["Hi!", say("setting_up")]);
     expect(model.calls).toHaveLength(1);
     expect(model.calls[0].user).not.toContain("/claude");
+  });
+});
+
+describe("retiring a box the plan no longer allows", () => {
+  const retiring = (until: string) => boxMessage("retiring", null, until).text;
+  const subscribe = async (user: string, plan: "standard" | "ai", created: string) => {
+    const event = subscriptionEvent({ user, sub: `sub_${user}`, plan, status: "active", periodEnd: "2099-12-30T10:00", created, type: "customer.subscription.created" });
+    expect((await postStripe(event)).status).toBe(200);
+  };
+
+  test("with billing on, a lapsed person is told the date once, and the box goes then even though it was signed in", async () => {
+    const box = fakeBox({ signedIn: true });
+    const ledger = memoryLedger();
+    const c = await devChat("uma", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger, billing: billingOn({ TRIAL_DAYS: "1" }).deps });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up"), say("connected")]);
+    box.replies.push({ kind: "reply", step: quietCheckin() });
+
+    await c.advanceTo("2099-11-05T11:00");
+    await c.say("hello");
+    await c.say("still there?");
+    expect(await c.received()).toEqual([retiring("19 November 2099"), NOTICE.lapsed]);
+
+    await c.advanceTo("2099-11-19T10:59");
+    expect(box.destroyCalls).toEqual([]);
+    await c.advanceTo("2099-11-19T11:00");
+
+    expect(await c.received()).toEqual([say("retired")]);
+    expect(box.destroyCalls).toEqual([await box.nameOf("uma")]);
+    expect(ledger.boxes.has("p:dev:uma")).toBe(false);
+    expect((await c.snapshot()).box).toBeNull();
+  });
+
+  test("a plan that allows a box again before the date keeps the box, silently", async () => {
+    const box = fakeBox({ signedIn: true });
+    const c = await devChat("vic", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, billing: billingOn({ TRIAL_DAYS: "1" }).deps });
+    box.replies.push(...Array.from({ length: 30 }, () => ({ kind: "reply" as const, step: quietCheckin() })));
+    await c.say("/claude");
+    await c.advanceTo("2099-11-05T11:00");
+    await c.say("hello");
+    expect(await c.received()).toEqual([say("setting_up"), say("connected"), retiring("19 November 2099"), NOTICE.lapsed]);
+
+    await subscribe("vic", "standard", "2099-11-06T10:00");
+    await c.settle();
+    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active."]);
+    await c.advanceTo("2099-11-25T10:00");
+
+    expect(await c.received()).toEqual([]);
+    expect(box.destroyCalls).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+  });
+
+  test("with billing off, a plan without the box never retires one", async () => {
+    const box = fakeBox({ signedIn: true });
+    const model = scripted([chat("From the API."), ...Array.from({ length: 30 }, () => quietCheckin())]);
+    const c = await devChat("wyn", { model, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+    await subscribe("wyn", "ai", "2099-11-04T11:00");
+    await c.settle();
+    expect((await c.snapshot()).plan).toEqual({ kind: "ai" });
+
+    await c.say("hello");
+    expect(await c.received()).toEqual(["From the API."]);
+    await c.advanceTo("2099-11-25T10:00");
+
+    expect(await c.received()).toEqual([]);
+    expect(box.destroyCalls).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
   });
 });
 

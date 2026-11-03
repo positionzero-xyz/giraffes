@@ -29,7 +29,7 @@ import { modelCallRow, type LogRow } from "../ledger/ledger";
 import type { ModelId, Purpose } from "../model/model";
 import type { Firing, NewWakeup, PendingWakeup } from "../policy/schedule";
 import type { MonthSpend } from "../policy/spend";
-import type { CompactionCommit, CompactionInput } from "./compaction";
+import { COMPACTION, type CompactionCommit, type CompactionInput } from "./compaction";
 import { TURN, type Batch, type InboxItem, type TurnCommit, type TurnRow } from "./turn";
 
 export type AgentRow = {
@@ -267,7 +267,7 @@ export class AgentStore {
     );
   }
 
-  turnContext(limitTurns: number): {
+  turnContext(limitTurns: number, limitNotes: number): {
     readonly summary: string;
     readonly notes: readonly string[];
     readonly recent: readonly TurnRow[];
@@ -275,8 +275,9 @@ export class AgentStore {
   } {
     const summary = this.sql.exec<{ summary: string }>("SELECT summary FROM memory").one().summary;
     const notes = this.sql
-      .exec<{ text: string }>("SELECT text FROM memory_note ORDER BY id")
+      .exec<{ text: string }>("SELECT text FROM memory_note ORDER BY id DESC LIMIT ?", limitNotes)
       .toArray()
+      .reverse()
       .map((n) => n.text);
     return { summary, notes, recent: this.recentTurns(limitTurns), pending: this.pendingWakeups() };
   }
@@ -528,13 +529,21 @@ export class AgentStore {
 
   compactionInput(): CompactionInput {
     const memory = this.sql.exec<{ summary: string; through_turn_seq: number }>("SELECT summary, through_turn_seq FROM memory").one();
+    const count = (table: "turn" | "memory_note") => this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).one().n;
     return {
       summary: memory.summary,
       throughSeq: memory.through_turn_seq,
-      turns: this.sql
-        .exec<{ seq: number; role: TurnRow["role"]; text: string; at: EpochMs }>("SELECT seq, role, text, at FROM turn ORDER BY seq")
+      turnCount: count("turn"),
+      oldestTurns: this.sql
+        .exec<{ seq: number; role: TurnRow["role"]; text: string; at: EpochMs }>(
+          "SELECT seq, role, text, at FROM turn ORDER BY seq LIMIT ?",
+          COMPACTION.foldTurns,
+        )
         .toArray(),
-      notes: this.sql.exec<{ id: number; text: string }>("SELECT id, text FROM memory_note ORDER BY id").toArray(),
+      noteCount: count("memory_note"),
+      oldestNotes: this.sql
+        .exec<{ id: number; text: string }>("SELECT id, text FROM memory_note ORDER BY id LIMIT ?", COMPACTION.foldNotes)
+        .toArray(),
     };
   }
 

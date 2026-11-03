@@ -175,7 +175,7 @@ export class Agent extends DurableObject<Env> {
       statusAt: a.statusAt,
       checkinLocal: a.checkinLocal,
       batch,
-      ...this.#store.turnContext(TURN.recentTurns),
+      ...this.#store.turnContext(TURN.recentTurns, TURN.recentNotes),
       unaskedLeftToday: Math.max(0, OUTREACH.dailyUnaskedBudget - admitted),
     };
   }

@@ -4,7 +4,9 @@ import { TURN, type TurnRow } from "./turn";
 export const COMPACTION = {
   triggerTurns: 60,
   keepTurns: TURN.recentTurns,
+  foldTurns: 30,
   maxNotes: 40,
+  foldNotes: 40,
 } as const;
 
 export const CompactionOutputSchema = z.object({ summary: z.string().min(1).max(12_000) });
@@ -12,8 +14,12 @@ export const CompactionOutputSchema = z.object({ summary: z.string().min(1).max(
 export type CompactionInput = {
   readonly summary: string;
   readonly throughSeq: number;
-  readonly turns: readonly (TurnRow & { readonly seq: number })[];
-  readonly notes: readonly { readonly id: number; readonly text: string }[];
+  readonly turnCount: number;
+  /** The oldest turns, at most `COMPACTION.foldTurns`. */
+  readonly oldestTurns: readonly (TurnRow & { readonly seq: number })[];
+  readonly noteCount: number;
+  /** The oldest notes, at most `COMPACTION.foldNotes`. */
+  readonly oldestNotes: readonly { readonly id: number; readonly text: string }[];
 };
 
 export type CompactionPlan = {
@@ -26,12 +32,15 @@ export type CompactionPlan = {
 const SPEAKER: Readonly<Record<TurnRow["role"], string>> = { person: "Person", agent: "Assistant", note: "Note" };
 
 export function planCompaction(input: CompactionInput): CompactionPlan | null {
-  const overTurns = input.turns.length > COMPACTION.triggerTurns;
-  const overNotes = input.notes.length > COMPACTION.maxNotes;
+  const overTurns = input.turnCount > COMPACTION.triggerTurns;
+  const overNotes = input.noteCount > COMPACTION.maxNotes;
   if (!overTurns && !overNotes) return null;
 
-  const folded = overTurns ? input.turns.slice(0, input.turns.length - COMPACTION.keepTurns) : [];
-  const foldedNotes = overNotes ? input.notes.slice(0, input.notes.length - COMPACTION.maxNotes / 2) : [];
+  // One page per call keeps the prompt bounded; a backlog is worked off over the following drains.
+  const folded = overTurns ? input.oldestTurns.slice(0, Math.min(COMPACTION.foldTurns, input.turnCount - COMPACTION.keepTurns)) : [];
+  const foldedNotes = overNotes
+    ? input.oldestNotes.slice(0, Math.min(COMPACTION.foldNotes, input.noteCount - COMPACTION.maxNotes / 2))
+    : [];
   const lastFolded = folded.at(-1);
   const turnsText = folded.map((t) => `[${new Date(t.at).toISOString().slice(0, 16)}Z] ${SPEAKER[t.role]}: ${t.text}`);
   return {

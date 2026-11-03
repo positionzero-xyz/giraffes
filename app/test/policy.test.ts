@@ -310,10 +310,11 @@ describe("alarm and compaction", () => {
     expect(nextAlarm({ now, inboxReadyAt: null, wakeupFireAt: null, outboxReadyAt: null, logsReadyAt: null })).toBeNull();
   });
 
-  test("compaction folds all but the newest 30 turns once there are more than 60", () => {
-    const turns = Array.from({ length: 61 }, (_, i) => ({ seq: i + 1, role: "person" as const, text: `t${i + 1}`, at: NOW }));
-    expect(planCompaction({ summary: "", throughSeq: 0, turns: turns.slice(0, 60), notes: [] })).toBeNull();
-    expect(planCompaction({ summary: "", throughSeq: 0, turns, notes: [] })?.foldThroughSeq).toBe(31);
+  test("compaction folds the oldest turns, keeping the newest 30, once there are more than 60", () => {
+    const oldestTurns = Array.from({ length: 30 }, (_, i) => ({ seq: i + 1, role: "person" as const, text: `t${i + 1}`, at: NOW }));
+    const input = { summary: "", throughSeq: 0, oldestTurns, noteCount: 0, oldestNotes: [] };
+    expect(planCompaction({ ...input, turnCount: 60 })).toBeNull();
+    expect(planCompaction({ ...input, turnCount: 61 })?.foldThroughSeq).toBe(30);
   });
 
   test("system prompts are byte-stable constants", () => {

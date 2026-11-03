@@ -37,6 +37,7 @@ import { toLocal, weekday } from "../policy/time";
 
 export const TURN = {
   recentTurns: 30,
+  recentNotes: 50,
   maxBatchMessages: 10,
   maxSendsPerTurn: 3,
   maxTextChars: 2000,

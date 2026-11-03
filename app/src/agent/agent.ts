@@ -27,6 +27,7 @@ import {
   beginStep,
   BOX,
   boxMessage,
+  goneMessage,
   needsLink,
   newBox,
   onCommand,
@@ -35,6 +36,8 @@ import {
   type BoxSay,
   type BoxState,
   type Probe,
+  type ProbeStep,
+  type Step,
 } from "../box/machine";
 import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
 import { makeChannels, type ChannelRegistry } from "../channels/channel";
@@ -74,6 +77,7 @@ const LOG_BATCH = 100;
 const LOG_BATCHES_PER_DRAIN = 10;
 const MODEL_RETRY_BASE_MS = 30_000;
 const NO_COST = 0 as MicroUsd;
+const BOX_STEPS_PER_DRAIN = 3;
 const utf8 = new TextEncoder();
 
 export type Clock = { now(): EpochMs };
@@ -476,38 +480,40 @@ export class Agent extends DurableObject<Env> {
 
   async #stepBox(): Promise<void> {
     const deps = this.#deps.box;
-    const current = this.#store.box();
-    if (!deps || !current) return;
-    const step = beginStep(current, this.#deps.clock.now());
-    if (!step) return;
-    if (step.kind === "settled") {
-      return this.#store.applyBox(step.box, await this.#outboxMessage(deps, step.box, step.say), [], this.#deps.clock.now());
+    if (!deps) return;
+    for (let i = 0; i < BOX_STEPS_PER_DRAIN; i++) {
+      const current = this.#store.box();
+      const step = current && beginStep(current, this.#deps.clock.now());
+      if (!step) return;
+      this.#store.applyBox(step.box, null, [], this.#deps.clock.now());
+      if (step.kind === "reclaim") {
+        await this.#reclaim(deps, step);
+        continue;
+      }
+      const probe = await this.#probe(deps, step);
+      const t = afterProbe(step, probe, this.#deps.clock.now());
+      this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [], this.#deps.clock.now());
     }
-    const claimed = step.box;
-    this.#store.applyBox(claimed, null, [], this.#deps.clock.now());
-    const probe = await this.#probe(deps, claimed, await boxToken(deps.secret, claimed.name));
-    const t = afterProbe(claimed, probe, this.#deps.clock.now());
-    if (t.box.state === "reclaiming") return this.#reclaim(deps, claimed);
-    this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [], this.#deps.clock.now());
   }
 
-  async #reclaim(deps: BoxDeps, box: Box): Promise<void> {
-    const destroyed = await deps.host.destroy(box.name);
+  async #reclaim(deps: BoxDeps, step: Extract<Step, { kind: "reclaim" }>): Promise<void> {
+    const destroyed = await deps.host.destroy(step.box.name);
     if (!destroyed.ok) {
-      console.warn("box reclaim failed", box.name, destroyed.detail);
+      console.warn("box reclaim failed", step.box.name, destroyed.detail);
       return;
     }
     await this.#deps.ledger.releaseBox(this.#agent().key, this.#deps.clock.now());
-    const m = boxMessage("reclaimed", null);
-    this.#store.removeBox(box.name, { texts: [m.text], note: m.note }, this.#deps.clock.now());
+    const m = goneMessage(step.box);
+    this.#store.removeBox(step.box.name, { texts: [m.text], note: m.note }, this.#deps.clock.now());
   }
 
-  async #probe(deps: BoxDeps, box: Box, token: BoxToken): Promise<Probe> {
-    if (box.state === "provisioning") {
-      const ensured = await deps.host.ensure(box.name, token);
+  async #probe(deps: BoxDeps, step: ProbeStep): Promise<Probe> {
+    const token = await boxToken(deps.secret, step.box.name);
+    if (step.kind === "provision") {
+      const ensured = await deps.host.ensure(step.box.name, token);
       if (!ensured.ok) return { kind: "down", retryable: ensured.retryable, detail: ensured.detail };
     }
-    const health = await deps.client.health(box.url, token);
+    const health = await deps.client.health(step.box.url, token);
     return health.kind === "up" ? health : { kind: "down", retryable: true, detail: health.detail };
   }
 

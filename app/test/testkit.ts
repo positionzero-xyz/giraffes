@@ -236,6 +236,8 @@ export type FakeBox = {
   readonly parses: { readonly authorization: string | null; readonly user: string }[];
   readonly replies: BoxReplyStep[];
   signedIn: boolean;
+  /** False makes the box's own URL unreachable, as a wedged machine or a network fault would. */
+  reachable: boolean;
   nameOf(user: string): Promise<BoxName>;
 };
 
@@ -259,6 +261,7 @@ export function fakeBox(
     parses: [] as { authorization: string | null; user: string }[],
     replies: [] as BoxReplyStep[],
     signedIn: opts.signedIn ?? false,
+    reachable: true,
     nameOf: (user: string) => boxName(BOX_SECRET, "gbox-", personAgentKey({ channel: "dev", channelUserId: user })),
   };
   const host: BoxHost = {
@@ -288,10 +291,10 @@ export function fakeBox(
   const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
     const url = new URL(input);
     const name = url.hostname.replace(/\.box\.test$/, "");
-    if (!box.created.has(name)) throw new TypeError("fetch failed: no such host");
+    if (url.pathname === "/health") box.healthCalls.push(name);
+    if (!box.created.has(name) || !box.reachable) throw new TypeError("fetch failed: no such host");
     const authorization = new Headers(init?.headers).get("authorization");
     if (url.pathname === "/health") {
-      box.healthCalls.push(name);
       return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test" });
     }
     if (url.pathname === "/parse") {

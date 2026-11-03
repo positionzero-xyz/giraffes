@@ -179,6 +179,32 @@ export const MIGRATIONS: readonly string[] = [
     at  INTEGER NOT NULL
   );
   `,
+  `
+  CREATE TABLE box_next (
+    one                INTEGER PRIMARY KEY CHECK (one = 1),
+    name               TEXT NOT NULL,
+    host               TEXT NOT NULL CHECK (host IN ('fly', 'static')),
+    url                TEXT NOT NULL,
+    state              TEXT NOT NULL CHECK (state IN ('provisioning', 'signed_out', 'signed_in', 'reclaiming')),
+    state_at           INTEGER NOT NULL,
+    link_sent_at       INTEGER,
+    signin_poll_until  INTEGER,
+    attempts           INTEGER NOT NULL DEFAULT 0,
+    next_at            INTEGER,
+    poll_at            INTEGER,
+    reclaim_at         INTEGER,
+    reclaim_reason     TEXT CHECK (reclaim_reason IN ('unused', 'failed')),
+    CHECK ((state = 'reclaiming') = (reclaim_reason IS NOT NULL))
+  );
+  INSERT INTO box_next (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at,
+                        reclaim_reason)
+    SELECT one, name, host, url, CASE state WHEN 'failed' THEN 'reclaiming' ELSE state END, state_at, link_sent_at, signin_poll_until,
+           CASE state WHEN 'failed' THEN 0 ELSE attempts END, CASE state WHEN 'failed' THEN state_at ELSE next_at END, poll_at, reclaim_at,
+           CASE state WHEN 'failed' THEN 'failed' WHEN 'reclaiming' THEN 'unused' END
+    FROM box;
+  DROP TABLE box;
+  ALTER TABLE box_next RENAME TO box;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

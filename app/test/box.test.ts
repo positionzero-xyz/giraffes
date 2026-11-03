@@ -6,6 +6,7 @@ import { flyHost, type FlyConfig } from "../src/box/fly";
 import type { Fetch } from "../src/box/host";
 import { BOX, boxMessage, type BoxSay } from "../src/box/machine";
 import { boxName, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
+import { MIGRATIONS } from "../src/agent/schema";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs } from "../src/domain";
 import { BOX_SECRET, chat, devChat, fakeBox, local, memoryLedger, quiet, scripted, turn } from "./testkit";
@@ -367,29 +368,53 @@ describe("connecting a Claude plan", () => {
     expect(box.created.size).toBe(1);
   });
 
-  test("a provisioning step that dies every time runs out of attempts and tells the person once", async () => {
+  test("a provisioning step that dies every time runs out of attempts, removes what it made, frees the slot and tells the person once", async () => {
     const box = fakeBox({ host: Array(50).fill("die") });
-    const c = await devChat("cy", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    const ledger = memoryLedger();
+    const c = await devChat("cy", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger });
 
     await c.say("/claude");
     await c.advanceTo("2099-11-04T12:00");
 
     expect(await c.received()).toEqual([say("setting_up"), say("setup_failed")]);
     expect(box.ensureCalls).toHaveLength(BOX.maxProvisionAttempts);
-    expect((await c.snapshot()).box?.state).toBe("failed");
+    expect(box.destroyCalls).toEqual([await box.nameOf("cy")]);
+    expect(box.created.size).toBe(0);
+    expect(ledger.boxes.has("p:dev:cy")).toBe(false);
+    expect((await c.snapshot()).box).toBeNull();
   });
 
-  test("a failed box is provisioned again on the next /claude", async () => {
+  test("a provisioning failure that can't be retried is removed at once, and the next /claude starts over", async () => {
     const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }] });
-    const c = await devChat("di", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    const ledger = memoryLedger();
+    const c = await devChat("di", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger });
 
     await c.say("/claude");
     expect(await c.received()).toEqual([say("setting_up"), say("setup_failed")]);
+    expect(box.destroyCalls).toEqual([await box.nameOf("di")]);
+    expect(ledger.boxes.has("p:dev:di")).toBe(false);
 
     await c.say("/claude");
     const [again, link] = await c.received();
     expect(again).toBe(say("setting_up"));
     expect((await linkIn(link, "di", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect(ledger.boxes.has("p:dev:di")).toBe(true);
+  });
+
+  test("/claude while a failed box is still being removed says to try again in a few minutes", async () => {
+    const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }], destroy: ["fail"] });
+    const c = await devChat("dot", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up")]);
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("resetting")]);
+
+    await c.advanceTo("2099-11-04T10:01");
+    expect(await c.received()).toEqual([say("setup_failed")]);
+    expect((await c.snapshot()).box).toBeNull();
   });
 
   test("polling sees the sign-in, flips the box to signed_in, confirms once, and stops polling", async () => {
@@ -515,6 +540,41 @@ describe("connecting a Claude plan", () => {
   });
 });
 
+describe("a box row written by the code before reclaim reasons", () => {
+  test("a box the old code left failed is removed on the next drain, freeing its slot, and its person told once", async () => {
+    const box = fakeBox();
+    const ledger = memoryLedger();
+    const c = await devChat("rex", { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", box: box.deps, ledger });
+    await c.say("hello");
+    await c.received();
+    const name = await box.nameOf("rex");
+    box.created.add(name);
+    await ledger.claimBox({ agent: "p:dev:rex" as AgentKey, name, host: "fly", at: local("2099-11-04T10:00"), max: 10 });
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName("p:dev:rex"));
+    await runInDurableObject(stub, (_agent, state) => {
+      const sql = state.storage.sql;
+      const created = MIGRATIONS.findIndex((m) => m.includes("CREATE TABLE box ("));
+      sql.exec("DROP TABLE box");
+      sql.exec(MIGRATIONS[created]);
+      sql.exec(MIGRATIONS[created + 1]);
+      sql.exec(
+        "INSERT INTO box (one, name, host, url, state, state_at, error, attempts) VALUES (1, ?, 'fly', ?, 'failed', ?, 'no answer', 10)",
+        name,
+        `https://${name}.box.test`,
+        local("2099-11-04T09:00"),
+      );
+      sql.exec(MIGRATIONS[MIGRATIONS.findLastIndex((m) => m.includes("CREATE TABLE box_next"))]);
+    });
+
+    await c.alarm();
+
+    expect(await c.received()).toEqual([say("setup_failed")]);
+    expect(box.destroyCalls).toEqual([name]);
+    expect(ledger.boxes.has("p:dev:rex")).toBe(false);
+    expect((await c.snapshot()).box).toBeNull();
+  });
+});
+
 describe("log rows queued by the code before the box path", () => {
   test("a queued model call row without a backend ships as backend 'api'", async () => {
     const c = await devChat("old", { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00" });
@@ -596,7 +656,7 @@ describe("reclaiming a box nobody signed in to", () => {
     expect((await c.snapshot()).box?.state).toBe("signed_in");
   });
 
-  test("a crash between the host's destroy and the row update converges on the retry with one message", async () => {
+  test("a crash between the host's destroy and the row update converges on the retry with one message, without probing again", async () => {
     const box = fakeBox({ destroy: ["die"] });
     const ledger = memoryLedger();
     const c = await devChat("ola", { model: scripted([quietCheckin(), quietCheckin()]), at: "2099-11-04T10:00", box: box.deps, ledger });
@@ -609,13 +669,49 @@ describe("reclaiming a box nobody signed in to", () => {
     expect(ledger.boxes.has("p:dev:ola")).toBe(true);
     await c.say("/claude");
     expect(await c.received()).toEqual([say("resetting")]);
+    const probes = box.healthCalls.length;
 
     await c.advanceTo("2099-11-06T10:05");
 
+    expect(box.healthCalls).toHaveLength(probes);
     expect(await c.received()).toEqual([say("reclaimed")]);
     expect(box.destroyCalls).toEqual([name, name]);
     expect(ledger.boxes.has("p:dev:ola")).toBe(false);
     expect((await c.snapshot()).box).toBeNull();
+  });
+
+  test("a link sent near the end moves the reclaim past that link's expiry", async () => {
+    const box = fakeBox();
+    const c = await devChat("pam", { model: scripted([quietCheckin(), quietCheckin()]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    await c.advanceTo("2099-11-06T09:50");
+    await c.say("/claude");
+    expect(await c.received()).toHaveLength(1);
+    await c.advanceTo("2099-11-06T10:21");
+    expect(box.destroyCalls).toEqual([]);
+
+    await c.advanceTo("2099-11-06T10:23");
+    expect(box.destroyCalls).toEqual([await box.nameOf("pam")]);
+    expect(await c.received()).toEqual([say("reclaimed")]);
+  });
+
+  test("a box that doesn't answer at reclaim time is never destroyed, and is looked at again later", async () => {
+    const box = fakeBox();
+    const c = await devChat("quy", { model: scripted([quietCheckin(), quietCheckin()]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    box.reachable = false;
+    await c.advanceTo("2099-11-06T11:00");
+    expect(box.destroyCalls).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("signed_out");
+
+    box.reachable = true;
+    await c.advanceTo("2099-11-06T11:10");
+    expect(box.destroyCalls).toEqual([await box.nameOf("quy")]);
+    expect(await c.received()).toEqual([say("reclaimed")]);
   });
 
   test("a destroy that fails every time keeps retrying with backoff and tells the person nothing", async () => {

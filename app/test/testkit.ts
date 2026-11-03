@@ -241,7 +241,13 @@ export type FakeBox = {
 
 /** A BoxHost and the box's HTTP server behind the real box client, wired through a fake fetch. */
 export function fakeBox(
-  opts: { readonly maxBoxes?: number; readonly host?: readonly HostStep[]; readonly destroy?: readonly DestroyStep[]; readonly signedIn?: boolean } = {},
+  opts: {
+    readonly maxBoxes?: number;
+    readonly host?: readonly HostStep[];
+    readonly destroy?: readonly DestroyStep[];
+    readonly signedIn?: boolean;
+    readonly onlyFor?: string;
+  } = {},
 ): FakeBox {
   const steps = [...(opts.host ?? [])];
   const destroySteps = [...(opts.destroy ?? [])];
@@ -306,7 +312,13 @@ export function fakeBox(
     }
     return new Response("not found", { status: 404 });
   };
-  const deps: BoxDeps = { host, client: boxClient(fetch), secret: BOX_SECRET, maxBoxes: opts.maxBoxes ?? 10 };
+  const deps: BoxDeps = {
+    host,
+    client: boxClient(fetch),
+    secret: BOX_SECRET,
+    maxBoxes: opts.maxBoxes ?? 10,
+    onlyFor: opts.onlyFor === undefined ? null : personAgentKey({ channel: "dev", channelUserId: opts.onlyFor }),
+  };
   return Object.assign(box, { deps });
 }
 

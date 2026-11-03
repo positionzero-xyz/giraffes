@@ -83,7 +83,11 @@ export type BoxDeps = {
   readonly client: BoxClient;
   readonly secret: string;
   readonly maxBoxes: number;
+  /** The one person the shared static box serves; null serves everyone. */
+  readonly onlyFor: AgentKey | null;
 };
+
+const boxServes = (deps: BoxDeps | null, agent: AgentKey): deps is BoxDeps => deps !== null && (deps.onlyFor === null || deps.onlyFor === agent);
 
 export type AgentDeps = {
   readonly model: ModelClient;
@@ -433,7 +437,7 @@ export class Agent extends DurableObject<Env> {
 
   async #boxCommand(view: TurnView, agent: AgentKey): Promise<void> {
     const deps = this.#deps.box;
-    if (!deps) return this.#boxReply(view, agent, null, { box: null, say: "unavailable" });
+    if (!boxServes(deps, agent)) return this.#boxReply(view, agent, null, { box: null, say: "unavailable" });
     if (!planAllowsBox(this.#plan(view.now).kind)) return this.#boxReply(view, agent, null, { box: null, say: "not_in_plan" });
     const now = this.#deps.clock.now();
     const current = this.#store.box();
@@ -510,7 +514,7 @@ export class Agent extends DurableObject<Env> {
   async #callBox<T>(system: string, user: string, schema: z.ZodType<T>, agent: AgentKey): Promise<BoxCall<T> | null> {
     const deps = this.#deps.box;
     const box = this.#store.box();
-    if (!deps || box?.state !== "signed_in") return null;
+    if (!boxServes(deps, agent) || box?.state !== "signed_in") return null;
     const id = crypto.randomUUID();
     const model = routeOf("turn").model;
     const res = await deps.client.parse(box.url, await boxToken(deps.secret, box.name), { purpose: "turn", system, user, schema });
@@ -789,9 +793,21 @@ function boxDeps(c: BoxConfig): BoxDeps | null {
     case "none":
       return null;
     case "fly":
-      return { host: flyHost({ ...c.fly, appPrefix: c.appPrefix, secret: c.secret }, f), client: boxClient(f), secret: c.secret, maxBoxes: c.maxBoxes };
+      return {
+        host: flyHost({ ...c.fly, appPrefix: c.appPrefix, secret: c.secret }, f),
+        client: boxClient(f),
+        secret: c.secret,
+        maxBoxes: c.maxBoxes,
+        onlyFor: null,
+      };
     case "static":
-      return { host: staticHost({ url: c.staticUrl, appPrefix: c.appPrefix }), client: boxClient(f), secret: c.secret, maxBoxes: c.maxBoxes };
+      return {
+        host: staticHost({ url: c.staticUrl, appPrefix: c.appPrefix }),
+        client: boxClient(f),
+        secret: c.secret,
+        maxBoxes: c.maxBoxes,
+        onlyFor: c.owner,
+      };
     default:
       return assertNever(c);
   }

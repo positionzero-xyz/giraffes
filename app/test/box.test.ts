@@ -58,6 +58,7 @@ describe("configuration", () => {
     expect(loadConfig(env({ BOX_HOST: "static", BOX_SECRET, BOX_STATIC_URL: "http://127.0.0.1:8789/" })).box).toMatchObject({
       host: "static",
       staticUrl: "http://127.0.0.1:8789",
+      owner: null,
     });
     expect(() => loadConfig(env({ BOX_HOST: "static", BOX_SECRET }))).toThrow("BOX_STATIC_URL");
     expect(() => loadConfig(env({ BOX_HOST: "static", BOX_STATIC_URL: "http://127.0.0.1:8789" }))).toThrow("BOX_SECRET");
@@ -132,6 +133,32 @@ const flyConfig: FlyConfig = {
 const app = "gbox-0123456789ab" as BoxName;
 const token = "box-token" as BoxToken;
 const posts = (rs: readonly FlyRequest[]) => rs.filter((r) => r.method === "POST").map((r) => [r.path, r.body]);
+
+describe("the static host shares one Claude login", () => {
+  const live = (vars: Record<string, string>): Env => ({ MODEL_BACKEND: "anthropic", ANTHROPIC_API_KEY: "fake-key", ...vars }) as unknown as Env;
+  const shared = { BOX_HOST: "static", BOX_SECRET, BOX_STATIC_URL: "https://box.example.test" };
+
+  test("outside DEV_MODE it needs BOX_STATIC_OWNER, which must be an agent key", () => {
+    expect(() => loadConfig(live(shared))).toThrow("BOX_STATIC_OWNER");
+    expect(loadConfig(live({ ...shared, BOX_STATIC_OWNER: "p:telegram:12345" })).box).toMatchObject({ host: "static", owner: "p:telegram:12345" });
+    expect(() => loadConfig(live({ ...shared, BOX_STATIC_OWNER: "12345" }))).toThrow("BOX_STATIC_OWNER");
+  });
+
+  test("with an owner set, anyone else's /claude says it isn't available and their turns stay on the API", async () => {
+    const box = fakeBox({ onlyFor: "own", signedIn: true });
+    const owner = await devChat("own", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    const other = await devChat("oth", { model: scripted([chat("From the API.")]), at: "2099-11-04T10:00", box: box.deps });
+
+    await other.say("/claude");
+    await owner.say("/claude");
+    await other.say("hello");
+
+    expect(await other.received()).toEqual([say("unavailable"), "From the API."]);
+    expect(await owner.received()).toEqual([say("setting_up"), say("connected")]);
+    expect((await other.snapshot()).box).toBeNull();
+    expect(box.parses).toEqual([]);
+  });
+});
 
 describe("fly host", () => {
   test("provisioning sends the contract's requests: app, shared v4 and v6, a data volume, one machine", async () => {

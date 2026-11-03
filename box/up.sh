@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
-# usage: box/up.sh <name> <host-port> <work-dir>
-# Starts the box with a fake model: the mock Messages API runs inside it and every Anthropic host resolves to loopback.
+# usage: BOX_TOKEN=<token> box/up.sh <name> <host-port> <data-dir> [--mock]
+# Runs the box image (BOX_IMAGE, default giraffes-box:mvp) on 127.0.0.1:<host-port> with the person's state in <data-dir>.
+# --mock signs the CLI in with a fake API key against box/mock-api.mjs running inside the box, with every Anthropic host resolved to loopback.
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
-name=$1 port=$2 work=$3
-here=$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || pwd)
-mkdir -p "$work/dump"
-# Docker's default seccomp profile blocks the user namespaces Chromium's sandbox needs; the alternative is --no-sandbox.
-docker run -d --name "$name" --init --shm-size=1g --security-opt seccomp=unconfined \
-  -p "127.0.0.1:$port:8789" \
-  -v "$here:/box:ro" -v "$work:/work" \
-  -e ANTHROPIC_BASE_URL=http://127.0.0.1:8788 \
-  -e ANTHROPIC_API_KEY=sk-ant-FAKE-spike-not-a-real-key \
-  --add-host api.anthropic.com:127.0.0.1 --add-host statsig.anthropic.com:127.0.0.1 \
-  --add-host console.anthropic.com:127.0.0.1 --add-host claude.ai:127.0.0.1 \
-  --add-host mcp-proxy.anthropic.com:127.0.0.1 --add-host platform.claude.com:127.0.0.1 \
-  giraffes-box:spike
-docker exec -d -u root "$name" node /box/mock-api.mjs /work/mock.log 8788 /work/dump
-for _ in $(seq 1 20); do
-  docker logs "$name" 2>&1 | grep -q "claude bridge on" && break
-  sleep 0.5
+name=$1 port=$2 data=$3 mode=${4:-}
+: "${BOX_TOKEN:?set BOX_TOKEN}"
+here=$(cd "$(dirname "$0")" && { pwd -W 2>/dev/null || pwd; })
+mkdir -p "$data"
+data=$(cd "$data" && { pwd -W 2>/dev/null || pwd; })
+mock=()
+if [ "$mode" = --mock ]; then
+  mock=(-v "$here:/box:ro"
+    -e ANTHROPIC_BASE_URL=http://127.0.0.1:8788
+    -e ANTHROPIC_API_KEY=sk-ant-FAKE-mock-not-a-real-key
+    --add-host api.anthropic.com:127.0.0.1 --add-host statsig.anthropic.com:127.0.0.1
+    --add-host console.anthropic.com:127.0.0.1 --add-host mcp-proxy.anthropic.com:127.0.0.1
+    --add-host claude.ai:127.0.0.1 --add-host claude.com:127.0.0.1 --add-host platform.claude.com:127.0.0.1)
+fi
+docker run -d --name "$name" --init -p "127.0.0.1:$port:8789" -v "$data:/data" -e BOX_TOKEN "${mock[@]}" "${BOX_IMAGE:-giraffes-box:mvp}"
+if [ "$mode" = --mock ]; then
+  docker exec -d -u agent "$name" node /box/mock-api.mjs /tmp/mock.log 8788
+fi
+for _ in $(seq 1 40); do
+  docker logs "$name" 2>&1 | grep -q "box on" && break
+  sleep 0.25
 done
 docker logs "$name"

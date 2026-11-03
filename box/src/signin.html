@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect your Claude plan</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1a1a1a; --muted: #5c5c5c; --bg: #fafaf7; --card: #ffffff; --line: #d9d6cc; --accent: #c15f3c; --ok: #2f7a3b; --err: #b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #ecebe6; --muted: #a8a69e; --bg: #1c1b19; --card: #262522; --line: #3d3b36; --accent: #e07a52; --ok: #6cc17a; --err: #f2867c; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.5 system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", sans-serif; }
+  main { max-width: 30rem; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.4rem; line-height: 1.3; margin: 0 0 4px; }
+  .th { color: var(--muted); font-size: 0.95em; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-top: 16px; }
+  section p { margin: 0 0 12px; }
+  button, input { font: inherit; width: 100%; border-radius: 10px; padding: 12px 14px; }
+  button { border: 0; background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  input { border: 1px solid var(--line); background: var(--bg); color: var(--fg); margin-bottom: 12px; }
+  a { color: var(--accent); }
+  #link { display: block; margin-top: 12px; word-break: break-all; }
+  #msg { margin-top: 16px; min-height: 1.5em; }
+  #msg.ok { color: var(--ok); font-weight: 600; }
+  #msg.err { color: var(--err); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Connect your Claude plan</h1>
+  <div class="th">เชื่อมต่อแพ็กเกจ Claude ของคุณ</div>
+
+  <section id="steps">
+    <p>1. Open Anthropic's page and sign in to Claude.<br><span class="th">เปิดหน้าของ Anthropic แล้วลงชื่อเข้าใช้ Claude</span></p>
+    <button id="open" type="button">Open sign-in page · เปิดหน้าลงชื่อเข้าใช้</button>
+    <a id="link" href="#" target="_blank" rel="noopener noreferrer" hidden>Tap here if the page didn't open · แตะที่นี่หากหน้าไม่เปิดขึ้นมา</a>
+  </section>
+
+  <section id="codeStep">
+    <form id="form">
+      <p>2. Copy the code it shows and paste it here.<br><span class="th">คัดลอกรหัสที่แสดง แล้ววางที่นี่</span></p>
+      <input id="code" name="code" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Code · รหัส" disabled>
+      <button id="send" type="submit" disabled>Connect · เชื่อมต่อ</button>
+    </form>
+  </section>
+
+  <div id="msg" role="status" aria-live="polite"></div>
+</main>
+<script>
+  const MESSAGES = {
+    opening: ["Opening the sign-in page…", "กำลังเปิดหน้าลงชื่อเข้าใช้…"],
+    opened: ["Sign in on Anthropic's page, then come back here with the code.", "ลงชื่อเข้าใช้ที่หน้าของ Anthropic แล้วกลับมาที่นี่พร้อมรหัส"],
+    checking: ["Checking the code…", "กำลังตรวจสอบรหัส…"],
+    connected: ["Connected. Your chats now use your Claude plan. You can close this page.", "เชื่อมต่อแล้ว ต่อจากนี้แชทของคุณจะใช้แพ็กเกจ Claude ของคุณ ปิดหน้านี้ได้เลย"],
+    badCode: ["That code didn't work. Open the sign-in page again and use the new code.", "รหัสนี้ใช้ไม่ได้ เปิดหน้าลงชื่อเข้าใช้อีกครั้งแล้วใช้รหัสใหม่"],
+    timedOut: ["Sign-in timed out. Open the sign-in page again.", "หมดเวลาลงชื่อเข้าใช้ เปิดหน้าลงชื่อเข้าใช้อีกครั้ง"],
+    expired: ["This link has expired. Send /claude in the chat to get a new one.", "ลิงก์นี้หมดอายุแล้ว ส่ง /claude ในแชทเพื่อรับลิงก์ใหม่"],
+    noTicket: ["This link is incomplete. Send /claude in the chat to get a new one.", "ลิงก์นี้ไม่สมบูรณ์ ส่ง /claude ในแชทเพื่อรับลิงก์ใหม่"],
+    failed: ["Something went wrong. Try again in a minute.", "เกิดข้อผิดพลาด ลองใหม่อีกครั้งในอีกสักครู่"],
+  };
+  const $ = (id) => document.getElementById(id);
+  const ticket = new URLSearchParams(location.hash.slice(1)).get("t");
+
+  function say(key, kind) {
+    const [en, th] = MESSAGES[key];
+    const msg = $("msg");
+    msg.className = kind || "";
+    msg.replaceChildren(en, document.createElement("br"), Object.assign(document.createElement("span"), { className: "th", textContent: th }));
+  }
+
+  async function post(path, body) {
+    try {
+      const res = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ticket, ...body }) });
+      return { status: res.status, body: await res.json().catch(() => ({})) };
+    } catch {
+      return { status: 0, body: {} };
+    }
+  }
+
+  function sayError(reply) {
+    if (reply.status === 401) say("expired", "err");
+    else if (reply.status === 409) say("timedOut", "err");
+    else say("failed", "err");
+  }
+
+  $("open").addEventListener("click", async () => {
+    const tab = window.open("", "_blank");
+    $("open").disabled = true;
+    say("opening");
+    const reply = await post("/signin/start", {});
+    $("open").disabled = false;
+    if (reply.status !== 200 || typeof reply.body.url !== "string") {
+      tab?.close();
+      return sayError(reply);
+    }
+    $("link").href = reply.body.url;
+    $("link").hidden = false;
+    if (tab) {
+      tab.opener = null;
+      tab.location.href = reply.body.url;
+    }
+    $("code").disabled = $("send").disabled = false;
+    say("opened");
+  });
+
+  $("form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const code = $("code").value.trim();
+    if (!code) return;
+    $("send").disabled = true;
+    say("checking");
+    const reply = await post("/signin/code", { code });
+    $("code").value = "";
+    if (reply.status === 200 && reply.body.signedIn) {
+      $("steps").hidden = true;
+      $("codeStep").hidden = true;
+      return say("connected", "ok");
+    }
+    $("code").disabled = true;
+    if (reply.status === 200) say("badCode", "err");
+    else sayError(reply);
+  });
+
+  if (!ticket) {
+    $("open").disabled = true;
+    say("noTicket", "err");
+  }
+</script>
+</body>
+</html>

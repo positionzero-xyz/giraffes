@@ -2,8 +2,10 @@
   "name": "giraffes-box",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.ts"
+  },
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.316",
-    "zod": "4.6.7"
+    "@anthropic-ai/claude-code": "2.1.316"
   }
 }

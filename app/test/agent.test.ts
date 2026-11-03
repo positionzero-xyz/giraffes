@@ -87,6 +87,26 @@ describe("reminders", () => {
     model.assertDone();
   });
 
+  test("a reminder for the current or next minute is accepted, and one already reached fires at once", async () => {
+    const model = scripted([
+      turn({ actions: [schedule("stretch", "2099-11-04T14:01", "Stretch"), schedule("water", "2099-11-04T14:00", "Drink water"), send("OK.")], task: ["reminder", "breaks", "started"] }),
+      chat("Drink some water."),
+      chat("Time to stretch."),
+    ]);
+    const c = await devChat("abe", { model, at: "2099-11-04T14:00" });
+    c.clock.set((local("2099-11-04T14:00") + 10_000) as EpochMs);
+
+    await c.say("remind me now to drink water, and at 14:01 to stretch");
+    await c.advanceTo("2099-11-04T14:05");
+
+    expect(c.channel.delivered.map((d) => [d.text, wall(d.at)])).toEqual([
+      ["OK.", "2099-11-04T14:00"],
+      ["Drink some water.", "2099-11-04T14:00"],
+      ["Time to stretch.", "2099-11-04T14:01"],
+    ]);
+    model.assertDone();
+  });
+
   test("a reminder the person asked for at 23:00 arrives at 23:00 and isn't counted as unasked", async () => {
     const model = scripted([
       turn({ actions: [schedule("bins", "2099-11-04T23:00", "Take the bins out"), send("Will do.")], task: ["reminder", "bins", "started"] }),

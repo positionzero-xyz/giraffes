@@ -310,17 +310,17 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   const adds = new Map<WakeupKey, NewReminder>();
   const rejected: { action: string; reason: ActionRejection }[] = [];
   const notices = new Set<string>();
-  const reject = (action: string, reason: ActionRejection) => {
+  const reject = (action: string, reason: ActionRejection, shown: boolean) => {
     rejected.push({ action, reason });
     const notice = REJECTION_NOTICE[reason];
-    if (notice !== null) notices.add(notice);
+    if (shown && notice !== null) notices.add(notice);
   };
 
   for (const a of out.actions) {
     switch (a.type) {
       case "send":
         if (sends.length < TURN.maxSendsPerTurn) sends.push(a.text);
-        else reject("send", "too_many_sends");
+        else reject("send", "too_many_sends", false);
         break;
       case "schedule_wakeup": {
         const origin = wakeupOrigin(first.kind, a.asked);
@@ -329,7 +329,8 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
           adds.set(admission.wakeup.key, admission.wakeup);
           pending.set(admission.wakeup.key, admission.wakeup);
         } else {
-          reject(`schedule_wakeup:${a.key}`, admission.reason);
+          // The person never hears of the agent's own wake-ups, so a rejected one is only logged.
+          reject(`schedule_wakeup:${a.key}`, admission.reason, a.asked);
         }
         break;
       }
@@ -337,7 +338,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
         const key = parseWakeupKey(a.key);
         const current = key === null ? undefined : pending.get(key);
         if (key === null || current === undefined || current.kind !== "reminder") {
-          reject(`cancel_wakeup:${a.key}`, key === CHECKIN_KEY ? "reserved_key" : "not_pending");
+          reject(`cancel_wakeup:${a.key}`, key === CHECKIN_KEY ? "reserved_key" : "not_pending", true);
           break;
         }
         pending.delete(key);
@@ -360,7 +361,9 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
     const notice = out.lateNotice?.trim() || NOTICE.lateFallback(human(late.dueAt, view.tz));
     agentTexts[0] = `${notice}\n${agentTexts[0]}`;
   }
-  const noticeText = intent === "reply" && notices.size > 0 ? [...notices].join("\n") : null;
+  // Whatever the turn's intent, a correction goes out with the model's text so it can't confirm what code
+  // rejected. A turn that sends nothing has nothing to correct.
+  const noticeText = agentTexts.length > 0 && notices.size > 0 ? [...notices].join("\n") : null;
   if (noticeText !== null && agentTexts.length >= TURN.maxSendsPerTurn) {
     agentTexts.pop();
     rejected.push({ action: "send", reason: "too_many_sends" });

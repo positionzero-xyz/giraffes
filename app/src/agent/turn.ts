@@ -400,9 +400,9 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
     const notice = given ? fit(given, TURN.maxLateNoticeChars, "late_notice") : NOTICE.lateFallback(human(late.dueAt, view.tz));
     agentTexts[0] = `${notice}\n${agentTexts[0]}`;
   }
-  // Whatever the turn's intent, a correction goes out with the model's text so it can't confirm what code
-  // rejected. A turn that sends nothing has nothing to correct.
-  const noticeText = agentTexts.length > 0 && notices.size > 0 ? [...notices].join("\n") : null;
+  // A correction goes out with any model text, so it can't confirm what code rejected, and on its own to a
+  // person who wrote in. A wake-up or check-in that sends nothing stays silent.
+  const noticeText = (agentTexts.length > 0 || intent === "reply") && notices.size > 0 ? [...notices].join("\n") : null;
   if (noticeText !== null && agentTexts.length >= TURN.maxSendsPerTurn) {
     agentTexts.pop();
     rejected.push({ action: "send", reason: "too_many_sends" });

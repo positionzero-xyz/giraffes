@@ -11,6 +11,7 @@ import {
   type UtcMonth,
 } from "../domain";
 import type { ModelId, Purpose, Usage } from "../model/model";
+import { REMINDER_REJECTIONS } from "../policy/schedule";
 
 export type LogRow =
   | {
@@ -68,6 +69,15 @@ export type LogRow =
       readonly change: "follow" | "block";
       readonly source: "channel" | "delivery";
       readonly at: EpochMs;
+    }
+  | {
+      readonly stream: "rejection";
+      readonly id: string;
+      readonly agent: AgentKey;
+      readonly turnId: string;
+      readonly action: string;
+      readonly reason: ActionRejection;
+      readonly at: EpochMs;
     };
 
 export const MODEL_CALL_STATUSES = [
@@ -82,6 +92,10 @@ export type ModelCallStatus = (typeof MODEL_CALL_STATUSES)[number];
 
 export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "model_failed", "poison", "no_model", "stale"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
+
+/** Why code refused an action the model returned. */
+export const ACTION_REJECTIONS = [...REMINDER_REJECTIONS, "not_pending", "too_many_sends"] as const;
+export type ActionRejection = (typeof ACTION_REJECTIONS)[number];
 
 export const UNASKED_STATUSES = ["sent", "dropped_budget", "dropped_blocked", "failed"] as const;
 export type UnaskedStatus = (typeof UNASKED_STATUSES)[number];
@@ -191,6 +205,10 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
       return db
         .prepare("INSERT OR IGNORE INTO lifecycle (id, agent_key, change, source, at) VALUES (?, ?, ?, ?, ?)")
         .bind(row.id, row.agent, row.change, row.source, row.at);
+    case "rejection":
+      return db
+        .prepare("INSERT OR IGNORE INTO action_rejection (id, agent_key, turn_id, action, reason, at) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(row.id, row.agent, row.turnId, row.action, row.reason, row.at);
     default:
       return assertNever(row);
   }

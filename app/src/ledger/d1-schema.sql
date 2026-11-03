@@ -58,6 +58,16 @@ CREATE TABLE IF NOT EXISTS lifecycle (
   at        INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS action_rejection (
+  id        TEXT PRIMARY KEY,
+  agent_key TEXT NOT NULL,
+  turn_id   TEXT NOT NULL,
+  action    TEXT NOT NULL,
+  reason    TEXT NOT NULL CHECK (reason IN ('duplicate', 'limit', 'past', 'too_far', 'bad_time', 'bad_key', 'reserved_key', 'not_pending', 'too_many_sends')),
+  at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS action_rejection_agent_time ON action_rejection (agent_key, at);
+
 CREATE TABLE IF NOT EXISTS spend_lease (
   agent_key  TEXT NOT NULL,
   month      TEXT NOT NULL,

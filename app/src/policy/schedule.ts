@@ -41,7 +41,8 @@ export function wakeupOrigin(trigger: AgentEventKind, askedFor: boolean): "perso
   return trigger === "message" && askedFor ? "person" : "agent";
 }
 
-export type ReminderRejection = "duplicate" | "limit" | "past" | "too_far" | "bad_time" | "bad_key" | "reserved_key";
+export const REMINDER_REJECTIONS = ["duplicate", "limit", "past", "too_far", "bad_time", "bad_key", "reserved_key"] as const;
+export type ReminderRejection = (typeof REMINDER_REJECTIONS)[number];
 
 export type ReminderAdmission =
   | { readonly ok: true; readonly wakeup: NewReminder }

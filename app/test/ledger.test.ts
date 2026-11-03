@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { TASK_KINDS, TASK_STATUSES, type AgentEventKind, type AgentKey, type EpochMs, type MicroUsd, type UtcMonth } from "../src/domain";
-import { d1Ledger, MODEL_CALL_STATUSES, TURN_OUTCOMES, UNASKED_STATUSES, type LogRow } from "../src/ledger/ledger";
+import { ACTION_REJECTIONS, d1Ledger, MODEL_CALL_STATUSES, TURN_OUTCOMES, UNASKED_STATUSES, type LogRow } from "../src/ledger/ledger";
 import { PURPOSES } from "../src/model/model";
 
 const month = "2099-11" as UtcMonth;
@@ -65,6 +65,7 @@ describe("log shipping", () => {
         cacheWriteTokens: 0,
         at,
       },
+      { stream: "rejection", id: "p:dev:a|dev:1|0", agent: agent("a"), turnId: "p:dev:a|dev:1", action: "schedule_wakeup:dentist", reason: "bad_time", at },
     ];
 
     await ledger.append(rows);
@@ -73,9 +74,9 @@ describe("log shipping", () => {
     const counts = await env.LEDGER.prepare(
       `SELECT (SELECT COUNT(*) FROM agent) AS agents, (SELECT COUNT(*) FROM turn_log) AS turns,
               (SELECT COUNT(*) FROM unasked_message) AS unasked, (SELECT COUNT(*) FROM lifecycle) AS lifecycle,
-              (SELECT COUNT(*) FROM model_call) AS calls`,
+              (SELECT COUNT(*) FROM model_call) AS calls, (SELECT COUNT(*) FROM action_rejection) AS rejections`,
     ).first();
-    expect(counts).toEqual({ agents: 1, turns: 1, unasked: 1, lifecycle: 1, calls: 1 });
+    expect(counts).toEqual({ agents: 1, turns: 1, unasked: 1, lifecycle: 1, calls: 1, rejections: 1 });
     const followed = await env.LEDGER.prepare("SELECT followed FROM unasked_with_followup WHERE id = 'o-1'").first<{ followed: number }>();
     expect(followed?.followed).toBe(0);
   });
@@ -98,6 +99,7 @@ describe("schema", () => {
       "model_call.purpose": PURPOSES,
       "model_call.status": MODEL_CALL_STATUSES,
       "unasked_message.status": UNASKED_STATUSES,
+      "action_rejection.reason": ACTION_REJECTIONS,
     };
 
     for (const [column, values] of Object.entries(expected)) expect(allowed.get(column), column).toEqual([...values].sort());

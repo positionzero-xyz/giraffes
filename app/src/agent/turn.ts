@@ -21,7 +21,7 @@ import {
   type TimeZone,
   type WakeupKey,
 } from "../domain";
-import { modelCallRow, type LogRow, type TurnOutcome } from "../ledger/ledger";
+import { modelCallRow, type ActionRejection, type LogRow, type TurnOutcome } from "../ledger/ledger";
 import type { ModelId, Usage } from "../model/model";
 import {
   admitReminder,
@@ -31,7 +31,6 @@ import {
   type NewReminder,
   type NewWakeup,
   type PendingWakeup,
-  type ReminderRejection,
 } from "../policy/schedule";
 import { toLocal, weekday } from "../policy/time";
 
@@ -187,26 +186,35 @@ export type TurnCommit = {
   readonly task: TaskLabel | null;
   readonly reachability: Reachability | null;
   readonly ensureCheckin: NewWakeup | null;
-  readonly rejected: readonly { readonly action: string; readonly reason: string }[];
+  readonly rejected: readonly { readonly action: string; readonly reason: ActionRejection }[];
 };
 
 export const NOTICE = {
   reminderLimit: "(I can hold 20 reminders at most. Cancel one and ask again.)",
   reminderPast: "(That time has already passed, so I didn't set it.)",
+  reminderTooFar: "(I can only set reminders up to a year ahead, so I didn't set it.)",
+  reminderBadTime: "(I couldn't read that time, so I didn't set the reminder.)",
+  reminderDuplicate: "(I already have that reminder set, so I didn't change it.)",
+  reminderNotSet: "(I couldn't set that reminder.)",
+  checkinReserved: "(The daily check-in can't be set or cancelled like a reminder.)",
+  cancelNotFound: "(I couldn't find that reminder, so nothing was cancelled.)",
   lateFallback: (dueLocal: string) => `Sorry, this is late. It was due at ${dueLocal}.`,
   monthlyLimit: "I've reached my usage limit for this month, so I can't help until it resets on the 1st.",
   failed: "Sorry, I couldn't process that. Could you say it again?",
   reminder: (note: string) => `Reminder: ${note}`,
 } as const;
 
-const REJECTION_NOTICE: Readonly<Record<ReminderRejection, string | null>> = {
+/** A rejected reminder or cancel is corrected in code, so the model can't confirm what didn't happen. */
+const REJECTION_NOTICE: Readonly<Record<ActionRejection, string | null>> = {
   limit: NOTICE.reminderLimit,
   past: NOTICE.reminderPast,
-  duplicate: null,
-  too_far: null,
-  bad_time: null,
-  bad_key: null,
-  reserved_key: null,
+  duplicate: NOTICE.reminderDuplicate,
+  too_far: NOTICE.reminderTooFar,
+  bad_time: NOTICE.reminderBadTime,
+  bad_key: NOTICE.reminderNotSet,
+  reserved_key: NOTICE.checkinReserved,
+  not_pending: NOTICE.cancelNotFound,
+  too_many_sends: null,
 };
 
 function nonEmpty<T>(xs: readonly T[]): readonly [T, ...T[]] | null {
@@ -300,14 +308,19 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   const notes: string[] = [];
   const cancels: WakeupKey[] = [];
   const adds = new Map<WakeupKey, NewReminder>();
-  const rejected: { action: string; reason: string }[] = [];
+  const rejected: { action: string; reason: ActionRejection }[] = [];
   const notices = new Set<string>();
+  const reject = (action: string, reason: ActionRejection) => {
+    rejected.push({ action, reason });
+    const notice = REJECTION_NOTICE[reason];
+    if (notice !== null) notices.add(notice);
+  };
 
   for (const a of out.actions) {
     switch (a.type) {
       case "send":
         if (sends.length < TURN.maxSendsPerTurn) sends.push(a.text);
-        else rejected.push({ action: "send", reason: "too_many_sends" });
+        else reject("send", "too_many_sends");
         break;
       case "schedule_wakeup": {
         const origin = wakeupOrigin(first.kind, a.asked);
@@ -316,9 +329,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
           adds.set(admission.wakeup.key, admission.wakeup);
           pending.set(admission.wakeup.key, admission.wakeup);
         } else {
-          rejected.push({ action: `schedule_wakeup:${a.key}`, reason: admission.reason });
-          const notice = REJECTION_NOTICE[admission.reason];
-          if (notice !== null) notices.add(notice);
+          reject(`schedule_wakeup:${a.key}`, admission.reason);
         }
         break;
       }
@@ -326,7 +337,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
         const key = parseWakeupKey(a.key);
         const current = key === null ? undefined : pending.get(key);
         if (key === null || current === undefined || current.kind !== "reminder") {
-          rejected.push({ action: `cancel_wakeup:${a.key}`, reason: key === CHECKIN_KEY ? "reserved_key" : "not_pending" });
+          reject(`cancel_wakeup:${a.key}`, key === CHECKIN_KEY ? "reserved_key" : "not_pending");
           break;
         }
         pending.delete(key);
@@ -515,6 +526,7 @@ export function logsForTurn(input: {
     default:
       assertNever(call);
   }
+  commit.rejected.forEach((r, i) => rows.push({ stream: "rejection", id: `${turnId}|${i}`, agent, turnId, action: r.action, reason: r.reason, at: input.now }));
   if (commit.reachability !== null) {
     rows.push({
       stream: "lifecycle",

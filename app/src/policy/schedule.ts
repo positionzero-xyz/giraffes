@@ -20,6 +20,7 @@ const MINUTE_MS = 60 * 1000;
 export const SCHEDULE = {
   maxPendingReminders: 20,
   lateAfterMs: 60 * 60 * 1000,
+  agentMinLeadMs: MINUTE_MS,
   maxHorizonMs: 366 * 24 * 60 * 60 * 1000,
   defaultCheckinLocal: "09:00",
 } as const;
@@ -59,8 +60,11 @@ export function admitReminder(
   const at = parseLocalDateTime(req.at);
   if (at === null) return { ok: false, reason: "bad_time" };
   const dueAt = fromLocal(at, ctx.tz);
-  // Model times name a minute, so the current minute still counts; a time already reached fires on the next alarm.
-  if (dueAt < ctx.now - (ctx.now % MINUTE_MS)) return { ok: false, reason: "past" };
+  // Model times name a minute, so the current minute still counts for a reminder the person asked for, and
+  // fires on the next alarm. The agent's own needs a lead, or a wake-up turn could re-arm itself and fire
+  // again in the same drain.
+  const earliest = req.origin === "person" ? ctx.now - (ctx.now % MINUTE_MS) : ctx.now + SCHEDULE.agentMinLeadMs;
+  if (dueAt < earliest) return { ok: false, reason: "past" };
   if (dueAt > ctx.now + SCHEDULE.maxHorizonMs) return { ok: false, reason: "too_far" };
   if (ctx.pending.has(key)) return { ok: false, reason: "duplicate" };
   const reminders = [...ctx.pending.values()].filter((w) => w.kind === "reminder").length;

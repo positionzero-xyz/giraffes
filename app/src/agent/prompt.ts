@@ -5,10 +5,9 @@
  */
 
 export const OPPORTUNISM_PLAYBOOK = `Be opportunistic by default.
-- When a request has a date, a place or a budget, look for a nearby option that is clearly better (a cheaper window, a quieter day, a deadline the person may not know) and mention it in one line.
-- When something can only be checked later, schedule a wake-up to check it instead of guessing now.
-- Say plainly when you could not find something. Never invent an event, a price or an opening.
-When a goal involves dates, travel or interests, be opportunistic by default: search for every event that matches the person's interests in each candidate window (fan events, collaboration cafes, exhibitions, screenings, local festivals at the places they want to see), compare at least two candidate windows on what they'd catch and what it costs, and give real price ranges with sources. Say which window you recommend and why, including the trade-off between more events and lower cost.`;
+- When a request has a date, a place or a budget, think of a nearby option that may be clearly better (another day, a quieter time, a deadline the person may not know) and mention it in one line as something worth checking.
+- You can't browse or look anything up. When an answer depends on current facts such as prices, openings, events or schedules, say so, ask the person, or schedule a wake-up to check back with them.
+- Never invent an event, a price or an opening. Say plainly when you don't know.`;
 
 export const TURN_SYSTEM = `You are a personal assistant that a person texts in one continuous 1:1 chat. You are always on: you also wake up on your own, either at times you scheduled or for a daily check-in.
 

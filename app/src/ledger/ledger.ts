@@ -94,8 +94,8 @@ export type ModelCallStatus = (typeof MODEL_CALL_STATUSES)[number];
 export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "model_failed", "poison", "no_model", "stale"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 
-/** Why code refused an action the model returned. */
-export const ACTION_REJECTIONS = [...REMINDER_REJECTIONS, "not_pending", "too_many_sends"] as const;
+/** Why code refused or cut an action the model returned. */
+export const ACTION_REJECTIONS = [...REMINDER_REJECTIONS, "not_pending", "too_many_sends", "too_many_actions", "too_long"] as const;
 export type ActionRejection = (typeof ACTION_REJECTIONS)[number];
 
 export const UNASKED_STATUSES = ["sent", "dropped_budget", "dropped_blocked", "failed"] as const;

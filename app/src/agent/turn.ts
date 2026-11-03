@@ -52,23 +52,27 @@ export const TURN = {
 
 const Slug = z.string().regex(WAKEUP_KEY_PATTERN);
 
+// The API doesn't enforce length limits (the SDK moves them into descriptions), so a limit here would fail
+// the whole turn for one long text. Limits are stated for the model and enforced in planTurn.
+const atMost = (n: number) => `At most ${n} characters.`;
+
 const ActionSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("send"), text: z.string().min(1).max(TURN.maxTextChars) }),
+  z.object({ type: z.literal("send"), text: z.string().min(1).describe(atMost(TURN.maxTextChars)) }),
   z.object({
     type: z.literal("schedule_wakeup"),
     key: Slug,
     at: z.string().describe("Local wall time, YYYY-MM-DDTHH:mm"),
-    note: z.string().min(1).max(TURN.maxNoteChars).describe("What your future self should do"),
+    note: z.string().min(1).describe(`What your future self should do. ${atMost(TURN.maxNoteChars)}`),
     asked: z.boolean().describe("True only when the person explicitly asked you to remind them"),
   }),
   z.object({ type: z.literal("cancel_wakeup"), key: Slug }),
-  z.object({ type: z.literal("remember"), note: z.string().min(1).max(TURN.maxNoteChars) }),
+  z.object({ type: z.literal("remember"), note: z.string().min(1).describe(atMost(TURN.maxNoteChars)) }),
   z.object({ type: z.literal("quiet") }),
 ]);
 
 export const TurnOutputSchema = z.object({
-  actions: z.array(ActionSchema).max(TURN.maxActions),
-  lateNotice: z.string().max(TURN.maxLateNoticeChars).optional(),
+  actions: z.array(ActionSchema).describe(`At most ${TURN.maxActions} actions.`),
+  lateNotice: z.string().describe(atMost(TURN.maxLateNoticeChars)).optional(),
   task: z.object({
     kind: z.enum(TASK_KINDS),
     key: Slug,
@@ -197,6 +201,7 @@ export const NOTICE = {
   reminderDuplicate: "(I already have that reminder set, so I didn't change it.)",
   reminderKept: (dueLocal: string) => `(Your reminder is still set for ${dueLocal}.)`,
   reminderNotSet: "(I couldn't set that reminder.)",
+  tooManyActions: "(That was more than I can do in one message, so I skipped some of it.)",
   checkinReserved: "(The daily check-in can't be set or cancelled like a reminder.)",
   cancelNotFound: "(I couldn't find that reminder, so nothing was cancelled.)",
   lateFallback: (dueLocal: string) => `Sorry, this is late. It was due at ${dueLocal}.`,
@@ -216,7 +221,19 @@ const REJECTION_NOTICE: Readonly<Record<ActionRejection, string | null>> = {
   reserved_key: NOTICE.checkinReserved,
   not_pending: NOTICE.cancelNotFound,
   too_many_sends: null,
+  too_many_actions: NOTICE.tooManyActions,
+  too_long: null,
 };
+
+/** Cut to `max` UTF-16 units, the unit the limits are stated in, ending in an ellipsis and never mid-pair. */
+function clip(text: string, max: number): string {
+  const cut = text.slice(0, max - 1);
+  return `${/[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut}…`;
+}
+
+function actionLabel(a: TurnOutput["actions"][number]): string {
+  return a.type === "schedule_wakeup" || a.type === "cancel_wakeup" ? `${a.type}:${a.key}` : a.type;
+}
 
 function nonEmpty<T>(xs: readonly T[]): readonly [T, ...T[]] | null {
   const [first, ...rest] = xs;
@@ -316,18 +333,28 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
     const notice = REJECTION_NOTICE[reason];
     if (shown && notice !== null) notices.add(notice);
   };
+  const fit = (text: string, max: number, action: string): string => {
+    if (text.length <= max) return text;
+    reject(action, "too_long", false);
+    return clip(text, max);
+  };
 
+  const actions = out.actions.slice(0, TURN.maxActions);
+  for (const a of out.actions.slice(TURN.maxActions)) {
+    reject(actionLabel(a), "too_many_actions", a.type === "cancel_wakeup" || (a.type === "schedule_wakeup" && a.asked));
+  }
   // Cancels apply first, so moving a reminder or freeing a slot works whatever order the model wrote it in.
-  const ordered = [...out.actions.filter((a) => a.type === "cancel_wakeup"), ...out.actions.filter((a) => a.type !== "cancel_wakeup")];
+  const ordered = [...actions.filter((a) => a.type === "cancel_wakeup"), ...actions.filter((a) => a.type !== "cancel_wakeup")];
   for (const a of ordered) {
     switch (a.type) {
       case "send":
-        if (sends.length < TURN.maxSendsPerTurn) sends.push(a.text);
+        if (sends.length < TURN.maxSendsPerTurn) sends.push(fit(a.text, TURN.maxTextChars, "send"));
         else reject("send", "too_many_sends", false);
         break;
       case "schedule_wakeup": {
         const origin = wakeupOrigin(first.kind, a.asked);
-        const admission = admitReminder({ key: a.key, at: a.at, note: a.note, origin }, { now: view.now, tz: view.tz, pending });
+        const note = fit(a.note, TURN.maxNoteChars, actionLabel(a));
+        const admission = admitReminder({ key: a.key, at: a.at, note, origin }, { now: view.now, tz: view.tz, pending });
         if (admission.ok) {
           adds.set(admission.wakeup.key, admission.wakeup);
           pending.set(admission.wakeup.key, admission.wakeup);
@@ -357,7 +384,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
         break;
       }
       case "remember":
-        notes.push(a.note);
+        notes.push(fit(a.note, TURN.maxNoteChars, "remember"));
         break;
       case "quiet":
         break;
@@ -369,7 +396,8 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   const agentTexts = [...sends];
   const late = lateTrigger(view);
   if (late && agentTexts.length > 0) {
-    const notice = out.lateNotice?.trim() || NOTICE.lateFallback(human(late.dueAt, view.tz));
+    const given = out.lateNotice?.trim();
+    const notice = given ? fit(given, TURN.maxLateNoticeChars, "late_notice") : NOTICE.lateFallback(human(late.dueAt, view.tz));
     agentTexts[0] = `${notice}\n${agentTexts[0]}`;
   }
   // Whatever the turn's intent, a correction goes out with the model's text so it can't confirm what code

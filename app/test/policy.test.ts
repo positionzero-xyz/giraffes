@@ -457,7 +457,7 @@ describe("output budgets", () => {
   const thai = (n: number) => "ก".repeat(n);
   const longest = <T extends string>(xs: readonly T[]) => xs.reduce((a, b) => (b.length > a.length ? b : a));
 
-  test("the largest turn output the schema accepts fits the turn's output budget", () => {
+  test("the largest turn output code keeps whole fits the turn's output budget", () => {
     const key = "k".repeat(40);
     const actions = [
       { type: "send", text: thai(TURN.maxTextChars) },
@@ -468,7 +468,7 @@ describe("output budgets", () => {
     const biggest = actions.reduce((a, b) => (bytes(b) > bytes(a) ? b : a));
     const output = {
       actions: Array.from({ length: TURN.maxActions }, () => biggest),
-      lateNotice: thai(TurnOutputSchema.shape.lateNotice.unwrap().maxLength ?? 0),
+      lateNotice: thai(TURN.maxLateNoticeChars),
       task: { kind: longest(TASK_KINDS), key, status: longest(TASK_STATUSES) },
     };
 

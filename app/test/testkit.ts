@@ -4,6 +4,7 @@
  */
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import type { Agent, AgentSnapshot } from "../src/agent/agent";
+import type { ChannelAdapter } from "../src/channels/channel";
 import { personAgentKey, type EpochMs, type LocalDateTime, type MicroUsd } from "../src/domain";
 import type { LeaseAnswer, Ledger, LogRow } from "../src/ledger/ledger";
 import { scripted, type ScriptStep, type ScriptedModel } from "../src/model/scripted";
@@ -54,9 +55,48 @@ export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): Mem
   };
 }
 
+export type DeliveryStep =
+  | { readonly kind: "sent" }
+  | { readonly kind: "retry"; readonly afterMs: number }
+  | { readonly kind: "throw" }
+  | { readonly kind: "gone" };
+
+export type Delivered = { readonly at: EpochMs; readonly text: string; readonly via: "reply" | "push" };
+
+export type ScriptedChannel = ChannelAdapter & { readonly delivered: readonly Delivered[] };
+
+/** Plays one step per delivery attempt, then delivers everything once the script runs out. */
+export function scriptedChannel(steps: readonly DeliveryStep[] = []): ScriptedChannel {
+  const queue = [...steps];
+  const delivered: Delivered[] = [];
+  return {
+    delivered,
+    receive: async () => {
+      throw new Error("the agent never receives through its channel");
+    },
+    async deliver(msg, now) {
+      const step = queue.shift() ?? { kind: "sent" };
+      switch (step.kind) {
+        case "sent": {
+          const via = msg.reply !== undefined && !msg.inDoubt && now < msg.reply.expiresAt ? "reply" : "push";
+          delivered.push({ at: now, text: msg.texts.join("\n"), via });
+          return { kind: "sent", via };
+        }
+        case "retry":
+          return { kind: "retry", afterMs: step.afterMs, detail: "scripted retry" };
+        case "throw":
+          throw new Error("scripted exception from the channel");
+        case "gone":
+          return { kind: "recipient_gone" };
+      }
+    },
+  };
+}
+
 export type DevChat = {
   readonly model: ScriptedModel;
   readonly clock: FakeClock;
+  readonly channel: ScriptedChannel;
   post(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<Response>;
   say(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<void>;
   settle(): Promise<void>;
@@ -71,18 +111,26 @@ let messageIds = 0;
 
 export async function devChat(
   user: string,
-  opts: { readonly model: ScriptedModel; readonly at: string; readonly ledger?: MemoryLedger },
+  opts: {
+    readonly model: ScriptedModel;
+    readonly at: string;
+    readonly ledger?: MemoryLedger;
+    readonly deliveries?: readonly DeliveryStep[];
+  },
 ): Promise<DevChat> {
   const clock = fakeClock(local(opts.at));
   const ledger = opts.ledger ?? memoryLedger();
+  const channel = scriptedChannel(opts.deliveries);
   const stub = env.AGENT.get(env.AGENT.idFromName(personAgentKey({ channel: "dev", channelUserId: user })));
-  await runInDurableObject<Agent, void>(stub, (agent) => agent.withDeps({ model: opts.model, clock, ledger }));
-  const delivered = new Set<string>();
+  const channels = { line: channel, telegram: channel, dev: channel };
+  await runInDurableObject<Agent, void>(stub, (agent) => agent.withDeps({ model: opts.model, clock, ledger, channels }));
+  let seen = 0;
   const nextAlarm = () => runInDurableObject(stub, (_agent, state) => state.storage.getAlarm());
 
   const chat: DevChat = {
     model: opts.model,
     clock,
+    channel,
     post(text, o = {}) {
       const body = { user, text, id: o.id ?? `m${++messageIds}`, at: o.at ?? clock.now() };
       return SELF.fetch("https://agent.test/webhook/dev", { method: "POST", body: JSON.stringify(body) });
@@ -113,9 +161,9 @@ export async function devChat(
       await chat.settle();
     },
     async received() {
-      const fresh = (await chat.snapshot()).outbox.filter((o) => o.status === "sent" && !delivered.has(o.id));
-      for (const o of fresh) delivered.add(o.id);
-      return fresh.map((o) => o.texts.join("\n"));
+      const fresh = channel.delivered.slice(seen);
+      seen = channel.delivered.length;
+      return fresh.map((d) => d.text);
     },
     snapshot: () => stub.snapshot(),
     logs: (stream) => ledger.rows.filter((r): r is Extract<LogRow, { stream: typeof stream }> => r.stream === stream),

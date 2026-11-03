@@ -502,6 +502,19 @@ describe("housekeeping", () => {
     expect(await c.received()).toEqual(["Reply 31.", "Reply 32."]);
     model.assertDone();
   });
+
+  test("a failed compaction on an otherwise idle agent is retried at its backoff time, with no new message", async () => {
+    const replies = Array.from({ length: 31 }, (_, i) => chat(`Reply ${i}.`));
+    const model = scripted(replies, { compaction: [{ kind: "fail", failure: "invalid_output" }, { kind: "output", value: { summary: "Summary." } }] });
+    const c = await devChat("cyd", { model, at: "2099-11-04T10:00" });
+    for (let i = 0; i < 31; i++) await c.say(`message ${i}`);
+
+    await c.advanceTo("2099-11-04T12:00");
+
+    const compactions = c.logs("model_call").filter((l) => l.purpose === "compaction");
+    expect(compactions.map((l) => wall(l.at))).toEqual(["2099-11-04T10:00", "2099-11-04T10:05"]);
+    model.assertDone();
+  });
 });
 
 describe("compaction", () => {

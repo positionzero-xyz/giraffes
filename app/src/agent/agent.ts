@@ -407,11 +407,12 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #rearm(): Promise<void> {
-    const r = this.#store.readiness();
+    const now = this.#deps.clock.now();
+    const r = this.#store.readiness(now);
     const a = this.#store.agent();
     const fireTimes = a ? r.earliestWakeups.map((w) => fireAt(w, a.tz)) : [];
     const t = nextAlarm({
-      now: this.#deps.clock.now(),
+      now,
       inboxReadyAt: r.inboxReadyAt,
       wakeupFireAt: fireTimes.length > 0 ? (Math.min(...fireTimes) as EpochMs) : null,
       outboxReadyAt: r.outboxReadyAt,

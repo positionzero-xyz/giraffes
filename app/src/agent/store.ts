@@ -623,7 +623,7 @@ export class AgentStore {
     this.sql.exec("UPDATE log_flush SET failures = failures + 1, retry_at = ?", now + backoff);
   }
 
-  readiness(): {
+  readiness(now: EpochMs): {
     readonly inboxReadyAt: EpochMs | null;
     readonly earliestWakeups: readonly { readonly origin: WakeupOrigin; readonly dueAt: EpochMs }[];
     readonly outboxReadyAt: EpochMs | null;
@@ -647,7 +647,9 @@ export class AgentStore {
         .map((r) => ({ origin: r.origin, dueAt: r.due_at })),
       outboxReadyAt: min("SELECT MIN(ready_at) AS t FROM outbox WHERE status IN ('pending', 'sending')"),
       logsReadyAt: min("SELECT CASE WHEN EXISTS (SELECT 1 FROM log_outbox) THEN retry_at END AS t FROM log_flush"),
-      compactionRetryAt: compaction.retry_at > 0 && compactionDue(compaction.turns, compaction.notes) ? compaction.retry_at : null,
+      // Only while backing off: a retry time already passed means the drain just ran compaction, so re-arming
+      // for it could loop if compaction failed without recording a backoff.
+      compactionRetryAt: compaction.retry_at > now && compactionDue(compaction.turns, compaction.notes) ? compaction.retry_at : null,
     };
   }
 

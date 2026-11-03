@@ -7,7 +7,7 @@ export const SPEND = {
   leaseChunkMicro: 500_000 as MicroUsd,
 } as const;
 
-export const SCHEMA_ALLOWANCE_TOKENS = 4_000;
+export const PROMPT_OVERHEAD_TOKENS = 4_000;
 
 export type MonthSpend = {
   readonly spent: MicroUsd;
@@ -29,7 +29,7 @@ export function estimate(model: ModelId, promptBytes: number, maxTokens: number)
   return priced(model, {
     inputTokens: 0,
     outputTokens: maxTokens,
-    cacheWriteTokens: promptBytes + SCHEMA_ALLOWANCE_TOKENS,
+    cacheWriteTokens: promptBytes + PROMPT_OVERHEAD_TOKENS,
     cacheReadTokens: 0,
   });
 }

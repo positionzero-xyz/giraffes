@@ -305,7 +305,7 @@ export class Agent extends DurableObject<Env> {
       const verdict = admitUnasked({
         now,
         tz: a.tz,
-        admitted: day,
+        admittedDay: day,
         sentToday: this.#store.unaskedAdmitted(localDate(now, a.tz)),
         dailyBudget: OUTREACH.dailyUnaskedBudget,
         status: a.status,

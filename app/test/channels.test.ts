@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { NOTICE, TURN } from "../src/agent/turn";
 import { lineChannel } from "../src/channels/line";
-import { MAX_TEXT as TELEGRAM_MAX_TEXT, telegramChannel } from "../src/channels/telegram";
+import { SEND_MESSAGE_MAX_CHARS as TELEGRAM_MAX_CHARS, telegramChannel } from "../src/channels/telegram";
 import type { EpochMs, Identity, OutboundMessage, OutboxId } from "../src/domain";
 
 type Seen = { url: string; headers: Headers; body: unknown };
@@ -230,10 +230,10 @@ describe("Telegram delivery", () => {
     const due = "2026-11-04 09:00";
     const fixed = Object.values(NOTICE).filter((n) => typeof n === "string");
     const corrections = [...fixed, ...Array.from({ length: TURN.maxActions }, () => NOTICE.reminderKept(due))].join("\n");
-    const floor = `${NOTICE.lateFallback(due)}\n${NOTICE.reminder("x".repeat(TURN.maxNoteChars))}`;
+    const requestedReminder = `${NOTICE.lateFallback(due)}\n${NOTICE.reminder("x".repeat(TURN.maxNoteChars))}`;
     const longestSend = TURN.maxLateNoticeChars + "\n".length + TURN.maxTextChars;
-    const longestText = Math.max(longestSend, corrections.length, floor.length);
-    expect(TURN.maxSendsPerTurn * longestText + "\n\n".length * (TURN.maxSendsPerTurn - 1)).toBeLessThanOrEqual(TELEGRAM_MAX_TEXT);
+    const longestText = Math.max(longestSend, corrections.length, requestedReminder.length);
+    expect(TURN.maxSendsPerTurn * longestText + "\n\n".length * (TURN.maxSendsPerTurn - 1)).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);
   });
 
   test("a block is reported as the recipient being gone; flood control retries when told", async () => {

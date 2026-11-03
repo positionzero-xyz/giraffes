@@ -20,7 +20,7 @@ import {
 import { priceOf, routeOf } from "../src/model/model";
 import { admitUnasked, quietUntil } from "../src/policy/outreach";
 import { fireAt, isLate, nextAlarm, planFiring, wakeupOrigin, type PendingWakeup } from "../src/policy/schedule";
-import { costOf, decideReservation, estimate, SCHEMA_ALLOWANCE_TOKENS, SPEND } from "../src/policy/spend";
+import { costOf, decideReservation, estimate, PROMPT_OVERHEAD_TOKENS, SPEND } from "../src/policy/spend";
 import { fromLocal, nextLocalTime, parseLocalDateTime, parseTimeZone, toLocal } from "../src/policy/time";
 
 const BKK = parseTimeZone("Asia/Bangkok")!;
@@ -74,7 +74,7 @@ describe("quiet hours", () => {
 });
 
 describe("unasked budget", () => {
-  const input = { tz: BKK, admitted: null, dailyBudget: 3, status: "active" as const };
+  const input = { tz: BKK, admittedDay: null, dailyBudget: 3, status: "active" as const };
 
   test("the first three of a local day are sent, charged to the local date", () => {
     expect(admitUnasked({ ...input, now: at("2026-11-04T15:00+07:00"), sentToday: 2 })).toEqual({ verdict: "send", day: "2026-11-04" });
@@ -93,15 +93,15 @@ describe("unasked budget", () => {
   });
 
   test("an admitted row is held by quiet hours on every attempt, and sends on its admitted day past the budget", () => {
-    const admitted = "2026-11-04" as LocalDate;
-    expect(admitUnasked({ ...input, admitted, now: at("2026-11-04T22:01+07:00"), sentToday: 0 })).toEqual({ verdict: "defer", until: at("2026-11-05T08:00+07:00") });
-    expect(admitUnasked({ ...input, admitted, now: at("2026-11-04T21:00+07:00"), sentToday: 3 })).toEqual({ verdict: "send", day: admitted });
+    const admittedDay = "2026-11-04" as LocalDate;
+    expect(admitUnasked({ ...input, admittedDay, now: at("2026-11-04T22:01+07:00"), sentToday: 0 })).toEqual({ verdict: "defer", until: at("2026-11-05T08:00+07:00") });
+    expect(admitUnasked({ ...input, admittedDay, now: at("2026-11-04T21:00+07:00"), sentToday: 3 })).toEqual({ verdict: "send", day: admittedDay });
   });
 
   test("a row admitted on an earlier day is admitted again against the day it goes out", () => {
-    const admitted = "2026-11-04" as LocalDate;
-    expect(admitUnasked({ ...input, admitted, now: at("2026-11-05T08:00+07:00"), sentToday: 2 })).toEqual({ verdict: "send", day: "2026-11-05" });
-    expect(admitUnasked({ ...input, admitted, now: at("2026-11-05T08:00+07:00"), sentToday: 3 })).toEqual({ verdict: "drop", reason: "budget" });
+    const admittedDay = "2026-11-04" as LocalDate;
+    expect(admitUnasked({ ...input, admittedDay, now: at("2026-11-05T08:00+07:00"), sentToday: 2 })).toEqual({ verdict: "send", day: "2026-11-05" });
+    expect(admitUnasked({ ...input, admittedDay, now: at("2026-11-05T08:00+07:00"), sentToday: 3 })).toEqual({ verdict: "drop", reason: "budget" });
   });
 
   test("a blocked person is dropped before anything else", () => {
@@ -422,7 +422,7 @@ describe("lifecycle order", () => {
 describe("spend", () => {
   test("estimates and costs are whole micro-dollars, rounded up", () => {
     const haiku = priceOf("claude-haiku-5-5");
-    expect(estimate("claude-haiku-5-5", 3_000, 1_200)).toBe(((3_000 + SCHEMA_ALLOWANCE_TOKENS) * haiku.cacheWritePerM + 1_200 * haiku.outputPerM) / 1_000_000);
+    expect(estimate("claude-haiku-5-5", 3_000, 1_200)).toBe(((3_000 + PROMPT_OVERHEAD_TOKENS) * haiku.cacheWritePerM + 1_200 * haiku.outputPerM) / 1_000_000);
     expect(costOf("claude-haiku-5-5", { inputTokens: 1, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 })).toBe(1);
     expect(costOf("claude-sonnet-5-5", { inputTokens: 1_000, outputTokens: 100, cacheWriteTokens: 1_000, cacheReadTokens: 10_000 })).toBe(2_000 + 1_000 + 2_500 + 2_000);
   });
@@ -458,21 +458,21 @@ describe("spend", () => {
 
 describe("output budgets", () => {
   const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
-  const thai = (n: number) => "ก".repeat(n);
+  const mostBytes = (n: number) => "ก".repeat(n);
   const longest = <T extends string>(xs: readonly T[]) => xs.reduce((a, b) => (b.length > a.length ? b : a));
 
   test("the largest turn output code keeps whole fits the turn's output budget", () => {
     const key = "k".repeat(40);
     const actions = [
-      { type: "send", text: thai(TURN.maxTextChars) },
-      { type: "schedule_wakeup", key, at: "2099-11-04T10:00", note: thai(TURN.maxNoteChars), asked: false },
+      { type: "send", text: mostBytes(TURN.maxTextChars) },
+      { type: "schedule_wakeup", key, at: "2099-11-04T10:00", note: mostBytes(TURN.maxNoteChars), asked: false },
       { type: "cancel_wakeup", key },
-      { type: "remember", note: thai(TURN.maxNoteChars) },
+      { type: "remember", note: mostBytes(TURN.maxNoteChars) },
     ];
     const biggest = actions.reduce((a, b) => (bytes(b) > bytes(a) ? b : a));
     const output = {
       actions: Array.from({ length: TURN.maxActions }, () => biggest),
-      lateNotice: thai(TURN.maxLateNoticeChars),
+      lateNotice: mostBytes(TURN.maxLateNoticeChars),
       task: { kind: longest(TASK_KINDS), key, status: longest(TASK_STATUSES) },
     };
 
@@ -481,7 +481,7 @@ describe("output budgets", () => {
   });
 
   test("the longest summary the compaction schema accepts fits the compaction's output budget", () => {
-    const output = { summary: thai(CompactionOutputSchema.shape.summary.maxLength ?? 0) };
+    const output = { summary: mostBytes(CompactionOutputSchema.shape.summary.maxLength ?? 0) };
 
     expect(CompactionOutputSchema.safeParse(output).success).toBe(true);
     expect(bytes(output)).toBeLessThanOrEqual(routeOf("compaction").maxTokens);

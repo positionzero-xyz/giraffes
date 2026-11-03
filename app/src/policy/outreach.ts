@@ -21,7 +21,7 @@ export type UnaskedVerdict =
 export function admitUnasked(input: {
   readonly now: EpochMs;
   readonly tz: TimeZone;
-  readonly admitted: LocalDate | null;
+  readonly admittedDay: LocalDate | null;
   readonly sentToday: number;
   readonly dailyBudget: number;
   readonly status: PersonStatus;
@@ -30,7 +30,7 @@ export function admitUnasked(input: {
   const until = quietUntil(input.now, input.tz);
   if (until !== null) return { verdict: "defer", until };
   const today = localDate(input.now, input.tz);
-  if (input.admitted === today) return { verdict: "send", day: today };
+  if (input.admittedDay === today) return { verdict: "send", day: today };
   if (input.sentToday >= input.dailyBudget) return { verdict: "drop", reason: "budget" };
   return { verdict: "send", day: today };
 }

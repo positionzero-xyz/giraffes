@@ -34,7 +34,7 @@ function toEvent(u: Update): { readonly chatId: number; readonly at: EpochMs; re
 
 const SendError = z.object({ parameters: z.object({ retry_after: z.number() }).optional() });
 
-export const MAX_TEXT = 4096;
+export const SEND_MESSAGE_MAX_CHARS = 4096;
 
 export function telegramChannel(secrets: { botToken: string; webhookSecret: string } | null): ChannelAdapter {
   if (!secrets) return disabledChannel("telegram");

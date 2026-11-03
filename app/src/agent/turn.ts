@@ -323,10 +323,10 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   const adds = new Map<WakeupKey, NewReminder>();
   const rejected: { action: string; reason: ActionRejection }[] = [];
   const notices = new Set<string>();
-  const reject = (action: string, reason: ActionRejection, shown: boolean) => {
+  const reject = (action: string, reason: ActionRejection, tellPerson: boolean) => {
     rejected.push({ action, reason });
     const notice = REJECTION_NOTICE[reason];
-    if (shown && notice !== null) notices.add(notice);
+    if (tellPerson && notice !== null) notices.add(notice);
   };
   const fit = (text: string, max: number, action: string): string => {
     if (text.length <= max) return text;
@@ -338,8 +338,8 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   for (const a of out.actions.slice(TURN.maxActions)) {
     reject(actionLabel(a), "too_many_actions", a.type === "cancel_wakeup" || (a.type === "schedule_wakeup" && a.asked));
   }
-  const ordered = [...actions.filter((a) => a.type === "cancel_wakeup"), ...actions.filter((a) => a.type !== "cancel_wakeup")];
-  for (const a of ordered) {
+  const cancelsFirst = [...actions.filter((a) => a.type === "cancel_wakeup"), ...actions.filter((a) => a.type !== "cancel_wakeup")];
+  for (const a of cancelsFirst) {
     switch (a.type) {
       case "send":
         if (sends.length < TURN.maxSendsPerTurn) sends.push(fit(a.text, TURN.maxTextChars, "send"));
@@ -398,8 +398,8 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
     rejected.push({ action: "send", reason: "too_many_sends" });
   }
   const planned = noticeText === null ? agentTexts : [...agentTexts, noticeText];
-  const floor = planned.length === 0 ? fixedText(view, null) : null;
-  const texts = floor === null ? planned : [floor];
+  const requestedReminder = planned.length === 0 ? textWithoutModel(view, null) : null;
+  const texts = requestedReminder === null ? planned : [requestedReminder];
 
   const effects = lifecycleEffects(view);
   const turns = personTurns(view);
@@ -407,7 +407,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   if (note !== null) turns.push({ role: "note", text: note, at: view.now, eventKey: view.batch.items[0].key });
   for (const text of agentTexts) turns.push({ role: "agent", text, at: view.now, eventKey: view.batch.items[0].key });
   if (noticeText !== null) turns.push({ role: "note", text: noticeText, at: view.now, eventKey: view.batch.items[0].key });
-  if (floor !== null) turns.push({ role: "note", text: floor, at: view.now, eventKey: view.batch.items[0].key });
+  if (requestedReminder !== null) turns.push({ role: "note", text: requestedReminder, at: view.now, eventKey: view.batch.items[0].key });
 
   const acted = texts.length > 0 || adds.size > 0 || cancelled.size > 0 || notes.length > 0 || effects.reachability !== null;
   return {
@@ -438,7 +438,7 @@ export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "blo
   return e.change === "block" ? { kind: "block" } : null;
 }
 
-function fixedText(view: TurnView, notice: string | null): string | null {
+function textWithoutModel(view: TurnView, notice: string | null): string | null {
   const e = trigger(view);
   if (e.kind === "message") return notice;
   if (e.kind !== "wakeup" || e.origin !== "person") return null;
@@ -458,12 +458,12 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
       break;
     case "refused_budget":
       outcome = "refused_budget";
-      text = fixedText(view, why.alreadyToldToday ? null : NOTICE.monthlyLimit);
+      text = textWithoutModel(view, why.alreadyToldToday ? null : NOTICE.monthlyLimit);
       break;
     case "model_failed":
     case "poison":
       outcome = why.kind;
-      text = fixedText(view, NOTICE.failed);
+      text = textWithoutModel(view, NOTICE.failed);
       break;
     default:
       return assertNever(why);

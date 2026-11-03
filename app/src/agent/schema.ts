@@ -139,6 +139,29 @@ export const MIGRATIONS: readonly string[] = [
     next_at            INTEGER
   );
   `,
+  `
+  CREATE TABLE box_next (
+    one                INTEGER PRIMARY KEY CHECK (one = 1),
+    name               TEXT NOT NULL,
+    host               TEXT NOT NULL CHECK (host IN ('fly', 'static')),
+    url                TEXT NOT NULL,
+    state              TEXT NOT NULL CHECK (state IN ('provisioning', 'signed_out', 'signed_in', 'failed', 'reclaiming')),
+    state_at           INTEGER NOT NULL,
+    link_sent_at       INTEGER,
+    signin_poll_until  INTEGER,
+    error              TEXT,
+    attempts           INTEGER NOT NULL DEFAULT 0,
+    next_at            INTEGER,
+    poll_at            INTEGER,
+    reclaim_at         INTEGER
+  );
+  INSERT INTO box_next (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at, poll_at)
+    SELECT one, name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at,
+           CASE state WHEN 'signed_out' THEN next_at END
+    FROM box;
+  DROP TABLE box;
+  ALTER TABLE box_next RENAME TO box;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

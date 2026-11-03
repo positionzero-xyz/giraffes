@@ -50,6 +50,9 @@ export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): Mem
       if (!boxes.has(req.agent)) boxes.set(req.agent, { name: req.name, host: req.host });
       return "granted";
     },
+    async releaseBox(agent) {
+      boxes.delete(agent);
+    },
     async append(batch) {
       for (const row of batch) {
         const key = `${row.stream}:${row.id}`;
@@ -208,6 +211,8 @@ export const chat = (text: string): ScriptStep => turn({ actions: [send(text)], 
 export const BOX_SECRET = "test-secret-0123456789abcdef";
 
 export type HostStep = "ok" | "die" | { readonly retryable: boolean; readonly detail: string };
+/** `die` removes the app and then throws, as a crash right after the host call would. */
+export type DestroyStep = "ok" | "die" | "fail";
 
 export type BoxReplyStep =
   | { readonly kind: "reply"; readonly step: ScriptStep }
@@ -219,6 +224,7 @@ export type FakeBox = {
   /** Apps the host has created; a step that died after creating one leaves it here, as a real crash would. */
   readonly created: Set<string>;
   readonly ensureCalls: string[];
+  readonly destroyCalls: string[];
   readonly healthCalls: string[];
   readonly parses: { readonly authorization: string | null; readonly user: string }[];
   readonly replies: BoxReplyStep[];
@@ -227,11 +233,15 @@ export type FakeBox = {
 };
 
 /** A BoxHost and the box's HTTP server behind the real box client, wired through a fake fetch. */
-export function fakeBox(opts: { readonly maxBoxes?: number; readonly host?: readonly HostStep[]; readonly signedIn?: boolean } = {}): FakeBox {
+export function fakeBox(
+  opts: { readonly maxBoxes?: number; readonly host?: readonly HostStep[]; readonly destroy?: readonly DestroyStep[]; readonly signedIn?: boolean } = {},
+): FakeBox {
   const steps = [...(opts.host ?? [])];
+  const destroySteps = [...(opts.destroy ?? [])];
   const box = {
     created: new Set<string>(),
     ensureCalls: [] as string[],
+    destroyCalls: [] as string[],
     healthCalls: [] as string[],
     parses: [] as { authorization: string | null; user: string }[],
     replies: [] as BoxReplyStep[],
@@ -251,6 +261,14 @@ export function fakeBox(opts: { readonly maxBoxes?: number; readonly host?: read
       }
       if (step !== "ok") return { ok: false, ...step };
       box.created.add(name);
+      return { ok: true };
+    },
+    async destroy(name): Promise<HostResult> {
+      box.destroyCalls.push(name);
+      const step = destroySteps.shift() ?? "ok";
+      if (step === "fail") return { ok: false, retryable: true, detail: "DELETE /apps: 503" };
+      box.created.delete(name);
+      if (step === "die") throw new Error("the host step died after destroying the app");
       return { ok: true };
     },
   };

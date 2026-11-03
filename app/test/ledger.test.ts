@@ -56,6 +56,22 @@ describe("box inventory", () => {
 
     expect(await claim("b")).toBe("granted");
   });
+
+  test("a released box frees its slot, a second release changes nothing, and its owner can claim again", async () => {
+    const ledger = d1Ledger(env.LEDGER, micro(1_000_000));
+    const claim = (who: string) => ledger.claimBox({ agent: agent(who), name: `gbox-${who}` as BoxName, host: "fly", at, max: 1 });
+    expect(await claim("a")).toBe("granted");
+
+    await ledger.releaseBox(agent("a"), at);
+    await ledger.releaseBox(agent("a"), (at + 1) as EpochMs);
+    const released = await env.LEDGER.prepare("SELECT deleted_at FROM boxes WHERE agent_key = 'p:dev:a'").first<{ deleted_at: number }>();
+    expect(released?.deleted_at).toBe(at);
+
+    expect(await claim("a")).toBe("granted");
+    expect(await claim("b")).toBe("full");
+    const row = await env.LEDGER.prepare("SELECT deleted_at FROM boxes WHERE agent_key = 'p:dev:a'").first<{ deleted_at: number | null }>();
+    expect(row?.deleted_at).toBeNull();
+  });
 });
 
 describe("log shipping", () => {

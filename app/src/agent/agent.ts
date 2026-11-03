@@ -8,12 +8,10 @@ import {
   beginStep,
   BOX,
   boxMessage,
-  isBoxCommand,
   needsLink,
   newBox,
   onCommand,
   onSignedOut,
-  planAllowsBox,
   type Box,
   type BoxSay,
   type BoxState,
@@ -21,6 +19,7 @@ import {
 } from "../box/machine";
 import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
 import { makeChannels, type ChannelRegistry } from "../channels/channel";
+import { commandOf, type Command } from "./commands";
 import { loadConfig, type BoxConfig, type Env } from "../config";
 import { assertNever, intentOf, type AgentKey, type EpochMs, type EventKey, type InboundEnvelope, type MicroUsd, type PersonStatus, type TimeZone } from "../domain";
 import { d1Ledger, modelCallRow, type LeaseAnswer, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
@@ -221,7 +220,8 @@ export class Agent extends DurableObject<Env> {
     const view = this.#view(batch, a);
     const bypass = bypassModel(view);
     if (bypass) return this.#commit(planWithoutModel(view, bypass), view, a.key, { kind: "none" }, null);
-    if (isBoxCommand(batch.items[0].event)) return this.#boxCommand(view, a.key);
+    const command = commandOf(batch.items[0].event);
+    if (command) return this.#command(command, view, a.key);
 
     const call = await this.#callModel(TURN_SYSTEM, renderUser(view), TurnOutputSchema, batch.items[0].key, a.key);
     switch (call.kind) {
@@ -262,6 +262,15 @@ export class Agent extends DurableObject<Env> {
     const now = this.#deps.clock.now();
     const logs = [...logsForTurn({ agent, commit, view, call, startedAt: view.now, now }), ...extra];
     this.#store.commitTurn(commit, settle, logs, now, box);
+  }
+
+  async #command(command: Command, view: TurnView, agent: AgentKey): Promise<void> {
+    switch (command.kind) {
+      case "claude":
+        return this.#boxCommand(view, agent);
+      default:
+        return assertNever(command.kind);
+    }
   }
 
   async #boxCommand(view: TurnView, agent: AgentKey): Promise<void> {
@@ -315,7 +324,23 @@ export class Agent extends DurableObject<Env> {
     this.#store.applyBox(claimed, null, [], this.#deps.clock.now());
     const probe = await this.#probe(deps, claimed, await boxToken(deps.secret, claimed.name));
     const t = afterProbe(claimed, probe, this.#deps.clock.now());
+    if (t.box.state === "reclaiming") return this.#reclaim(deps, claimed);
     this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [], this.#deps.clock.now());
+  }
+
+  /**
+   * Host first, then the inventory, then the row: each step is done when repeated, and the row with its
+   * `reclaiming` state and retry time is the last thing to go, so a crash anywhere resumes from the top.
+   */
+  async #reclaim(deps: BoxDeps, box: Box): Promise<void> {
+    const destroyed = await deps.host.destroy(box.name);
+    if (!destroyed.ok) {
+      console.warn("box reclaim failed", box.name, destroyed.detail);
+      return;
+    }
+    await this.#deps.ledger.releaseBox(this.#agent().key, this.#deps.clock.now());
+    const m = boxMessage("reclaimed", null);
+    this.#store.removeBox(box.name, { texts: [m.text], note: m.note }, this.#deps.clock.now());
   }
 
   async #probe(deps: BoxDeps, box: Box, token: BoxToken): Promise<Probe> {
@@ -331,7 +356,7 @@ export class Agent extends DurableObject<Env> {
   async #callBox<T>(system: string, user: string, schema: z.ZodType<T>, agent: AgentKey): Promise<BoxCall<T> | null> {
     const deps = this.#deps.box;
     const box = this.#store.box();
-    if (!deps || box?.state !== "signed_in" || !planAllowsBox(agent)) return null;
+    if (!deps || box?.state !== "signed_in") return null;
     const id = crypto.randomUUID();
     const model = routeOf("turn").model;
     const res = await deps.client.parse(box.url, await boxToken(deps.secret, box.name), { purpose: "turn", system, user, schema });

@@ -3,7 +3,8 @@
  * atomic with respect to other requests.
  */
 import type { BoxHostKind } from "../box/host";
-import { dueAt, isBoxCommand, type Box, type BoxState } from "../box/machine";
+import { dueAt, type Box, type BoxState } from "../box/machine";
+import { commandOf } from "./commands";
 import type { BoxName } from "../box/names";
 import {
   assertNever,
@@ -105,6 +106,8 @@ type BoxCols = {
   error: string | null;
   attempts: number;
   next_at: EpochMs | null;
+  poll_at: EpochMs | null;
+  reclaim_at: EpochMs | null;
 };
 
 export type BoxMessage = { readonly texts: readonly [string, ...string[]]; readonly note: string };
@@ -139,11 +142,20 @@ function toBox(r: BoxCols): Box {
     case "provisioning":
       return { ...base, state: r.state, attempts: r.attempts, retryAt: r.next_at ?? r.state_at };
     case "signed_out":
-      return { ...base, state: r.state, linkSentAt: r.link_sent_at, pollAt: r.next_at, pollUntil: r.signin_poll_until };
+      return {
+        ...base,
+        state: r.state,
+        linkSentAt: r.link_sent_at,
+        pollAt: r.poll_at,
+        pollUntil: r.signin_poll_until,
+        reclaimAt: r.reclaim_at,
+      };
     case "signed_in":
       return { ...base, state: r.state };
     case "failed":
       return { ...base, state: r.state, error: r.error ?? "" };
+    case "reclaiming":
+      return { ...base, state: r.state, attempts: r.attempts, retryAt: r.next_at ?? r.state_at };
     default:
       return assertNever(r.state);
   }
@@ -271,7 +283,7 @@ export class AgentStore {
         .toArray();
       const [head] = ready;
       if (!head) return null;
-      const command = (r: (typeof ready)[number]) => r.kind === "message" && isBoxCommand(fromJson<AgentEvent>(r.payload));
+      const command = (r: (typeof ready)[number]) => r.kind === "message" && commandOf(fromJson<AgentEvent>(r.payload)) !== null;
       const end = head.kind === "message" && !command(head) ? ready.findIndex((r) => r.kind !== "message" || command(r)) : 1;
       const rows = end === -1 ? ready : ready.slice(0, end);
       const keys = rows.map((r) => r.event_key);
@@ -384,28 +396,34 @@ export class AgentStore {
 
   box(): Box | null {
     const r = this.sql
-      .exec<BoxCols>("SELECT name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at FROM box")
+      .exec<BoxCols>(
+        "SELECT name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at, poll_at, reclaim_at FROM box",
+      )
       .toArray()[0];
     return r ? toBox(r) : null;
   }
 
   private writeBox(b: Box): void {
+    const out = b.state === "signed_out" ? b : null;
     this.sql.exec(
-      `INSERT INTO box (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO box (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at, poll_at, reclaim_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (one) DO UPDATE SET name = excluded.name, host = excluded.host, url = excluded.url, state = excluded.state,
          state_at = excluded.state_at, link_sent_at = excluded.link_sent_at, signin_poll_until = excluded.signin_poll_until,
-         error = excluded.error, attempts = excluded.attempts, next_at = excluded.next_at`,
+         error = excluded.error, attempts = excluded.attempts, next_at = excluded.next_at, poll_at = excluded.poll_at,
+         reclaim_at = excluded.reclaim_at`,
       b.name,
       b.host,
       b.url,
       b.state,
       b.stateAt,
-      b.state === "signed_out" ? b.linkSentAt : null,
-      b.state === "signed_out" ? b.pollUntil : null,
+      out?.linkSentAt ?? null,
+      out?.pollUntil ?? null,
       b.state === "failed" ? b.error : null,
-      b.state === "provisioning" ? b.attempts : 0,
+      b.state === "provisioning" || b.state === "reclaiming" ? b.attempts : 0,
       dueAt(b),
+      out?.pollAt ?? null,
+      out?.reclaimAt ?? null,
     );
   }
 
@@ -413,13 +431,21 @@ export class AgentStore {
   applyBox(b: Box, message: BoxMessage | null, logs: readonly LogRow[], now: EpochMs): void {
     this.tx(() => {
       this.writeBox(b);
-      if (message) {
-        const key = eventKey.box(b.name);
-        this.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES ('note', ?, ?, ?)", message.note, now, key);
-        this.insertOutbox(key, { texts: message.texts, intent: "requested", triggerKind: "message" }, now);
-      }
+      if (message) this.insertMessage(eventKey.box(b.name), message, now);
       this.insertLogs(logs, now);
     });
+  }
+
+  removeBox(name: BoxName, message: BoxMessage, now: EpochMs): void {
+    this.tx(() => {
+      this.sql.exec("DELETE FROM box WHERE name = ?", name);
+      this.insertMessage(eventKey.box(name), message, now);
+    });
+  }
+
+  private insertMessage(key: EventKey, message: BoxMessage, now: EpochMs): void {
+    this.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES ('note', ?, ?, ?)", message.note, now, key);
+    this.insertOutbox(key, { texts: message.texts, intent: "requested", triggerKind: "message" }, now);
   }
 
   appendLogs(logs: readonly LogRow[], now: EpochMs): void {

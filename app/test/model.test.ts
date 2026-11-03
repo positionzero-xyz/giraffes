@@ -80,9 +80,16 @@ describe("anthropic", () => {
     expect(await anthropicModel("sk-test").parse(request)).toEqual({ ok: false, failure: "in_doubt", usage: null });
   });
 
-  test("a rejected request is a programming error, not an outage", async () => {
-    stubFetch(() => Response.json({ type: "error", error: { type: "invalid_request_error", message: "bad" } }, { status: 400 }));
-    await expect(anthropicModel("sk-test").parse(request)).rejects.toThrow();
+  test("a request the API rejected with a 4xx was never run, so it is rejected, not in doubt", async () => {
+    for (const status of [400, 401, 403, 404, 413]) {
+      vi.restoreAllMocks();
+      stubFetch(() => Response.json({ type: "error", error: { type: "invalid_request_error", message: "bad" } }, { status }));
+      expect(await anthropicModel("sk-test").parse(request), String(status)).toEqual({ ok: false, failure: "rejected", usage: null });
+    }
+
+    vi.restoreAllMocks();
+    stubFetch(() => Response.json({ type: "error", error: { type: "timeout_error", message: "slow" } }, { status: 408 }));
+    expect(await anthropicModel("sk-test").parse(request)).toEqual({ ok: false, failure: "in_doubt", usage: null });
   });
 });
 

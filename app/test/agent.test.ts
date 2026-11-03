@@ -362,6 +362,24 @@ describe("spend", () => {
     expect((await c.snapshot()).spendThisMonthMicro).toBe(calls[0].estimateMicro + calls[1].costMicro);
   });
 
+  test("a request the API rejected is charged nothing, retried after a backoff, then answered with the fixed apology", async () => {
+    const rejected = { kind: "fail", failure: "rejected" } as unknown as ScriptStep;
+    const model = scripted([rejected, rejected, rejected]);
+    const c = await devChat("rex", { model, at: "2099-11-04T10:00" });
+
+    await c.say("hello");
+    await c.advanceTo("2099-11-04T10:05");
+
+    expect(await c.received()).toEqual([NOTICE.failed]);
+    expect(c.logs("model_call").map((l) => [l.status, l.costMicro])).toEqual([
+      ["rejected", 0],
+      ["rejected", 0],
+      ["rejected", 0],
+    ]);
+    expect((await c.snapshot()).spendThisMonthMicro).toBe(0);
+    model.assertDone();
+  });
+
   test("an over-cap person is refused without a model call, told once a day, and logged", async () => {
     const inputThatSpendsTheCap = (SPEND.userCapMicro * 1_000_000) / priceOf(routeOf("turn").model).inputPerM;
     const model = scripted([turn({ actions: [send("Here's a long answer.")], task: ["chat", "x", "none"], usage: { inputTokens: inputThatSpendsTheCap } })]);

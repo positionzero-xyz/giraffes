@@ -32,10 +32,13 @@ export type CompactionPlan = {
 
 const SPEAKER: Readonly<Record<TurnRow["role"], string>> = { person: "Person", agent: "Assistant", note: "Note" };
 
+export const compactionDue = (turnCount: number, noteCount: number): boolean =>
+  turnCount > COMPACTION.triggerTurns || noteCount > COMPACTION.maxNotes;
+
 export function planCompaction(input: CompactionInput): CompactionPlan | null {
+  if (!compactionDue(input.turnCount, input.noteCount)) return null;
   const overTurns = input.turnCount > COMPACTION.triggerTurns;
   const overNotes = input.noteCount > COMPACTION.maxNotes;
-  if (!overTurns && !overNotes) return null;
 
   // One page per call keeps the prompt bounded; a backlog is worked off over the following drains.
   const folded = overTurns ? input.oldestTurns.slice(0, Math.min(COMPACTION.foldTurns, input.turnCount - COMPACTION.keepTurns)) : [];

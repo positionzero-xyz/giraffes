@@ -143,8 +143,9 @@ export function nextAlarm(input: {
   readonly wakeupFireAt: EpochMs | null;
   readonly outboxReadyAt: EpochMs | null;
   readonly logsReadyAt: EpochMs | null;
+  readonly compactionRetryAt: EpochMs | null;
 }): EpochMs | null {
-  const times = [input.inboxReadyAt, input.wakeupFireAt, input.outboxReadyAt, input.logsReadyAt].filter(
+  const times = [input.inboxReadyAt, input.wakeupFireAt, input.outboxReadyAt, input.logsReadyAt, input.compactionRetryAt].filter(
     (t): t is EpochMs => t !== null,
   );
   if (times.length === 0) return null;

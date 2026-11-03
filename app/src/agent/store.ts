@@ -29,7 +29,7 @@ import { modelCallRow, type LogRow } from "../ledger/ledger";
 import type { ModelId, Purpose } from "../model/model";
 import type { Firing, NewWakeup, PendingWakeup } from "../policy/schedule";
 import type { MonthSpend } from "../policy/spend";
-import { COMPACTION, type CompactionCommit, type CompactionInput } from "./compaction";
+import { COMPACTION, compactionDue, type CompactionCommit, type CompactionInput } from "./compaction";
 import { TURN, type Batch, type InboxItem, type TurnCommit, type TurnRow } from "./turn";
 
 export type AgentRow = {
@@ -628,8 +628,15 @@ export class AgentStore {
     readonly earliestWakeups: readonly { readonly origin: WakeupOrigin; readonly dueAt: EpochMs }[];
     readonly outboxReadyAt: EpochMs | null;
     readonly logsReadyAt: EpochMs | null;
+    readonly compactionRetryAt: EpochMs | null;
   } {
     const min = (query: string) => this.sql.exec<{ t: EpochMs | null }>(query).one().t;
+    const compaction = this.sql
+      .exec<{ retry_at: EpochMs; turns: number; notes: number }>(
+        `SELECT compaction_retry_at AS retry_at, (SELECT COUNT(*) FROM turn) AS turns, (SELECT COUNT(*) FROM memory_note) AS notes
+         FROM memory`,
+      )
+      .one();
     return {
       inboxReadyAt: min("SELECT MIN(ready_at) AS t FROM inbox WHERE status IN ('pending', 'processing')"),
       earliestWakeups: this.sql
@@ -640,6 +647,7 @@ export class AgentStore {
         .map((r) => ({ origin: r.origin, dueAt: r.due_at })),
       outboxReadyAt: min("SELECT MIN(ready_at) AS t FROM outbox WHERE status IN ('pending', 'sending')"),
       logsReadyAt: min("SELECT CASE WHEN EXISTS (SELECT 1 FROM log_outbox) THEN retry_at END AS t FROM log_flush"),
+      compactionRetryAt: compaction.retry_at > 0 && compactionDue(compaction.turns, compaction.notes) ? compaction.retry_at : null,
     };
   }
 

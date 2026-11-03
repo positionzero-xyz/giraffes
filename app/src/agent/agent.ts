@@ -416,6 +416,7 @@ export class Agent extends DurableObject<Env> {
       wakeupFireAt: fireTimes.length > 0 ? (Math.min(...fireTimes) as EpochMs) : null,
       outboxReadyAt: r.outboxReadyAt,
       logsReadyAt: r.logsReadyAt,
+      compactionRetryAt: r.compactionRetryAt,
     });
     if (t === null) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(t);

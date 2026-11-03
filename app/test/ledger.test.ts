@@ -1,9 +1,10 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
-import type { AgentKey, EpochMs, MicroUsd, MonthKey } from "../src/domain";
-import { d1Ledger, type LogRow } from "../src/ledger/ledger";
+import { TASK_KINDS, TASK_STATUSES, type AgentEventKind, type AgentKey, type EpochMs, type MicroUsd, type UtcMonth } from "../src/domain";
+import { d1Ledger, MODEL_CALL_STATUSES, TURN_OUTCOMES, UNASKED_STATUSES, type LogRow } from "../src/ledger/ledger";
+import { PURPOSES } from "../src/model/model";
 
-const month = "2099-11" as MonthKey;
+const month = "2099-11" as UtcMonth;
 const at = 4_100_000_000_000 as EpochMs;
 const micro = (n: number) => n as MicroUsd;
 const agent = (name: string) => `p:dev:${name}` as AgentKey;
@@ -16,7 +17,7 @@ describe("global ceiling leases", () => {
     expect(await ledger.requestLease({ agent: agent("b"), month, seq: 1, micro: micro(500_000), at })).toEqual({ kind: "ceiling" });
     expect(await ledger.requestLease({ agent: agent("b"), month, seq: 1, micro: micro(400_000), at })).toEqual({ kind: "granted", micro: 400_000 });
     expect(await ledger.requestLease({ agent: agent("a"), month, seq: 1, micro: micro(500_000), at })).toEqual({ kind: "granted", micro: 600_000 });
-    expect(await ledger.requestLease({ agent: agent("a"), month: "2099-12" as MonthKey, seq: 1, micro: micro(600_000), at })).toEqual({
+    expect(await ledger.requestLease({ agent: agent("a"), month: "2099-12" as UtcMonth, seq: 1, micro: micro(600_000), at })).toEqual({
       kind: "granted",
       micro: 600_000,
     });
@@ -77,5 +78,28 @@ describe("log shipping", () => {
     expect(counts).toEqual({ agents: 1, turns: 1, unasked: 1, lifecycle: 1, calls: 1 });
     const followed = await env.LEDGER.prepare("SELECT followed FROM unasked_with_followup WHERE id = 'o-1'").first<{ followed: number }>();
     expect(followed?.followed).toBe(0);
+  });
+});
+
+describe("schema", () => {
+  test("each enumerated column allows exactly the values of the TypeScript union that writes it", async () => {
+    const tables = await env.LEDGER.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table'").all<{ name: string; sql: string }>();
+    const allowed = new Map(
+      tables.results.flatMap(({ name, sql }) =>
+        [...sql.matchAll(/CHECK \((\w+) IN \(([^)]*)\)\)/g)].map(([, column, list]) => [`${name}.${column}`, [...list.matchAll(/'(\w+)'/g)].map(([, v]) => v).sort()]),
+      ),
+    );
+    const eventKinds = Object.keys({ message: true, lifecycle: true, wakeup: true, checkin: true } satisfies Record<AgentEventKind, true>);
+    const expected: Record<string, readonly string[]> = {
+      "turn_log.event_kind": eventKinds,
+      "turn_log.task_kind": TASK_KINDS,
+      "turn_log.task_status": TASK_STATUSES,
+      "turn_log.outcome": TURN_OUTCOMES,
+      "model_call.purpose": PURPOSES,
+      "model_call.status": MODEL_CALL_STATUSES,
+      "unasked_message.status": UNASKED_STATUSES,
+    };
+
+    for (const [column, values] of Object.entries(expected)) expect(allowed.get(column), column).toEqual([...values].sort());
   });
 });

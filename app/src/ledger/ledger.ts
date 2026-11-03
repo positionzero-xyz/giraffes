@@ -6,9 +6,9 @@ import {
   type EpochMs,
   type LocalDate,
   type MicroUsd,
-  type MonthKey,
   type TaskKind,
   type TaskStatus,
+  type UtcMonth,
 } from "../domain";
 import type { ModelId, Purpose, Usage } from "../model/model";
 
@@ -57,7 +57,7 @@ export type LogRow =
       readonly agent: AgentKey;
       readonly triggerKind: AgentEventKind;
       readonly text: string;
-      readonly status: "sent" | "dropped_budget" | "dropped_blocked" | "failed";
+      readonly status: UnaskedStatus;
       readonly day: LocalDate | null;
       readonly at: EpochMs;
     }
@@ -70,21 +70,20 @@ export type LogRow =
       readonly at: EpochMs;
     };
 
-export type ModelCallStatus =
-  | "settled"
-  | "refused_user_cap"
-  | "refused_global_ceiling"
-  | "recovered_after_crash"
-  | "unavailable";
+export const MODEL_CALL_STATUSES = [
+  "settled",
+  "refused_user_cap",
+  "refused_global_ceiling",
+  "recovered_after_crash",
+  "unavailable",
+] as const;
+export type ModelCallStatus = (typeof MODEL_CALL_STATUSES)[number];
 
-export type TurnOutcome =
-  | "acted"
-  | "quiet"
-  | "refused_budget"
-  | "model_failed"
-  | "poison"
-  | "no_model"
-  | "stale";
+export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "model_failed", "poison", "no_model", "stale"] as const;
+export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
+
+export const UNASKED_STATUSES = ["sent", "dropped_budget", "dropped_blocked", "failed"] as const;
+export type UnaskedStatus = (typeof UNASKED_STATUSES)[number];
 
 export function modelCallRow(input: {
   readonly id: string;
@@ -116,7 +115,7 @@ export function modelCallRow(input: {
 
 export type LeaseRequest = {
   readonly agent: AgentKey;
-  readonly month: MonthKey;
+  readonly month: UtcMonth;
   readonly seq: number;
   readonly micro: MicroUsd;
   readonly at: EpochMs;

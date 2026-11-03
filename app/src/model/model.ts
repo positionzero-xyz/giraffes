@@ -6,7 +6,8 @@ import { bridgeModel } from "./bridge";
 export type ModelId = "claude-haiku-5-5" | "claude-sonnet-5-5";
 export type Effort = "low" | "medium" | "high";
 
-export type Purpose = "turn" | "compaction" | "planning";
+export const PURPOSES = ["turn", "compaction", "planning"] as const;
+export type Purpose = (typeof PURPOSES)[number];
 
 export type Route = { readonly model: ModelId; readonly maxTokens: number; readonly effort: Effort };
 

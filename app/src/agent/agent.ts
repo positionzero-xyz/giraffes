@@ -3,12 +3,12 @@ import type { z } from "zod";
 import { makeChannels, type ChannelRegistry } from "../channels/channel";
 import { loadConfig, type Env } from "../config";
 import { assertNever, type AgentKey, type EpochMs, type EventKey, type InboundEnvelope, type MicroUsd, type PersonStatus, type TimeZone } from "../domain";
-import { d1Ledger, modelCallRow, type LeaseAnswer, type Ledger, type LogRow } from "../ledger/ledger";
+import { d1Ledger, modelCallRow, type LeaseAnswer, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
 import { makeModelClient, routeOf, type ModelClient, type ModelId, type Purpose, type Usage } from "../model/model";
 import { admitUnasked, OUTREACH } from "../policy/outreach";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
 import { costOf, decideReservation, estimate, SPEND } from "../policy/spend";
-import { DEFAULT_TIME_ZONE, localDate, monthKey, startOfLocalDay } from "../policy/time";
+import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../policy/time";
 import { compactionCommit, CompactionOutputSchema, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import { migrate } from "./schema";
@@ -33,7 +33,7 @@ const MAX_DELIVERY_ATTEMPTS = 5;
 const DELIVERY_BATCH = 20;
 const LOG_BATCH = 100;
 const LOG_BATCHES_PER_DRAIN = 10;
-const MODEL_RETRY_MS = 30_000;
+const MODEL_RETRY_BASE_MS = 30_000;
 const NO_COST = 0 as MicroUsd;
 
 export type Clock = { now(): EpochMs };
@@ -105,7 +105,7 @@ export class Agent extends DurableObject<Env> {
       outbox: this.#store.recentOutbox(50),
       pendingWakeups: this.#store.pendingWakeups(),
       unaskedSentToday: a ? this.#store.unaskedAdmitted(localDate(now, a.tz)) : 0,
-      spendThisMonthMicro: this.#store.monthSpend(monthKey(now)).spent,
+      spendThisMonthMicro: this.#store.monthSpend(utcMonth(now)).spent,
     };
   }
 
@@ -222,11 +222,11 @@ export class Agent extends DurableObject<Env> {
     const settle = reservation ? { reservation, cost: NO_COST } : null;
     const logs = reservation ? [callRow(agent, reservation, "unavailable", NO_COST, null, now)] : [];
     const attempts = Math.max(...view.batch.items.map((i) => i.attempts));
-    if (attempts >= TURN.maxAttempts) {
+    if (attempts >= TURN.maxModelAttempts) {
       return this.#commit(planWithoutModel(view, { kind: "model_failed" }), view, agent, { kind: "none" }, settle, logs);
     }
     const keys = view.batch.items.map((i) => i.key);
-    this.#store.releaseBatch(keys, (now + MODEL_RETRY_MS * 2 ** (attempts - 1)) as EpochMs, settle, logs, now);
+    this.#store.releaseBatch(keys, (now + MODEL_RETRY_BASE_MS * 2 ** (attempts - 1)) as EpochMs, settle, logs, now);
   }
 
   async #callModel<T>(
@@ -239,7 +239,7 @@ export class Agent extends DurableObject<Env> {
   ): Promise<ModelCall<T>> {
     const route = routeOf(purpose);
     const now = this.#deps.clock.now();
-    const month = monthKey(now);
+    const month = utcMonth(now);
     const est = estimate(route.model, system.length + user.length, route.maxTokens);
     for (;;) {
       const decision = decideReservation(this.#store.monthSpend(month), est);
@@ -274,7 +274,7 @@ export class Agent extends DurableObject<Env> {
   async #deliver(row: OutboxRow): Promise<void> {
     const now = this.#deps.clock.now();
     const a = this.#agent();
-    const unaskedLog = (status: Extract<LogRow, { stream: "unasked" }>["status"], day: OutboxRow["admittedDay"]): LogRow[] =>
+    const unaskedLog = (status: UnaskedStatus, day: OutboxRow["admittedDay"]): LogRow[] =>
       row.intent === "unasked"
         ? [{ stream: "unasked", id: row.id, agent: a.key, triggerKind: row.triggerKind, text: row.texts.join("\n"), status, day, at: now }]
         : [];

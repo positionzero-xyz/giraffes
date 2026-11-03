@@ -1,4 +1,4 @@
-import type { EpochMs, LocalDate, LocalDateTime, MonthKey, TimeOfDay, TimeZone } from "../domain";
+import type { EpochMs, LocalDate, LocalDateTime, TimeOfDay, TimeZone, UtcMonth } from "../domain";
 
 export const DEFAULT_TIME_ZONE = "Asia/Bangkok" as TimeZone;
 
@@ -97,8 +97,8 @@ export function startOfLocalDay(t: EpochMs, tz: TimeZone): EpochMs {
   return fromLocal(`${localDate(t, tz)}T00:00` as LocalDateTime, tz);
 }
 
-export function monthKey(t: EpochMs): MonthKey {
-  return new Date(t).toISOString().slice(0, 7) as MonthKey;
+export function utcMonth(t: EpochMs): UtcMonth {
+  return new Date(t).toISOString().slice(0, 7) as UtcMonth;
 }
 
 function addDays(day: LocalDate, n: number): LocalDate {

@@ -8,12 +8,12 @@ CREATE TABLE IF NOT EXISTS agent (
 CREATE TABLE IF NOT EXISTS turn_log (
   id                 TEXT PRIMARY KEY,
   agent_key          TEXT NOT NULL,
-  event_kind         TEXT NOT NULL,
+  event_kind         TEXT NOT NULL CHECK (event_kind IN ('message', 'lifecycle', 'wakeup', 'checkin')),
   batch_size         INTEGER NOT NULL,
-  task_kind          TEXT,
+  task_kind          TEXT CHECK (task_kind IN ('chat', 'reminder', 'plan', 'booking', 'site', 'group', 'other')),
   task_key           TEXT,
-  task_status        TEXT NOT NULL,
-  outcome            TEXT NOT NULL,
+  task_status        TEXT NOT NULL CHECK (task_status IN ('none', 'started', 'progressed', 'completed', 'failed')),
+  outcome            TEXT NOT NULL CHECK (outcome IN ('acted', 'quiet', 'refused_budget', 'model_failed', 'poison', 'no_model', 'stale')),
   refused_for_budget INTEGER NOT NULL CHECK (refused_for_budget IN (0, 1)),
   cost_micro         INTEGER NOT NULL,
   attempts           INTEGER NOT NULL,
@@ -26,9 +26,9 @@ CREATE INDEX IF NOT EXISTS turn_log_task ON turn_log (task_status, finished_at);
 CREATE TABLE IF NOT EXISTS model_call (
   id                 TEXT PRIMARY KEY,
   agent_key          TEXT NOT NULL,
-  purpose            TEXT NOT NULL,
+  purpose            TEXT NOT NULL CHECK (purpose IN ('turn', 'compaction', 'planning')),
   model              TEXT NOT NULL,
-  status             TEXT NOT NULL,
+  status             TEXT NOT NULL CHECK (status IN ('settled', 'refused_user_cap', 'refused_global_ceiling', 'recovered_after_crash', 'unavailable')),
   estimate_micro     INTEGER NOT NULL,
   cost_micro         INTEGER NOT NULL,
   input_tokens       INTEGER NOT NULL,
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS unasked_message (
   agent_key    TEXT NOT NULL,
   trigger_kind TEXT NOT NULL,
   text         TEXT NOT NULL,
-  status       TEXT NOT NULL,
+  status       TEXT NOT NULL CHECK (status IN ('sent', 'dropped_budget', 'dropped_blocked', 'failed')),
   day          TEXT,
   at           INTEGER NOT NULL
 );

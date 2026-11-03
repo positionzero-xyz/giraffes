@@ -1,5 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { NOTICE } from "../src/agent/turn";
+import { priceOf, routeOf } from "../src/model/model";
+import { SPEND } from "../src/policy/spend";
 import { chat, crash, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, turn } from "./testkit";
 
 const until = async (done: () => boolean) => {
@@ -204,7 +206,8 @@ describe("crash and duplicate safety", () => {
 
 describe("spend", () => {
   test("an over-cap person is refused without a model call, told once a day, and logged", async () => {
-    const model = scripted([turn({ actions: [send("Here's a long answer.")], task: ["chat", "x", "none"], usage: { inputTokens: 150_000_000 } })]);
+    const inputThatSpendsTheCap = (SPEND.userCapMicro * 1_000_000) / priceOf(routeOf("turn").model).inputPerM;
+    const model = scripted([turn({ actions: [send("Here's a long answer.")], task: ["chat", "x", "none"], usage: { inputTokens: inputThatSpendsTheCap } })]);
     const c = await devChat("lea", { model, at: "2099-11-04T10:00" });
     await c.say("tell me everything");
     await c.received();

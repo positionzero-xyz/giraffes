@@ -1,4 +1,4 @@
-import type { EpochMs, LocalDate, PersonStatus, TimeZone } from "../domain";
+import type { EpochMs, LocalDate, PersonStatus, TimeOfDay, TimeZone } from "../domain";
 import { localDate, localHour, nextLocalTime } from "./time";
 
 export const OUTREACH = {
@@ -10,7 +10,7 @@ export const OUTREACH = {
 export function quietUntil(t: EpochMs, tz: TimeZone): EpochMs | null {
   const h = localHour(t, tz);
   if (h >= OUTREACH.quietEndHour && h < OUTREACH.quietStartHour) return null;
-  return nextLocalTime(t, tz, "08:00");
+  return nextLocalTime(t, tz, `${String(OUTREACH.quietEndHour).padStart(2, "0")}:00` as TimeOfDay);
 }
 
 export type UnaskedVerdict =

@@ -15,12 +15,12 @@ import {
   type Intent,
   type LocalDate,
   type MicroUsd,
-  type MonthKey,
   type OutboundMessage,
   type OutboxId,
   type PersonStatus,
   type TimeOfDay,
   type TimeZone,
+  type UtcMonth,
   type WakeupId,
   type WakeupKey,
   type WakeupOrigin,
@@ -50,7 +50,7 @@ export type OutboxRow = OutboundMessage & {
 
 export type Reservation = {
   readonly id: string;
-  readonly month: MonthKey;
+  readonly month: UtcMonth;
   readonly purpose: Purpose;
   readonly model: ModelId;
   readonly estimate: MicroUsd;
@@ -89,10 +89,10 @@ type OutboxCols = {
   in_doubt: number;
   attempts: number;
 };
-type ReservationCols = { id: string; month: MonthKey; purpose: Purpose; model: ModelId; estimate_micro: MicroUsd };
+type ReservationCols = { id: string; month: UtcMonth; purpose: Purpose; model: ModelId; estimate_micro: MicroUsd };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const INBOX_KEEP_MS = 14 * DAY_MS;
+const DEDUPE_WINDOW_MS = 14 * DAY_MS;
 const OUTBOX_KEEP_MS = 30 * DAY_MS;
 const LOG_RETRY_BASE_MS = 10_000;
 const LOG_RETRY_MAX_MS = 60 * 60 * 1000;
@@ -192,7 +192,7 @@ export class AgentStore {
         .toArray()
         .map(toInboxItem);
       const batch = toBatch(inFlight);
-      const poisoned = batch && Math.max(...batch.items.map((i) => i.attempts)) >= TURN.maxAttempts ? batch : null;
+      const poisoned = batch && Math.max(...batch.items.map((i) => i.attempts)) >= TURN.maxClaimAttempts ? batch : null;
       if (!poisoned) this.sql.exec("UPDATE inbox SET status = 'pending' WHERE status = 'processing'");
       this.sql.exec("UPDATE outbox SET status = 'pending', in_doubt = 1 WHERE status = 'sending'");
       const open = this.sql
@@ -461,7 +461,7 @@ export class AgentStore {
       .map((r) => ({ ...r, texts: fromJson<string[]>(r.texts) }));
   }
 
-  monthSpend(month: MonthKey): MonthSpend {
+  monthSpend(month: UtcMonth): MonthSpend {
     const row = this.sql
       .exec<{ spent_micro: MicroUsd; leased_micro: MicroUsd }>("SELECT spent_micro, leased_micro FROM spend_month WHERE month = ?", month)
       .toArray()[0];
@@ -498,11 +498,11 @@ export class AgentStore {
     this.sql.exec("DELETE FROM reservation WHERE id = ?", s.reservation.id);
   }
 
-  private ensureMonth(month: MonthKey): void {
+  private ensureMonth(month: UtcMonth): void {
     this.sql.exec("INSERT INTO spend_month (month) VALUES (?) ON CONFLICT (month) DO NOTHING", month);
   }
 
-  beginLease(month: MonthKey): number {
+  beginLease(month: UtcMonth): number {
     return this.tx(() => {
       this.ensureMonth(month);
       this.sql.exec("UPDATE spend_month SET lease_pending = COALESCE(lease_pending, lease_seq + 1) WHERE month = ?", month);
@@ -510,7 +510,7 @@ export class AgentStore {
     });
   }
 
-  grantLease(month: MonthKey, seq: number, micro: MicroUsd): void {
+  grantLease(month: UtcMonth, seq: number, micro: MicroUsd): void {
     this.sql.exec(
       "UPDATE spend_month SET leased_micro = leased_micro + ?, lease_seq = ?, lease_pending = NULL WHERE month = ? AND lease_pending = ?",
       micro,
@@ -520,7 +520,7 @@ export class AgentStore {
     );
   }
 
-  denyLease(month: MonthKey, seq: number): void {
+  denyLease(month: UtcMonth, seq: number): void {
     this.sql.exec("UPDATE spend_month SET lease_pending = NULL WHERE month = ? AND lease_pending = ?", month, seq);
   }
 
@@ -612,7 +612,7 @@ export class AgentStore {
   }
 
   prune(now: EpochMs): void {
-    this.sql.exec("DELETE FROM inbox WHERE status IN ('done', 'failed') AND finished_at < ?", now - INBOX_KEEP_MS);
+    this.sql.exec("DELETE FROM inbox WHERE status IN ('done', 'failed') AND finished_at < ?", now - DEDUPE_WINDOW_MS);
     this.sql.exec("DELETE FROM outbox WHERE status IN ('sent', 'dropped') AND closed_at < ?", now - OUTBOX_KEEP_MS);
   }
 }

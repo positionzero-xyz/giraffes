@@ -42,7 +42,8 @@ export const TURN = {
   maxTextChars: 2000,
   maxNoteChars: 500,
   maxActions: 8,
-  maxAttempts: 3,
+  maxClaimAttempts: 3,
+  maxModelAttempts: 3,
 } as const;
 
 const Slug = z.string().regex(WAKEUP_KEY_PATTERN);

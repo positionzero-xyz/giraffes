@@ -6,7 +6,7 @@ export type MicroUsd = Brand<number, "MicroUsd">;
 export type TimeZone = Brand<string, "TimeZone">;
 export type LocalDateTime = Brand<string, "LocalDateTime">;
 export type LocalDate = Brand<string, "LocalDate">;
-export type MonthKey = Brand<string, "MonthKey">;
+export type UtcMonth = Brand<string, "UtcMonth">;
 export type TimeOfDay = `${number}:${number}`;
 
 export const CHANNEL_IDS = ["line", "telegram", "dev"] as const;

@@ -7,7 +7,7 @@ export const SPEND = {
   leaseChunkMicro: 500_000 as MicroUsd,
 } as const;
 
-const CHARS_PER_TOKEN = 3;
+export const CHARS_PER_TOKEN = 3;
 
 export type MonthSpend = {
   readonly spent: MicroUsd;

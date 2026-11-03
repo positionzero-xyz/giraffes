@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { NOTICE } from "../src/agent/turn";
 import { priceOf, routeOf } from "../src/model/model";
 import { SPEND } from "../src/policy/spend";
+import { type ScriptStep } from "../src/model/scripted";
 import { chat, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, throws, turn } from "./testkit";
 
 const until = async (done: () => boolean) => {
@@ -293,6 +294,43 @@ describe("housekeeping", () => {
     await c.say("message 32");
     expect(compactions()).toBe(2);
     expect(await c.received()).toEqual(["Reply 31.", "Reply 32."]);
+    model.assertDone();
+  });
+});
+
+describe("compaction", () => {
+  const foldedTurns = (user: string) => user.match(/^\[\d{4}-\d\d-\d\dT\d\d:\d\dZ\] (Person|Assistant|Note):/gm)?.length ?? 0;
+  const summary = (text: string): ScriptStep => ({ kind: "output", value: { summary: text } });
+
+  test("a backlog left by failed compactions is folded in bounded pages, oldest first", async () => {
+    const replies = Array.from({ length: 72 }, (_, i) => chat(`Reply ${i}.`));
+    const model = scripted(replies, { compaction: [{ kind: "fail", failure: "invalid_output" }, summary("Summary 1."), summary("Summary 2."), summary("Summary 3.")] });
+    const c = await devChat("pia", { model, at: "2099-11-04T10:00" });
+    for (let i = 0; i < 71; i++) await c.say(`message ${i}`);
+
+    c.clock.set(local("2099-11-04T10:06"));
+    await c.say("message 71");
+
+    const pages = model.calls.filter((call) => call.purpose === "compaction").slice(1);
+    expect(pages.map((p) => foldedTurns(p.user))).toEqual([30, 30, 30]);
+    expect(pages[0].user).toContain("Person: message 0\n");
+    expect(pages[1].user).toContain("Current summary:\nSummary 1.");
+    expect(pages[1].user).toContain("Person: message 15\n");
+    expect(pages[2].user).toContain("Person: message 30\n");
+    model.assertDone();
+  });
+
+  test("while compaction is backing off, a turn's prompt carries at most the newest 50 notes", async () => {
+    const facts = (from: number) => Array.from({ length: 6 }, (_, i) => ({ type: "remember", note: `fact ${from + i}` }));
+    const replies = Array.from({ length: 11 }, (_, i) => turn({ actions: facts(i * 6), task: ["chat", "facts", "none"] }));
+    const model = scripted(replies, { compaction: [throws()] });
+    const c = await devChat("quinn", { model, at: "2099-11-04T10:00" });
+    for (let i = 0; i < 11; i++) await c.say(`fact batch ${i}`);
+
+    const last = model.calls.filter((call) => call.purpose === "turn").at(-1)!.user;
+    const notes = last.match(/^- fact \d+$/gm) ?? [];
+    expect(notes).toHaveLength(50);
+    expect(notes.at(-1)).toBe("- fact 59");
     model.assertDone();
   });
 });

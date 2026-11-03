@@ -64,6 +64,21 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
     }
   }
 
+  async function push(msg: OutboundMessage, messages: readonly object[]): Promise<Delivery> {
+    try {
+      // Billed, and idempotent per X-Line-Retry-Key, so a resend after a crash is deduplicated by LINE.
+      const res = await fetch(`${API}/push`, {
+        method: "POST",
+        headers: { ...auth, "x-line-retry-key": msg.id },
+        body: JSON.stringify({ to: msg.to.channelUserId, messages }),
+      });
+      if (res.ok || res.status === 409) return { kind: "sent", via: "push" };
+      return classify(res.status, await res.text());
+    } catch (err) {
+      return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail: String(err) };
+    }
+  }
+
   return {
     async receive(req: Request): Promise<Received> {
       const raw = await req.arrayBuffer();
@@ -102,19 +117,11 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
       if (msg.reply && now < msg.reply.expiresAt - REPLY_TOKEN_SAFETY_MS) {
         const replied = await reply(msg.reply.token, messages);
         if (replied !== null) return replied;
+        // LINE refused the token, so a retry must not present it again, and in_doubt is how a row drops it.
+        const pushed = await push(msg, messages);
+        return pushed.kind === "retry" ? { ...pushed, kind: "in_doubt" } : pushed;
       }
-      try {
-        // Billed, and idempotent per X-Line-Retry-Key, so a resend after a crash is deduplicated by LINE.
-        const res = await fetch(`${API}/push`, {
-          method: "POST",
-          headers: { ...auth, "x-line-retry-key": msg.id },
-          body: JSON.stringify({ to: msg.to.channelUserId, messages }),
-        });
-        if (res.ok || res.status === 409) return { kind: "sent", via: "push" };
-        return classify(res.status, await res.text());
-      } catch (err) {
-        return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail: String(err) };
-      }
+      return push(msg, messages);
     },
   };
 }

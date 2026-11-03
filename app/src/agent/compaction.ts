@@ -41,7 +41,7 @@ export function planCompaction(input: CompactionInput): CompactionPlan | null {
   const overNotes = input.noteCount > COMPACTION.maxNotes;
 
   // One page per call keeps the prompt bounded; a backlog is worked off over the following drains.
-  const folded = overTurns ? input.oldestTurns.slice(0, Math.min(COMPACTION.foldTurns, input.turnCount - COMPACTION.keepTurns)) : [];
+  const folded = overTurns ? input.oldestTurns.slice(0, COMPACTION.foldTurns) : [];
   const foldedNotes = overNotes
     ? input.oldestNotes.slice(0, Math.min(COMPACTION.foldNotes, input.noteCount - COMPACTION.maxNotes / 2))
     : [];

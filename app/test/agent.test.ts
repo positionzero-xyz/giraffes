@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { NOTICE } from "../src/agent/turn";
 import { priceOf, routeOf } from "../src/model/model";
-import { SPEND } from "../src/policy/spend";
+import { costOf, SPEND } from "../src/policy/spend";
 import { type ScriptStep } from "../src/model/scripted";
 import { chat, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, throws, turn } from "./testkit";
 
@@ -206,6 +206,33 @@ describe("failure and duplicate safety", () => {
 });
 
 describe("spend", () => {
+  test("a Thai message's reservation covers the worst-case bill: every prompt byte a cache-write token, plus full output", async () => {
+    const model = scripted([chat("สวัสดีค่ะ")]);
+    const c = await devChat("ray", { model, at: "2099-11-04T10:00" });
+
+    await c.say("ช่วยเตือนฉันพรุ่งนี้ตอนเก้าโมงให้โทรหาคลินิกทันตกรรมเพื่อเลื่อนนัดหน่อยนะคะ ".repeat(40));
+
+    const [call] = model.calls;
+    const bytes = new TextEncoder().encode(call.system + call.user).length;
+    const route = routeOf("turn");
+    const worst = costOf(route.model, { inputTokens: 0, outputTokens: route.maxTokens, cacheWriteTokens: bytes, cacheReadTokens: 0 });
+    expect(c.logs("model_call")[0].estimateMicro).toBeGreaterThanOrEqual(worst);
+  });
+
+  test("a model call that times out is charged at its estimate, not $0, and the turn is retried", async () => {
+    const model = scripted([{ kind: "fail", failure: "in_doubt" }, chat("Here now.")]);
+    const c = await devChat("sam", { model, at: "2099-11-04T10:00" });
+
+    await c.say("hello");
+    await c.advanceTo("2099-11-04T10:01");
+
+    expect(await c.received()).toEqual(["Here now."]);
+    const calls = c.logs("model_call");
+    expect(calls.map((l) => l.status)).toEqual(["in_doubt", "settled"]);
+    expect(calls[0].costMicro).toBe(calls[0].estimateMicro);
+    expect((await c.snapshot()).spendThisMonthMicro).toBe(calls[0].estimateMicro + calls[1].costMicro);
+  });
+
   test("an over-cap person is refused without a model call, told once a day, and logged", async () => {
     const inputThatSpendsTheCap = (SPEND.userCapMicro * 1_000_000) / priceOf(routeOf("turn").model).inputPerM;
     const model = scripted([turn({ actions: [send("Here's a long answer.")], task: ["chat", "x", "none"], usage: { inputTokens: inputThatSpendsTheCap } })]);

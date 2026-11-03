@@ -48,7 +48,8 @@ export type ModelRequest<T> = {
 export type ModelFailure =
   | "invalid_output"
   | "refused_by_model"
-  | "unavailable";
+  | "unavailable"
+  | "in_doubt";
 
 export type ModelResult<T> =
   | { readonly ok: true; readonly value: T; readonly usage: Usage }

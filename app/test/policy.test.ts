@@ -284,6 +284,17 @@ describe("spend", () => {
     expect(costOf("claude-sonnet-5-5", { inputTokens: 1_000, outputTokens: 100, cacheWriteTokens: 1_000, cacheReadTokens: 10_000 })).toBe(2_000 + 1_000 + 2_500 + 2_000);
   });
 
+  test("Haiku prompts over 100K tokens are billed on the long-context rate card", () => {
+    expect(costOf("claude-haiku-5-5", { inputTokens: 100_000, outputTokens: 1_000, cacheWriteTokens: 0, cacheReadTokens: 0 })).toBe(10_000 + 500);
+    expect(costOf("claude-haiku-5-5", { inputTokens: 120_000, outputTokens: 1_000, cacheWriteTokens: 0, cacheReadTokens: 0 })).toBe(60_000 + 2_500);
+    expect(costOf("claude-haiku-5-5", { inputTokens: 1_000, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 100_000 })).toBe(500 + 5_000);
+  });
+
+  test("the estimate for a long prompt covers its bill on the long-context card", () => {
+    const worst = costOf("claude-haiku-5-5", { inputTokens: 0, outputTokens: 1_000, cacheWriteTokens: 150_000, cacheReadTokens: 0 });
+    expect(estimate("claude-haiku-5-5", 150_000, 1_000)).toBeGreaterThanOrEqual(worst);
+  });
+
   test("within the lease, a call is reserved locally", () => {
     expect(decideReservation({ spent: usd(1), reserved: usd(0.1), leased: usd(1.5) }, usd(0.002))).toEqual({ kind: "reserve" });
   });

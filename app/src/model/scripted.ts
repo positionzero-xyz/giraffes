@@ -2,7 +2,7 @@ import type { ModelClient, ModelRequest, ModelResult, Purpose, Usage } from "./m
 
 export type ScriptStep =
   | { readonly kind: "output"; readonly value: unknown; readonly usage?: Partial<Usage> }
-  | { readonly kind: "fail"; readonly failure: "invalid_output" | "refused_by_model" | "unavailable" }
+  | { readonly kind: "fail"; readonly failure: "invalid_output" | "refused_by_model" | "unavailable" | "in_doubt" }
   | { readonly kind: "throw" }
   | { readonly kind: "hold"; readonly then: ScriptStep };
 
@@ -29,7 +29,7 @@ export function scripted(steps: readonly ScriptStep[], opts: { readonly compacti
         return { ok: true, value: parsed.data, usage: { ...DEFAULT_USAGE, ...step.usage } };
       }
       case "fail":
-        return { ok: false, failure: step.failure, usage: step.failure === "unavailable" ? null : DEFAULT_USAGE };
+        return { ok: false, failure: step.failure, usage: step.failure === "unavailable" || step.failure === "in_doubt" ? null : DEFAULT_USAGE };
       case "throw":
         throw new Error("scripted exception from the model call");
       case "hold":

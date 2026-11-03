@@ -72,6 +72,13 @@ describe("anthropic", () => {
     expect(await anthropicModel("sk-test").parse(request)).toMatchObject({ ok: false, failure: "invalid_output", usage: { outputTokens: 40 } });
   });
 
+  test("a request whose response never arrived is in doubt, because it may have been billed", async () => {
+    stubFetch(() => {
+      throw new TypeError("connection reset");
+    });
+    expect(await anthropicModel("sk-test").parse(request)).toEqual({ ok: false, failure: "in_doubt", usage: null });
+  });
+
   test("a rejected request is a programming error, not an outage", async () => {
     stubFetch(() => Response.json({ type: "error", error: { type: "invalid_request_error", message: "bad" } }, { status: 400 }));
     await expect(anthropicModel("sk-test").parse(request)).rejects.toThrow();

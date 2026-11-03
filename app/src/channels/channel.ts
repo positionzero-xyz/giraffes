@@ -11,6 +11,8 @@ export type Received =
 export type Delivery =
   | { readonly kind: "sent"; readonly via: "reply" | "push" }
   | { readonly kind: "retry"; readonly afterMs: number; readonly detail: string }
+  /** The channel may have delivered it. Retry, but never with the reply token. */
+  | { readonly kind: "in_doubt"; readonly afterMs: number; readonly detail: string }
   | { readonly kind: "failed"; readonly detail: string }
   | { readonly kind: "recipient_gone" };
 

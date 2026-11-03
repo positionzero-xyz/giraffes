@@ -224,6 +224,19 @@ describe("delivery", () => {
     expect(c.logs("unasked").map((l) => [l.status, l.day])).toEqual([["sent", "2099-11-04"]]);
     model.assertDone();
   });
+
+  test.each([
+    ["the channel can't tell whether it was delivered", { kind: "in_doubt", afterMs: 1000 } as const],
+    ["the send was cut off by a crash", { kind: "throw" } as const],
+  ])("a reply that may already have reached the person goes out by push, never with its token again: %s", async (_, step) => {
+    const model = scripted([chat("Hi!")]);
+    const c = await devChat(`vic-${step.kind}`, { model, at: "2099-11-04T10:00", deliveries: [step] });
+
+    await c.say("hello");
+    await c.advanceTo("2099-11-04T10:01");
+
+    expect(c.channel.delivered.map((d) => [d.text, d.via])).toEqual([["Hi!", "push"]]);
+  });
 });
 
 describe("spend", () => {

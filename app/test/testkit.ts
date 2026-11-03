@@ -58,7 +58,7 @@ export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): Mem
 
 export type DeliveryStep =
   | { readonly kind: "sent" }
-  | { readonly kind: "retry"; readonly afterMs: number }
+  | { readonly kind: "retry" | "in_doubt"; readonly afterMs: number }
   | { readonly kind: "throw" }
   | { readonly kind: "gone" };
 
@@ -79,12 +79,13 @@ export function scriptedChannel(steps: readonly DeliveryStep[] = []): ScriptedCh
       const step = queue.shift() ?? { kind: "sent" };
       switch (step.kind) {
         case "sent": {
-          const via = msg.reply !== undefined && !msg.inDoubt && now < msg.reply.expiresAt ? "reply" : "push";
+          const via = msg.reply !== undefined && now < msg.reply.expiresAt ? "reply" : "push";
           delivered.push({ at: now, text: msg.texts.join("\n"), via });
           return { kind: "sent", via };
         }
         case "retry":
-          return { kind: "retry", afterMs: step.afterMs, detail: "scripted retry" };
+        case "in_doubt":
+          return { kind: step.kind, afterMs: step.afterMs, detail: `scripted ${step.kind}` };
         case "throw":
           throw new Error("scripted exception from the channel");
         case "gone":

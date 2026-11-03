@@ -401,13 +401,14 @@ export class AgentStore {
           to: agent.identity,
           texts: fromJson<readonly [string, ...string[]]>(r.texts),
           intent: r.intent,
-          inDoubt: r.in_doubt === 1,
           eventKey: r.event_key,
           triggerKind: r.trigger_kind,
           admittedDay: r.admitted_day,
           attempts: r.attempts,
         };
-        return r.reply_token !== null && r.reply_expires !== null
+        // A row in doubt (cut off mid-send, or a channel that couldn't tell) may have spent its token,
+        // so it is read without one.
+        return r.in_doubt === 0 && r.reply_token !== null && r.reply_expires !== null
           ? { ...base, reply: { token: r.reply_token, expiresAt: r.reply_expires } }
           : base;
       });
@@ -436,6 +437,10 @@ export class AgentStore {
 
   reschedule(id: OutboxId, readyAt: EpochMs): void {
     this.sql.exec("UPDATE outbox SET status = 'pending', ready_at = ? WHERE id = ?", readyAt, id);
+  }
+
+  rescheduleInDoubt(id: OutboxId, readyAt: EpochMs): void {
+    this.sql.exec("UPDATE outbox SET status = 'pending', ready_at = ?, in_doubt = 1 WHERE id = ?", readyAt, id);
   }
 
   drop(id: OutboxId, reason: "budget" | "blocked" | "failed", now: EpochMs, logs: readonly LogRow[]): void {

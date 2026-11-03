@@ -82,7 +82,7 @@ describe("LINE webhook", () => {
 const NOW = 4097563210000 as EpochMs;
 function outbound(over: Partial<OutboundMessage> = {}): OutboundMessage {
   const to: Identity = { channel: "line", channelUserId: USER };
-  return { id: "5f0c2c61-0d1e-4c3c-9a43-1d1f6c2a8b10" as OutboxId, to, texts: ["Done.", "(note)"], intent: "reply", inDoubt: false, ...over };
+  return { id: "5f0c2c61-0d1e-4c3c-9a43-1d1f6c2a8b10" as OutboxId, to, texts: ["Done.", "(note)"], intent: "reply", ...over };
 }
 const fresh = { token: "reply-token-1", expiresAt: (NOW + 50_000) as EpochMs };
 
@@ -106,12 +106,6 @@ describe("LINE delivery", () => {
     expect(seen.map((s) => s.url)).toEqual(["https://api.line.me/v2/bot/message/push", "https://api.line.me/v2/bot/message/push"]);
     expect(seen[0].headers.get("x-line-retry-key")).toBe("5f0c2c61-0d1e-4c3c-9a43-1d1f6c2a8b10");
     expect(seen[0].body).toEqual({ to: USER, messages: [{ type: "text", text: "Done." }, { type: "text", text: "(note)" }] });
-  });
-
-  test("a row in doubt never reuses its reply token", async () => {
-    const seen = stubFetch(() => Response.json({}));
-    expect(await line().deliver(outbound({ reply: fresh, inDoubt: true }), NOW)).toEqual({ kind: "sent", via: "push" });
-    expect(seen.map((s) => s.url)).toEqual(["https://api.line.me/v2/bot/message/push"]);
   });
 
   test("a rejected reply token falls back to a push", async () => {

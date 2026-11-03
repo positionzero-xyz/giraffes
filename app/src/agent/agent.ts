@@ -333,9 +333,14 @@ export class Agent extends DurableObject<Env> {
       case "sent":
         return this.#store.markSent(row.id, delivery.via, after, unaskedLog("sent", day));
       case "retry":
-        if (row.attempts + 1 < MAX_DELIVERY_ATTEMPTS) return this.#store.reschedule(row.id, (after + delivery.afterMs) as EpochMs);
+      case "in_doubt": {
+        const at = (after + delivery.afterMs) as EpochMs;
+        if (row.attempts + 1 < MAX_DELIVERY_ATTEMPTS) {
+          return delivery.kind === "in_doubt" ? this.#store.rescheduleInDoubt(row.id, at) : this.#store.reschedule(row.id, at);
+        }
         console.warn("delivery gave up", row.id, delivery.detail);
         return this.#store.drop(row.id, "failed", after, unaskedLog("failed", day));
+      }
       case "failed":
         console.warn("delivery failed", row.id, delivery.detail);
         return this.#store.drop(row.id, "failed", after, unaskedLog("failed", day));

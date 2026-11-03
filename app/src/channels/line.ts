@@ -49,6 +49,21 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
   if (!secrets) return disabledChannel("line");
   const auth = { authorization: `Bearer ${secrets.accessToken}`, "content-type": "application/json" };
 
+  /** Null when LINE turned the token down (400: invalid or used), so a push still reaches the person. */
+  async function reply(token: string, messages: readonly object[]): Promise<Delivery | null> {
+    try {
+      const res = await fetch(`${API}/reply`, { method: "POST", headers: auth, body: JSON.stringify({ replyToken: token, messages }) });
+      if (res.ok) return { kind: "sent", via: "reply" };
+      if (res.status === 400) return null;
+      const body = await res.text();
+      // A 5xx can come after LINE accepted the reply and spent the token.
+      if (res.status >= 500) return { kind: "in_doubt", afterMs: CHANNEL_RETRY_MS, detail: `${res.status} ${body}` };
+      return classify(res.status, body);
+    } catch (err) {
+      return { kind: "in_doubt", afterMs: CHANNEL_RETRY_MS, detail: String(err) };
+    }
+  }
+
   return {
     async receive(req: Request): Promise<Received> {
       const raw = await req.arrayBuffer();
@@ -84,13 +99,11 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
 
     async deliver(msg: OutboundMessage, now: EpochMs): Promise<Delivery> {
       const messages = msg.texts.slice(0, MAX_MESSAGES).map((text) => ({ type: "text", text: text.slice(0, MAX_TEXT) }));
+      if (msg.reply && now < msg.reply.expiresAt - REPLY_TOKEN_SAFETY_MS) {
+        const replied = await reply(msg.reply.token, messages);
+        if (replied !== null) return replied;
+      }
       try {
-        if (msg.reply && !msg.inDoubt && now < msg.reply.expiresAt - REPLY_TOKEN_SAFETY_MS) {
-          const res = await fetch(`${API}/reply`, { method: "POST", headers: auth, body: JSON.stringify({ replyToken: msg.reply.token, messages }) });
-          if (res.ok) return { kind: "sent", via: "reply" };
-          // 400 is an invalid or used token: pushing still reaches the person.
-          if (res.status !== 400) return classify(res.status, await res.text());
-        }
         // Billed, and idempotent per X-Line-Retry-Key, so a resend after a crash is deduplicated by LINE.
         const res = await fetch(`${API}/push`, {
           method: "POST",

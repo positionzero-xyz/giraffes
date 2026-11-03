@@ -39,7 +39,7 @@ export function devChannel(devMode: boolean): ChannelAdapter {
       };
     },
     async deliver(msg: OutboundMessage, now: EpochMs): Promise<Delivery> {
-      const fresh = msg.reply !== undefined && !msg.inDoubt && now < msg.reply.expiresAt;
+      const fresh = msg.reply !== undefined && now < msg.reply.expiresAt;
       return { kind: "sent", via: fresh ? "reply" : "push" };
     },
   };

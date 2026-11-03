@@ -107,8 +107,8 @@ export type OutboundMessage = {
   readonly to: Identity;
   readonly texts: readonly [string, ...string[]];
   readonly intent: Intent;
+  /** Absent for a row in doubt: an earlier attempt may have spent the token. */
   readonly reply?: ReplyHandle;
-  readonly inDoubt: boolean;
 };
 
 export const TASK_KINDS = ["chat", "reminder", "plan", "booking", "site", "group", "other"] as const;

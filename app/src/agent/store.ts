@@ -422,7 +422,7 @@ export class AgentStore {
 
   markSending(id: OutboxId, admittedDay: LocalDate | null): void {
     this.sql.exec(
-      "UPDATE outbox SET status = 'sending', admitted_day = COALESCE(admitted_day, ?), attempts = attempts + 1 WHERE id = ?",
+      "UPDATE outbox SET status = 'sending', admitted_day = ?, attempts = attempts + 1 WHERE id = ?",
       admittedDay,
       id,
     );

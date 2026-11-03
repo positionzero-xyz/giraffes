@@ -363,7 +363,7 @@ describe("spend", () => {
   });
 
   test("a request the API rejected is charged nothing, retried after a backoff, then answered with the fixed apology", async () => {
-    const rejected = { kind: "fail", failure: "rejected" } as unknown as ScriptStep;
+    const rejected: ScriptStep = { kind: "fail", failure: "rejected" };
     const model = scripted([rejected, rejected, rejected]);
     const c = await devChat("rex", { model, at: "2099-11-04T10:00" });
 

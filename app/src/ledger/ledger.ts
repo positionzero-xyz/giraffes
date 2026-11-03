@@ -86,6 +86,7 @@ export const MODEL_CALL_STATUSES = [
   "refused_global_ceiling",
   "recovered_after_crash",
   "unavailable",
+  "rejected",
   "in_doubt",
 ] as const;
 export type ModelCallStatus = (typeof MODEL_CALL_STATUSES)[number];

@@ -65,6 +65,7 @@ export type ModelFailure =
   | "invalid_output"
   | "refused_by_model"
   | "unavailable"
+  | "rejected"
   | "in_doubt";
 
 export type ModelResult<T> =

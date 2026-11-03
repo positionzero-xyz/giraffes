@@ -49,7 +49,7 @@ export type AgentDeps = {
 type ModelCall<T> =
   | { readonly kind: "ok"; readonly value: T; readonly reservation: Reservation; readonly usage: Usage }
   | { readonly kind: "failed"; readonly reservation: Reservation; readonly usage: Usage | null }
-  | { readonly kind: "unavailable"; readonly reservation: Reservation | null; readonly inDoubt: boolean }
+  | { readonly kind: "unavailable"; readonly reservation: Reservation | null; readonly failure: "unavailable" | "rejected" | "in_doubt" }
   | { readonly kind: "refused"; readonly scope: "user_cap" | "global_ceiling"; readonly model: ModelId; readonly estimate: MicroUsd };
 
 export type AgentSnapshot = {
@@ -262,7 +262,7 @@ export class Agent extends DurableObject<Env> {
         answer = await this.#deps.ledger.requestLease({ agent, month, seq, micro: decision.chunk, at: now });
       } catch (err) {
         console.warn("lease request failed", err);
-        return { kind: "unavailable", reservation: null, inDoubt: false };
+        return { kind: "unavailable", reservation: null, failure: "unavailable" };
       }
       if (answer.kind === "ceiling") {
         this.#store.denyLease(month, seq);
@@ -276,15 +276,15 @@ export class Agent extends DurableObject<Env> {
     try {
       res = await this.#deps.model.parse({ purpose, system, user, schema });
     } catch (err) {
-      // The instance is alive, so close the reservation here rather than leave it for recover(). We
-      // can't tell whether the request was billed, so it is charged at its estimate.
+      // The instance is alive, so close the reservation here rather than leave it for recover(). The client
+      // classifies every answer the API gave, so a throw is something else, and it may have been billed.
       const at = this.#deps.clock.now();
       this.#store.settle({ reservation, cost: reservation.estimate }, [callRow(agent, reservation, "in_doubt", reservation.estimate, null, at)], at);
       throw err;
     }
     if (res.ok) return { kind: "ok", value: res.value, reservation, usage: res.usage };
-    if (res.failure === "unavailable" || res.failure === "in_doubt") {
-      return { kind: "unavailable", reservation, inDoubt: res.failure === "in_doubt" };
+    if (res.failure === "unavailable" || res.failure === "rejected" || res.failure === "in_doubt") {
+      return { kind: "unavailable", reservation, failure: res.failure };
     }
     return { kind: "failed", reservation, usage: res.usage };
   }
@@ -429,12 +429,12 @@ export class Agent extends DurableObject<Env> {
 
 type Unavailable = Extract<ModelCall<unknown>, { kind: "unavailable" }>;
 
-/** A call the API turned away costs nothing; one whose response was lost may have been billed in full. */
+/** A call the API turned away or rejected costs nothing; one whose response was lost may have been billed in full. */
 function closeUnavailable(call: Unavailable, agent: AgentKey, now: EpochMs): { settle: Settlement | null; logs: LogRow[] } {
   const r = call.reservation;
   if (!r) return { settle: null, logs: [] };
-  const cost = call.inDoubt ? r.estimate : NO_COST;
-  return { settle: { reservation: r, cost }, logs: [callRow(agent, r, call.inDoubt ? "in_doubt" : "unavailable", cost, null, now)] };
+  const cost = call.failure === "in_doubt" ? r.estimate : NO_COST;
+  return { settle: { reservation: r, cost }, logs: [callRow(agent, r, call.failure, cost, null, now)] };
 }
 
 function settledCall(settle: Settlement, usage: Usage | null): TurnCall {
@@ -445,7 +445,7 @@ function settledCall(settle: Settlement, usage: Usage | null): TurnCall {
 function callRow(
   agent: AgentKey,
   r: Reservation,
-  status: "settled" | "unavailable" | "in_doubt",
+  status: "settled" | Unavailable["failure"],
   cost: MicroUsd,
   usage: Usage | null,
   at: EpochMs,

@@ -2,8 +2,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { routeOf, type ModelClient, type ModelRequest, type ModelResult, type Usage } from "./model";
 
-// 429 and 529 mean the API turned the request away before running it. A dropped connection, a timeout or
-// another 5xx can come after the work was done and billed.
+// 429 and 529 mean the API turned the request away, and any other 4xx except 408 means it rejected the
+// request. Neither ran. A dropped connection, a timeout or another 5xx can come after the work was done and billed.
 const turnedAway = (status: number | undefined) => status === 429 || status === 529;
 const inDoubt = (status: number | undefined) => status === undefined || status === 408 || status >= 500;
 
@@ -25,6 +25,7 @@ export function anthropicModel(apiKey: string): ModelClient {
       } catch (err) {
         if (err instanceof Anthropic.APIError && turnedAway(err.status)) return { ok: false, failure: "unavailable", usage: null };
         if (err instanceof Anthropic.APIError && inDoubt(err.status)) return { ok: false, failure: "in_doubt", usage: null };
+        if (err instanceof Anthropic.APIError) return { ok: false, failure: "rejected", usage: null };
         throw err;
       }
 

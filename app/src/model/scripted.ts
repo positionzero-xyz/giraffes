@@ -1,8 +1,8 @@
-import type { ModelClient, ModelRequest, ModelResult, Purpose, Usage } from "./model";
+import type { ModelClient, ModelFailure, ModelRequest, ModelResult, Purpose, Usage } from "./model";
 
 export type ScriptStep =
   | { readonly kind: "output"; readonly value: unknown; readonly usage?: Partial<Usage> }
-  | { readonly kind: "fail"; readonly failure: "invalid_output" | "refused_by_model" | "unavailable" | "in_doubt" }
+  | { readonly kind: "fail"; readonly failure: ModelFailure }
   | { readonly kind: "throw" }
   | { readonly kind: "hold"; readonly then: ScriptStep };
 
@@ -13,6 +13,7 @@ export type ScriptedModel = ModelClient & {
 };
 
 const DEFAULT_USAGE: Usage = { inputTokens: 1000, outputTokens: 100, cacheWriteTokens: 0, cacheReadTokens: 0 };
+const NO_RESPONSE: ReadonlySet<ModelFailure> = new Set(["unavailable", "rejected", "in_doubt"]);
 
 /** Compaction calls play `opts.compaction` when given, so a test can script them apart from turns. */
 export function scripted(steps: readonly ScriptStep[], opts: { readonly compaction?: readonly ScriptStep[] } = {}): ScriptedModel {
@@ -29,7 +30,7 @@ export function scripted(steps: readonly ScriptStep[], opts: { readonly compacti
         return { ok: true, value: parsed.data, usage: { ...DEFAULT_USAGE, ...step.usage } };
       }
       case "fail":
-        return { ok: false, failure: step.failure, usage: step.failure === "unavailable" || step.failure === "in_doubt" ? null : DEFAULT_USAGE };
+        return { ok: false, failure: step.failure, usage: NO_RESPONSE.has(step.failure) ? null : DEFAULT_USAGE };
       case "throw":
         throw new Error("scripted exception from the model call");
       case "hold":

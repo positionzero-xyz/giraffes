@@ -2,8 +2,10 @@
  * Every method is synchronous: SQLite calls in a Durable Object don't await, so a method body is
  * atomic with respect to other requests.
  */
+import type { PaidPlan, PlanRow, Standing, SubscriptionId } from "../billing/plan";
 import type { BoxHostKind } from "../box/host";
-import { dueAt, isBoxCommand, type Box, type BoxState } from "../box/machine";
+import { dueAt, type Box, type BoxState } from "../box/machine";
+import { commandOf } from "./commands";
 import type { BoxName } from "../box/names";
 import {
   assertNever,
@@ -105,9 +107,19 @@ type BoxCols = {
   error: string | null;
   attempts: number;
   next_at: EpochMs | null;
+  poll_at: EpochMs | null;
+  reclaim_at: EpochMs | null;
 };
 
-export type BoxMessage = { readonly texts: readonly [string, ...string[]]; readonly note: string };
+type PlanCols = {
+  trial_ends_at: EpochMs;
+  own_subscription: SubscriptionId | null;
+  own_plan: PaidPlan | null;
+  seat_subscription: SubscriptionId | null;
+  seat_owner: AgentKey | null;
+};
+
+export type NoteMessage = { readonly texts: readonly [string, ...string[]]; readonly note: string };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEDUPE_WINDOW_MS = 14 * DAY_MS;
@@ -139,11 +151,20 @@ function toBox(r: BoxCols): Box {
     case "provisioning":
       return { ...base, state: r.state, attempts: r.attempts, retryAt: r.next_at ?? r.state_at };
     case "signed_out":
-      return { ...base, state: r.state, linkSentAt: r.link_sent_at, pollAt: r.next_at, pollUntil: r.signin_poll_until };
+      return {
+        ...base,
+        state: r.state,
+        linkSentAt: r.link_sent_at,
+        pollAt: r.poll_at,
+        pollUntil: r.signin_poll_until,
+        reclaimAt: r.reclaim_at,
+      };
     case "signed_in":
       return { ...base, state: r.state };
     case "failed":
       return { ...base, state: r.state, error: r.error ?? "" };
+    case "reclaiming":
+      return { ...base, state: r.state, attempts: r.attempts, retryAt: r.next_at ?? r.state_at };
     default:
       return assertNever(r.state);
   }
@@ -180,12 +201,16 @@ export class AgentStore {
     };
   }
 
+  /** A person's first message also starts their trial, which ends at `trialEndsAt`. */
   enqueue(
     envelope: InboundEnvelope,
-    first: { readonly tz: TimeZone; readonly checkinLocal: TimeOfDay; readonly checkin: NewWakeup },
+    first: { readonly tz: TimeZone; readonly checkinLocal: TimeOfDay; readonly checkin: NewWakeup; readonly trialEndsAt: EpochMs },
     now: EpochMs,
   ): "inserted" | "duplicate" {
     return this.tx(() => {
+      if (envelope.event.kind === "message") {
+        this.sql.exec("INSERT OR IGNORE INTO plan (one, trial_ends_at, updated_at) VALUES (1, ?, ?)", first.trialEndsAt, now);
+      }
       const created = this.sql.exec(
         `INSERT OR IGNORE INTO agent (one, agent_key, channel, channel_user_id, tz, checkin_local, created_at)
          VALUES (1, ?, ?, ?, ?, ?, ?)`,
@@ -271,7 +296,7 @@ export class AgentStore {
         .toArray();
       const [head] = ready;
       if (!head) return null;
-      const command = (r: (typeof ready)[number]) => r.kind === "message" && isBoxCommand(fromJson<AgentEvent>(r.payload));
+      const command = (r: (typeof ready)[number]) => r.kind === "message" && commandOf(fromJson<AgentEvent>(r.payload)) !== null;
       const end = head.kind === "message" && !command(head) ? ready.findIndex((r) => r.kind !== "message" || command(r)) : 1;
       const rows = end === -1 ? ready : ready.slice(0, end);
       const keys = rows.map((r) => r.event_key);
@@ -295,11 +320,11 @@ export class AgentStore {
     });
   }
 
-  refusedToday(dayStart: EpochMs): boolean {
+  /** Whether a message turn today already ended this way, which is when its one notice a day went out. */
+  toldToday(outcome: "refused_budget" | "lapsed", dayStart: EpochMs): boolean {
     return (
-      this.sql
-        .exec("SELECT 1 FROM inbox WHERE outcome = 'refused_budget' AND finished_at >= ? AND kind = 'message' LIMIT 1", dayStart)
-        .toArray().length > 0
+      this.sql.exec("SELECT 1 FROM inbox WHERE outcome = ? AND finished_at >= ? AND kind = 'message' LIMIT 1", outcome, dayStart).toArray()
+        .length > 0
     );
   }
 
@@ -384,42 +409,95 @@ export class AgentStore {
 
   box(): Box | null {
     const r = this.sql
-      .exec<BoxCols>("SELECT name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at FROM box")
+      .exec<BoxCols>(
+        "SELECT name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at, poll_at, reclaim_at FROM box",
+      )
       .toArray()[0];
     return r ? toBox(r) : null;
   }
 
   private writeBox(b: Box): void {
+    const out = b.state === "signed_out" ? b : null;
     this.sql.exec(
-      `INSERT INTO box (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO box (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at, poll_at, reclaim_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (one) DO UPDATE SET name = excluded.name, host = excluded.host, url = excluded.url, state = excluded.state,
          state_at = excluded.state_at, link_sent_at = excluded.link_sent_at, signin_poll_until = excluded.signin_poll_until,
-         error = excluded.error, attempts = excluded.attempts, next_at = excluded.next_at`,
+         error = excluded.error, attempts = excluded.attempts, next_at = excluded.next_at, poll_at = excluded.poll_at,
+         reclaim_at = excluded.reclaim_at`,
       b.name,
       b.host,
       b.url,
       b.state,
       b.stateAt,
-      b.state === "signed_out" ? b.linkSentAt : null,
-      b.state === "signed_out" ? b.pollUntil : null,
+      out?.linkSentAt ?? null,
+      out?.pollUntil ?? null,
       b.state === "failed" ? b.error : null,
-      b.state === "provisioning" ? b.attempts : 0,
+      b.state === "provisioning" || b.state === "reclaiming" ? b.attempts : 0,
       dueAt(b),
+      out?.pollAt ?? null,
+      out?.reclaimAt ?? null,
     );
   }
 
   /** A box change and the message it owes the person land together, so a crash can't send one without the other. */
-  applyBox(b: Box, message: BoxMessage | null, logs: readonly LogRow[], now: EpochMs): void {
+  applyBox(b: Box, message: NoteMessage | null, logs: readonly LogRow[], now: EpochMs): void {
     this.tx(() => {
       this.writeBox(b);
-      if (message) {
-        const key = eventKey.box(b.name);
-        this.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES ('note', ?, ?, ?)", message.note, now, key);
-        this.insertOutbox(key, { texts: message.texts, intent: "requested", triggerKind: "message" }, now);
-      }
+      if (message) this.insertMessage(eventKey.box(b.name), message, now);
       this.insertLogs(logs, now);
     });
+  }
+
+  removeBox(name: BoxName, message: NoteMessage, now: EpochMs): void {
+    this.tx(() => {
+      this.sql.exec("DELETE FROM box WHERE name = ?", name);
+      this.insertMessage(eventKey.box(name), message, now);
+    });
+  }
+
+  private insertMessage(key: EventKey, message: NoteMessage, now: EpochMs): void {
+    this.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES ('note', ?, ?, ?)", message.note, now, key);
+    this.insertOutbox(key, { texts: message.texts, intent: "requested", triggerKind: "message" }, now);
+  }
+
+  plan(): PlanRow | null {
+    const r = this.sql
+      .exec<PlanCols>("SELECT trial_ends_at, own_subscription, own_plan, seat_subscription, seat_owner FROM plan")
+      .toArray()[0];
+    if (!r) return null;
+    return {
+      trialEndsAt: r.trial_ends_at,
+      own: r.own_subscription !== null && r.own_plan !== null ? { id: r.own_subscription, plan: r.own_plan } : null,
+      seat: r.seat_subscription !== null && r.seat_owner !== null ? { id: r.seat_subscription, owner: r.seat_owner } : null,
+    };
+  }
+
+  /** `trialEndsAt` applies only when the row doesn't exist yet. */
+  applyStanding(s: Standing, trialEndsAt: EpochMs, message: { readonly key: EventKey; readonly message: NoteMessage } | null, now: EpochMs): void {
+    this.tx(() => {
+      this.sql.exec(
+        `INSERT INTO plan (one, trial_ends_at, own_subscription, own_plan, seat_subscription, seat_owner, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (one) DO UPDATE SET own_subscription = excluded.own_subscription, own_plan = excluded.own_plan,
+           seat_subscription = excluded.seat_subscription, seat_owner = excluded.seat_owner, updated_at = excluded.updated_at`,
+        trialEndsAt,
+        s.own?.id ?? null,
+        s.own?.plan ?? null,
+        s.seat?.id ?? null,
+        s.seat?.owner ?? null,
+        now,
+      );
+      if (message && this.agent()) this.insertMessage(message.key, message.message, now);
+    });
+  }
+
+  billingEventSeen(id: string): boolean {
+    return this.sql.exec("SELECT 1 FROM billing_event WHERE id = ?", id).toArray().length > 0;
+  }
+
+  billingEventDone(id: string, now: EpochMs): void {
+    this.sql.exec("INSERT OR IGNORE INTO billing_event (id, at) VALUES (?, ?)", id, now);
   }
 
   appendLogs(logs: readonly LogRow[], now: EpochMs): void {
@@ -735,5 +813,6 @@ export class AgentStore {
   prune(now: EpochMs): void {
     this.sql.exec("DELETE FROM inbox WHERE status IN ('done', 'failed') AND finished_at < ?", now - DEDUPE_WINDOW_MS);
     this.sql.exec("DELETE FROM outbox WHERE status IN ('sent', 'dropped') AND closed_at < ?", now - OUTBOX_KEEP_MS);
+    this.sql.exec("DELETE FROM billing_event WHERE at < ?", now - DEDUPE_WINDOW_MS);
   }
 }

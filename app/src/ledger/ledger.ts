@@ -97,7 +97,7 @@ export type ModelCallStatus = (typeof MODEL_CALL_STATUSES)[number];
 export const BACKENDS = ["api", "box"] as const;
 export type Backend = (typeof BACKENDS)[number];
 
-export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "model_failed", "poison", "no_model", "stale"] as const;
+export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "lapsed", "model_failed", "poison", "no_model", "stale"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 
 export const ACTION_REJECTIONS = [...REMINDER_REJECTIONS, "not_pending", "too_many_sends", "too_many_actions", "too_long"] as const;
@@ -159,6 +159,8 @@ export interface Ledger {
   requestLease(req: LeaseRequest): Promise<LeaseAnswer>;
   /** Records the box in the inventory unless MAX_BOXES are live. A retry for a box already recorded is granted. */
   claimBox(req: BoxClaim): Promise<"granted" | "full">;
+  /** Marks the person's box deleted, which frees its slot. Done when it already is. */
+  releaseBox(agent: AgentKey, at: EpochMs): Promise<void>;
 }
 
 const APPEND_CHUNK = 100;
@@ -266,12 +268,16 @@ export function d1Ledger(db: D1Database, ceiling: MicroUsd): Ledger {
             `INSERT INTO boxes (agent_key, name, host, created_at)
              SELECT ?1, ?2, ?3, ?4
              WHERE (SELECT COUNT(*) FROM boxes WHERE deleted_at IS NULL) < ?5
-             ON CONFLICT (agent_key) DO NOTHING`,
+             ON CONFLICT (agent_key) DO UPDATE SET name = excluded.name, host = excluded.host, created_at = excluded.created_at, deleted_at = NULL
+               WHERE boxes.deleted_at IS NOT NULL`,
           )
           .bind(req.agent, req.name, req.host, req.at, req.max),
         db.prepare("SELECT 1 AS one FROM boxes WHERE agent_key = ?1 AND deleted_at IS NULL").bind(req.agent),
       ]);
       return live?.results.length ? "granted" : "full";
+    },
+    async releaseBox(agent, at) {
+      await db.prepare("UPDATE boxes SET deleted_at = ? WHERE agent_key = ? AND deleted_at IS NULL").bind(at, agent).run();
     },
   };
 }

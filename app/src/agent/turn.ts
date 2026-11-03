@@ -204,6 +204,7 @@ export const NOTICE = {
   cancelNotFound: "(I couldn't find that reminder, so nothing was cancelled.)",
   lateFallback: (dueLocal: string) => `Sorry, this is late. It was due at ${dueLocal}.`,
   monthlyLimit: "I've reached my usage limit for this month, so I can't help until it resets on the 1st.",
+  lapsed: "You have no active plan, so I can't answer messages for now. Send /plan to pick one.",
   failed: "Sorry, I couldn't process that. Could you say it again?",
   reminder: (note: string) => `Reminder: ${note}`,
 } as const;
@@ -428,6 +429,7 @@ export type NoModelReason =
   | { readonly kind: "block" }
   | { readonly kind: "stale_lifecycle" }
   | { readonly kind: "refused_budget"; readonly alreadyToldToday: boolean }
+  | { readonly kind: "lapsed"; readonly alreadyToldToday: boolean }
   | { readonly kind: "model_failed" }
   | { readonly kind: "poison" }
   | { readonly kind: "command"; readonly text: string; readonly note: string };
@@ -461,6 +463,10 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     case "refused_budget":
       outcome = "refused_budget";
       text = textWithoutModel(view, why.alreadyToldToday ? null : NOTICE.monthlyLimit);
+      break;
+    case "lapsed":
+      outcome = "lapsed";
+      text = textWithoutModel(view, why.alreadyToldToday ? null : NOTICE.lapsed);
       break;
     case "model_failed":
     case "poison":

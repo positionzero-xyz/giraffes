@@ -2,8 +2,13 @@
  * Scenarios use dates in 2099. The runtime fires a stored alarm on its own once the real clock passes
  * it, which would race the test's explicit runs; far-future fake times keep every alarm in the future.
  */
+import { createHmac } from "node:crypto";
 import { env, runInDurableObject, SELF } from "cloudflare:test";
-import type { Agent, AgentSnapshot, BoxDeps } from "../src/agent/agent";
+import worker from "../src/worker";
+import { d1Billing, type BillingStore } from "../src/billing/store";
+import type { CheckoutRequest, CheckoutResult, StripeApi } from "../src/billing/stripe";
+import { loadConfig, type BillingConfig, type Env } from "../src/config";
+import type { Agent, AgentSnapshot, BillingDeps, BoxDeps } from "../src/agent/agent";
 import { boxClient } from "../src/box/client";
 import type { BoxHost, HostResult } from "../src/box/host";
 import { boxName, type BoxName } from "../src/box/names";
@@ -49,6 +54,9 @@ export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): Mem
       if (!boxes.has(req.agent) && boxes.size >= req.max) return "full";
       if (!boxes.has(req.agent)) boxes.set(req.agent, { name: req.name, host: req.host });
       return "granted";
+    },
+    async releaseBox(agent) {
+      boxes.delete(agent);
     },
     async append(batch) {
       for (const row of batch) {
@@ -131,6 +139,7 @@ export async function devChat(
     readonly ledger?: MemoryLedger;
     readonly deliveries?: readonly DeliveryStep[];
     readonly box?: BoxDeps;
+    readonly billing?: BillingDeps;
   },
 ): Promise<DevChat> {
   const clock = fakeClock(local(opts.at));
@@ -139,7 +148,8 @@ export async function devChat(
   const stub = env.AGENT.get(env.AGENT.idFromName(personAgentKey({ channel: "dev", channelUserId: user })));
   const channels = { line: channel, telegram: channel, dev: channel };
   const box = opts.box ? { box: opts.box } : {};
-  await runInDurableObject<Agent, void>(stub, (agent) => agent.withDeps({ model: opts.model, clock, ledger, channels, ...box }));
+  const billing = opts.billing ? { billing: opts.billing } : {};
+  await runInDurableObject<Agent, void>(stub, (agent) => agent.withDeps({ model: opts.model, clock, ledger, channels, ...box, ...billing }));
   let seen = 0;
   const nextAlarm = () => runInDurableObject(stub, (_agent, state) => state.storage.getAlarm());
 
@@ -208,6 +218,8 @@ export const chat = (text: string): ScriptStep => turn({ actions: [send(text)], 
 export const BOX_SECRET = "test-secret-0123456789abcdef";
 
 export type HostStep = "ok" | "die" | { readonly retryable: boolean; readonly detail: string };
+/** `die` removes the app and then throws, as a crash right after the host call would. */
+export type DestroyStep = "ok" | "die" | "fail";
 
 export type BoxReplyStep =
   | { readonly kind: "reply"; readonly step: ScriptStep }
@@ -219,6 +231,7 @@ export type FakeBox = {
   /** Apps the host has created; a step that died after creating one leaves it here, as a real crash would. */
   readonly created: Set<string>;
   readonly ensureCalls: string[];
+  readonly destroyCalls: string[];
   readonly healthCalls: string[];
   readonly parses: { readonly authorization: string | null; readonly user: string }[];
   readonly replies: BoxReplyStep[];
@@ -227,11 +240,15 @@ export type FakeBox = {
 };
 
 /** A BoxHost and the box's HTTP server behind the real box client, wired through a fake fetch. */
-export function fakeBox(opts: { readonly maxBoxes?: number; readonly host?: readonly HostStep[]; readonly signedIn?: boolean } = {}): FakeBox {
+export function fakeBox(
+  opts: { readonly maxBoxes?: number; readonly host?: readonly HostStep[]; readonly destroy?: readonly DestroyStep[]; readonly signedIn?: boolean } = {},
+): FakeBox {
   const steps = [...(opts.host ?? [])];
+  const destroySteps = [...(opts.destroy ?? [])];
   const box = {
     created: new Set<string>(),
     ensureCalls: [] as string[],
+    destroyCalls: [] as string[],
     healthCalls: [] as string[],
     parses: [] as { authorization: string | null; user: string }[],
     replies: [] as BoxReplyStep[],
@@ -251,6 +268,14 @@ export function fakeBox(opts: { readonly maxBoxes?: number; readonly host?: read
       }
       if (step !== "ok") return { ok: false, ...step };
       box.created.add(name);
+      return { ok: true };
+    },
+    async destroy(name): Promise<HostResult> {
+      box.destroyCalls.push(name);
+      const step = destroySteps.shift() ?? "ok";
+      if (step === "fail") return { ok: false, retryable: true, detail: "DELETE /apps: 503" };
+      box.created.delete(name);
+      if (step === "die") throw new Error("the host step died after destroying the app");
       return { ok: true };
     },
   };
@@ -283,4 +308,108 @@ export function fakeBox(opts: { readonly maxBoxes?: number; readonly host?: read
   };
   const deps: BoxDeps = { host, client: boxClient(fetch), secret: BOX_SECRET, maxBoxes: opts.maxBoxes ?? 10 };
   return Object.assign(box, { deps });
+}
+
+export const STRIPE_VARS = {
+  BILLING: "on",
+  STRIPE_SECRET_KEY: "sk_test_fake",
+  STRIPE_WEBHOOK_SECRET: "whsec_test_fake",
+  STRIPE_PRICE_STANDARD: "price_standard",
+  STRIPE_PRICE_PLUS: "price_plus",
+  STRIPE_PRICE_SEAT: "price_seat",
+  STRIPE_PRICE_AI: "price_ai",
+  PUBLIC_URL: "https://giraffes.test",
+} as const;
+
+export type FakeStripe = StripeApi & { readonly checkouts: CheckoutRequest[]; failing: boolean };
+
+export function fakeStripe(): FakeStripe {
+  const stripe = {
+    checkouts: [] as CheckoutRequest[],
+    failing: false,
+    async checkout(req: CheckoutRequest): Promise<CheckoutResult> {
+      stripe.checkouts.push(req);
+      if (stripe.failing) return { ok: false, detail: "checkout 500" };
+      return { ok: true, url: `https://checkout.stripe.test/${req.plan}/${encodeURIComponent(req.idempotencyKey)}` };
+    },
+  };
+  return stripe;
+}
+
+export type BillingKit = { readonly deps: BillingDeps; readonly stripe: FakeStripe; readonly config: Extract<BillingConfig, { on: true }> };
+
+/** BILLING=on with the real D1 store and a fake Stripe API. `vars` overrides the env, such as TRIAL_DAYS. */
+export function billingOn(vars: Record<string, string> = {}, store: BillingStore = d1Billing(env.LEDGER)): BillingKit {
+  const config = loadConfig({ MODEL_BACKEND: "scripted", DEV_MODE: "1", ...STRIPE_VARS, ...vars } as unknown as Env).billing;
+  if (!config.on) throw new Error("billingOn needs BILLING=on");
+  const stripe = fakeStripe();
+  return { deps: { config, store, stripe }, stripe, config };
+}
+
+export function signStripe(payload: string, at: number = Date.now(), secret: string = STRIPE_VARS.STRIPE_WEBHOOK_SECRET): string {
+  const t = Math.floor(at / 1000);
+  return `t=${t},v1=${createHmac("sha256", secret).update(`${t}.${payload}`).digest("hex")}`;
+}
+
+/** Posts to the real Worker route with BILLING=on in its env. */
+export async function postStripe(event: unknown, opts: { readonly signature?: string; readonly vars?: Record<string, string> } = {}): Promise<Response> {
+  const payload = JSON.stringify(event);
+  const req = new Request("https://agent.test/webhook/stripe", {
+    method: "POST",
+    headers: { "stripe-signature": opts.signature ?? signStripe(payload) },
+    body: payload,
+  });
+  return worker.fetch(req, { ...env, ...STRIPE_VARS, ...opts.vars } as Env);
+}
+
+let stripeEvents = 0;
+const seconds = (t: EpochMs | string) => Math.floor((typeof t === "string" ? local(t) : t) / 1000);
+
+export function subscriptionEvent(o: {
+  readonly user: string;
+  readonly sub: string;
+  readonly plan: "standard" | "plus" | "ai";
+  readonly status: string;
+  readonly periodEnd: string;
+  readonly created: string;
+  readonly type?: "customer.subscription.created" | "customer.subscription.updated" | "customer.subscription.deleted";
+  readonly extraSeats?: number;
+  readonly id?: string;
+}) {
+  const items = [{ price: { id: `price_${o.plan}` }, quantity: 1, current_period_end: seconds(o.periodEnd) }];
+  if (o.extraSeats) items.push({ price: { id: "price_seat" }, quantity: o.extraSeats, current_period_end: seconds(o.periodEnd) });
+  return {
+    id: o.id ?? `evt_${++stripeEvents}`,
+    type: o.type ?? "customer.subscription.updated",
+    created: seconds(o.created),
+    data: {
+      object: {
+        id: o.sub,
+        object: "subscription",
+        status: o.status,
+        metadata: { agent_key: personAgentKey({ channel: "dev", channelUserId: o.user }), plan: o.plan },
+        items: { object: "list", data: items },
+      },
+    },
+  };
+}
+
+export function checkoutEvent(o: { readonly user: string; readonly sub: string; readonly plan: "standard" | "plus" | "ai"; readonly created: string; readonly id?: string }) {
+  const agent = personAgentKey({ channel: "dev", channelUserId: o.user });
+  return {
+    id: o.id ?? `evt_${++stripeEvents}`,
+    type: "checkout.session.completed",
+    created: seconds(o.created),
+    data: {
+      object: {
+        id: `cs_${stripeEvents}`,
+        object: "checkout.session",
+        mode: "subscription",
+        client_reference_id: agent,
+        metadata: { agent_key: agent, plan: o.plan },
+        subscription: o.sub,
+        payment_status: "paid",
+      },
+    },
+  };
 }

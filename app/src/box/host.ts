@@ -18,6 +18,8 @@ export interface BoxHost {
   urlOf(name: BoxName): string;
   /** Converges on a running box. Safe to call again after any partial run. */
   ensure(name: BoxName, token: BoxToken): Promise<HostResult>;
+  /** Removes the box and the person's data on it. Done when the box is already gone. */
+  destroy(name: BoxName): Promise<HostResult>;
 }
 
 /**
@@ -31,6 +33,7 @@ export function staticHost(cfg: { readonly url: string; readonly appPrefix: stri
     nameFor: async () => name,
     urlOf: () => cfg.url,
     ensure: async () => HOST_OK,
+    destroy: async () => HOST_OK,
   };
 }
 

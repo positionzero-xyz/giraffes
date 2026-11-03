@@ -7,7 +7,7 @@ import { BOX, boxMessage, type BoxSay } from "../src/box/machine";
 import { boxName, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs } from "../src/domain";
-import { BOX_SECRET, chat, devChat, fakeBox, local, memoryLedger, scripted } from "./testkit";
+import { BOX_SECRET, chat, devChat, fakeBox, local, memoryLedger, quiet, scripted, turn } from "./testkit";
 
 const say = (s: BoxSay) => boxMessage(s, null).text;
 const LINK = /^https:\/\/([a-z0-9-]+)\.box\.test\/signin#t=(\d+)\.([A-Za-z0-9_-]+)$/m;
@@ -465,5 +465,107 @@ describe("connecting a Claude plan", () => {
     expect(sent.slice(0, 2)).toEqual(["Hi!", say("setting_up")]);
     expect(model.calls).toHaveLength(1);
     expect(model.calls[0].user).not.toContain("/claude");
+  });
+});
+
+const quietCheckin = () => turn({ actions: [quiet()], task: ["chat", "checkin", "none"] });
+
+describe("reclaiming a box nobody signed in to", () => {
+  test("48 hours after the first link the box is destroyed, its slot freed, its row forgotten, and /claude starts over", async () => {
+    const box = fakeBox();
+    const ledger = memoryLedger();
+    const c = await devChat("lea", { model: scripted([quietCheckin(), quietCheckin()]), at: "2099-11-04T10:00", box: box.deps, ledger });
+    const name = await box.nameOf("lea");
+    await c.say("/claude");
+    await c.received();
+
+    await c.advanceTo("2099-11-05T12:00");
+    await c.say("/claude");
+    expect(await c.received()).toHaveLength(1);
+    await c.advanceTo("2099-11-06T09:59");
+    expect((await c.snapshot()).box?.state).toBe("signed_out");
+    expect(box.destroyCalls).toEqual([]);
+
+    await c.advanceTo("2099-11-06T10:00");
+
+    expect(await c.received()).toEqual([say("reclaimed")]);
+    expect(box.destroyCalls).toEqual([name]);
+    expect(box.created.has(name)).toBe(false);
+    expect(ledger.boxes.has("p:dev:lea")).toBe(false);
+    expect((await c.snapshot()).box).toBeNull();
+
+    await c.say("/claude");
+    const [again, link] = await c.received();
+    expect(again).toBe(say("setting_up"));
+    expect((await linkIn(link, "lea", local("2099-11-06T10:00"))).valid).toBe(true);
+    expect(ledger.boxes.has("p:dev:lea")).toBe(true);
+  });
+
+  test("a box that was ever signed in is never destroyed on its own", async () => {
+    const box = fakeBox({ signedIn: true });
+    const model = scripted([chat("From the API."), quietCheckin(), quietCheckin(), quietCheckin()]);
+    const c = await devChat("max", { model, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    box.signedIn = false;
+    box.replies.push({ kind: "signed_out" });
+    await c.say("hello");
+    await c.received();
+
+    await c.advanceTo("2099-11-07T12:00");
+
+    expect(box.destroyCalls).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("signed_out");
+    expect(await c.received()).toEqual([]);
+  });
+
+  test("a box found signed in at reclaim time is kept and connected", async () => {
+    const box = fakeBox();
+    const c = await devChat("ned", { model: scripted([quietCheckin(), quietCheckin()]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+    await c.advanceTo("2099-11-06T09:00");
+
+    box.signedIn = true;
+    await c.advanceTo("2099-11-06T10:00");
+
+    expect(await c.received()).toEqual([say("connected")]);
+    expect(box.destroyCalls).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+  });
+
+  test("a crash between the host's destroy and the row update converges on the retry with one message", async () => {
+    const box = fakeBox({ destroy: ["die"] });
+    const ledger = memoryLedger();
+    const c = await devChat("ola", { model: scripted([quietCheckin(), quietCheckin()]), at: "2099-11-04T10:00", box: box.deps, ledger });
+    const name = await box.nameOf("ola");
+    await c.say("/claude");
+    await c.received();
+
+    await c.advanceTo("2099-11-06T10:00");
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+    expect(ledger.boxes.has("p:dev:ola")).toBe(true);
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("resetting")]);
+
+    await c.advanceTo("2099-11-06T10:05");
+
+    expect(await c.received()).toEqual([say("reclaimed")]);
+    expect(box.destroyCalls).toEqual([name, name]);
+    expect(ledger.boxes.has("p:dev:ola")).toBe(false);
+    expect((await c.snapshot()).box).toBeNull();
+  });
+
+  test("a destroy that fails every time keeps retrying with backoff and tells the person nothing", async () => {
+    const box = fakeBox({ destroy: Array(200).fill("fail") });
+    const c = await devChat("pia", { model: scripted([quietCheckin(), quietCheckin(), quietCheckin()]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    await c.advanceTo("2099-11-07T10:00");
+
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+    expect(box.destroyCalls.length).toBeGreaterThan(20);
+    expect(box.destroyCalls.length).toBeLessThan(40);
   });
 });

@@ -1,16 +1,20 @@
 import { DurableObject } from "cloudflare:workers";
 import type { z } from "zod";
-import { apiCapOf, NO_STANDING, PAID_PLANS, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan, type Standing } from "../billing/plan";
+import { apiCapOf, NO_STANDING, PAID_PLANS, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan, type Standing, type SubscriptionId } from "../billing/plan";
 import {
   BILLING_BUSY,
   BILLING_OFF,
+  DUPLICATE,
   INVITE_FOR_MS,
   INVITE_NOT_OWNER,
   inviteFull,
   inviteText,
   JOIN,
   LEFT,
+  manage,
+  MANAGE_NOTE,
   NO_LINKS,
+  NO_PORTAL,
   NOT_SEATED,
   planChanged,
   planChoices,
@@ -183,8 +187,22 @@ export class Agent extends DurableObject<Env> {
     for (const member of await store.members(sub.id)) {
       await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member);
     }
+    await this.#flagDuplicate(sub.owner);
     this.#store.billingEventDone(e.id, this.#deps.clock.now());
     return "applied";
+  }
+
+  /** Two paying subscriptions need a person to decide which to refund, so nothing is cancelled here. */
+  async #flagDuplicate(owner: AgentKey): Promise<void> {
+    const { store } = this.#deps.billing;
+    const now = this.#deps.clock.now();
+    const owned = await store.owned(owner, now);
+    if (owned.length < 2) return;
+    console.error("person owns more than one paying subscription", owner, owned.join(" "));
+    await store.recordDuplicate(owner, owned, now);
+    this.#store.notifyOnce(`duplicate:${owned.join(" ")}`, eventKey.billing("duplicate"), { texts: [DUPLICATE], note: DUPLICATE }, now);
+    await this.#armNoLaterThan(now);
+    this.ctx.waitUntil(this.alarm());
   }
 
   async refreshPlan(agent: AgentKey): Promise<void> {
@@ -415,9 +433,10 @@ export class Agent extends DurableObject<Env> {
     const say = (text: string) => ({ text, note: text });
     switch (command.kind) {
       case "plan": {
-        const { plan } = await this.#standingNow(agent);
+        const { plan, standing } = await this.#standingNow(agent);
         const places = plan.kind === "plus" && plan.role === "owner" ? await store.places(agent, now) : null;
         const status = planStatus(plan, now, places);
+        if (config.on && standing.own) return this.#manageLink(status, standing.own.id);
         if (!config.on || (plan.kind !== "trial" && plan.kind !== "lapsed")) return say(status);
         const links = await this.#checkoutLinks(agent, view.batch.items[0].key);
         if (!links) return say(`${status}\n${NO_LINKS}`);
@@ -446,21 +465,50 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
+  async #manageLink(status: string, id: SubscriptionId): Promise<{ readonly text: string; readonly note: string }> {
+    const { store, stripe } = this.#deps.billing;
+    const customer = await store.customer(id);
+    const portal = stripe && customer ? await stripe.portal(customer) : null;
+    if (!portal?.ok) {
+      console.warn("portal link failed", id, portal ? portal.detail : "no customer");
+      return { text: `${status}\n${NO_PORTAL}`, note: `${status}\n${NO_PORTAL}` };
+    }
+    return { text: `${status}\n${manage(portal.value.url)}`, note: `${status}\n${manage(MANAGE_NOTE)}` };
+  }
+
+  /**
+   * Sessions an earlier /plan handed out are expired first, so at most one set can be paid. A retried turn
+   * gets its own sessions back from the idempotency key, so those are left open.
+   */
   async #checkoutLinks(agent: AgentKey, key: EventKey): Promise<Links | null> {
     const stripe = this.#deps.billing.stripe;
     if (!stripe) return null;
+    const stale = this.#store.openCheckouts().filter((c) => c.eventKey !== key);
+    const expiries = await Promise.all(stale.map(async (c) => ({ id: c.id, result: await stripe.expireCheckout(c.id) })));
+    let expired = true;
+    for (const { id, result } of expiries) {
+      if (result.ok) this.#store.checkoutClosed(id);
+      else {
+        console.warn("checkout expiry failed", id, result.detail);
+        expired = false;
+      }
+    }
+    if (!expired) return null;
+
     const results = await Promise.all(
       PAID_PLANS.map(async (plan) => ({ plan, result: await stripe.checkout({ agent, plan, idempotencyKey: `${agent}|${key}|${plan}` }) })),
     );
+    const now = this.#deps.clock.now();
     const links: Partial<Record<PaidPlan, string>> = {};
     for (const { plan, result } of results) {
       if (!result.ok) {
         console.warn("checkout failed", plan, result.detail);
-        return null;
+        continue;
       }
+      this.#store.checkoutOpened(result.value.id, key, now);
       links[plan] = result.value.url;
     }
-    return links as Links;
+    return PAID_PLANS.every((p) => links[p]) ? (links as Links) : null;
   }
 
   async #boxCommand(view: TurnView, agent: AgentKey): Promise<void> {

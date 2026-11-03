@@ -1,10 +1,10 @@
 import { env } from "cloudflare:test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { NOTICE } from "../src/agent/turn";
-import { planAllowsBox, planOf, type PlanRules, type Subscription, type SubscriptionId } from "../src/billing/plan";
-import { BILLING_BUSY, BILLING_OFF, inviteFull, JOIN, LEFT, NO_LINKS, NOT_SEATED } from "../src/billing/say";
+import { planAllowsBox, planOf, type CustomerId, type PlanRules, type Subscription, type SubscriptionId } from "../src/billing/plan";
+import { BILLING_BUSY, BILLING_OFF, DUPLICATE, inviteFull, JOIN, LEFT, NO_LINKS, NO_PORTAL, NOT_SEATED } from "../src/billing/say";
 import { d1Billing, type BillingStore } from "../src/billing/store";
-import { checkoutForm, parseEvent, parseSubscription, stripeApi, verifySignature } from "../src/billing/stripe";
+import { checkoutForm, parseEvent, parseSubscription, stripeApi, verifySignature, type CheckoutId } from "../src/billing/stripe";
 import { DEFAULT_AMOUNTS, stripeSetup } from "../src/billing/setup";
 import { formBody, STRIPE_EVENT_TYPES } from "../src/billing/wire";
 import { boxMessage } from "../src/box/machine";
@@ -79,7 +79,7 @@ describe("configuration", () => {
     expect(load({})).toEqual({ on: false, rules: { trialDays: 14, plusSeats: 3, plusMaxSeats: 6, aiCapMicro: 1_000_000 } });
   });
 
-  test.each(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_STANDARD", "STRIPE_PRICE_PLUS", "STRIPE_PRICE_SEAT", "STRIPE_PRICE_AI", "PUBLIC_URL"])(
+  test.each(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_STANDARD", "STRIPE_PRICE_PLUS", "STRIPE_PRICE_SEAT", "STRIPE_PRICE_AI", "STRIPE_PORTAL_CONFIGURATION", "PUBLIC_URL"])(
     "BILLING=on without %s fails at load",
     (name) => {
       const vars: Record<string, string> = { ...STRIPE_VARS };
@@ -119,10 +119,10 @@ describe("stripe boundary", () => {
     const sent: { url: string; headers: Headers; body: string }[] = [];
     const api = stripeApi(cfg, rules, async (url, init) => {
       sent.push({ url, headers: new Headers(init?.headers), body: String(init?.body) });
-      return Response.json({ url: "https://checkout.stripe.com/c/pay/cs_test_1" });
+      return Response.json({ id: "cs_test_1", url: "https://checkout.stripe.com/c/pay/cs_test_1" });
     });
 
-    expect(await api.checkout({ agent: agent("ann"), plan: "plus", idempotencyKey: "k1" })).toEqual({ ok: true, value: { url: "https://checkout.stripe.com/c/pay/cs_test_1" } });
+    expect(await api.checkout({ agent: agent("ann"), plan: "plus", idempotencyKey: "k1" })).toEqual({ ok: true, value: { id: "cs_test_1", url: "https://checkout.stripe.com/c/pay/cs_test_1" } });
 
     expect(sent[0].url).toBe("https://api.stripe.com/v1/checkout/sessions");
     expect(sent[0].headers.get("authorization")).toBe("Bearer sk_test_fake");
@@ -147,6 +147,38 @@ describe("stripe boundary", () => {
     });
     expect(formBody({ "a[b]": "x y" })).toBe("a%5Bb%5D=x%20y");
     expect(Object.keys(checkoutForm(cfg, rules, { agent: agent("ann"), plan: "standard", idempotencyKey: "k" }))).not.toContain("optional_items[0][price]");
+  });
+
+  test("the subscription read, session expiry and portal session call Stripe as documented", async () => {
+    const sent: { method: string; url: string; body: string }[] = [];
+    let status = 200;
+    const api = stripeApi(cfg, rules, async (url, init) => {
+      sent.push({ method: init?.method ?? "GET", url, body: String(init?.body ?? "") });
+      return Response.json({ id: "x", url: "https://billing.stripe.com/p/session_1" }, { status });
+    });
+
+    expect(await api.subscription("sub_1" as SubscriptionId)).toEqual({ ok: true, value: { id: "x", url: "https://billing.stripe.com/p/session_1" } });
+    expect(await api.expireCheckout("cs_1" as CheckoutId)).toEqual({ ok: true, value: "expired" });
+    expect(await api.portal("cus_1" as CustomerId)).toEqual({ ok: true, value: { url: "https://billing.stripe.com/p/session_1" } });
+    expect(sent.map((s) => `${s.method} ${s.url}`)).toEqual([
+      "GET https://api.stripe.com/v1/subscriptions/sub_1",
+      "POST https://api.stripe.com/v1/checkout/sessions/cs_1/expire",
+      "POST https://api.stripe.com/v1/billing_portal/sessions",
+    ]);
+    expect(Object.fromEntries(new URLSearchParams(sent[2].body))).toEqual({
+      customer: "cus_1",
+      configuration: "bpc_fake",
+      return_url: "https://giraffes.test/billing/done",
+    });
+
+    status = 404;
+    expect(await api.subscription("sub_gone" as SubscriptionId)).toEqual({ ok: true, value: null });
+    expect(await api.expireCheckout("cs_gone" as CheckoutId)).toEqual({ ok: true, value: "gone" });
+    status = 400;
+    expect(await api.expireCheckout("cs_paid" as CheckoutId)).toEqual({ ok: true, value: "gone" });
+    status = 503;
+    expect(await api.expireCheckout("cs_1" as CheckoutId)).toMatchObject({ ok: false, status: 503 });
+    expect(await api.subscription("sub_1" as SubscriptionId)).toMatchObject({ ok: false, status: 503 });
   });
 
   test("a Stripe error or a network failure is a failed checkout whose detail carries no key", async () => {
@@ -305,7 +337,76 @@ describe("trial and lapse", () => {
     await c.say("hello");
     expect(await c.received()).toEqual(["Welcome back."]);
     await c.say("/plan");
-    expect(await c.received()).toEqual(["You're on the Standard plan."]);
+    expect(await c.received()).toEqual(["You're on the Standard plan.\nTo change or cancel your plan: https://billing.stripe.test/p/cus_eve"]);
+  });
+});
+
+describe("checkout and the portal", () => {
+  test("a new /plan expires the Checkout sessions an earlier one handed out before making new ones", async () => {
+    const kit = billingOn();
+    const c = await devChat("fin", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("/plan", { id: "plan-a" });
+    const first = [...kit.stripe.sessions.keys()];
+    kit.stripe.sessions.set(first[1], "complete");
+
+    await c.say("/plan", { id: "plan-b" });
+
+    expect(first.map((id) => kit.stripe.sessions.get(id))).toEqual(["expired", "complete", "expired"]);
+    expect([...kit.stripe.sessions.values()].filter((s) => s === "open")).toHaveLength(3);
+    const [, second] = await c.received();
+    expect(second).toContain("Pick a plan:");
+  });
+
+  test("when an earlier session can't be expired, no new links go out, and the next /plan tries again", async () => {
+    const kit = billingOn();
+    const c = await devChat("gus", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("/plan");
+    kit.stripe.expiresFailing = true;
+    await c.say("/plan");
+    expect(kit.stripe.checkouts).toHaveLength(3);
+
+    kit.stripe.expiresFailing = false;
+    await c.say("/plan");
+
+    expect((await c.received())[1]).toBe(`You're on the free trial, with 14 days left.\n${NO_LINKS}`);
+    expect([...kit.stripe.sessions.values()]).toEqual(["expired", "expired", "expired", "open", "open", "open"]);
+  });
+
+  test("a person who pays gets a link to manage the plan instead of Checkout links, kept out of the history", async () => {
+    const kit = billingOn();
+    const c = await devChat("hal", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await pay(kit, c, "hal", "standard");
+    await c.received();
+
+    await c.say("/plan");
+
+    expect(await c.received()).toEqual(["You're on the Standard plan.\nTo change or cancel your plan: https://billing.stripe.test/p/cus_hal"]);
+    expect(kit.stripe.portals).toEqual(["cus_hal"]);
+    expect(kit.stripe.checkouts).toEqual([]);
+    expect(JSON.stringify((await c.snapshot()).turns)).not.toContain("billing.stripe.test");
+
+    kit.stripe.failing = true;
+    await c.say("/plan");
+    expect(await c.received()).toEqual([`You're on the Standard plan.\n${NO_PORTAL}`]);
+  });
+
+  test("a second paying subscription is logged and recorded, nothing is cancelled, and the person is told once", async () => {
+    const kit = billingOn();
+    const c = await devChat("ike", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("/plan");
+    await c.received();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    await stripeChange(kit, { user: "ike", sub: "sub_ike_1", plan: "standard", status: "active" });
+    await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "ai", status: "active" });
+    await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "ai", status: "active" });
+    await c.settle();
+
+    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", DUPLICATE]);
+    expect(errors.mock.calls.flat().join(" ")).toContain("sub_ike_1 sub_ike_2");
+    errors.mockRestore();
+    const found = await env.LEDGER.prepare("SELECT owner_key, subscription_ids FROM billing_duplicate").all();
+    expect(found.results).toEqual([{ owner_key: "p:dev:ike", subscription_ids: "sub_ike_1 sub_ike_2" }]);
+    expect([(await row("sub_ike_1"))?.status, (await row("sub_ike_2"))?.status]).toEqual(["active", "active"]);
   });
 });
 
@@ -533,7 +634,7 @@ describe("plus seats", () => {
     expect((await mia.snapshot()).plan).toEqual({ kind: "plus", role: "member" });
     await owner.say("/plan");
     await owner.say("/invite");
-    expect(await owner.received()).toEqual(["You're on the Plus plan, with 3 of 3 places taken. Send /invite to add someone.", inviteFull(3)]);
+    expect(await owner.received()).toEqual(["You're on the Plus plan, with 3 of 3 places taken. Send /invite to add someone.\nTo change or cancel your plan: https://billing.stripe.test/p/cus_kit", inviteFull(3)]);
 
     await pay(kit, owner, "kit", "plus", { extraSeats: 1 });
     await ola.say(`/join ${codes[2]}`);

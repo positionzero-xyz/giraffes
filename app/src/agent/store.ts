@@ -3,6 +3,7 @@
  * atomic with respect to other requests.
  */
 import type { PaidPlan, PlanRow, Standing, SubscriptionId } from "../billing/plan";
+import type { CheckoutId } from "../billing/stripe";
 import type { BoxHostKind } from "../box/host";
 import { dueAt, type Box, type BoxState } from "../box/machine";
 import { commandOf } from "./commands";
@@ -490,6 +491,30 @@ export class AgentStore {
       );
       if (message && this.agent()) this.insertMessage(message.key, message.message, now);
     });
+  }
+
+  /** Tells the person `message` unless `once` was already told, marking it like a handled Stripe event. */
+  notifyOnce(once: string, key: EventKey, message: NoteMessage, now: EpochMs): void {
+    this.tx(() => {
+      if (this.billingEventSeen(once)) return;
+      if (this.agent()) this.insertMessage(key, message, now);
+      this.billingEventDone(once, now);
+    });
+  }
+
+  openCheckouts(): readonly { readonly id: CheckoutId; readonly eventKey: EventKey }[] {
+    return this.sql
+      .exec<{ id: CheckoutId; event_key: EventKey }>("SELECT id, event_key FROM checkout_session ORDER BY created_at, id")
+      .toArray()
+      .map((r) => ({ id: r.id, eventKey: r.event_key }));
+  }
+
+  checkoutOpened(id: CheckoutId, key: EventKey, now: EpochMs): void {
+    this.sql.exec("INSERT OR IGNORE INTO checkout_session (id, event_key, created_at) VALUES (?, ?, ?)", id, key, now);
+  }
+
+  checkoutClosed(id: CheckoutId): void {
+    this.sql.exec("DELETE FROM checkout_session WHERE id = ?", id);
   }
 
   billingEventSeen(id: string): boolean {

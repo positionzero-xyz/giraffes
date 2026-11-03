@@ -196,6 +196,13 @@ export const MIGRATIONS: readonly string[] = [
   DROP TABLE plan;
   ALTER TABLE plan_next RENAME TO plan;
   `,
+  `
+  CREATE TABLE checkout_session (
+    id          TEXT PRIMARY KEY,
+    event_key   TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+  );
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

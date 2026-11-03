@@ -6,7 +6,7 @@ import { createHmac } from "node:crypto";
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import worker from "../src/worker";
 import { d1Billing, type BillingStore } from "../src/billing/store";
-import type { CheckoutRequest, StripeApi, StripeReply } from "../src/billing/stripe";
+import type { CheckoutId, CheckoutRequest, StripeApi, StripeReply } from "../src/billing/stripe";
 import { loadConfig, type BillingConfig, type Env } from "../src/config";
 import type { Agent, AgentSnapshot, BillingDeps, BoxDeps } from "../src/agent/agent";
 import { boxClient } from "../src/box/client";
@@ -318,12 +318,17 @@ export const STRIPE_VARS = {
   STRIPE_PRICE_PLUS: "price_plus",
   STRIPE_PRICE_SEAT: "price_seat",
   STRIPE_PRICE_AI: "price_ai",
+  STRIPE_PORTAL_CONFIGURATION: "bpc_fake",
   PUBLIC_URL: "https://giraffes.test",
 } as const;
 
 export type FakeStripe = StripeApi & {
   readonly checkouts: CheckoutRequest[];
+  /** Checkout sessions by id, as Stripe holds them; a repeated idempotency key gets its session back. */
+  readonly sessions: Map<string, "open" | "complete" | "expired">;
+  readonly portals: string[];
   failing: boolean;
+  expiresFailing: boolean;
   /** What Stripe holds now, by subscription id; each event's handler reads it from here. */
   readonly subscriptions: Map<string, unknown>;
   readsFailing: boolean;
@@ -335,7 +340,10 @@ export function fakeStripe(): FakeStripe {
   let hold: Promise<void> | null = null;
   const stripe: FakeStripe = {
     checkouts: [],
+    sessions: new Map(),
+    portals: [],
     failing: false,
+    expiresFailing: false,
     subscriptions: new Map(),
     readsFailing: false,
     holdNextRead() {
@@ -346,7 +354,20 @@ export function fakeStripe(): FakeStripe {
     async checkout(req) {
       stripe.checkouts.push(req);
       if (stripe.failing) return { ok: false, status: 500, detail: "checkout 500" };
-      return { ok: true, value: { url: `https://checkout.stripe.test/${req.plan}/${encodeURIComponent(req.idempotencyKey)}` } };
+      const id = `cs_${createHmac("sha256", "cs").update(req.idempotencyKey).digest("hex").slice(0, 12)}` as CheckoutId;
+      if (!stripe.sessions.has(id)) stripe.sessions.set(id, "open");
+      return { ok: true, value: { id, url: `https://checkout.stripe.test/${req.plan}/${encodeURIComponent(req.idempotencyKey)}` } };
+    },
+    async expireCheckout(id) {
+      if (stripe.expiresFailing) return { ok: false, status: 500, detail: "expire 500" };
+      if (stripe.sessions.get(id) !== "open") return { ok: true, value: "gone" };
+      stripe.sessions.set(id, "expired");
+      return { ok: true, value: "expired" };
+    },
+    async portal(customer) {
+      if (stripe.failing) return { ok: false, status: 500, detail: "portal 500" };
+      stripe.portals.push(customer);
+      return { ok: true, value: { url: `https://billing.stripe.test/p/${customer}` } };
     },
     async subscription(id): Promise<StripeReply<unknown>> {
       if (stripe.readsFailing) return { ok: false, status: null, detail: "TypeError: fetch failed" };

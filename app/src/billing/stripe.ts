@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Fetch } from "../box/host";
 import type { StripeConfig } from "../config";
-import { CHANNEL_IDS, type AgentKey, type EpochMs } from "../domain";
+import { CHANNEL_IDS, type AgentKey, type Brand, type EpochMs } from "../domain";
 import { PAID_PLANS, SUBSCRIPTION_STATUSES, type CustomerId, type PaidPlan, type PlanRules, type Subscription, type SubscriptionId } from "./plan";
 import { formBody, PRICE_NAMES, priceKey, STRIPE_API, STRIPE_EVENT_TYPES, type Form, type PriceName } from "./wire";
 
@@ -9,12 +9,16 @@ export const DONE_PATH = "/billing/done";
 const SIGNATURE_TOLERANCE_MS = 5 * 60_000;
 
 export type CheckoutRequest = { readonly agent: AgentKey; readonly plan: PaidPlan; readonly idempotencyKey: string };
+export type CheckoutId = Brand<string, "CheckoutId">;
 
 /** A failed call carries Stripe's HTTP status, or null when Stripe wasn't reached. */
 export type StripeReply<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly status: number | null; readonly detail: string };
 
 export interface StripeApi {
-  checkout(req: CheckoutRequest): Promise<StripeReply<{ readonly url: string }>>;
+  checkout(req: CheckoutRequest): Promise<StripeReply<{ readonly id: CheckoutId; readonly url: string }>>;
+  /** `gone` when the session was no longer open: paid, expired or unknown. */
+  expireCheckout(id: CheckoutId): Promise<StripeReply<"expired" | "gone">>;
+  portal(customer: CustomerId): Promise<StripeReply<{ readonly url: string }>>;
   /** The subscription as Stripe holds it now, unparsed, or null when Stripe has no such subscription. */
   subscription(id: SubscriptionId): Promise<StripeReply<unknown>>;
 }
@@ -46,7 +50,8 @@ export function checkoutForm(cfg: StripeConfig, rules: PlanRules, req: CheckoutR
   return form;
 }
 
-const CheckoutReply = z.object({ url: z.string().url() });
+const CheckoutReply = z.object({ id: z.string().min(1), url: z.string().url() });
+const PortalReply = z.object({ url: z.string().url() });
 /** Stripe's error message can echo part of the key, so only its type and code reach the logs. */
 const ErrorReply = z.object({ error: z.object({ type: z.string().optional(), code: z.string().optional() }) });
 
@@ -79,7 +84,21 @@ export function stripeApi(cfg: StripeConfig, rules: PlanRules, fetch: Fetch): St
       const r = await call("checkout", "POST", "/checkout/sessions", { form: checkoutForm(cfg, rules, req), idempotencyKey: req.idempotencyKey });
       if (!r.ok) return r;
       const parsed = CheckoutReply.safeParse(r.value);
-      return parsed.success ? { ok: true, value: { url: parsed.data.url } } : { ok: false, status: 200, detail: "checkout reply unreadable" };
+      return parsed.success
+        ? { ok: true, value: { id: parsed.data.id as CheckoutId, url: parsed.data.url } }
+        : { ok: false, status: 200, detail: "checkout reply unreadable" };
+    },
+    async expireCheckout(id) {
+      const r = await call("expire", "POST", `/checkout/sessions/${encodeURIComponent(id)}/expire`);
+      if (r.ok) return { ok: true, value: "expired" };
+      return r.status === 400 || r.status === 404 ? { ok: true, value: "gone" } : r;
+    },
+    async portal(customer) {
+      const form = { customer, configuration: cfg.portalConfiguration, return_url: `${cfg.publicUrl}${DONE_PATH}` };
+      const r = await call("portal", "POST", "/billing_portal/sessions", { form });
+      if (!r.ok) return r;
+      const parsed = PortalReply.safeParse(r.value);
+      return parsed.success ? { ok: true, value: { url: parsed.data.url } } : { ok: false, status: 200, detail: "portal reply unreadable" };
     },
     async subscription(id) {
       const r = await call("subscription", "GET", `/subscriptions/${encodeURIComponent(id)}`);

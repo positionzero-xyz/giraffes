@@ -1,5 +1,5 @@
 import type { AgentKey, EpochMs } from "../domain";
-import { isPaying, PAST_DUE_GRACE_MS, TERMINAL, type PaidPlan, type Standing, type Subscription, type SubscriptionId, type SubscriptionStatus } from "./plan";
+import { isPaying, PAST_DUE_GRACE_MS, TERMINAL, type CustomerId, type PaidPlan, type Standing, type Subscription, type SubscriptionId, type SubscriptionStatus } from "./plan";
 
 type InviteResult = { readonly kind: "created" } | { readonly kind: "not_owner" } | { readonly kind: "full"; readonly seats: number };
 export type JoinResult = "joined" | "bad_code" | "own" | "seated" | "ended" | "full";
@@ -9,6 +9,10 @@ export interface BillingStore {
   /** `s` is the state just fetched from Stripe, so it replaces the stored row unless that row is terminal. */
   applySubscription(s: Subscription, now: EpochMs): Promise<void>;
   standing(agent: AgentKey, now: EpochMs): Promise<Standing>;
+  /** Every paying subscription the person owns, in id order; more than one is a duplicate. */
+  owned(owner: AgentKey, now: EpochMs): Promise<readonly SubscriptionId[]>;
+  customer(id: SubscriptionId): Promise<CustomerId | null>;
+  recordDuplicate(owner: AgentKey, ids: readonly SubscriptionId[], now: EpochMs): Promise<void>;
   members(id: SubscriptionId): Promise<readonly AgentKey[]>;
   places(owner: AgentKey, now: EpochMs): Promise<Places | null>;
   invite(owner: AgentKey, code: string, now: EpochMs, expiresAt: EpochMs): Promise<InviteResult>;
@@ -82,6 +86,26 @@ export function d1Billing(db: D1Database): BillingStore {
       const own = rows.results.filter((r) => r.kind === "own").sort((x, y) => OWN_ORDER[x.plan] - OWN_ORDER[y.plan] || (x.id < y.id ? -1 : 1))[0];
       const seat = rows.results.find((r) => r.kind === "seat");
       return { own: own ? { id: own.id, plan: own.plan } : null, seat: seat ? { id: seat.id, owner: seat.owner } : null };
+    },
+
+    async owned(owner, now) {
+      const rows = await db
+        .prepare(`SELECT id FROM billing_subscription b WHERE owner_key = ?1 AND ${paying("b", "?2")} ORDER BY id`)
+        .bind(owner, now)
+        .all<{ id: SubscriptionId }>();
+      return rows.results.map((r) => r.id);
+    },
+
+    async customer(id) {
+      const row = await db.prepare("SELECT customer_id FROM billing_subscription WHERE id = ?").bind(id).first<{ customer_id: CustomerId | null }>();
+      return row?.customer_id ?? null;
+    },
+
+    async recordDuplicate(owner, ids, now) {
+      await db
+        .prepare("INSERT OR IGNORE INTO billing_duplicate (owner_key, subscription_ids, found_at) VALUES (?, ?, ?)")
+        .bind(owner, ids.join(" "), now)
+        .run();
     },
 
     async members(id) {

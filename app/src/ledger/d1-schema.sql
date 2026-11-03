@@ -89,6 +89,13 @@ CREATE TABLE IF NOT EXISTS billing_subscription (
 );
 CREATE INDEX IF NOT EXISTS billing_subscription_owner ON billing_subscription (owner_key);
 
+CREATE TABLE IF NOT EXISTS billing_duplicate (
+  owner_key        TEXT NOT NULL,
+  subscription_ids TEXT NOT NULL,
+  found_at         INTEGER NOT NULL,
+  PRIMARY KEY (owner_key, subscription_ids)
+);
+
 CREATE TABLE IF NOT EXISTS billing_seat (
   agent_key       TEXT PRIMARY KEY,
   subscription_id TEXT NOT NULL,

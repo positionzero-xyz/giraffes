@@ -4,7 +4,7 @@ import type { EpochMs } from "../src/domain";
 import { priceOf, routeOf } from "../src/model/model";
 import { costOf, SPEND } from "../src/policy/spend";
 import { type ScriptStep } from "../src/model/scripted";
-import { chat, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, throws, turn, wall } from "./testkit";
+import { cancel, chat, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, throws, turn, wall } from "./testkit";
 
 const until = async (done: () => boolean) => {
   for (let i = 0; i < 2000 && !done(); i++) await new Promise((r) => setTimeout(r, 1));
@@ -43,6 +43,30 @@ describe("conversation", () => {
 });
 
 describe("reminders", () => {
+  test("a reminder or cancel that code rejects is corrected in the same message, and why is logged", async () => {
+    const model = scripted([
+      turn({
+        actions: [schedule("dentist", "tomorrow at 9", "Dentist at 9"), cancel("gym"), send("Done! Dentist reminder set, gym one cancelled.")],
+        task: ["reminder", "dentist", "started"],
+      }),
+    ]);
+    const c = await devChat("zed", { model, at: "2099-11-04T10:00" });
+
+    await c.say("remind me about the dentist tomorrow at 9, and cancel the gym reminder");
+
+    expect(await c.received()).toEqual([
+      [
+        "Done! Dentist reminder set, gym one cancelled.",
+        "(I couldn't read that time, so I didn't set the reminder.)\n(I couldn't find that reminder, so nothing was cancelled.)",
+      ].join("\n"),
+    ]);
+    expect((await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder")).toEqual([]);
+    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([
+      ["schedule_wakeup:dentist", "bad_time"],
+      ["cancel_wakeup:gym", "not_pending"],
+    ]);
+  });
+
   test("'remind me at 18:00' fires through the alarm and is delivered", async () => {
     const model = scripted([
       turn({ actions: [schedule("call-clinic", "2099-11-04T18:00", "Remind: call the clinic"), send("Done.")], task: ["reminder", "call-clinic", "started"] }),

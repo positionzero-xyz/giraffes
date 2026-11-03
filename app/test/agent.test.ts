@@ -123,6 +123,22 @@ describe("reminders", () => {
     expect(c.logs("unasked")).toEqual([]);
   });
 
+  test("the agent's own wake-up can't re-arm itself for the minute it fires in", async () => {
+    const again = turn({ actions: [schedule("check", "2099-11-04T10:01", "Check again", false)], task: ["other", "check", "progressed"] });
+    const model = scripted([
+      turn({ actions: [schedule("check", "2099-11-04T10:01", "Check the thing", false), send("OK.")], task: ["other", "check", "started"] }),
+      again,
+    ]);
+    const c = await devChat("lou", { model, at: "2099-11-04T10:00" });
+    await c.say("keep an eye on it");
+
+    await c.advanceTo("2099-11-04T10:05");
+
+    expect(model.calls).toHaveLength(2);
+    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([["schedule_wakeup:check", "past"]]);
+    model.assertDone();
+  });
+
   test("the agent's own wake-up at 23:00 waits for 08:00 and says it is late", async () => {
     const model = scripted([
       turn({ actions: [schedule("bins", "2099-11-04T23:00", "Ask about the bins", false), send("OK.")], task: ["chat", "bins", "started"] }),

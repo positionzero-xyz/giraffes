@@ -170,6 +170,18 @@ describe("reminders", () => {
     expect(commit.rejected).toEqual([{ action: "schedule_wakeup:gone", reason: "past" }]);
   });
 
+  test("the agent's own wake-up needs a minute's lead; the person's may be for the current minute", () => {
+    const commit = planTurn(
+      output([schedule("asked", "2026-11-04T10:00"), schedule("mine", "2026-11-04T10:00", false), schedule("soon", "2026-11-04T10:01", false)]),
+      view({ now: (NOW + 10_000) as EpochMs }),
+    );
+    expect(commit.wakeupsAdd.map((w) => w.key)).toEqual(["asked"]);
+    expect(commit.rejected).toEqual([
+      { action: "schedule_wakeup:mine", reason: "past" },
+      { action: "schedule_wakeup:soon", reason: "past" },
+    ]);
+  });
+
   test("a key that is already pending is dropped, within a turn and across turns", () => {
     const pending = [reminder("dentist", local("2026-11-06T09:00"))];
     const commit = planTurn(output([schedule("dentist", "2026-11-07T09:00"), schedule("gym", "2026-11-05T07:00"), schedule("gym", "2026-11-05T08:00")]), view({ pending }));

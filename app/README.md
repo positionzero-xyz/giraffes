@@ -63,9 +63,10 @@ npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_w
 
 Re-running `src/ledger/d1-schema.sql` adds new tables and views, such as `action_rejection`. Do that
 before you deploy code that writes to them, or log shipping backs off until the table exists. Re-running
-the file doesn't change the CHECK constraints of a table that already exists. In a ledger created before
-`model_call.status` allowed `in_doubt`, the `INSERT OR IGNORE` that ships logs silently skips every
-`in_doubt` row, so the cost views under-count. To migrate the CHECK, rebuild the table:
+the file doesn't change the CHECK constraints of a table that already exists. A row that an old CHECK
+refuses, such as an `in_doubt` model call in a ledger created before `model_call.status` allowed it, fails
+its log flush. The flush backs off and retries, and log shipping stays stuck behind that row until the
+table is migrated. To migrate the CHECK, rebuild the table:
 
 ```sh
 npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW cost_per_agent_week; DROP INDEX model_call_agent_time; ALTER TABLE model_call RENAME TO model_call_old"

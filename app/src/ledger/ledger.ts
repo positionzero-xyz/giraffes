@@ -149,14 +149,15 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
   switch (row.stream) {
     case "agent":
       return db
-        .prepare("INSERT OR IGNORE INTO agent (id, agent_key, channel, first_seen_at) VALUES (?, ?, ?, ?)")
+        .prepare("INSERT INTO agent (id, agent_key, channel, first_seen_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")
         .bind(row.id, row.agent, row.channel, row.firstSeenAt);
     case "turn":
       return db
         .prepare(
-          `INSERT OR IGNORE INTO turn_log (id, agent_key, event_kind, batch_size, task_kind, task_key, task_status,
+          `INSERT INTO turn_log (id, agent_key, event_kind, batch_size, task_kind, task_key, task_status,
              outcome, refused_for_budget, cost_micro, attempts, started_at, finished_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO NOTHING`,
         )
         .bind(
           row.id,
@@ -176,9 +177,10 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
     case "model_call":
       return db
         .prepare(
-          `INSERT OR IGNORE INTO model_call (id, agent_key, purpose, model, status, estimate_micro, cost_micro,
+          `INSERT INTO model_call (id, agent_key, purpose, model, status, estimate_micro, cost_micro,
              input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO NOTHING`,
         )
         .bind(
           row.id,
@@ -197,17 +199,18 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
     case "unasked":
       return db
         .prepare(
-          `INSERT OR IGNORE INTO unasked_message (id, agent_key, trigger_kind, text, status, day, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO unasked_message (id, agent_key, trigger_kind, text, status, day, at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO NOTHING`,
         )
         .bind(row.id, row.agent, row.triggerKind, row.text, row.status, row.day, row.at);
     case "lifecycle":
       return db
-        .prepare("INSERT OR IGNORE INTO lifecycle (id, agent_key, change, source, at) VALUES (?, ?, ?, ?, ?)")
+        .prepare("INSERT INTO lifecycle (id, agent_key, change, source, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")
         .bind(row.id, row.agent, row.change, row.source, row.at);
     case "rejection":
       return db
-        .prepare("INSERT OR IGNORE INTO action_rejection (id, agent_key, turn_id, action, reason, at) VALUES (?, ?, ?, ?, ?, ?)")
+        .prepare("INSERT INTO action_rejection (id, agent_key, turn_id, action, reason, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")
         .bind(row.id, row.agent, row.turnId, row.action, row.reason, row.at);
     default:
       return assertNever(row);

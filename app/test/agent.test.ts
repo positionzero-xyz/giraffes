@@ -213,6 +213,8 @@ describe("requested reminders without a model", () => {
     ["the model refuses", "wim", [{ kind: "fail", failure: "refused_by_model" }]],
     ["the model call crashes three times", "wyn", [throws(), throws(), throws()]],
     ["the model is unavailable for minutes", "wyatt", Array.from({ length: 5 }, () => unavailable)],
+    ["the model answers with quiet", "wren", [turn({ actions: [quiet()], task: ["reminder", "clinic", "completed"] })]],
+    ["the model answers with only a note", "wade", [turn({ actions: [{ type: "remember", note: "Calls the clinic" }], task: ["reminder", "clinic", "completed"] })]],
   ] satisfies [string, string, ScriptStep[]][])("a reminder still arrives, written by code, when %s", async (_, user, atFiring) => {
     const model = scripted([setClinic(), ...atFiring]);
     const c = await devChat(user, { model, at: "2099-11-04T10:00" });

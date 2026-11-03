@@ -5,13 +5,16 @@
 import type { AgentKey, EpochMs } from "../domain";
 import { PAYING, TERMINAL, type PaidPlan, type Standing, type Subscription, type SubscriptionId, type SubscriptionStatus } from "./plan";
 
-export type InviteResult = { readonly kind: "created" } | { readonly kind: "not_owner" } | { readonly kind: "full"; readonly seats: number };
-export const JOIN_RESULTS = ["joined", "bad_code", "own", "seated", "ended", "full"] as const;
-export type JoinResult = (typeof JOIN_RESULTS)[number];
+type InviteResult = { readonly kind: "created" } | { readonly kind: "not_owner" } | { readonly kind: "full"; readonly seats: number };
+export type JoinResult = "joined" | "bad_code" | "own" | "seated" | "ended" | "full";
 export type Places = { readonly taken: number; readonly seats: number };
 
 export interface BillingStore {
-  /** Keeps the newer of what is stored and `s` by `supersedes`, so a replay or a late event changes nothing. */
+  /**
+   * Stripe delivers events out of order, so `s` replaces the stored row only if it is newer: a terminal
+   * state is final; otherwise the later billing period wins, then the later event, and within the same
+   * second anything beats `incomplete`. A replay or a late event changes nothing.
+   */
   applySubscription(s: Subscription, now: EpochMs): Promise<void>;
   standing(agent: AgentKey): Promise<Standing>;
   /** Everyone holding a seat on the subscription, counted or not. */

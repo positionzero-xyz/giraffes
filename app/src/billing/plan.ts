@@ -3,7 +3,7 @@ import { SPEND } from "../policy/spend";
 
 export const PAID_PLANS = ["standard", "plus", "ai"] as const;
 export type PaidPlan = (typeof PAID_PLANS)[number];
-export type PlanKind = "trial" | PaidPlan | "lapsed";
+type PlanKind = "trial" | PaidPlan | "lapsed";
 
 export type SubscriptionId = Brand<string, "SubscriptionId">;
 
@@ -34,18 +34,6 @@ export type Subscription = {
   readonly seats: number;
 };
 
-/**
- * Stripe delivers events out of order. A terminal state is final; otherwise the later billing period
- * wins, then the later event, and within the same second anything beats `incomplete`.
- */
-export function supersedes(incoming: Subscription, stored: Subscription | null): boolean {
-  if (stored === null) return true;
-  if (TERMINAL.includes(stored.status)) return false;
-  if (TERMINAL.includes(incoming.status)) return true;
-  if (incoming.periodEnd !== stored.periodEnd) return incoming.periodEnd > stored.periodEnd;
-  if (incoming.eventAt !== stored.eventAt) return incoming.eventAt > stored.eventAt;
-  return stored.status === "incomplete" && incoming.status !== "incomplete";
-}
 
 /** What D1 says a person has right now: their best paying subscription, and a Plus seat that counts. */
 export type Standing = {

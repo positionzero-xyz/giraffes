@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { NOTICE } from "../src/agent/turn";
-import { planAllowsBox, planOf, supersedes, type PlanRules, type Subscription, type SubscriptionId } from "../src/billing/plan";
+import { planAllowsBox, planOf, type PlanRules, type Subscription, type SubscriptionId } from "../src/billing/plan";
 import { BILLING_OFF, inviteFull, JOIN, LEFT, NO_LINKS, NOT_SEATED } from "../src/billing/say";
 import { d1Billing, type BillingStore } from "../src/billing/store";
 import { checkoutForm, parseEvent, stripeApi, verifySignature } from "../src/billing/stripe";
@@ -70,24 +70,6 @@ describe("plan rules", () => {
     expect((["trial", "standard", "plus", "ai", "lapsed"] as const).filter(planAllowsBox)).toEqual(["trial", "standard", "plus"]);
   });
 
-  test("a terminal state is final; otherwise the later period, then the later event, then anything over incomplete wins", () => {
-    const s = (status: Subscription["status"], periodEnd: number, eventAt: number): Subscription => ({
-      id,
-      owner: agent("o"),
-      plan: "standard",
-      status,
-      periodEnd: periodEnd as EpochMs,
-      eventAt: eventAt as EpochMs,
-      seats: 1,
-    });
-    expect(supersedes(s("active", 1, 1), null)).toBe(true);
-    expect(supersedes(s("active", 9, 9), s("canceled", 1, 1))).toBe(false);
-    expect(supersedes(s("canceled", 1, 1), s("active", 9, 9))).toBe(true);
-    expect(supersedes(s("past_due", 1, 5), s("active", 2, 1))).toBe(false);
-    expect(supersedes(s("past_due", 2, 5), s("active", 2, 4))).toBe(true);
-    expect(supersedes(s("incomplete", 2, 4), s("active", 2, 4))).toBe(false);
-    expect(supersedes(s("active", 2, 4), s("incomplete", 2, 4))).toBe(true);
-  });
 });
 
 describe("configuration", () => {
@@ -364,6 +346,37 @@ describe("stripe webhook", () => {
     }
     expect(await row("sub_joe")).toBeNull();
     expect((await postStripe({ nope: true })).status).toBe(400);
+  });
+});
+
+describe("the subscription store", () => {
+  test("a terminal state is final; otherwise the later period, then the later event, then anything over incomplete wins", async () => {
+    const store = d1Billing(env.LEDGER);
+    const id = "sub_order" as SubscriptionId;
+    const s = (status: Subscription["status"], periodEnd: number, eventAt: number): Subscription => ({
+      id,
+      owner: agent("o"),
+      plan: "standard",
+      status,
+      periodEnd: periodEnd as EpochMs,
+      eventAt: eventAt as EpochMs,
+      seats: 1,
+    });
+    const after = async (sub: Subscription) => {
+      await store.applySubscription(sub, 0 as EpochMs);
+      return (await row("sub_order"))?.status;
+    };
+    expect(await after(s("active", 2, 4))).toBe("active");
+    expect(await after(s("past_due", 1, 5))).toBe("active");
+    expect(await after(s("incomplete", 2, 4))).toBe("active");
+    expect(await after(s("past_due", 2, 5))).toBe("past_due");
+    expect(await after(s("unpaid", 2, 5))).toBe("past_due");
+    expect(await after(s("active", 3, 1))).toBe("active");
+    expect(await after(s("canceled", 1, 1))).toBe("canceled");
+    expect(await after(s("active", 9, 9))).toBe("canceled");
+    await env.LEDGER.prepare("DELETE FROM billing_subscription").run();
+    expect(await after(s("incomplete", 2, 4))).toBe("incomplete");
+    expect(await after(s("active", 2, 4))).toBe("active");
   });
 });
 

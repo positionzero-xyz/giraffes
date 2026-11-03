@@ -19,11 +19,11 @@ const PRODUCT_NAMES: Readonly<Record<PriceName, string>> = {
   ai: "Giraffes AI",
 };
 
-export const lookupKey = (p: PriceName) => `giraffes_${p}`;
+const lookupKey = (p: PriceName) => `giraffes_${p}`;
 
 type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
-export type SetupResult = {
+type SetupResult = {
   readonly prices: Readonly<Record<PriceName, string>>;
   /** `secret` is only known when the endpoint was created by this run. */
   readonly webhook: { readonly id: string; readonly secret: string | null };

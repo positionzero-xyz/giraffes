@@ -7,7 +7,7 @@ import { PAID_PLANS, SUBSCRIPTION_STATUSES, type PaidPlan, type PlanRules, type 
 import { formBody, STRIPE_API, STRIPE_EVENT_TYPES, type Form } from "./wire";
 
 export const DONE_PATH = "/billing/done";
-export const SIGNATURE_TOLERANCE_MS = 5 * 60_000;
+const SIGNATURE_TOLERANCE_MS = 5 * 60_000;
 
 export type CheckoutRequest = { readonly agent: AgentKey; readonly plan: PaidPlan; readonly idempotencyKey: string };
 export type CheckoutResult = { readonly ok: true; readonly url: string } | { readonly ok: false; readonly detail: string };
@@ -106,7 +106,7 @@ export async function verifySignature(payload: string, header: string | null, se
 /** A Stripe event as the person's Durable Object takes it: one subscription, as of that event. */
 export type BillingEvent = { readonly id: string; readonly subscription: Subscription };
 
-export type ParsedEvent =
+type ParsedEvent =
   | { readonly kind: "event"; readonly event: BillingEvent }
   | { readonly kind: "ignored"; readonly reason: string }
   | { readonly kind: "invalid"; readonly reason: string };
@@ -136,7 +136,7 @@ const paidPlan = (raw: string | null | undefined): PaidPlan | null => PAID_PLANS
 /**
  * Newer API versions moved `current_period_end` from the subscription onto its items, so either is read.
  * A checkout event carries no subscription status or period: it counts as period 0, which every
- * subscription event for the same subscription supersedes.
+ * subscription event for the same subscription replaces.
  */
 export function parseEvent(raw: unknown, cfg: StripeConfig, rules: PlanRules): ParsedEvent {
   const env = Envelope.safeParse(raw);

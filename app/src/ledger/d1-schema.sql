@@ -81,9 +81,8 @@ CREATE TABLE IF NOT EXISTS billing_subscription (
   id         TEXT PRIMARY KEY,
   owner_key  TEXT NOT NULL,
   plan       TEXT NOT NULL CHECK (plan IN ('standard', 'plus', 'ai')),
+  customer_id TEXT,
   status     TEXT NOT NULL CHECK (status IN ('incomplete', 'incomplete_expired', 'trialing', 'active', 'past_due', 'unpaid', 'paused', 'canceled')),
-  period_end INTEGER NOT NULL,
-  event_at   INTEGER NOT NULL,
   seats      INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );

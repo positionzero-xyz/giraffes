@@ -6,6 +6,7 @@ export type PaidPlan = (typeof PAID_PLANS)[number];
 type PlanKind = "trial" | PaidPlan | "lapsed";
 
 export type SubscriptionId = Brand<string, "SubscriptionId">;
+export type CustomerId = Brand<string, "CustomerId">;
 
 export const SUBSCRIPTION_STATUSES = ["incomplete", "incomplete_expired", "trialing", "active", "past_due", "unpaid", "paused", "canceled"] as const;
 export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUSES)[number];
@@ -24,13 +25,11 @@ export type PlanRules = {
 export type Subscription = {
   readonly id: SubscriptionId;
   readonly owner: AgentKey;
+  readonly customer: CustomerId | null;
   readonly plan: PaidPlan;
   readonly status: SubscriptionStatus;
-  readonly periodEnd: EpochMs;
-  readonly eventAt: EpochMs;
   readonly seats: number;
 };
-
 
 export type Standing = {
   readonly own: { readonly id: SubscriptionId; readonly plan: PaidPlan } | null;

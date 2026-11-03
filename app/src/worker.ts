@@ -56,7 +56,7 @@ async function stripeWebhook(req: Request, env: Env, billing: Extract<Config["bi
   } catch {
     return new Response("bad json", { status: 400 });
   }
-  const parsed = parseEvent(raw, billing.stripe, billing.rules);
+  const parsed = parseEvent(raw);
   switch (parsed.kind) {
     case "invalid":
       console.warn("stripe event rejected", parsed.reason);
@@ -64,7 +64,7 @@ async function stripeWebhook(req: Request, env: Env, billing: Extract<Config["bi
     case "ignored":
       return new Response(`ignored: ${parsed.reason}`);
     case "event":
-      return new Response(await agentStub(env, parsed.event.subscription.owner).billingEvent(parsed.event));
+      return new Response(await agentStub(env, parsed.event.owner).billingEvent(parsed.event));
   }
 }
 

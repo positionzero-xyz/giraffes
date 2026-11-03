@@ -6,11 +6,7 @@ export type JoinResult = "joined" | "bad_code" | "own" | "seated" | "ended" | "f
 export type Places = { readonly taken: number; readonly seats: number };
 
 export interface BillingStore {
-  /**
-   * Stripe delivers events out of order, so `s` replaces the stored row only if it is newer: a terminal
-   * state is final; otherwise the later billing period wins, then the later event, and within the same
-   * second anything beats `incomplete`. A replay or a late event changes nothing.
-   */
+  /** `s` is the state just fetched from Stripe, so it replaces the stored row unless that row is terminal. */
   applySubscription(s: Subscription, now: EpochMs): Promise<void>;
   standing(agent: AgentKey): Promise<Standing>;
   members(id: SubscriptionId): Promise<readonly AgentKey[]>;
@@ -52,18 +48,13 @@ export function d1Billing(db: D1Database): BillingStore {
     async applySubscription(s, now) {
       await db
         .prepare(
-          `INSERT INTO billing_subscription (id, owner_key, plan, status, period_end, event_at, seats, updated_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-           ON CONFLICT (id) DO UPDATE SET owner_key = excluded.owner_key, plan = excluded.plan, status = excluded.status,
-             period_end = excluded.period_end, event_at = excluded.event_at, seats = excluded.seats, updated_at = excluded.updated_at
-           WHERE billing_subscription.status NOT IN (${TERMINAL_SQL})
-             AND (excluded.status IN (${TERMINAL_SQL})
-               OR excluded.period_end > billing_subscription.period_end
-               OR (excluded.period_end = billing_subscription.period_end AND excluded.event_at > billing_subscription.event_at)
-               OR (excluded.period_end = billing_subscription.period_end AND excluded.event_at = billing_subscription.event_at
-                   AND billing_subscription.status = 'incomplete' AND excluded.status != 'incomplete'))`,
+          `INSERT INTO billing_subscription (id, owner_key, customer_id, plan, status, seats, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+           ON CONFLICT (id) DO UPDATE SET owner_key = excluded.owner_key, customer_id = excluded.customer_id, plan = excluded.plan,
+             status = excluded.status, seats = excluded.seats, updated_at = excluded.updated_at
+           WHERE billing_subscription.status NOT IN (${TERMINAL_SQL})`,
         )
-        .bind(s.id, s.owner, s.plan, s.status, s.periodEnd, s.eventAt, s.seats, now)
+        .bind(s.id, s.owner, s.customer, s.plan, s.status, s.seats, now)
         .run();
     },
 

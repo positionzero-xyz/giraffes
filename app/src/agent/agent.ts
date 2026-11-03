@@ -18,7 +18,7 @@ import {
   type Links,
 } from "../billing/say";
 import { d1Billing, type BillingStore } from "../billing/store";
-import { stripeApi, type BillingEvent, type StripeApi } from "../billing/stripe";
+import { parseSubscription, stripeApi, type BillingEvent, type StripeApi } from "../billing/stripe";
 import { boxClient, type BoxClient } from "../box/client";
 import { flyHost } from "../box/fly";
 import { staticHost, type BoxHost, type BoxHostKind, type Fetch } from "../box/host";
@@ -133,6 +133,9 @@ export class Agent extends DurableObject<Env> {
   // A DO interleaves requests during `await fetch`. The guard is in memory on purpose: there is one live
   // instance per DO, and if it dies the drain dies with it, so the guard never outlives the work it protects.
   #drain: Promise<void> | null = null;
+  // Each event re-reads the subscription from Stripe; handling them one at a time keeps a slower, older read
+  // from landing after a newer one. Like #drain, it lives and dies with this instance.
+  #billing: Promise<unknown> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -155,13 +158,30 @@ export class Agent extends DurableObject<Env> {
     return "queued";
   }
 
-  async billingEvent(e: BillingEvent): Promise<"applied" | "duplicate"> {
+  billingEvent(e: BillingEvent): Promise<"applied" | "duplicate" | "ignored"> {
+    const run = this.#billing.then(() => this.#billingEvent(e));
+    this.#billing = run.catch(() => undefined);
+    return run;
+  }
+
+  async #billingEvent(e: BillingEvent): Promise<"applied" | "duplicate" | "ignored"> {
     if (this.#store.billingEventSeen(e.id)) return "duplicate";
-    const { store } = this.#deps.billing;
-    await store.applySubscription(e.subscription, this.#deps.clock.now());
-    await this.refreshPlan(e.subscription.owner);
-    if (e.subscription.plan === "plus") {
-      for (const member of await store.members(e.subscription.id)) {
+    const { config, store, stripe } = this.#deps.billing;
+    if (!config.on || !stripe) throw new Error("a Stripe event reached a DO with billing off");
+    const fetched = await stripe.subscription(e.subscription);
+    if (!fetched.ok) throw new Error(`subscription read failed: ${fetched.detail}`);
+    const read = parseSubscription(fetched.value, config.stripe, config.rules);
+    if (read.kind === "invalid") throw new Error(`subscription read failed: ${read.reason}`);
+    if (read.kind === "not_ours" || read.subscription.owner !== e.owner) {
+      console.warn("stripe event ignored", e.id, read.kind === "not_ours" ? read.reason : "owner differs from the event's");
+      this.#store.billingEventDone(e.id, this.#deps.clock.now());
+      return "ignored";
+    }
+    const sub = read.subscription;
+    await store.applySubscription(sub, this.#deps.clock.now());
+    await this.refreshPlan(sub.owner);
+    if (sub.plan === "plus") {
+      for (const member of await store.members(sub.id)) {
         await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member);
       }
     }
@@ -425,7 +445,7 @@ export class Agent extends DurableObject<Env> {
         console.warn("checkout failed", plan, result.detail);
         return null;
       }
-      links[plan] = result.url;
+      links[plan] = result.value.url;
     }
     return links as Links;
   }

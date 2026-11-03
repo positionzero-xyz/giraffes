@@ -96,6 +96,8 @@ const DEDUPE_WINDOW_MS = 14 * DAY_MS;
 const OUTBOX_KEEP_MS = 30 * DAY_MS;
 const LOG_RETRY_BASE_MS = 10_000;
 const LOG_RETRY_MAX_MS = 60 * 60 * 1000;
+const COMPACTION_RETRY_BASE_MS = 5 * 60 * 1000;
+const COMPACTION_RETRY_MAX_MS = DAY_MS;
 
 function fromJson<T>(text: string): T {
   return JSON.parse(text);
@@ -541,7 +543,8 @@ export class AgentStore {
       this.settleRow(settle);
       this.insertLogs(logs, now);
       const swapped = this.sql.exec(
-        "UPDATE memory SET summary = ?, through_turn_seq = ?, updated_at = ? WHERE through_turn_seq = ?",
+        `UPDATE memory SET summary = ?, through_turn_seq = ?, updated_at = ?, compaction_failures = 0, compaction_retry_at = 0
+         WHERE through_turn_seq = ?`,
         c.summary,
         c.throughSeq,
         now,
@@ -553,6 +556,20 @@ export class AgentStore {
         this.sql.exec(`DELETE FROM memory_note WHERE id IN (${placeholders(c.deleteNoteIds.length)})`, ...c.deleteNoteIds);
       }
       return true;
+    });
+  }
+
+  compactionRetryAt(): EpochMs {
+    return this.sql.exec<{ t: EpochMs }>("SELECT compaction_retry_at AS t FROM memory").one().t;
+  }
+
+  compactionFailed(now: EpochMs, settle: Settlement | null, logs: readonly LogRow[]): void {
+    this.tx(() => {
+      const { failures } = this.sql.exec<{ failures: number }>("SELECT compaction_failures AS failures FROM memory").one();
+      const backoff = Math.min(COMPACTION_RETRY_BASE_MS * 2 ** failures, COMPACTION_RETRY_MAX_MS);
+      this.sql.exec("UPDATE memory SET compaction_failures = compaction_failures + 1, compaction_retry_at = ?", now + backoff);
+      if (settle) this.settleRow(settle);
+      this.insertLogs(logs, now);
     });
   }
 

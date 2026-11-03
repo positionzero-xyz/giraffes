@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS model_call (
   agent_key          TEXT NOT NULL,
   purpose            TEXT NOT NULL CHECK (purpose IN ('turn', 'compaction', 'planning')),
   model              TEXT NOT NULL,
-  status             TEXT NOT NULL CHECK (status IN ('settled', 'refused_user_cap', 'refused_global_ceiling', 'recovered_after_crash', 'unavailable')),
+  status             TEXT NOT NULL CHECK (status IN ('settled', 'refused_user_cap', 'refused_global_ceiling', 'recovered_after_crash', 'unavailable', 'in_doubt')),
   estimate_micro     INTEGER NOT NULL,
   cost_micro         INTEGER NOT NULL,
   input_tokens       INTEGER NOT NULL,

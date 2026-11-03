@@ -4,7 +4,7 @@ import { makeChannels, type ChannelRegistry } from "../channels/channel";
 import { loadConfig, type Env } from "../config";
 import { assertNever, type AgentKey, type EpochMs, type EventKey, type InboundEnvelope, type MicroUsd, type PersonStatus, type TimeZone } from "../domain";
 import { d1Ledger, modelCallRow, type LeaseAnswer, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
-import { makeModelClient, routeOf, type ModelClient, type ModelId, type Purpose, type Usage } from "../model/model";
+import { makeModelClient, routeOf, type ModelClient, type ModelId, type ModelResult, type Purpose, type Usage } from "../model/model";
 import { admitUnasked, OUTREACH } from "../policy/outreach";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
 import { costOf, decideReservation, estimate, SPEND } from "../policy/spend";
@@ -118,25 +118,35 @@ export class Agent extends DurableObject<Env> {
     const clock = this.#deps.clock;
     const started = clock.now();
     try {
-      const poisoned = this.#store.recover(started);
-      if (poisoned) this.#commitPoison(poisoned);
-      this.#fireDueWakeups();
-      while (clock.now() - started < DRAIN_BUDGET_MS) {
-        const batch = this.#store.claimBatch(clock.now());
-        if (!batch) break;
-        await this.#turn(batch);
-        await this.#deliverReady();
+      await this.#phase("turns", async () => {
+        const poisoned = this.#store.recover(started);
+        if (poisoned) this.#commitPoison(poisoned);
         this.#fireDueWakeups();
-      }
-      await this.#compactIfDue();
-      await this.#deliverReady();
-      await this.#flushLogs();
-      this.#store.prune(clock.now());
-    } catch (err) {
-      // Not rethrown: our re-arm is the retry policy, not Cloudflare's alarm backoff.
-      console.error("drain failed", err);
+        while (clock.now() - started < DRAIN_BUDGET_MS) {
+          const batch = this.#store.claimBatch(clock.now());
+          if (!batch) break;
+          await this.#turn(batch);
+          await this.#deliverReady();
+          this.#fireDueWakeups();
+        }
+      });
+      // Each phase fails alone, and the cheap ones go first, so a failing compaction can't hold back
+      // delivery or log shipping.
+      await this.#phase("delivery", () => this.#deliverReady());
+      await this.#phase("log flush", () => this.#flushLogs());
+      await this.#phase("compaction", () => this.#compactIfDue());
+      await this.#phase("prune", async () => this.#store.prune(clock.now()));
     } finally {
       await this.#rearm();
+    }
+  }
+
+  async #phase(name: string, run: () => Promise<void>): Promise<void> {
+    try {
+      await run();
+    } catch (err) {
+      // Not rethrown: our re-arm is the retry policy, not Cloudflare's alarm backoff.
+      console.error(`drain ${name} failed`, err);
     }
   }
 
@@ -261,7 +271,16 @@ export class Agent extends DurableObject<Env> {
     }
     const reservation: Reservation = { id: crypto.randomUUID(), month, purpose, model: route.model, estimate: est };
     this.#store.reserve(reservation, eventKey, now);
-    const res = await this.#deps.model.parse({ purpose, system, user, schema });
+    let res: ModelResult<T>;
+    try {
+      res = await this.#deps.model.parse({ purpose, system, user, schema });
+    } catch (err) {
+      // The instance is alive, so close the reservation here rather than leave it for recover(). We
+      // can't tell whether the request was billed, so it is charged at its estimate.
+      const at = this.#deps.clock.now();
+      this.#store.settle({ reservation, cost: reservation.estimate }, [callRow(agent, reservation, "in_doubt", reservation.estimate, null, at)], at);
+      throw err;
+    }
     if (res.ok) return { kind: "ok", value: res.value, reservation, usage: res.usage };
     if (res.failure === "unavailable") return { kind: "unavailable", reservation };
     return { kind: "failed", reservation, usage: res.usage };
@@ -329,10 +348,16 @@ export class Agent extends DurableObject<Env> {
 
   async #compactIfDue(): Promise<void> {
     const a = this.#store.agent();
-    if (!a) return;
+    if (!a || this.#store.compactionRetryAt() > this.#deps.clock.now()) return;
     const plan = planCompaction(this.#store.compactionInput());
     if (!plan) return;
-    const call = await this.#callModel("compaction", COMPACTION_SYSTEM, plan.user, CompactionOutputSchema, null, a.key);
+    let call: ModelCall<z.infer<typeof CompactionOutputSchema>>;
+    try {
+      call = await this.#callModel("compaction", COMPACTION_SYSTEM, plan.user, CompactionOutputSchema, null, a.key);
+    } catch (err) {
+      this.#store.compactionFailed(this.#deps.clock.now(), null, []);
+      throw err;
+    }
     const now = this.#deps.clock.now();
     switch (call.kind) {
       case "ok": {
@@ -343,16 +368,16 @@ export class Agent extends DurableObject<Env> {
       }
       case "failed": {
         const cost = call.usage ? costOf(call.reservation.model, call.usage) : NO_COST;
-        this.#store.settle({ reservation: call.reservation, cost }, [callRow(a.key, call.reservation, "settled", cost, call.usage, now)], now);
+        this.#store.compactionFailed(now, { reservation: call.reservation, cost }, [callRow(a.key, call.reservation, "settled", cost, call.usage, now)]);
         return;
       }
       case "unavailable":
-        if (call.reservation) {
-          this.#store.settle({ reservation: call.reservation, cost: NO_COST }, [callRow(a.key, call.reservation, "unavailable", NO_COST, null, now)], now);
-        }
-        return;
+        if (!call.reservation) return this.#store.compactionFailed(now, null, []);
+        return this.#store.compactionFailed(now, { reservation: call.reservation, cost: NO_COST }, [
+          callRow(a.key, call.reservation, "unavailable", NO_COST, null, now),
+        ]);
       case "refused":
-        return;
+        return this.#store.compactionFailed(now, null, []);
       default:
         return assertNever(call);
     }
@@ -402,7 +427,7 @@ function settledCall(settle: Settlement, usage: Usage | null): TurnCall {
 function callRow(
   agent: AgentKey,
   r: Reservation,
-  status: "settled" | "unavailable",
+  status: "settled" | "unavailable" | "in_doubt",
   cost: MicroUsd,
   usage: Usage | null,
   at: EpochMs,

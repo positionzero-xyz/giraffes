@@ -120,6 +120,10 @@ export const MIGRATIONS: readonly string[] = [
   );
   INSERT INTO log_flush (one) VALUES (1);
   `,
+  `
+  ALTER TABLE memory ADD COLUMN compaction_failures INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE memory ADD COLUMN compaction_retry_at INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

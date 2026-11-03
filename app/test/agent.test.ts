@@ -141,7 +141,7 @@ describe("reminders", () => {
   });
 });
 
-describe("crash and duplicate safety", () => {
+describe("failure and duplicate safety", () => {
   test("a redelivered webhook is processed once", async () => {
     const model = scripted([chat("Got it.")]);
     const c = await devChat("hal", { model, at: "2099-11-04T10:00" });
@@ -176,14 +176,14 @@ describe("crash and duplicate safety", () => {
     model.assertDone();
   });
 
-  test("a crash during the model call re-runs the turn once and applies it once", async () => {
+  test("a model call that throws re-runs the turn once, applies it once, and charges the failed call at its estimate", async () => {
     const model = scripted([throws(), chat("hi")]);
     const c = await devChat("jon", { model, at: "2099-11-04T10:00" });
 
     await c.say("hello");
 
     expect(await c.received()).toEqual(["hi"]);
-    expect(c.logs("model_call").map((l) => l.status)).toEqual(["recovered_after_crash", "settled"]);
+    expect(c.logs("model_call").map((l) => l.status)).toEqual(["in_doubt", "settled"]);
     expect(c.logs("turn").map((l) => [l.outcome, l.attempts])).toEqual([["acted", 2]]);
     expect((await c.snapshot()).turns.map((t) => [t.role, t.text])).toEqual([
       ["person", "hello"],
@@ -191,7 +191,7 @@ describe("crash and duplicate safety", () => {
     ]);
   });
 
-  test("an event that crashes three times is poisoned with a fixed apology", async () => {
+  test("an event whose model call throws three times is poisoned with a fixed apology", async () => {
     const model = scripted([throws(), throws(), throws()]);
     const c = await devChat("kim", { model, at: "2099-11-04T10:00" });
 
@@ -199,7 +199,7 @@ describe("crash and duplicate safety", () => {
 
     expect(await c.received()).toEqual([NOTICE.failed]);
     expect(c.logs("turn").map((l) => l.outcome)).toEqual(["poison"]);
-    expect(c.logs("model_call").map((l) => l.status)).toEqual(["recovered_after_crash", "recovered_after_crash", "recovered_after_crash"]);
+    expect(c.logs("model_call").map((l) => l.status)).toEqual(["in_doubt", "in_doubt", "in_doubt"]);
     model.assertDone();
   });
 });

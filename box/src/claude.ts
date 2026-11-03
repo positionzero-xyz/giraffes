@@ -111,7 +111,10 @@ export async function parseTurn(cli: Cli, req: ParseRequest): Promise<TurnReply>
   const run = await runClaude(cli, args, req.user, TURN_TIMEOUT_MS);
   const result = run.code === 0 ? parseJson(run.stdout) : undefined;
   if (!isObject(result) || result.is_error !== false) {
-    console.error(`claude -p failed (exit ${run.code}): ${run.stderr || run.stdout}`.slice(0, 2000));
+    // stdout can hold the person's conversation, so only its error subtype is logged.
+    const failed = parseJson(run.stdout);
+    const subtype = isObject(failed) && typeof failed.subtype === "string" ? failed.subtype : "none";
+    console.error(`claude -p failed (exit ${run.code}, subtype ${subtype}): ${run.stderr.slice(0, 300)}`);
     const status = await authStatus(cli);
     return status?.loggedIn === false ? { status: 409, body: { error: "signed_out" } } : { status: 502, body: { error: "claude_failed" } };
   }

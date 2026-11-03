@@ -18,9 +18,11 @@ export type UnaskedVerdict =
   | { readonly verdict: "defer"; readonly until: EpochMs }
   | { readonly verdict: "drop"; readonly reason: "budget" | "blocked" };
 
+/** Quiet hours apply to every attempt; the budget is charged once, on the day a row is first admitted. */
 export function admitUnasked(input: {
   readonly now: EpochMs;
   readonly tz: TimeZone;
+  readonly admitted: LocalDate | null;
   readonly sentToday: number;
   readonly dailyBudget: number;
   readonly status: PersonStatus;
@@ -28,6 +30,7 @@ export function admitUnasked(input: {
   if (input.status === "blocked") return { verdict: "drop", reason: "blocked" };
   const until = quietUntil(input.now, input.tz);
   if (until !== null) return { verdict: "defer", until };
+  if (input.admitted !== null) return { verdict: "send", day: input.admitted };
   if (input.sentToday >= input.dailyBudget) return { verdict: "drop", reason: "budget" };
   return { verdict: "send", day: localDate(input.now, input.tz) };
 }

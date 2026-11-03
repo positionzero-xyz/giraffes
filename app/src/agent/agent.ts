@@ -304,10 +304,11 @@ export class Agent extends DurableObject<Env> {
     if (a.status === "blocked") return this.#store.drop(row.id, "blocked", now, unaskedLog("dropped_blocked", null));
 
     let day = row.admittedDay;
-    if (row.intent === "unasked" && day === null) {
+    if (row.intent === "unasked") {
       const verdict = admitUnasked({
         now,
         tz: a.tz,
+        admitted: day,
         sentToday: this.#store.unaskedAdmitted(localDate(now, a.tz)),
         dailyBudget: OUTREACH.dailyUnaskedBudget,
         status: a.status,

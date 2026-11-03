@@ -10,6 +10,7 @@ import {
   intentOf,
   type AgentEvent,
   type EpochMs,
+  type LocalDate,
   type LocalDateTime,
   type MicroUsd,
   type TimeZone,
@@ -73,7 +74,7 @@ describe("quiet hours", () => {
 });
 
 describe("unasked budget", () => {
-  const input = { tz: BKK, dailyBudget: 3, status: "active" as const };
+  const input = { tz: BKK, admitted: null, dailyBudget: 3, status: "active" as const };
 
   test("the first three of a local day are sent, charged to the local date", () => {
     expect(admitUnasked({ ...input, now: at("2026-11-04T15:00+07:00"), sentToday: 2 })).toEqual({ verdict: "send", day: "2026-11-04" });
@@ -89,6 +90,12 @@ describe("unasked budget", () => {
       verdict: "defer",
       until: at("2026-11-05T08:00+07:00"),
     });
+  });
+
+  test("an admitted row is held by quiet hours on every attempt, and sends on its admitted day past the budget", () => {
+    const admitted = "2026-11-04" as LocalDate;
+    expect(admitUnasked({ ...input, admitted, now: at("2026-11-04T22:01+07:00"), sentToday: 0 })).toEqual({ verdict: "defer", until: at("2026-11-05T08:00+07:00") });
+    expect(admitUnasked({ ...input, admitted, now: at("2026-11-05T08:00+07:00"), sentToday: 3 })).toEqual({ verdict: "send", day: admitted });
   });
 
   test("a blocked person is dropped before anything else", () => {

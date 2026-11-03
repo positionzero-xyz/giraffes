@@ -45,7 +45,8 @@ export function checkoutForm(cfg: StripeConfig, rules: PlanRules, req: CheckoutR
 }
 
 const CheckoutReply = z.object({ url: z.string().url() });
-const ErrorReply = z.object({ error: z.object({ message: z.string().optional(), type: z.string().optional() }) });
+/** Stripe's error message can echo part of the key, so only its type and code reach the logs. */
+const ErrorReply = z.object({ error: z.object({ type: z.string().optional(), code: z.string().optional() }) });
 
 export function stripeApi(cfg: StripeConfig, rules: PlanRules, fetch: Fetch): StripeApi {
   return {
@@ -69,7 +70,7 @@ export function stripeApi(cfg: StripeConfig, rules: PlanRules, fetch: Fetch): St
       }
       if (!res.ok) {
         const e = ErrorReply.safeParse(body);
-        return { ok: false, detail: `checkout ${res.status}${e.success ? ` ${e.data.error.type ?? ""}: ${e.data.error.message ?? ""}` : ""}` };
+        return { ok: false, detail: `checkout ${res.status}${e.success ? ` ${e.data.error.type ?? ""} ${e.data.error.code ?? ""}`.trimEnd() : ""}` };
       }
       const parsed = CheckoutReply.safeParse(body);
       return parsed.success ? { ok: true, url: parsed.data.url } : { ok: false, detail: "checkout reply unreadable" };

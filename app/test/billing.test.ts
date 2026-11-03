@@ -150,9 +150,11 @@ describe("stripe boundary", () => {
   });
 
   test("a Stripe error or a network failure is a failed checkout whose detail carries no key", async () => {
-    const refused = stripeApi(cfg, rules, async () => Response.json({ error: { type: "invalid_request_error", message: "No such price" } }, { status: 400 }));
+    const refused = stripeApi(cfg, rules, async () =>
+      Response.json({ error: { type: "invalid_request_error", code: "api_key_invalid", message: "Invalid API Key provided: sk_test_****fake" } }, { status: 401 }),
+    );
     const r = await refused.checkout({ agent: agent("ann"), plan: "ai", idempotencyKey: "k" });
-    expect(r).toEqual({ ok: false, detail: "checkout 400 invalid_request_error: No such price" });
+    expect(r).toEqual({ ok: false, detail: "checkout 401 invalid_request_error api_key_invalid" });
     const down = stripeApi(cfg, rules, async () => {
       throw new TypeError("fetch failed");
     });

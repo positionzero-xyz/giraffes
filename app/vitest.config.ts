@@ -25,7 +25,6 @@ export default defineConfig(async () => ({
     }),
   ],
   test: {
-    passWithNoTests: true,
     setupFiles: ["./test/setup.ts"],
     provide: { d1Migrations: await readD1Migrations("./src/ledger") },
   },

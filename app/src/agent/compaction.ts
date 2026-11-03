@@ -11,8 +11,7 @@
  * second run recomputes the same plan.
  */
 import { z } from "zod";
-import type { TurnRow } from "./turn";
-import { TURN } from "./turn";
+import { TURN, type TurnRow } from "./turn";
 
 export const COMPACTION = {
   /** Compact when verbatim turns exceed this… */

@@ -414,7 +414,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
     wakeupsCancel: cancels,
     wakeupsAdd: [...adds.values()],
     notes,
-    task: { kind: out.task.kind, key: out.task.key, status: out.task.status },
+    task: out.task,
     ...effects,
     rejected,
   };

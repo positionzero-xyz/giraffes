@@ -103,7 +103,7 @@ export type TurnOutcome =
   | "quiet" // model chose quiet
   | "refused_budget"
   | "model_failed" // invalid_output / refused_by_model / unavailable after retries
-  | "poison" // gave up after MAX_ATTEMPTS crashes
+  | "poison" // gave up after TURN.maxAttempts crashes
   | "no_model" // handled by code alone (a block)
   | "stale"; // a lifecycle event older than the last applied one: logged, not applied
 

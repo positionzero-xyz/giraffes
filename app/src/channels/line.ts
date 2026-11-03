@@ -70,10 +70,11 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
       const envelopes: InboundEnvelope[] = [];
       for (const item of body.data.events) {
         const e = WebhookEvent.safeParse(item);
-        const userId = e.success && e.data.source.type === "user" ? e.data.source.userId : undefined;
-        const event = e.success && userId ? toEvent(e.data) : null;
-        if (!e.success || !userId || !event) continue; // groups arrive in week 3; other kinds aren't handled
-        const identity = { channel: "line", channelUserId: userId } as const;
+        // Groups arrive in week 3; other kinds aren't handled.
+        if (!e.success || e.data.source.type !== "user" || !e.data.source.userId) continue;
+        const event = toEvent(e.data);
+        if (!event) continue;
+        const identity = { channel: "line", channelUserId: e.data.source.userId } as const;
         envelopes.push({
           agent: personAgentKey(identity),
           identity,

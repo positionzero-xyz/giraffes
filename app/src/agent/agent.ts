@@ -96,9 +96,6 @@ export class Agent extends DurableObject<Env> {
     this.#deps = defaultDeps(env);
   }
 
-  // =============================================================================================
-  // Public surface.
-
   /**
    * The only way in. Durable on return. Idempotent on `envelope.key`.
    * Called by the Worker for every verified webhook event, before it answers the channel 200.
@@ -145,9 +142,7 @@ export class Agent extends DurableObject<Env> {
     this.#deps = { ...this.#deps, ...over };
   }
 
-  // =============================================================================================
-  // The drain. Order is the priority: replies before housekeeping.
-
+  /** Order is the priority: replies before housekeeping. */
   async #runDrain(): Promise<void> {
     const clock = this.#deps.clock;
     const started = clock.now();

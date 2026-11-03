@@ -365,14 +365,18 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
     agentTexts.pop();
     rejected.push({ action: "send", reason: "too_many_sends" });
   }
-  const texts = noticeText === null ? agentTexts : [...agentTexts, noticeText];
+  const planned = noticeText === null ? agentTexts : [...agentTexts, noticeText];
+  // A reminder the person asked for goes out even when the model answered its firing without a send.
+  const floor = planned.length === 0 ? fixedText(view, null) : null;
+  const texts = floor === null ? planned : [floor];
 
   const effects = lifecycleEffects(view);
   const turns = personTurns(view);
-  const note = texts.length > 0 ? triggerNote(first, view.tz) : null;
+  const note = planned.length > 0 ? triggerNote(first, view.tz) : null;
   if (note !== null) turns.push({ role: "note", text: note, at: view.now, eventKey: view.batch.items[0].key });
   for (const text of agentTexts) turns.push({ role: "agent", text, at: view.now, eventKey: view.batch.items[0].key });
   if (noticeText !== null) turns.push({ role: "note", text: noticeText, at: view.now, eventKey: view.batch.items[0].key });
+  if (floor !== null) turns.push({ role: "note", text: floor, at: view.now, eventKey: view.batch.items[0].key });
 
   const acted = texts.length > 0 || adds.size > 0 || cancels.length > 0 || notes.length > 0 || effects.reachability !== null;
   return {

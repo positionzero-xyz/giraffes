@@ -221,9 +221,12 @@ describe("Telegram delivery", () => {
   });
 
   test("the longest row a turn can produce fits one Telegram message", () => {
-    const notices = Object.values(NOTICE).map((n) => (typeof n === "string" ? n : n("x".repeat(TURN.maxNoteChars))));
+    const due = "2026-11-04 09:00";
+    const fixed = Object.values(NOTICE).filter((n) => typeof n === "string");
+    const corrections = [...fixed, ...Array.from({ length: TURN.maxActions }, () => NOTICE.reminderKept(due))].join("\n");
+    const floor = `${NOTICE.lateFallback(due)}\n${NOTICE.reminder("x".repeat(TURN.maxNoteChars))}`;
     const longestSend = TURN.maxLateNoticeChars + "\n".length + TURN.maxTextChars;
-    const longestText = Math.max(longestSend, notices.join("\n").length);
+    const longestText = Math.max(longestSend, corrections.length, floor.length);
     expect(TURN.maxSendsPerTurn * longestText + "\n\n".length * (TURN.maxSendsPerTurn - 1)).toBeLessThanOrEqual(TELEGRAM_MAX_TEXT);
   });
 

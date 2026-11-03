@@ -209,7 +209,7 @@ describe("reminders", () => {
     const commit = planTurn(output([{ type: "cancel_wakeup", key: "dentist" }, schedule("dentist", "friday at 9"), send("Moved!")]), view({ pending }));
     expect(commit.wakeupsCancel).toEqual([]);
     expect(commit.wakeupsAdd).toEqual([]);
-    expect(commit.outbound?.texts).toEqual(["Moved!", `${NOTICE.reminderBadTime}\n${"(Your reminder is still set for 2026-11-06 09:00.)"}`]);
+    expect(commit.outbound?.texts).toEqual(["Moved!", `${NOTICE.reminderBadTime}\n(Your reminder is still set for 2026-11-06 09:00.)`]);
   });
 
   test("with 20 pending, one can be replaced whichever order the model writes it in", () => {

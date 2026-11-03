@@ -195,6 +195,7 @@ export const NOTICE = {
   reminderTooFar: "(I can only set reminders up to a year ahead, so I didn't set it.)",
   reminderBadTime: "(I couldn't read that time, so I didn't set the reminder.)",
   reminderDuplicate: "(I already have that reminder set, so I didn't change it.)",
+  reminderKept: (dueLocal: string) => `(Your reminder is still set for ${dueLocal}.)`,
   reminderNotSet: "(I couldn't set that reminder.)",
   checkinReserved: "(The daily check-in can't be set or cancelled like a reminder.)",
   cancelNotFound: "(I couldn't find that reminder, so nothing was cancelled.)",
@@ -306,7 +307,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   const pending = new Map<WakeupKey, NewWakeup>(view.pending.map((w) => [w.key, w]));
   const sends: string[] = [];
   const notes: string[] = [];
-  const cancels: WakeupKey[] = [];
+  const cancelled = new Map<WakeupKey, NewWakeup>();
   const adds = new Map<WakeupKey, NewReminder>();
   const rejected: { action: string; reason: ActionRejection }[] = [];
   const notices = new Set<string>();
@@ -316,7 +317,9 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
     if (shown && notice !== null) notices.add(notice);
   };
 
-  for (const a of out.actions) {
+  // Cancels apply first, so moving a reminder or freeing a slot works whatever order the model wrote it in.
+  const ordered = [...out.actions.filter((a) => a.type === "cancel_wakeup"), ...out.actions.filter((a) => a.type !== "cancel_wakeup")];
+  for (const a of ordered) {
     switch (a.type) {
       case "send":
         if (sends.length < TURN.maxSendsPerTurn) sends.push(a.text);
@@ -331,6 +334,14 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
         } else {
           // The person never hears of the agent's own wake-ups, so a rejected one is only logged.
           reject(`schedule_wakeup:${a.key}`, admission.reason, a.asked);
+          // A move whose new time is rejected keeps the reminder it was moving.
+          const key = parseWakeupKey(a.key);
+          const original = key === null ? undefined : cancelled.get(key);
+          if (key !== null && original !== undefined && !adds.has(key)) {
+            cancelled.delete(key);
+            pending.set(key, original);
+            if (a.asked) notices.add(NOTICE.reminderKept(human(original.dueAt, view.tz)));
+          }
         }
         break;
       }
@@ -342,7 +353,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
           break;
         }
         pending.delete(key);
-        if (!adds.delete(key)) cancels.push(key);
+        cancelled.set(key, current);
         break;
       }
       case "remember":
@@ -381,13 +392,13 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   if (noticeText !== null) turns.push({ role: "note", text: noticeText, at: view.now, eventKey: view.batch.items[0].key });
   if (floor !== null) turns.push({ role: "note", text: floor, at: view.now, eventKey: view.batch.items[0].key });
 
-  const acted = texts.length > 0 || adds.size > 0 || cancels.length > 0 || notes.length > 0 || effects.reachability !== null;
+  const acted = texts.length > 0 || adds.size > 0 || cancelled.size > 0 || notes.length > 0 || effects.reachability !== null;
   return {
     batchKeys: batchKeys(view),
     outcome: acted ? "acted" : "quiet",
     turns,
     outbound: outbound(texts, intent, view),
-    wakeupsCancel: cancels,
+    wakeupsCancel: [...cancelled.keys()],
     wakeupsAdd: [...adds.values()],
     notes,
     task: out.task,

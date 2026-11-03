@@ -57,13 +57,13 @@ describe("reminders", () => {
     expect(await c.received()).toEqual([
       [
         "Done! Dentist reminder set, gym one cancelled.",
-        "(I couldn't read that time, so I didn't set the reminder.)\n(I couldn't find that reminder, so nothing was cancelled.)",
+        "(I couldn't find that reminder, so nothing was cancelled.)\n(I couldn't read that time, so I didn't set the reminder.)",
       ].join("\n"),
     ]);
     expect((await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder")).toEqual([]);
     expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([
-      ["schedule_wakeup:dentist", "bad_time"],
       ["cancel_wakeup:gym", "not_pending"],
+      ["schedule_wakeup:dentist", "bad_time"],
     ]);
   });
 

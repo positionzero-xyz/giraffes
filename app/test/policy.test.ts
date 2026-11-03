@@ -364,6 +364,12 @@ describe("alarm and compaction", () => {
     expect(planCompaction({ ...input, turnCount: 61 })?.foldThroughSeq).toBe(30);
   });
 
+  test("the turn prompt asks only for what a model without tools can do", () => {
+    expect(TURN_SYSTEM).not.toMatch(/search|sources|price ranges/i);
+    expect(TURN_SYSTEM.match(/opportunistic by default/gi)).toHaveLength(1);
+    expect(TURN_SYSTEM).toContain("Never invent an event, a price or an opening.");
+  });
+
   test("system prompts are byte-stable constants", () => {
     for (const p of [TURN_SYSTEM, COMPACTION_SYSTEM]) expect(p).not.toContain("${");
   });

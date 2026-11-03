@@ -29,7 +29,8 @@ if (args[0] === "--version") {
   process.stdout.write("Paste code here if prompted > ");
   for await (const line of createInterface({ input: process.stdin })) {
     event(`login read ${line}`);
-    if (line === "good-code#state") {
+    if (line === "slow-code#state") await sleep(600);
+    if (line === "good-code#state" || line === "slow-code#state") {
       writeFileSync(join(dir, "logged-in"), "");
       console.log("Login successful.");
       process.exit(0);

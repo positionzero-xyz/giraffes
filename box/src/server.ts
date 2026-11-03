@@ -10,6 +10,7 @@ export type BoxOptions = { readonly token: string; readonly cli: Cli; readonly n
 const SIGNIN_TTL_MS = 10 * 60_000;
 const URL_WAIT_MS = 30_000;
 const CODE_EXIT_WAIT_MS = 60_000;
+const KILL_WAIT_MS = 5_000;
 const SIGNIN_HOSTS = new Set(["claude.com", "claude.ai", "platform.claude.com"]);
 const MAX_CODE_LENGTH = 1024;
 const PAGE = readFileSync(new URL("./signin.html", import.meta.url));
@@ -23,7 +24,7 @@ const PAGE_HEADERS = {
 };
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void;
-type Login = { readonly proc: ChildProcessWithoutNullStreams; readonly expiresAt: number; output: string; exited: boolean };
+type Login = { readonly proc: ChildProcessWithoutNullStreams; readonly expiresAt: number; output: string; exited: boolean; completing: boolean };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -58,14 +59,17 @@ export function createBox({ token, cli, now = Date.now }: BoxOptions): Server {
   function startLogin(): Login {
     stopLogin();
     const proc = spawnClaude(cli, ["auth", "login", "--claudeai"], { ...process.env, BROWSER: "true" });
-    const started: Login = { proc, expiresAt: now() + SIGNIN_TTL_MS, output: "", exited: false };
+    const started: Login = { proc, expiresAt: now() + SIGNIN_TTL_MS, output: "", exited: false, completing: false };
     const append = (c: Buffer) => (started.output += c.toString("utf8"));
     proc.stdout.on("data", append);
     proc.stderr.on("data", append);
-    proc.on("error", () => (started.exited = true));
-    proc.on("close", (code) => {
+    const exited = () => {
       started.exited = true;
       if (login === started) login = null;
+    };
+    proc.on("error", exited);
+    proc.on("close", (code) => {
+      exited();
       console.log(`sign-in process exited (${code})`);
     });
     setTimeout(() => proc.kill("SIGKILL"), SIGNIN_TTL_MS).unref();
@@ -88,6 +92,7 @@ export function createBox({ token, cli, now = Date.now }: BoxOptions): Server {
   }
 
   async function signinStart(res: ServerResponse): Promise<void> {
+    if (login?.completing) return sendJson(res, 409, { error: "busy" });
     const started = startLogin();
     console.log("sign-in started");
     await waitUntil(() => signinUrl(started.output) !== undefined || started.exited, URL_WAIT_MS);
@@ -103,16 +108,18 @@ export function createBox({ token, cli, now = Date.now }: BoxOptions): Server {
     const code = typeof raw === "string" ? raw.trim() : "";
     if (!code || code.length > MAX_CODE_LENGTH || /[\r\n]/.test(code)) return sendJson(res, 400, { error: "bad_code" });
     const pending = login;
+    if (pending?.completing) return sendJson(res, 409, { error: "busy" });
     if (!pending || now() >= pending.expiresAt) {
       stopLogin();
       return sendJson(res, 409, { error: "no_signin" });
     }
-    login = null;
+    pending.completing = true;
     const mark = pending.output.length;
     pending.proc.stdin.write(`${code}\n`);
     // A code the CLI can't read makes it ask again instead of exiting.
     await waitUntil(() => pending.exited || pending.output.includes("Invalid code", mark), CODE_EXIT_WAIT_MS);
     if (!pending.exited) pending.proc.kill("SIGKILL");
+    await waitUntil(() => pending.exited, KILL_WAIT_MS);
     const signedIn = (await authStatus(cli))?.loggedIn === true;
     console.log(`sign-in code sent, signed in: ${signedIn}`);
     sendJson(res, 200, { signedIn });

@@ -184,6 +184,22 @@ describe("sign-in", () => {
     assert.equal((await call("GET", "/health", { auth: bearer })).body.signedIn, false);
   });
 
+  it("answers 409 busy to a start or a code while a code is completing, and keeps the one login process", async () => {
+    const t = ticket();
+    await call("POST", "/signin/start", { body: { ticket: t } });
+    const completing = call("POST", "/signin/code", { body: { ticket: t, code: "slow-code#state" } });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const start = await call("POST", "/signin/start", { body: { ticket: t } });
+    const code = await call("POST", "/signin/code", { body: { ticket: t, code: "good-code#state" } });
+    assert.deepEqual([start.status, start.body], [409, { error: "busy" }]);
+    assert.deepEqual([code.status, code.body], [409, { error: "busy" }]);
+
+    assert.deepEqual((await completing).body, { signedIn: true });
+    assert.deepEqual(events(), ["login started BROWSER=true", "login read slow-code#state"]);
+    assert.deepEqual((await call("POST", "/signin/code", { body: { ticket: t, code: "good-code#state" } })).body, { error: "no_signin" });
+  });
+
   it("replaces the first sign-in when started again", async () => {
     const t = ticket();
     await call("POST", "/signin/start", { body: { ticket: t } });

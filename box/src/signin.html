@@ -57,6 +57,7 @@
     timedOut: ["Sign-in timed out. Open the sign-in page again.", "หมดเวลาลงชื่อเข้าใช้ เปิดหน้าลงชื่อเข้าใช้อีกครั้ง"],
     expired: ["This link has expired. Send /claude in the chat to get a new one.", "ลิงก์นี้หมดอายุแล้ว ส่ง /claude ในแชทเพื่อรับลิงก์ใหม่"],
     noTicket: ["This link is incomplete. Send /claude in the chat to get a new one.", "ลิงก์นี้ไม่สมบูรณ์ ส่ง /claude ในแชทเพื่อรับลิงก์ใหม่"],
+    busy: ["Still checking your last code. Wait a moment, then try again.", "ยังตรวจสอบรหัสก่อนหน้าอยู่ รอสักครู่แล้วลองใหม่อีกครั้ง"],
     failed: ["Something went wrong. Try again in a minute.", "เกิดข้อผิดพลาด ลองใหม่อีกครั้งในอีกสักครู่"],
   };
   const $ = (id) => document.getElementById(id);
@@ -80,6 +81,7 @@
 
   function sayError(reply) {
     if (reply.status === 401) say("expired", "err");
+    else if (reply.status === 409 && reply.body.error === "busy") say("busy", "err");
     else if (reply.status === 409) say("timedOut", "err");
     else say("failed", "err");
   }
@@ -108,9 +110,10 @@
     event.preventDefault();
     const code = $("code").value.trim();
     if (!code) return;
-    $("send").disabled = true;
+    $("send").disabled = $("open").disabled = true;
     say("checking");
     const reply = await post("/signin/code", { code });
+    $("open").disabled = false;
     $("code").value = "";
     if (reply.status === 200 && reply.body.signedIn) {
       $("steps").hidden = true;

@@ -4,6 +4,7 @@ import { boxName, type BoxName, type BoxToken } from "./names.ts";
 
 export const FLY_API = "https://api.machines.dev/v1";
 export const BOX_PORT = 8789;
+export const FLY_TIMEOUT_MS = 15_000;
 
 export type FlyConfig = {
   readonly apiToken: string;
@@ -62,22 +63,24 @@ export function machineConfig(cfg: FlyConfig, token: BoxToken, volumeId: string)
   };
 }
 
-export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}): BoxHost {
+export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, timeoutMs: number = FLY_TIMEOUT_MS): BoxHost {
   const authorization = flyAuthorization(cfg.apiToken);
 
   async function call(method: string, path: string, body?: unknown): Promise<Reply | HostFailure> {
     const what = `${method} ${path}`;
     let res: Response;
+    let text: string;
     try {
       res = await fetch(`${FLY_API}${path}`, {
         method,
         headers: { authorization, "content-type": "application/json" },
         body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
       });
+      text = await res.text();
     } catch (err) {
-      return fail(true, `${what}: ${err instanceof Error ? err.message : String(err)}`);
+      return fail(true, `${what}: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
     }
-    const text = await res.text().catch(() => "");
     if (res.status === 429 || res.status >= 500) return fail(true, `${what}: ${res.status} ${text.slice(0, 200)}`);
     let parsed: unknown = null;
     try {

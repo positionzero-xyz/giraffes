@@ -205,6 +205,25 @@ describe("fly host", () => {
     expect(fly.machines.get(app)).toBeUndefined();
   });
 
+  test("a Fly call that hangs before answering or while sending its body times out as retryable", async () => {
+    const hangs: Fetch = (_url, init) =>
+      new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason)));
+    expect(await flyHost(flyConfig, hangs, () => {}, 20).ensure(app, token)).toMatchObject({ ok: false, retryable: true, detail: expect.stringMatching(/Timeout/) });
+
+    const stalls: Fetch = async (_url, init) =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"id":'));
+            init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason));
+          },
+        }),
+        { status: 201 },
+      );
+    expect(await flyHost(flyConfig, stalls, () => {}, 20).ensure(app, token)).toMatchObject({ ok: false, retryable: true });
+    expect(await flyHost(flyConfig, stalls, () => {}, 20).destroy(app)).toMatchObject({ ok: false, retryable: true });
+  });
+
   test("a FlyV1 token goes as-is, and delete forces removal and treats a missing app as done", async () => {
     const fly = fakeFly();
     const host = flyHost({ ...flyConfig, apiToken: "FlyV1 fm2_fake" }, fly.fetch);

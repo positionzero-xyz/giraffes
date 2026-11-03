@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { NOTICE, TURN } from "../src/agent/turn";
 import { lineChannel } from "../src/channels/line";
 import { MAX_TEXT as TELEGRAM_MAX_TEXT, telegramChannel } from "../src/channels/telegram";
-import { NOTICE, TURN } from "../src/agent/turn";
 import type { EpochMs, Identity, OutboundMessage, OutboxId } from "../src/domain";
 
 type Seen = { url: string; headers: Headers; body: unknown };

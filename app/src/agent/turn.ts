@@ -360,7 +360,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
           pending.set(admission.wakeup.key, admission.wakeup);
         } else {
           // The person never hears of the agent's own wake-ups, so a rejected one is only logged.
-          reject(`schedule_wakeup:${a.key}`, admission.reason, a.asked);
+          reject(actionLabel(a), admission.reason, a.asked);
           // A move whose new time is rejected keeps the reminder it was moving.
           const key = parseWakeupKey(a.key);
           const original = key === null ? undefined : cancelled.get(key);
@@ -376,7 +376,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
         const key = parseWakeupKey(a.key);
         const current = key === null ? undefined : pending.get(key);
         if (key === null || current === undefined || current.kind !== "reminder") {
-          reject(`cancel_wakeup:${a.key}`, key === CHECKIN_KEY ? "reserved_key" : "not_pending", true);
+          reject(actionLabel(a), key === CHECKIN_KEY ? "reserved_key" : "not_pending", true);
           break;
         }
         pending.delete(key);

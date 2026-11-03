@@ -2,8 +2,8 @@ import { describe, expect, test } from "vitest";
 import { NOTICE, TURN } from "../src/agent/turn";
 import type { EpochMs } from "../src/domain";
 import { priceOf, routeOf } from "../src/model/model";
+import type { ScriptStep } from "../src/model/scripted";
 import { costOf, SPEND } from "../src/policy/spend";
-import { type ScriptStep } from "../src/model/scripted";
 import { cancel, chat, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, throws, turn, wall } from "./testkit";
 
 const until = async (done: () => boolean) => {

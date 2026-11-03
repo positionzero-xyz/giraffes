@@ -23,10 +23,10 @@ export function anthropicModel(apiKey: string): ModelClient {
           output_config: { format: zodOutputFormat(req.schema), effort: route.effort },
         });
       } catch (err) {
-        if (err instanceof Anthropic.APIError && turnedAway(err.status)) return { ok: false, failure: "unavailable", usage: null };
-        if (err instanceof Anthropic.APIError && inDoubt(err.status)) return { ok: false, failure: "in_doubt", usage: null };
-        if (err instanceof Anthropic.APIError) return { ok: false, failure: "rejected", usage: null };
-        throw err;
+        if (!(err instanceof Anthropic.APIError)) throw err;
+        if (turnedAway(err.status)) return { ok: false, failure: "unavailable", usage: null };
+        if (inDoubt(err.status)) return { ok: false, failure: "in_doubt", usage: null };
+        return { ok: false, failure: "rejected", usage: null };
       }
 
       const usage: Usage = {

@@ -1,22 +1,8 @@
-/**
- * Memory compaction as pure functions. The conversation never resets: recent turns stay verbatim, older
- * turns and surplus notes are folded into one summary by a cheap model call.
- *
- * Runs after the inbox is empty, never ahead of a reply. If it is refused for budget or fails, nothing
- * breaks: the turn prompt always takes only the last TURN.recentTurns rows, so the prompt stays bounded
- * and the backlog is folded on a later drain.
- *
- * Idempotent and crash-safe: the plan records the `through_turn_seq` it started from, and the commit
- * applies only if memory still says that (compare-and-set). A crash mid-call leaves memory untouched; a
- * second run recomputes the same plan.
- */
 import { z } from "zod";
 import { TURN, type TurnRow } from "./turn";
 
 export const COMPACTION = {
-  /** Compact when verbatim turns exceed this… */
   triggerTurns: 60,
-  /** …folding all but the newest TURN.recentTurns. */
   keepTurns: TURN.recentTurns,
   maxNotes: 40,
 } as const;
@@ -26,7 +12,6 @@ export const CompactionOutputSchema = z.object({ summary: z.string().min(1).max(
 export type CompactionInput = {
   readonly summary: string;
   readonly throughSeq: number;
-  /** All verbatim turns, oldest first, with their seq. */
   readonly turns: readonly (TurnRow & { readonly seq: number })[];
   readonly notes: readonly { readonly id: number; readonly text: string }[];
 };
@@ -35,12 +20,11 @@ export type CompactionPlan = {
   readonly expectThroughSeq: number;
   readonly foldThroughSeq: number;
   readonly foldNoteIds: readonly number[];
-  readonly user: string; // with COMPACTION_SYSTEM from prompt.ts
+  readonly user: string;
 };
 
 const SPEAKER: Readonly<Record<TurnRow["role"], string>> = { person: "Person", agent: "Assistant", note: "Note" };
 
-/** null when under both thresholds. */
 export function planCompaction(input: CompactionInput): CompactionPlan | null {
   const overTurns = input.turns.length > COMPACTION.triggerTurns;
   const overNotes = input.notes.length > COMPACTION.maxNotes;

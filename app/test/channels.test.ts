@@ -1,6 +1,3 @@
-/**
- * Channel adapters against fixed webhook fixtures and stubbed platform APIs (nothing reaches the network).
- */
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { lineChannel } from "../src/channels/line";
 import { telegramChannel } from "../src/channels/telegram";
@@ -23,16 +20,9 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-// ---------------------------------------------------------------------------------------------
-// LINE
-
 const LINE_SECRET = "line-channel-secret-for-tests";
 const USER = "U4af4980629a1b2c3d4e5f60718293a4b";
 const T = 4097563200000;
-/**
- * Five events as LINE sends them: a text, a sticker, a follow, an unfollow (redelivered) and a group
- * message. Signed with LINE_SECRET by LINE's scheme: base64(HMAC-SHA256(secret, raw body)).
- */
 const LINE_BODY =
   '{"destination":"Uaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","events":[{"type":"message","webhookEventId":"01HZEVT0000000000000000001","timestamp":4097563200000,"mode":"active","source":{"type":"user","userId":"U4af4980629a1b2c3d4e5f60718293a4b"},"replyToken":"reply-token-1","message":{"id":"1","type":"text","text":"remind me at 6pm"},"deliveryContext":{"isRedelivery":false}},{"type":"message","webhookEventId":"01HZEVT0000000000000000002","timestamp":4097563201000,"mode":"active","source":{"type":"user","userId":"U4af4980629a1b2c3d4e5f60718293a4b"},"replyToken":"reply-token-2","message":{"id":"2","type":"sticker","packageId":"1","stickerId":"2"},"deliveryContext":{"isRedelivery":false}},{"type":"follow","webhookEventId":"01HZEVT0000000000000000003","timestamp":4097563202000,"mode":"active","source":{"type":"user","userId":"U4af4980629a1b2c3d4e5f60718293a4b"},"replyToken":"reply-token-3","follow":{"isUnblocked":true},"deliveryContext":{"isRedelivery":false}},{"type":"unfollow","webhookEventId":"01HZEVT0000000000000000004","timestamp":4097563203000,"mode":"active","source":{"type":"user","userId":"U4af4980629a1b2c3d4e5f60718293a4b"},"deliveryContext":{"isRedelivery":true}},{"type":"message","webhookEventId":"01HZEVT0000000000000000005","timestamp":4097563204000,"mode":"active","source":{"type":"group","groupId":"Cgroup","userId":"U4af4980629a1b2c3d4e5f60718293a4b"},"replyToken":"reply-token-5","message":{"id":"5","type":"text","text":"hi all"},"deliveryContext":{"isRedelivery":false}}]}';
 const LINE_SIGNATURE = "aH8hSlr1rq+2eLuZdUEtiMz/NfzZQPIXhjG3lsZaZLs=";
@@ -147,9 +137,6 @@ describe("LINE delivery", () => {
     expect(await line().deliver(outbound(), NOW)).toMatchObject({ kind: "retry" });
   });
 });
-
-// ---------------------------------------------------------------------------------------------
-// Telegram
 
 const TG_SECRET = "tg-webhook-secret";
 const telegram = () => telegramChannel({ botToken: "123:abc", webhookSecret: TG_SECRET });

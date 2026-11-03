@@ -1,7 +1,3 @@
-/**
- * The D1 ledger against a real D1 database with the real schema: global-ceiling leases and idempotent
- * log shipping.
- */
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import type { AgentKey, EpochMs, MicroUsd, MonthKey } from "../src/domain";

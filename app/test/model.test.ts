@@ -1,6 +1,3 @@
-/**
- * Model backends against fixed HTTP fixtures (global fetch is stubbed; nothing reaches the network).
- */
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import { anthropicModel } from "../src/model/anthropic";

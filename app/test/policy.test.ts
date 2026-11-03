@@ -1,6 +1,3 @@
-/**
- * Pure policy and planner tests: no storage, no Durable Object. Each case pins one rule of the brief.
- */
 import { describe, expect, test } from "vitest";
 import { planCompaction } from "../src/agent/compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "../src/agent/prompt";
@@ -98,9 +95,6 @@ describe("unasked budget", () => {
     });
   });
 });
-
-// ---------------------------------------------------------------------------------------------
-// Turn planning fixtures
 
 const NOW = local("2026-11-04T10:00");
 
@@ -283,7 +277,6 @@ describe("lifecycle order", () => {
 
 describe("spend", () => {
   test("estimates and costs are whole micro-dollars, rounded up", () => {
-    // 3,000 chars ≈ 1,000 input tokens at $0.10/M plus 1,200 output tokens at $0.50/M = 100 + 600 micro.
     expect(estimate("claude-haiku-5-5", 3_000, 1_200)).toBe(700);
     expect(costOf("claude-haiku-5-5", { inputTokens: 1, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 })).toBe(1);
     expect(costOf("claude-sonnet-5-5", { inputTokens: 1_000, outputTokens: 100, cacheWriteTokens: 1_000, cacheReadTokens: 10_000 })).toBe(2_000 + 1_000 + 2_500 + 2_000);

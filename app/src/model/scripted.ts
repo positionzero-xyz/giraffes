@@ -1,23 +1,14 @@
-/**
- * Test backend. A queue of canned outputs, each validated against the request's real schema, so a
- * script that drifts from the schema fails the test instead of passing a shape production can't produce.
- */
 import type { ModelClient, ModelRequest, ModelResult, Purpose, Usage } from "./model";
 
 export type ScriptStep =
   | { readonly kind: "output"; readonly value: unknown; readonly usage?: Partial<Usage> }
   | { readonly kind: "fail"; readonly failure: "invalid_output" | "refused_by_model" | "unavailable" }
-  /** The call throws, as when the instance dies mid-call: nothing after the reservation is written. */
   | { readonly kind: "crash" }
-  /** Wait until the test calls `release()`, then play `then`: lets a test enqueue a message mid-call. */
   | { readonly kind: "hold"; readonly then: ScriptStep };
 
 export type ScriptedModel = ModelClient & {
-  /** Every request seen, in order, for assertions on prompt content and routing. */
   readonly calls: ReadonlyArray<{ readonly purpose: Purpose; readonly system: string; readonly user: string }>;
-  /** Lets a held call continue. */
   release(): void;
-  /** Throws if steps remain: an unconsumed step means the agent made fewer calls than the test expected. */
   assertDone(): void;
 };
 

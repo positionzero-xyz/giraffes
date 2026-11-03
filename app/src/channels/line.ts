@@ -1,12 +1,9 @@
-/**
- * LINE Messaging API, 1:1 only in week 1. LINE wire types live in this file and nowhere else.
- */
 import { z } from "zod";
 import { eventKey, personAgentKey, type ChannelEvent, type EpochMs, type InboundEnvelope, type OutboundMessage } from "../domain";
 import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
 
 const API = "https://api.line.me/v2/bot/message";
-/** LINE says a reply token is good for about one minute. We stop trusting it earlier. */
+/** LINE says a reply token is good for about one minute. */
 const REPLY_TOKEN_TTL_MS = 60_000;
 const REPLY_TOKEN_SAFETY_MS = 10_000;
 /** A reply or push carries at most 5 message objects; each text at most 5,000 characters. */
@@ -70,7 +67,6 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
       const envelopes: InboundEnvelope[] = [];
       for (const item of body.data.events) {
         const e = WebhookEvent.safeParse(item);
-        // Groups arrive in week 3; other kinds aren't handled.
         if (!e.success || e.data.source.type !== "user" || !e.data.source.userId) continue;
         const event = toEvent(e.data);
         if (!event) continue;
@@ -87,13 +83,12 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
     },
 
     async deliver(msg: OutboundMessage, now: EpochMs): Promise<Delivery> {
-      // The planner caps texts per turn, so truncation here is a guard, not a path.
       const messages = msg.texts.slice(0, MAX_MESSAGES).map((text) => ({ type: "text", text: text.slice(0, MAX_TEXT) }));
       try {
         if (msg.reply && !msg.inDoubt && now < msg.reply.expiresAt - REPLY_TOKEN_SAFETY_MS) {
           const res = await fetch(`${API}/reply`, { method: "POST", headers: auth, body: JSON.stringify({ replyToken: msg.reply.token, messages }) });
           if (res.ok) return { kind: "sent", via: "reply" };
-          // 400 is an invalid or used token: pushing still reaches the person. Anything else is final.
+          // 400 is an invalid or used token: pushing still reaches the person.
           if (res.status !== 400) return classify(res.status, await res.text());
         }
         // Billed, and idempotent per X-Line-Retry-Key, so a resend after a crash is deduplicated by LINE.

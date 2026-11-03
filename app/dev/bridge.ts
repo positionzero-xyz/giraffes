@@ -1,10 +1,4 @@
-/**
- * Local dev bridge: lets `wrangler dev` use the operator's own Claude login through `claude -p`.
- * A Worker can't spawn processes, so the Worker's `bridgeModel` POSTs here.
- * Run with: npm run bridge   (Node 24 runs this file directly; binds 127.0.0.1 only; never deployed)
- *
- * Contract: see src/model/bridge.ts. No retries here: the Worker's agent owns retry policy.
- */
+/** A Worker can't spawn processes, so the Worker's `bridgeModel` POSTs here. */
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";

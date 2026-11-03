@@ -1,7 +1,3 @@
-/**
- * Zone math. Pure. Uses `Intl.DateTimeFormat` (Workers ship full ICU tz data).
- * Every conversion between instants and wall time in the codebase goes through this file.
- */
 import type { EpochMs, LocalDate, LocalDateTime, MonthKey, TimeOfDay, TimeZone } from "../domain";
 
 export const DEFAULT_TIME_ZONE = "Asia/Bangkok" as TimeZone;
@@ -9,7 +5,6 @@ export const DEFAULT_TIME_ZONE = "Asia/Bangkok" as TimeZone;
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
 
-/** Boundary constructor. Returns null for anything `Intl` rejects. */
 export function parseTimeZone(raw: string): TimeZone | null {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: raw });
@@ -21,7 +16,6 @@ export function parseTimeZone(raw: string): TimeZone | null {
 
 const LOCAL_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/;
 
-/** Boundary constructor for model output. Accepts exactly "YYYY-MM-DDTHH:mm" with a real calendar date. */
 export function parseLocalDateTime(raw: string): LocalDateTime | null {
   const m = LOCAL_DATE_TIME.exec(raw);
   if (!m) return null;
@@ -59,13 +53,11 @@ function fieldsAt(t: number, tz: TimeZone): Fields {
   return { y: parts.year, mo: parts.month, d: parts.day, h: parts.hour, mi: parts.minute, s: parts.second };
 }
 
-/** The instant's wall clock in `tz`, written as if it were UTC. */
 function wallMs(t: number, tz: TimeZone): number {
   const f = fieldsAt(t, tz);
   return Date.UTC(f.y, f.mo - 1, f.d, f.h, f.mi, f.s);
 }
 
-/** Local minus UTC at instant `t`, in ms. */
 function offsetAt(t: number, tz: TimeZone): number {
   return wallMs(t, tz) - Math.floor(t / 1000) * 1000;
 }
@@ -81,19 +73,12 @@ function localWall(l: LocalDateTime): number {
   return Date.UTC(+l.slice(0, 4), +l.slice(5, 7) - 1, +l.slice(8, 10), +l.slice(11, 13), +l.slice(14, 16));
 }
 
-/**
- * Wall time to instant.
- * Invariant: never throws for a parsed LocalDateTime. A DST gap resolves forward to the first valid
- * minute; an overlap resolves to the earlier instant. (Asia/Bangkok has neither; Telegram users elsewhere do.)
- */
 export function fromLocal(l: LocalDateTime, tz: TimeZone): EpochMs {
   const wall = localWall(l);
   const before = wall - offsetAt(wall - DAY, tz);
   const after = wall - offsetAt(wall + DAY, tz);
   const exact = [before, after].filter((c) => wallMs(c, tz) === wall);
   if (exact.length > 0) return Math.min(...exact) as EpochMs;
-  // A gap: the wall clock jumps over `wall` somewhere between the two candidates. Find the first
-  // minute whose wall time is at or past it.
   let lo = Math.min(before, after);
   let hi = Math.max(before, after);
   while (hi - lo > MINUTE) {
@@ -108,12 +93,10 @@ export function localDate(t: EpochMs, tz: TimeZone): LocalDate {
   return toLocal(t, tz).slice(0, 10) as LocalDate;
 }
 
-/** The instant the local day containing `t` began. */
 export function startOfLocalDay(t: EpochMs, tz: TimeZone): EpochMs {
   return fromLocal(`${localDate(t, tz)}T00:00` as LocalDateTime, tz);
 }
 
-/** UTC month. Spend uses one calendar for the user cap and the global ceiling so they roll over together. */
 export function monthKey(t: EpochMs): MonthKey {
   return new Date(t).toISOString().slice(0, 7) as MonthKey;
 }
@@ -127,7 +110,6 @@ function atLocal(day: LocalDate, hhmm: TimeOfDay, tz: TimeZone): EpochMs {
   return fromLocal(`${day}T${hhmm}` as LocalDateTime, tz);
 }
 
-/** Next instant strictly after `after` whose wall time in `tz` is `hhmm` (or the gap's end, on a DST day). */
 export function nextLocalTime(after: EpochMs, tz: TimeZone, hhmm: TimeOfDay): EpochMs {
   let day = localDate(after, tz);
   for (;;) {

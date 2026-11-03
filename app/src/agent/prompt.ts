@@ -1,13 +1,9 @@
 /**
- * System prompts. Plain string constants with no interpolation, so they are byte-stable across every
- * person and every call and the prompt cache can hit. Anything per-person or per-event belongs in the
- * user message built by `turn.renderUser`. A unit test asserts these strings contain no "${".
- *
- * Note: a cached prefix must clear the model's minimum cacheable length. If the final system prompt is
- * shorter, caching silently doesn't happen; cost is still correct, just higher. Measure in week 1.
+ * Plain string constants with no interpolation, so they are byte-stable across every person and every
+ * call and the prompt cache can hit. A cached prefix must clear the model's minimum cacheable length;
+ * if the final system prompt is shorter, caching silently doesn't happen.
  */
 
-/** Placeholder for the opportunism playbook from the prototypes. */
 export const OPPORTUNISM_PLAYBOOK = `Be opportunistic by default.
 - When a request has a date, a place or a budget, look for a nearby option that is clearly better (a cheaper window, a quieter day, a deadline the person may not know) and mention it in one line.
 - When something can only be checked later, schedule a wake-up to check it instead of guessing now.

@@ -1,11 +1,4 @@
 /**
- * Drives a real Agent Durable Object through the real Worker route, with a scripted model, a fake clock
- * and an in-memory ledger. Runs under @cloudflare/vitest-pool-workers.
- *
- * The test talks the way a channel does (POST /webhook/dev) and reads what the person would see
- * (delivered outbox texts) and what the agent shipped to the ledger. It never reaches into tables, so a
- * refactor of the store doesn't break tests.
- *
  * Scenarios use dates in 2099. The runtime fires a stored alarm on its own once the real clock passes
  * it, which would race the test's explicit runs; far-future fake times keep every alarm in the future.
  */
@@ -35,7 +28,6 @@ export function fakeClock(start: EpochMs): FakeClock {
 
 export type MemoryLedger = Ledger & { readonly rows: readonly LogRow[] };
 
-/** Same contract as the D1 ledger: rows are idempotent by (stream, id), leases by (agent, month, seq). */
 export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): MemoryLedger {
   const ceiling = opts.ceilingMicro ?? SPEND.globalCeilingMicro;
   const rows: LogRow[] = [];
@@ -65,20 +57,13 @@ export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): Mem
 export type DevChat = {
   readonly model: ScriptedModel;
   readonly clock: FakeClock;
-  /** POST /webhook/dev without waiting for the agent. `at` is the platform timestamp (default: now). */
   post(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<Response>;
-  /** post(), then run the agent until it is idle at the current fake time. */
   say(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<void>;
-  /** Run drains until no alarm is due at the current fake time, joining a drain already in flight. */
   settle(): Promise<void>;
-  /** Invoke the alarm handler once, as the runtime does (possibly again, possibly concurrently). */
   alarm(): Promise<void>;
-  /** Move the fake clock to a local wall time, running every alarm due on the way, in order. */
   advanceTo(local: string): Promise<void>;
-  /** Texts delivered to the person since the last call, one string per delivery (texts joined by \n). */
   received(): Promise<string[]>;
   snapshot(): Promise<AgentSnapshot>;
-  /** Rows the agent shipped to the ledger, by stream. */
   logs<S extends LogRow["stream"]>(stream: S): Extract<LogRow, { stream: S }>[];
 };
 
@@ -138,7 +123,6 @@ export async function devChat(
   return chat;
 }
 
-/** Builds a ScriptStep whose value must satisfy TurnOutputSchema (checked when the agent calls). */
 export function turn(o: {
   readonly actions: unknown[];
   readonly lateNotice?: string;
@@ -150,7 +134,6 @@ export function turn(o: {
   return o.usage ? { kind: "output", value, usage: o.usage } : { kind: "output", value };
 }
 export const send = (text: string) => ({ type: "send", text });
-/** `asked` defaults to true: the person asked for this reminder. */
 export const schedule = (key: string, at: string, note: string, asked = true) => ({ type: "schedule_wakeup", key, at, note, asked });
 export const cancel = (key: string) => ({ type: "cancel_wakeup", key });
 export const quiet = () => ({ type: "quiet" });

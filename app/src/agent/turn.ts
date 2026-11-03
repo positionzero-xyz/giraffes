@@ -1,11 +1,3 @@
-/**
- * The agent turn as pure functions: what the model sees, what it may return, and how its output becomes
- * one atomic `TurnCommit`. No I/O. The Agent loads a `TurnView`, makes one model call, and hands the
- * output to `planTurn`; whatever comes back is applied in a single SQLite transaction or not at all.
- *
- * `TurnOutputSchema` is the model's contract. The Agent passes it to the model client and hands the
- * parsed value straight back to `planTurn`; no other module reads model output.
- */
 import { z } from "zod";
 import {
   CHECKIN_KEY,
@@ -50,12 +42,8 @@ export const TURN = {
   maxTextChars: 2000,
   maxNoteChars: 500,
   maxActions: 8,
-  /** Claim attempts before an event is declared poison (crashes, not model failures). */
   maxAttempts: 3,
 } as const;
-
-// ---------------------------------------------------------------------------------------------
-// Model output schema (structured output via zodOutputFormat)
 
 const Slug = z.string().regex(WAKEUP_KEY_PATTERN);
 
@@ -84,9 +72,6 @@ export const TurnOutputSchema = z.object({
 });
 export type TurnOutput = z.infer<typeof TurnOutputSchema>;
 
-// ---------------------------------------------------------------------------------------------
-// Inputs
-
 export type InboxItem = {
   readonly key: EventKey;
   readonly event: AgentEvent;
@@ -94,27 +79,19 @@ export type InboxItem = {
   readonly receivedAt: EpochMs;
 };
 
-/**
- * What one turn is about. Invariant (enforced by the store's `claimBatch`): either exactly one
- * non-message event, or 1..maxBatchMessages consecutive message events.
- */
 export type Batch = { readonly items: readonly [InboxItem, ...InboxItem[]] };
 
 export type TurnRow = { readonly role: "person" | "agent" | "note"; readonly text: string; readonly at: EpochMs };
 
-/** Everything a turn reads. Loaded by the Agent in one synchronous read, so it is a consistent snapshot. */
 export type TurnView = {
   readonly now: EpochMs;
   readonly tz: TimeZone;
   readonly status: PersonStatus;
-  /** Platform timestamp of the last applied follow or block. Older lifecycle events are stale. */
   readonly statusAt: EpochMs;
   readonly checkinLocal: TimeOfDay;
   readonly summary: string;
   readonly notes: readonly string[];
-  /** The last TURN.recentTurns rows, oldest first. Bounded even if compaction lags. */
   readonly recent: readonly TurnRow[];
-  /** Includes the check-in, so the model can see when it will next wake. */
   readonly pending: readonly PendingWakeup[];
   readonly batch: Batch;
   readonly unaskedLeftToday: number;
@@ -166,7 +143,6 @@ function renderPending(w: PendingWakeup, tz: TimeZone): string {
 
 const SPEAKER: Readonly<Record<TurnRow["role"], string>> = { person: "Person:", agent: "You:", note: "(note)" };
 
-/** The user message. Deterministic given the view; system prompt is the constant in prompt.ts. */
 export function renderUser(view: TurnView): string {
   const memory = [view.summary || "(nothing yet)", ...view.notes.map((n) => `- ${n}`)].join("\n");
   const pending = view.pending.length ? view.pending.map((w) => renderPending(w, view.tz)).join("\n") : "(none)";
@@ -183,46 +159,31 @@ export function renderUser(view: TurnView): string {
   ].join("\n\n");
 }
 
-// ---------------------------------------------------------------------------------------------
-// Output
-
 export type NewTurn = TurnRow & { readonly eventKey: EventKey };
 
 export type Outbound = {
   readonly texts: readonly [string, ...string[]];
   readonly intent: Intent;
-  /** What started the turn; the unasked log records it at delivery. */
   readonly triggerKind: AgentEventKind;
   readonly reply?: ReplyHandle;
 };
 
 export type Reachability = { readonly status: PersonStatus; readonly at: EpochMs };
 
-/**
- * Everything one turn changes. Applied by `AgentStore.commitTurn` in one transaction together with
- * marking the batch done, settling the spend reservation, and writing the turn's log rows.
- */
 export type TurnCommit = {
   readonly batchKeys: readonly [EventKey, ...EventKey[]];
   readonly outcome: TurnOutcome;
   readonly turns: readonly NewTurn[];
   readonly outbound: Outbound | null;
-  /** Applied before `wakeupsAdd`, so cancel-then-schedule of one key reschedules. */
   readonly wakeupsCancel: readonly WakeupKey[];
   readonly wakeupsAdd: readonly NewReminder[];
   readonly notes: readonly string[];
   readonly task: TaskLabel | null;
-  /** A fresh follow or block, stamped with its platform time. */
   readonly reachability: Reachability | null;
-  /** Inserted unless a check-in is already pending (a follow). */
   readonly ensureCheckin: NewWakeup | null;
-  /** Actions code refused, for the turn log. The person sees a notice for the ones that matter. */
   readonly rejected: readonly { readonly action: string; readonly reason: string }[];
 };
 
-/**
- * Fixed texts code adds on its own. English-only in week 1 (see RATIONALE open questions).
- */
 export const NOTICE = {
   reminderLimit: "(I can hold 20 reminders at most. Cancel one and ask again.)",
   reminderPast: "(That time has already passed, so I didn't set it.)",
@@ -255,7 +216,6 @@ function batchKeys(view: TurnView): readonly [EventKey, ...EventKey[]] {
 
 const NO_COST = 0 as MicroUsd;
 
-/** The freshest reply token in the batch: the newest event that carries one. */
 function newestReply(view: TurnView): ReplyHandle | undefined {
   let reply: ReplyHandle | undefined;
   for (const item of view.batch.items) {
@@ -282,10 +242,6 @@ function personTurns(view: TurnView): NewTurn[] {
   return turns;
 }
 
-/**
- * A lifecycle event changes reachability only if it is at least as new as the last applied one, so a
- * replayed or out-of-order older event never overrides a newer change.
- */
 function lifecycleEffects(view: TurnView): Pick<TurnCommit, "reachability" | "ensureCheckin"> {
   const e = trigger(view);
   if (e.kind !== "lifecycle" || e.at < view.statusAt) return { reachability: null, ensureCheckin: null };
@@ -294,7 +250,6 @@ function lifecycleEffects(view: TurnView): Pick<TurnCommit, "reachability" | "en
     : { reachability: { status: "blocked", at: e.at }, ensureCheckin: null };
 }
 
-/** The wake-up or check-in that started this turn, if it fired more than an hour late. */
 function lateTrigger(view: TurnView): { readonly dueAt: EpochMs } | null {
   const e = trigger(view);
   return (e.kind === "wakeup" || e.kind === "checkin") && isLate(e) ? e : null;
@@ -314,26 +269,6 @@ function triggerNote(e: AgentEvent, tz: TimeZone): string | null {
   }
 }
 
-/**
- * Validate and convert model output. Never throws on model content; every bad action becomes a
- * rejection. Rules, applied in action order with a running copy of `pending`:
- *   send            → collected; at most maxSendsPerTurn, extras rejected
- *   schedule_wakeup → origin from wakeupOrigin(); admitReminder(); limit and past get a notice
- *   cancel_wakeup   → must name a pending reminder key; the check-in key is refused
- *   remember        → collected
- *   quiet           → no effect
- * Then:
- *   intent  = intentOf(first event)        (code decides reply, requested or unasked)
- *   reply   = newest event's ReplyHandle (freshest token) when intent is reply
- *   late    = a wakeup/checkin trigger with isLate(); if late and there are texts, prepend
- *             out.lateNotice ?? NOTICE.lateFallback(dueLocal) to the first text
- *   notices = only when answering the person: appended as a final text (counts toward
- *             maxSendsPerTurn; a send is dropped first)
- *   turns   = person texts from message events, a note for a proactive trigger, agent texts as sent,
- *             then a note for the notice
- *   outcome = "acted" if anything applied, else "quiet"
- *   follow  -> reachability active, ensureCheckin (the welcome text is the model's)
- */
 export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   const first = trigger(view);
   const intent = intentOf(first);
@@ -420,7 +355,6 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   };
 }
 
-/** Why a turn commits without its model output. */
 export type NoModelReason =
   | { readonly kind: "block" }
   | { readonly kind: "stale_lifecycle" }
@@ -428,7 +362,6 @@ export type NoModelReason =
   | { readonly kind: "model_failed" }
   | { readonly kind: "poison" };
 
-/** Lifecycle events the model has nothing to say about: a block, and anything older than the last change. */
 export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "block" | "stale_lifecycle" }> | null {
   const e = trigger(view);
   if (e.kind !== "lifecycle") return null;
@@ -436,17 +369,6 @@ export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "blo
   return e.change === "block" ? { kind: "block" } : null;
 }
 
-/**
- * A turn that doesn't call the model, or whose model call failed. Still commits, so the batch is done
- * and the person's words are recorded. A fresh follow or block still changes reachability.
- *   block            → status blocked, no outbound, outcome no_model
- *   stale_lifecycle  → nothing applied, outcome stale
- *   refused_budget   → message events: one fixed reply ("I've reached my limit for this month…") at
- *                      most once per local day (caller passes `alreadyToldToday`); proactive events: nothing
- *   model_failed     → message events: fixed "Sorry, I couldn't process that, can you say it again?";
- *                      proactive events: nothing (the wake-up is lost, and logged)
- *   poison           → like model_failed, outcome poison
- */
 export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit {
   const answersPerson = trigger(view).kind === "message";
   let outcome: TurnOutcome;
@@ -498,13 +420,6 @@ export type TurnCall =
   | { readonly kind: "refused"; readonly scope: "user_cap" | "global_ceiling"; readonly model: ModelId; readonly estimate: MicroUsd }
   | { readonly kind: "none" };
 
-/**
- * The turn's log rows, written in the same transaction as the commit (log_outbox, then D1).
- *   turn       always, id `<agent>|<first batch key>`
- *   model_call when a call was made or refused
- *   lifecycle  for a fresh follow/block
- * Unasked-message rows are written later, at delivery, because only delivery knows sent vs dropped.
- */
 export function logsForTurn(input: {
   readonly agent: AgentKey;
   readonly commit: TurnCommit;

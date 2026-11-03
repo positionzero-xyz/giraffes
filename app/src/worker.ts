@@ -1,7 +1,3 @@
-/**
- * Worker entry. Thin: authenticate and parse at the channel boundary, hand domain envelopes to the
- * right Agent, answer. No business logic, no model calls, no waiting on a turn.
- */
 import chatPage from "../dev/chat.html";
 import { makeChannels } from "./channels/channel";
 import { devIdentity } from "./channels/dev";
@@ -23,8 +19,6 @@ export default {
       const adapter = makeChannels(config)[channel];
       const received = await adapter.receive(req);
       if (received.kind === "rejected") return new Response(null, { status: received.status });
-      // Durable before 200. If any enqueue throws, answer 500: the channel redelivers, and
-      // UNIQUE(event_key) turns the already-landed envelopes into no-ops.
       await Promise.all(received.envelopes.map((e) => agentStub(env, e.agent).enqueue(e)));
       return new Response("ok");
     }
@@ -41,7 +35,6 @@ export function agentStub(env: Env, key: AgentKey) {
   return env.AGENT.get(env.AGENT.idFromName(key));
 }
 
-/** GET /dev/transcript?user=u → Agent.snapshot() for p:dev:u. The dev page polls it every second. */
 async function transcript(env: Env, url: URL): Promise<Response> {
   const identity = devIdentity(url.searchParams.get("user") ?? "");
   if (!identity) return new Response("user must match [A-Za-z0-9_-]{1,64}", { status: 400 });

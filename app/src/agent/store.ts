@@ -1,13 +1,6 @@
 /**
- * Typed access to the agent's SQLite tables. The only module that writes SQL against `ctx.storage.sql`
- * and the only one that parses JSON columns. Imported only by `agent.ts`.
- *
  * Every method is synchronous: SQLite calls in a Durable Object don't await, so a method body is
- * atomic with respect to other requests. Each method that changes more than one row runs inside one
- * `transactionSync`, so it lands whole or not at all; callers never compose transactions themselves.
- *
- * Row types below are the columns as schema.ts declares them. They are this module's assertion about its
- * own tables, which nothing else writes.
+ * atomic with respect to other requests.
  */
 import {
   assertNever,
@@ -63,7 +56,6 @@ export type Reservation = {
   readonly estimate: MicroUsd;
 };
 
-/** A reservation closed at its actual cost. */
 export type Settlement = { readonly reservation: Reservation; readonly cost: MicroUsd };
 
 export type OutboxView = {
@@ -105,7 +97,6 @@ const OUTBOX_KEEP_MS = 30 * DAY_MS;
 const LOG_RETRY_BASE_MS = 10_000;
 const LOG_RETRY_MAX_MS = 60 * 60 * 1000;
 
-/** JSON columns hold values this module serialized itself. */
 function fromJson<T>(text: string): T {
   return JSON.parse(text);
 }
@@ -138,8 +129,6 @@ export class AgentStore {
     return this.storage.transactionSync(fn);
   }
 
-  // --- agent ----------------------------------------------------------------------------------
-
   agent(): AgentRow | null {
     const r = this.sql
       .exec<AgentCols>("SELECT agent_key, channel, channel_user_id, tz, checkin_local, status, status_at FROM agent")
@@ -155,11 +144,6 @@ export class AgentStore {
     };
   }
 
-  /**
-   * The only write `enqueue` makes. The first time: the singleton agent row, its `agent` log row and the
-   * daily check-in. Then INSERT OR IGNORE on event_key: "duplicate" means this exact event was seen
-   * before, in any status.
-   */
   enqueue(
     envelope: InboundEnvelope,
     first: { readonly tz: TimeZone; readonly checkinLocal: TimeOfDay; readonly checkin: NewWakeup },
@@ -199,16 +183,6 @@ export class AgentStore {
     return written > 0 ? "inserted" : "duplicate";
   }
 
-  // --- inbox ----------------------------------------------------------------------------------
-
-  /**
-   * Called once at the start of every drain. Anything in `processing`/`sending` or any open reservation
-   * belongs to a run that died: the in-memory drain guard guarantees no live run exists when this runs.
-   * Only one batch is ever in flight, so every `processing` row belongs to the same batch.
-   *   processing inbox rows → pending, attempts kept; or, at TURN.maxAttempts, returned for a poison commit
-   *   sending outbox rows   → pending with in_doubt = 1
-   *   open reservations     → settled at their estimate, logged as recovered_after_crash
-   */
   recover(now: EpochMs): Batch | null {
     const agent = this.agent();
     if (!agent) return null;
@@ -248,11 +222,6 @@ export class AgentStore {
     });
   }
 
-  /**
-   * Claim the next batch: the oldest ready pending row; if it is a message, also the following ready
-   * pending message rows up to TURN.maxBatchMessages, stopping at the first non-message. Sets them to
-   * `processing` and increments attempts, in one transaction. Returns null when nothing is ready.
-   */
   claimBatch(now: EpochMs): Batch | null {
     return this.tx(() => {
       const ready = this.sql
@@ -276,11 +245,6 @@ export class AgentStore {
     });
   }
 
-  /**
-   * processing -> pending with ready_at moved: the model was unavailable. Attempts are kept, so a long
-   * outage ends in model_failed instead of an endless loop. The call's reservation closes in the same
-   * transaction.
-   */
   releaseBatch(keys: readonly EventKey[], readyAt: EpochMs, settle: Settlement | null, logs: readonly LogRow[], now: EpochMs): void {
     this.tx(() => {
       this.sql.exec(
@@ -293,10 +257,6 @@ export class AgentStore {
     });
   }
 
-  /**
-   * Derived "already told them about the monthly limit today": any done row with outcome
-   * refused_budget finished since the local day began. No flag to keep in sync.
-   */
   refusedToday(dayStart: EpochMs): boolean {
     return (
       this.sql
@@ -305,9 +265,6 @@ export class AgentStore {
     );
   }
 
-  // --- the turn's read and write --------------------------------------------------------------
-
-  /** One synchronous read of everything `TurnView` needs except the batch and clock. */
   turnContext(limitTurns: number): {
     readonly summary: string;
     readonly notes: readonly string[];
@@ -336,7 +293,6 @@ export class AgentStore {
       .map(toWakeup);
   }
 
-  /** Apply a turn atomically: everything in `commit`, the batch marked done, the call settled, the logs queued. */
   commitTurn(commit: TurnCommit, settle: Settlement | null, logs: readonly LogRow[], now: EpochMs): void {
     const [firstKey] = commit.batchKeys;
     this.tx(() => {
@@ -386,7 +342,6 @@ export class AgentStore {
   }
 
   private insertWakeup(w: NewWakeup, createdBy: string, now: EpochMs): void {
-    // OR IGNORE against the partial unique index: a key that is already pending stays as it is.
     this.sql.exec(
       `INSERT OR IGNORE INTO wakeup (key, kind, origin, note, due_at, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       w.key,
@@ -399,9 +354,6 @@ export class AgentStore {
     );
   }
 
-  // --- wake-ups -------------------------------------------------------------------------------
-
-  /** Pending rows with due_at <= now, oldest first. */
   dueWakeups(now: EpochMs): readonly PendingWakeup[] {
     return this.sql
       .exec<WakeupCols>(
@@ -412,10 +364,6 @@ export class AgentStore {
       .map(toWakeup);
   }
 
-  /**
-   * One transaction per firing: inbox insert (OR IGNORE on 'wake:<id>' or 'checkin:<day>'), close the
-   * wake-up as fired or skipped, insert its successor (check-in).
-   */
   applyFiring(firing: Firing, now: EpochMs): void {
     this.tx(() => {
       switch (firing.kind) {
@@ -432,8 +380,6 @@ export class AgentStore {
       }
     });
   }
-
-  // --- outbox ---------------------------------------------------------------------------------
 
   readyOutbox(now: EpochMs, limit: number): readonly OutboxRow[] {
     const agent = this.agent();
@@ -464,14 +410,12 @@ export class AgentStore {
       });
   }
 
-  /** Derived budget: COUNT(*) WHERE intent='unasked' AND admitted_day = day. */
   unaskedAdmitted(day: LocalDate): number {
     return this.sql
       .exec<{ n: number }>("SELECT COUNT(*) AS n FROM outbox WHERE intent = 'unasked' AND admitted_day = ?", day)
       .one().n;
   }
 
-  /** pending -> sending, recording admitted_day for unasked rows. Must commit before the network call. */
   markSending(id: OutboxId, admittedDay: LocalDate | null): void {
     this.sql.exec(
       "UPDATE outbox SET status = 'sending', admitted_day = COALESCE(admitted_day, ?), attempts = attempts + 1 WHERE id = ?",
@@ -487,7 +431,6 @@ export class AgentStore {
     });
   }
 
-  /** sending|pending -> pending with ready_at moved (retry backoff or quiet-hours deferral). */
   reschedule(id: OutboxId, readyAt: EpochMs): void {
     this.sql.exec("UPDATE outbox SET status = 'pending', ready_at = ? WHERE id = ?", readyAt, id);
   }
@@ -499,7 +442,6 @@ export class AgentStore {
     });
   }
 
-  /** The platform says the person blocked us: drop the row and mark them blocked, as one fact. */
   recipientGone(id: OutboxId, now: EpochMs, logs: readonly LogRow[]): void {
     this.tx(() => {
       this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'gone', closed_at = ? WHERE id = ?", now, id);
@@ -518,8 +460,6 @@ export class AgentStore {
       .reverse()
       .map((r) => ({ ...r, texts: fromJson<string[]>(r.texts) }));
   }
-
-  // --- spend ----------------------------------------------------------------------------------
 
   monthSpend(month: MonthKey): MonthSpend {
     const row = this.sql
@@ -545,7 +485,6 @@ export class AgentStore {
     );
   }
 
-  /** Settle outside a turn commit (compaction). Deletes the reservation, adds actual, queues the logs. */
   settle(s: Settlement, logs: readonly LogRow[], now: EpochMs): void {
     this.tx(() => {
       this.settleRow(s);
@@ -563,7 +502,6 @@ export class AgentStore {
     this.sql.exec("INSERT INTO spend_month (month) VALUES (?) ON CONFLICT (month) DO NOTHING", month);
   }
 
-  /** Persist the seq about to be requested, so a crash between asking and recording retries the same seq. */
   beginLease(month: MonthKey): number {
     return this.tx(() => {
       this.ensureMonth(month);
@@ -582,12 +520,9 @@ export class AgentStore {
     );
   }
 
-  /** A refused seq was never inserted in the ledger, so the next request may reuse it. */
   denyLease(month: MonthKey, seq: number): void {
     this.sql.exec("UPDATE spend_month SET lease_pending = NULL WHERE month = ? AND lease_pending = ?", month, seq);
   }
-
-  // --- memory ---------------------------------------------------------------------------------
 
   compactionInput(): CompactionInput {
     const memory = this.sql.exec<{ summary: string; through_turn_seq: number }>("SELECT summary, through_turn_seq FROM memory").one();
@@ -601,11 +536,6 @@ export class AgentStore {
     };
   }
 
-  /**
-   * Settle the compaction call and, if memory.through_turn_seq still equals c.expectThroughSeq, replace
-   * the summary and delete folded turns and notes. One transaction. Returns false if the compare-and-set
-   * missed (the settle still applies).
-   */
   commitCompaction(c: CompactionCommit, settle: Settlement, logs: readonly LogRow[], now: EpochMs): boolean {
     return this.tx(() => {
       this.settleRow(settle);
@@ -626,8 +556,6 @@ export class AgentStore {
     });
   }
 
-  // --- logs -----------------------------------------------------------------------------------
-
   private insertLogs(rows: readonly LogRow[], now: EpochMs): void {
     for (const row of rows) {
       this.sql.exec(
@@ -640,7 +568,6 @@ export class AgentStore {
     }
   }
 
-  /** Rows waiting for D1, unless the last flush failed and its backoff hasn't passed. */
   pendingLogs(now: EpochMs, limit: number): readonly LogRow[] {
     const { retry_at } = this.sql.exec<{ retry_at: EpochMs }>("SELECT retry_at FROM log_flush").one();
     if (retry_at > now) return [];
@@ -650,7 +577,6 @@ export class AgentStore {
       .map((r) => fromJson<LogRow>(r.row));
   }
 
-  /** Delete shipped rows and reset the failure counter. */
   logsShipped(rows: readonly LogRow[]): void {
     this.tx(() => {
       const ids = rows.map((r) => `${r.stream}:${r.id}`);
@@ -665,13 +591,6 @@ export class AgentStore {
     this.sql.exec("UPDATE log_flush SET failures = failures + 1, retry_at = ?", now + backoff);
   }
 
-  // --- the alarm's inputs ---------------------------------------------------------------------
-
-  /**
-   * The earliest instant each table needs the drain. Feeds `nextAlarm`; nothing stores the result.
-   * `processing` and `sending` rows count as ready: outside a live drain they are a dead run's leftovers.
-   * Wake-ups are reported per origin, because only the caller can turn a due time into a fire time.
-   */
   readiness(): {
     readonly inboxReadyAt: EpochMs | null;
     readonly earliestWakeups: readonly { readonly origin: WakeupOrigin; readonly dueAt: EpochMs }[];
@@ -692,7 +611,6 @@ export class AgentStore {
     };
   }
 
-  /** Housekeeping: done inbox rows outlive the 14-day dedupe window; closed outbox rows go after 30. */
   prune(now: EpochMs): void {
     this.sql.exec("DELETE FROM inbox WHERE status IN ('done', 'failed') AND finished_at < ?", now - INBOX_KEEP_MS);
     this.sql.exec("DELETE FROM outbox WHERE status IN ('sent', 'dropped') AND closed_at < ?", now - OUTBOX_KEEP_MS);

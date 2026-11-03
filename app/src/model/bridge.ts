@@ -1,16 +1,3 @@
-/**
- * Dev backend: the Worker calls a tiny local process (`app/dev/bridge.ts`) that runs `claude -p` with the
- * operator's own Claude login, run locally. Dev only: `loadConfig` refuses
- * MODEL_BACKEND=bridge unless DEV_MODE=1.
- *
- * Wire contract (private to this file and dev/bridge.ts):
- *   POST {bridgeUrl}/parse  { model, system, user, jsonSchema }
- *   200  { structured: unknown | null, usage: { input_tokens, output_tokens, cache_creation_input_tokens,
- *          cache_read_input_tokens } | null, stop: "end" | "refusal" | "max_tokens", costUsd: number | null }
- *   502  the CLI failed; the Worker treats it as unavailable.
- * Usage is the CLI's real token count, priced like production, so spend tracking behaves as it will
- * when deployed even though the operator's plan pays (`costUsd`, which the Worker doesn't use).
- */
 import { z } from "zod";
 import { routeOf, type ModelClient, type ModelRequest, type ModelResult, type Usage } from "./model";
 

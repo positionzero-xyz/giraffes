@@ -1,22 +1,3 @@
-/**
- * One Durable Object per person. Owns that person's queue, memory, wake-ups, budget counters, spend and
- * outbox, in its own SQLite.
- *
- * Shape: one way in, one executor.
- *   - `enqueue` is the only entry for outside events. It writes one inbox row, arms the alarm as the
- *     durable backstop, and starts the drain at once (`ctx.waitUntil`) so a reply never waits on alarm
- *     scheduling. It never processes anything itself.
- *   - The drain (run by `alarm`, or started by `enqueue`) is the only executor. It drains durable tables
- *     in a fixed order and re-arms the alarm to the earliest instant any table needs attention (derived
- *     each time, never stored).
- *
- * Why this is serial even though a DO interleaves requests during `await fetch` (the model call):
- * the only thing that can interleave is `enqueue` (an INSERT) or `snapshot` (a read). A second drain
- * request while one is in flight joins it via `#drain` instead of starting another. The guard is in
- * memory on purpose: there is one live instance per DO, and if it dies the drain dies with it, so the
- * guard never outlives the work it protects. `store.recover()` at the start of every drain then treats
- * anything left in flight as crashed.
- */
 import { DurableObject } from "cloudflare:workers";
 import type { z } from "zod";
 import { makeChannels, type ChannelRegistry } from "../channels/channel";
@@ -47,19 +28,16 @@ import {
   type TurnView,
 } from "./turn";
 
-/** One drain stops taking new batches after this and re-arms for now, so one person can't hold an alarm. */
 const DRAIN_BUDGET_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 5;
 const DELIVERY_BATCH = 20;
 const LOG_BATCH = 100;
 const LOG_BATCHES_PER_DRAIN = 10;
-/** First retry after the model was unavailable; doubles per attempt until TURN.maxAttempts. */
 const MODEL_RETRY_MS = 30_000;
 const NO_COST = 0 as MicroUsd;
 
 export type Clock = { now(): EpochMs };
 
-/** Everything the agent talks to. Built from config in production; replaced wholesale in tests. */
 export type AgentDeps = {
   readonly model: ModelClient;
   readonly ledger: Ledger;
@@ -69,9 +47,7 @@ export type AgentDeps = {
 
 type ModelCall<T> =
   | { readonly kind: "ok"; readonly value: T; readonly reservation: Reservation; readonly usage: Usage }
-  /** Invalid output or a refusal by the model. Billed, so it settles like a success. */
   | { readonly kind: "failed"; readonly reservation: Reservation; readonly usage: Usage | null }
-  /** Transient. The caller retries the work later instead of failing it. */
   | { readonly kind: "unavailable"; readonly reservation: Reservation | null }
   | { readonly kind: "refused"; readonly scope: "user_cap" | "global_ceiling"; readonly model: ModelId; readonly estimate: MicroUsd };
 
@@ -87,6 +63,8 @@ export type AgentSnapshot = {
 export class Agent extends DurableObject<Env> {
   readonly #store: AgentStore;
   #deps: AgentDeps;
+  // A DO interleaves requests during `await fetch`. The guard is in memory on purpose: there is one live
+  // instance per DO, and if it dies the drain dies with it, so the guard never outlives the work it protects.
   #drain: Promise<void> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -96,10 +74,6 @@ export class Agent extends DurableObject<Env> {
     this.#deps = defaultDeps(env);
   }
 
-  /**
-   * The only way in. Durable on return. Idempotent on `envelope.key`.
-   * Called by the Worker for every verified webhook event, before it answers the channel 200.
-   */
   async enqueue(envelope: InboundEnvelope): Promise<"queued" | "duplicate"> {
     const now = this.#deps.clock.now();
     const first = {
@@ -113,7 +87,7 @@ export class Agent extends DurableObject<Env> {
     return "queued";
   }
 
-  /** The only executor. Cloudflare may invoke it more than once; joining the in-flight drain makes that harmless. */
+  /** Cloudflare may invoke it more than once; joining the in-flight drain makes that harmless. */
   override async alarm(): Promise<void> {
     if (this.#drain) return this.#drain;
     this.#drain = this.#runDrain().finally(() => {
@@ -122,7 +96,6 @@ export class Agent extends DurableObject<Env> {
     return this.#drain;
   }
 
-  /** Read-only view for the dev chat page and tests. */
   async snapshot(): Promise<AgentSnapshot> {
     const now = this.#deps.clock.now();
     const a = this.#store.agent();
@@ -136,13 +109,11 @@ export class Agent extends DurableObject<Env> {
     };
   }
 
-  /** Test seam. Refused unless MODEL_BACKEND=scripted, so it can't be reached in a deployed Worker. */
   withDeps(over: Partial<AgentDeps>): void {
     if (loadConfig(this.env).model.backend !== "scripted") throw new Error("withDeps is test-only");
     this.#deps = { ...this.#deps, ...over };
   }
 
-  /** Order is the priority: replies before housekeeping. */
   async #runDrain(): Promise<void> {
     const clock = this.#deps.clock;
     const started = clock.now();
@@ -155,16 +126,14 @@ export class Agent extends DurableObject<Env> {
         if (!batch) break;
         await this.#turn(batch);
         await this.#deliverReady();
-        this.#fireDueWakeups(); // a long drain can cross a due time
+        this.#fireDueWakeups();
       }
       await this.#compactIfDue();
-      await this.#deliverReady(); // deferred unasked rows that became admissible at 08:00
+      await this.#deliverReady();
       await this.#flushLogs();
       this.#store.prune(clock.now());
     } catch (err) {
-      // Unexpected errors are crash-equivalent: rows stay `processing`/`sending`, the re-arm below
-      // counts them as ready now, and the next drain's recover() handles them (attempts bound the
-      // retries). Not rethrown: our re-arm is the retry policy, not Cloudflare's alarm backoff.
+      // Not rethrown: our re-arm is the retry policy, not Cloudflare's alarm backoff.
       console.error("drain failed", err);
     } finally {
       await this.#rearm();
@@ -182,7 +151,6 @@ export class Agent extends DurableObject<Env> {
 
   #agent(): AgentRow {
     const a = this.#store.agent();
-    // enqueue writes the agent row in the same transaction as the first inbox row.
     if (!a) throw new Error("inbox rows exist without an agent row");
     return a;
   }
@@ -202,11 +170,6 @@ export class Agent extends DurableObject<Env> {
     };
   }
 
-  /**
-   * One turn: read a consistent view, call the model at most once, commit everything in one transaction.
-   * Between the claim and the commit the only durable trace is `inbox.status = processing` and the open
-   * reservation, both of which recover() knows how to undo.
-   */
   async #turn(batch: Batch): Promise<void> {
     const a = this.#agent();
     const view = this.#view(batch, a);
@@ -248,17 +211,12 @@ export class Agent extends DurableObject<Env> {
     this.#store.commitTurn(commit, settle, logs, now);
   }
 
-  /** A batch that crashed TURN.maxAttempts times commits a fixed apology, so it can't eat the queue. */
   #commitPoison(batch: Batch): void {
     const a = this.#agent();
     const view = this.#view(batch, a);
     this.#commit(planWithoutModel(view, { kind: "poison" }), view, a.key, { kind: "none" }, null);
   }
 
-  /**
-   * The provider (or the ledger, for a lease) was unreachable. The batch goes back with backoff and its
-   * attempts kept, so a long outage ends as model_failed instead of looping.
-   */
   #modelUnavailable(view: TurnView, agent: AgentKey, reservation: Reservation | null): void {
     const now = this.#deps.clock.now();
     const settle = reservation ? { reservation, cost: NO_COST } : null;
@@ -271,11 +229,6 @@ export class Agent extends DurableObject<Env> {
     this.#store.releaseBatch(keys, (now + MODEL_RETRY_MS * 2 ** (attempts - 1)) as EpochMs, settle, logs, now);
   }
 
-  /**
-   * The metered model call: route → estimate → reserve (lease more from the global ceiling if needed)
-   * → call. Settlement is the caller's, inside its commit transaction, so cost and effects land together.
-   * Never awaits while holding anything but the durable reservation row.
-   */
   async #callModel<T>(
     purpose: Purpose,
     system: string,
@@ -314,11 +267,6 @@ export class Agent extends DurableObject<Env> {
     return { kind: "failed", reservation, usage: res.usage };
   }
 
-  /**
-   * Deliver ready outbox rows. Unasked rows pass `admitUnasked` exactly once (admitted_day is recorded
-   * with the pending→sending transition, before the network call), so a crash after admission never
-   * charges the budget twice and never re-judges a row that was already allowed.
-   */
   async #deliverReady(): Promise<void> {
     for (const row of this.#store.readyOutbox(this.#deps.clock.now(), DELIVERY_BATCH)) await this.#deliver(row);
   }
@@ -404,7 +352,6 @@ export class Agent extends DurableObject<Env> {
         }
         return;
       case "refused":
-        // A lagging summary only loses recall: the turn prompt stays bounded either way.
         return;
       default:
         return assertNever(call);
@@ -426,7 +373,6 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
-  /** Set the one alarm to the earliest instant any table needs us, or delete it. */
   async #rearm(): Promise<void> {
     const r = this.#store.readiness();
     const a = this.#store.agent();
@@ -442,10 +388,6 @@ export class Agent extends DurableObject<Env> {
     else await this.ctx.storage.setAlarm(t);
   }
 
-  /**
-   * If a drain is running, its final #rearm() recomputes anyway; this only guarantees the new row is
-   * never stranded when the object is idle or the drain dies.
-   */
   async #armNoLaterThan(t: EpochMs): Promise<void> {
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current > t) await this.ctx.storage.setAlarm(t);

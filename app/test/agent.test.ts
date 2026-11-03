@@ -1,7 +1,3 @@
-/**
- * Behavior tests for the agent loop, through the real Worker route and the real Durable Object. Each
- * names a property the design promises (see RATIONALE.md, "Failure cases").
- */
 import { describe, expect, test } from "vitest";
 import { NOTICE } from "../src/agent/turn";
 import { chat, crash, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, turn } from "./testkit";
@@ -208,7 +204,6 @@ describe("crash and duplicate safety", () => {
 
 describe("spend", () => {
   test("an over-cap person is refused without a model call, told once a day, and logged", async () => {
-    // One call billed at the whole monthly cap: 150M input tokens at $0.10 per million.
     const model = scripted([turn({ actions: [send("Here's a long answer.")], task: ["chat", "x", "none"], usage: { inputTokens: 150_000_000 } })]);
     const c = await devChat("lea", { model, at: "2099-11-04T10:00" });
     await c.say("tell me everything");

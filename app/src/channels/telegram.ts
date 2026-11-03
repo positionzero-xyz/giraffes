@@ -1,6 +1,3 @@
-/**
- * Telegram Bot API, private chats only in week 1. Telegram wire types live in this file and nowhere else.
- */
 import { z } from "zod";
 import { eventKey, personAgentKey, type ChannelEvent, type EpochMs, type OutboundMessage } from "../domain";
 import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
@@ -15,14 +12,12 @@ const Update = z.object({
 });
 type Update = z.infer<typeof Update>;
 
-/** The media kinds a person is likely to send, named for the model when there is no text. */
 const MEDIA = ["photo", "sticker", "voice", "audio", "video", "video_note", "animation", "document", "location", "contact"] as const;
 
 function toEvent(u: Update): { readonly chatId: number; readonly at: EpochMs; readonly event: ChannelEvent } | null {
   if (u.message && u.message.chat.type === "private") {
     const m = u.message;
     const at = (m.date * 1000) as EpochMs;
-    // "/start <payload>" also arrives here; week 3 reads the payload as an invite code.
     if (m.text === "/start" || m.text?.startsWith("/start ")) return { chatId: m.chat.id, at, event: { kind: "lifecycle", change: "follow", at } };
     const text = m.text ?? `[sent a ${MEDIA.find((k) => k in m) ?? "message"}]`;
     return { chatId: m.chat.id, at, event: { kind: "message", text } };
@@ -63,9 +58,7 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
 
     /**
      * Telegram has no idempotency key. A crash after sendMessage succeeded but before the outbox row was
-     * marked sent re-sends on recovery: the person may see a duplicate. We accept a rare duplicate over a
-     * lost reminder. A multi-text row that failed midway resends from the first text; texts per turn are
-     * capped at 3 to keep that small.
+     * marked sent re-sends on recovery: the person may see a duplicate.
      */
     async deliver(msg: OutboundMessage): Promise<Delivery> {
       try {

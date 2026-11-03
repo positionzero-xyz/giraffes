@@ -1,12 +1,7 @@
-/**
- * Hosted backend: the official `@anthropic-ai/sdk`, which runs on Workers.
- * SDK types stop at this file.
- */
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { routeOf, type ModelClient, type ModelRequest, type ModelResult, type Usage } from "./model";
 
-/** Statuses worth retrying later: timeout, rate limit, and server-side trouble (including 529 overloaded). */
 const transient = (status: number | undefined) => status === undefined || status === 408 || status === 429 || status >= 500;
 
 export function anthropicModel(apiKey: string): ModelClient {
@@ -17,7 +12,6 @@ export function anthropicModel(apiKey: string): ModelClient {
       const route = routeOf(req.purpose);
       let res: Anthropic.Message;
       try {
-        // No assistant prefill, temperature, top_p or forced tool_choice: these models reject them.
         res = await client.messages.create({
           model: route.model,
           max_tokens: route.maxTokens,

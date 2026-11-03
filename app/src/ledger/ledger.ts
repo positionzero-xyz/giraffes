@@ -1,12 +1,3 @@
-/**
- * The cross-user record, in D1. Owns two kinds of fact:
- *   1. Instrumentation rows (append-only, queryable across all users; the MVP gates are views over them).
- *   2. Global-ceiling leases (the only cross-user *write* that gates behavior).
- *
- * Agents never write D1 inside an event. They write `LogRow`s to their local `log_outbox` in the same
- * SQLite transaction as the state change they describe, then `append` ships them. Every row carries a
- * deterministic id, so a re-shipped batch is `INSERT OR IGNORE` and the log is exactly-once in effect.
- */
 import {
   assertNever,
   type AgentEventKind,
@@ -21,14 +12,9 @@ import {
 } from "../domain";
 import type { ModelId, Purpose, Usage } from "../model/model";
 
-/**
- * One union, one table per variant, one mapping in `append`. Adding a stream = adding a variant here and a
- * table in d1-schema.sql; `append`'s exhaustive switch fails the build until the mapping exists.
- */
 export type LogRow =
   | {
       readonly stream: "agent";
-      /** `agent:<key>` — written once per agent, on its first event. Cohort dimension for the gates. */
       readonly id: string;
       readonly agent: AgentKey;
       readonly channel: ChannelId;
@@ -36,7 +22,6 @@ export type LogRow =
     }
   | {
       readonly stream: "turn";
-      /** `<agent>|<first event key of the batch>` — one row per committed turn. */
       readonly id: string;
       readonly agent: AgentKey;
       readonly eventKind: AgentEventKind;
@@ -53,14 +38,12 @@ export type LogRow =
     }
   | {
       readonly stream: "model_call";
-      /** The reservation id; for a refusal, which reserved nothing, `refused:<turn id>`. */
       readonly id: string;
       readonly agent: AgentKey;
       readonly purpose: Purpose;
       readonly model: ModelId;
       readonly status: ModelCallStatus;
       readonly estimateMicro: MicroUsd;
-      /** Actual for settled; the estimate for recovered (we can't know); 0 for refused and unavailable. */
       readonly costMicro: MicroUsd;
       readonly inputTokens: number;
       readonly outputTokens: number;
@@ -70,7 +53,6 @@ export type LogRow =
     }
   | {
       readonly stream: "unasked";
-      /** The outbox id. One row per unasked delivery decision that is final (sent or dropped). */
       readonly id: string;
       readonly agent: AgentKey;
       readonly triggerKind: AgentEventKind;
@@ -81,11 +63,9 @@ export type LogRow =
     }
   | {
       readonly stream: "lifecycle";
-      /** The inbound event key, or `gone:<outbox id>` when a delivery found the person gone. */
       readonly id: string;
       readonly agent: AgentKey;
       readonly change: "follow" | "block";
-      /** "channel": the platform told us. "delivery": a send came back recipient_gone. */
       readonly source: "channel" | "delivery";
       readonly at: EpochMs;
     };
@@ -95,19 +75,17 @@ export type ModelCallStatus =
   | "refused_user_cap"
   | "refused_global_ceiling"
   | "recovered_after_crash"
-  /** The provider was unreachable or overloaded; nothing was billed and the batch was retried. */
   | "unavailable";
 
 export type TurnOutcome =
-  | "acted" // at least one action applied
-  | "quiet" // model chose quiet
+  | "acted"
+  | "quiet"
   | "refused_budget"
-  | "model_failed" // invalid_output / refused_by_model / unavailable after retries
-  | "poison" // gave up after TURN.maxAttempts crashes
-  | "no_model" // handled by code alone (a block)
-  | "stale"; // a lifecycle event older than the last applied one: logged, not applied
+  | "model_failed"
+  | "poison"
+  | "no_model"
+  | "stale";
 
-/** Builds the model_call row for one reservation, so turns, compaction and recovery log calls alike. */
 export function modelCallRow(input: {
   readonly id: string;
   readonly agent: AgentKey;
@@ -139,26 +117,18 @@ export function modelCallRow(input: {
 export type LeaseRequest = {
   readonly agent: AgentKey;
   readonly month: MonthKey;
-  /** Per-agent sequence. The agent persists `seq` before asking, so a retry after a crash reuses it. */
   readonly seq: number;
   readonly micro: MicroUsd;
   readonly at: EpochMs;
 };
 
-/** `micro` is what the ledger holds for this seq, which a retried request may have asked for differently. */
 export type LeaseAnswer = { readonly kind: "granted"; readonly micro: MicroUsd } | { readonly kind: "ceiling" };
 
 export interface Ledger {
-  /** Idempotent by row id. Throws on D1 unavailability; the caller keeps the rows and backs off. */
   append(rows: readonly LogRow[]): Promise<void>;
-  /**
-   * Atomically grant `micro` against the global ceiling for `month`, unless that would exceed it.
-   * Idempotent by (agent, month, seq): a repeated request returns the original answer.
-   */
   requestLease(req: LeaseRequest): Promise<LeaseAnswer>;
 }
 
-/** D1 caps bound parameters per statement; a batch of single-row inserts stays far below it. */
 const APPEND_CHUNK = 100;
 
 function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {

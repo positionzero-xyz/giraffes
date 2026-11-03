@@ -231,32 +231,50 @@ export type FakeBox = {
   /** Apps the host has created; a step that died after creating one leaves it here, as a real crash would. */
   readonly created: Set<string>;
   readonly ensureCalls: string[];
+  /** The image each `ensure` put on its machine. */
+  readonly ensuredWith: string[];
+  /** BOX_IMAGE as the host sees it; changing it stands for a deploy with a new image. */
+  image: string;
   readonly destroyCalls: string[];
   readonly healthCalls: string[];
   readonly parses: { readonly authorization: string | null; readonly user: string }[];
   readonly replies: BoxReplyStep[];
   signedIn: boolean;
+  /** False makes the box's own URL unreachable, as a wedged machine or a network fault would. */
+  reachable: boolean;
   nameOf(user: string): Promise<BoxName>;
 };
 
 /** A BoxHost and the box's HTTP server behind the real box client, wired through a fake fetch. */
 export function fakeBox(
-  opts: { readonly maxBoxes?: number; readonly host?: readonly HostStep[]; readonly destroy?: readonly DestroyStep[]; readonly signedIn?: boolean } = {},
+  opts: {
+    readonly maxBoxes?: number;
+    readonly host?: readonly HostStep[];
+    readonly destroy?: readonly DestroyStep[];
+    readonly signedIn?: boolean;
+    readonly onlyFor?: string;
+  } = {},
 ): FakeBox {
   const steps = [...(opts.host ?? [])];
   const destroySteps = [...(opts.destroy ?? [])];
   const box = {
     created: new Set<string>(),
     ensureCalls: [] as string[],
+    ensuredWith: [] as string[],
+    image: "registry.test/box:1",
     destroyCalls: [] as string[],
     healthCalls: [] as string[],
     parses: [] as { authorization: string | null; user: string }[],
     replies: [] as BoxReplyStep[],
     signedIn: opts.signedIn ?? false,
+    reachable: true,
     nameOf: (user: string) => boxName(BOX_SECRET, "gbox-", personAgentKey({ channel: "dev", channelUserId: user })),
   };
   const host: BoxHost = {
     kind: "fly",
+    get image() {
+      return box.image;
+    },
     nameFor: (agent) => boxName(BOX_SECRET, "gbox-", agent),
     urlOf: (name) => `https://${name}.box.test`,
     async ensure(name): Promise<HostResult> {
@@ -268,6 +286,7 @@ export function fakeBox(
       }
       if (step !== "ok") return { ok: false, ...step };
       box.created.add(name);
+      box.ensuredWith.push(box.image);
       return { ok: true };
     },
     async destroy(name): Promise<HostResult> {
@@ -282,10 +301,10 @@ export function fakeBox(
   const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
     const url = new URL(input);
     const name = url.hostname.replace(/\.box\.test$/, "");
-    if (!box.created.has(name)) throw new TypeError("fetch failed: no such host");
+    if (url.pathname === "/health") box.healthCalls.push(name);
+    if (!box.created.has(name) || !box.reachable) throw new TypeError("fetch failed: no such host");
     const authorization = new Headers(init?.headers).get("authorization");
     if (url.pathname === "/health") {
-      box.healthCalls.push(name);
       return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test" });
     }
     if (url.pathname === "/parse") {
@@ -306,7 +325,13 @@ export function fakeBox(
     }
     return new Response("not found", { status: 404 });
   };
-  const deps: BoxDeps = { host, client: boxClient(fetch), secret: BOX_SECRET, maxBoxes: opts.maxBoxes ?? 10 };
+  const deps: BoxDeps = {
+    host,
+    client: boxClient(fetch),
+    secret: BOX_SECRET,
+    maxBoxes: opts.maxBoxes ?? 10,
+    onlyFor: opts.onlyFor === undefined ? null : personAgentKey({ channel: "dev", channelUserId: opts.onlyFor }),
+  };
   return Object.assign(box, { deps });
 }
 

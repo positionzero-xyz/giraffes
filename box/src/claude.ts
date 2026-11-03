@@ -46,10 +46,19 @@ export function spawnClaude(cli: Cli, args: readonly string[], env: NodeJS.Proce
   return proc;
 }
 
-function runClaude(cli: Cli, args: readonly string[], stdin: string, timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runClaude(
+  cli: Cli,
+  args: readonly string[],
+  stdin: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
+    if (signal?.aborted) return resolve({ code: null, stdout: "", stderr: "abandoned" });
     const proc = spawnClaude(cli, args);
-    const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
+    const kill = () => proc.kill("SIGKILL");
+    const timer = setTimeout(kill, timeoutMs);
+    signal?.addEventListener("abort", kill, { once: true });
     let stdout = "";
     let stderr = "";
     proc.stdout.on("data", (c: Buffer) => (stdout += c.toString("utf8")));
@@ -57,6 +66,7 @@ function runClaude(cli: Cli, args: readonly string[], stdin: string, timeoutMs: 
     proc.on("error", (err) => (stderr += String(err)));
     proc.on("close", (code) => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", kill);
       resolve({ code, stdout, stderr });
     });
     proc.stdin.end(stdin);
@@ -92,7 +102,7 @@ function usageOf(v: unknown): Usage | null {
   };
 }
 
-export async function parseTurn(cli: Cli, req: ParseRequest): Promise<TurnReply> {
+export async function parseTurn(cli: Cli, req: ParseRequest, signal?: AbortSignal): Promise<TurnReply> {
   // The CLI's validator doesn't load zod's draft 2020-12 meta-schema; the keywords zod emits validate without it.
   const { $schema: _, ...schema } = req.jsonSchema;
   const args = [
@@ -107,7 +117,11 @@ export async function parseTurn(cli: Cli, req: ParseRequest): Promise<TurnReply>
     "--strict-mcp-config",
   ];
   const started = Date.now();
-  const run = await runClaude(cli, args, req.user, TURN_TIMEOUT_MS);
+  const run = await runClaude(cli, args, req.user, TURN_TIMEOUT_MS, signal);
+  if (signal?.aborted) {
+    console.log(`${req.model} abandoned by the caller after ${Date.now() - started}ms`);
+    return { status: 502, body: { error: "claude_failed" } };
+  }
   const result = run.code === 0 ? parseJson(run.stdout) : undefined;
   if (!isObject(result) || result.is_error !== false) {
     const failed = parseJson(run.stdout);

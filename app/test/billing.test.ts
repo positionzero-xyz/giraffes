@@ -280,7 +280,7 @@ describe("trial and lapse", () => {
     c.clock.set(local("2099-11-19T08:00"));
     await c.say("anyone?");
 
-    expect(await c.received()).toEqual([NOTICE.lapsed, NOTICE.lapsed]);
+    expect(await c.received()).toEqual([NOTICE.lapsed, boxMessage("retiring", null, "2 December 2099").text, NOTICE.lapsed]);
     expect(model.calls).toHaveLength(1);
     expect(box.parses).toEqual([]);
     expect(c.logs("turn").filter((t) => t.eventKind === "message").map((t) => t.outcome)).toEqual(["acted", "no_model", "lapsed", "lapsed", "lapsed"]);
@@ -812,7 +812,7 @@ describe("the ai plan", () => {
     await c.say("/claude");
     await c.received();
     await pay(kit, c, "val", "ai");
-    expect(await c.received()).toEqual(["Thanks. Your AI plan is active."]);
+    expect(await c.received()).toEqual(["Thanks. Your AI plan is active.", boxMessage("retiring", null, "18 November 2099").text]);
 
     await c.say("hello");
     await c.say("/claude");

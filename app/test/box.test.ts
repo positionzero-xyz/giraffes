@@ -1,13 +1,30 @@
+import { env as testEnv, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import { boxClient } from "../src/box/client";
-import { flyHost, type FlyConfig } from "../src/box/fly";
+import { flyHost, machineConfig, type FlyConfig } from "../src/box/fly";
 import type { Fetch } from "../src/box/host";
 import { BOX, boxMessage, type BoxSay } from "../src/box/machine";
 import { boxName, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
+import { MIGRATIONS } from "../src/agent/schema";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs } from "../src/domain";
-import { BOX_SECRET, chat, devChat, fakeBox, local, memoryLedger, quiet, scripted, turn } from "./testkit";
+import { NOTICE } from "../src/agent/turn";
+import {
+  billingOn,
+  BOX_SECRET,
+  chat,
+  devChat,
+  fakeBox,
+  local,
+  memoryLedger,
+  stripeChange,
+  quiet,
+  scripted,
+  type BillingKit,
+  turn,
+  type MemoryLedger,
+} from "./testkit";
 
 const say = (s: BoxSay) => boxMessage(s, null).text;
 const LINK = /^https:\/\/([a-z0-9-]+)\.box\.test\/signin#t=(\d+)\.([A-Za-z0-9_-]+)$/m;
@@ -57,6 +74,7 @@ describe("configuration", () => {
     expect(loadConfig(env({ BOX_HOST: "static", BOX_SECRET, BOX_STATIC_URL: "http://127.0.0.1:8789/" })).box).toMatchObject({
       host: "static",
       staticUrl: "http://127.0.0.1:8789",
+      owner: null,
     });
     expect(() => loadConfig(env({ BOX_HOST: "static", BOX_SECRET }))).toThrow("BOX_STATIC_URL");
     expect(() => loadConfig(env({ BOX_HOST: "static", BOX_STATIC_URL: "http://127.0.0.1:8789" }))).toThrow("BOX_SECRET");
@@ -66,13 +84,19 @@ describe("configuration", () => {
   });
 });
 
+/** Fly answers with fields of its own in a machine's config, which a comparison must not count as a difference. */
+function withFlyDefaults(config: Record<string, unknown>): Record<string, unknown> {
+  const mounts = (config.mounts as { volume: string; path: string }[]).map((m) => ({ ...m, name: "data", size_gb: 5, encrypted: true }));
+  return { ...config, mounts, init: {}, metadata: { fly_platform_version: "v2" }, env: { ...(config.env as object), FLY_PROCESS_GROUP: "app" } };
+}
+
 type FlyRequest = { readonly method: string; readonly path: string; readonly body: unknown; readonly authorization: string | null };
 
 function fakeFly(org = "giraffes") {
   const apps = new Map<string, string>();
   const ips = new Map<string, { ip: string; shared: boolean }[]>();
   const volumes = new Map<string, { id: string; name: string; state: string }[]>();
-  const machines = new Map<string, { id: string }[]>();
+  const machines = new Map<string, { id: string; config: Record<string, unknown> }[]>();
   const requests: FlyRequest[] = [];
   const failures: { method: string; path: string; status: number }[] = [];
   let n = 0;
@@ -84,7 +108,7 @@ function fakeFly(org = "giraffes") {
     requests.push({ method, path, body, authorization: new Headers(init?.headers).get("authorization") });
     const failure = failures.findIndex((f) => f.method === method && f.path === path);
     if (failure >= 0) return new Response("boom", { status: failures.splice(failure, 1)[0].status });
-    const [, app, sub] = url.pathname.match(/^\/v1\/apps(?:\/([^/]+))?(?:\/(\w+))?$/) ?? [];
+    const [, app, sub, id] = url.pathname.match(/^\/v1\/apps(?:\/([^/]+))?(?:\/(\w+))?(?:\/([^/]+))?$/) ?? [];
     if (!app && method === "POST") {
       if (apps.has(body.app_name)) return Response.json({ error: "Validation failed: Name has already been taken" }, { status: 422 });
       apps.set(body.app_name, body.org_slug);
@@ -110,9 +134,16 @@ function fakeFly(org = "giraffes") {
       return Response.json(v);
     }
     if (sub === "machines" && method === "GET") return Response.json(list(machines));
+    if (sub === "machines" && id) {
+      const m = list(machines).find((x) => x.id === id);
+      if (!m) return Response.json({ error: "machine not found" }, { status: 404 });
+      m.config = withFlyDefaults(body.config);
+      return Response.json(m);
+    }
     if (sub === "machines") {
-      list(machines).push({ id: `m${++n}` });
-      return Response.json({ id: `m${n}` });
+      const m = { id: `m${++n}`, config: withFlyDefaults(body.config) };
+      list(machines).push(m);
+      return Response.json(m);
     }
     return Response.json({ error: "no route" }, { status: 404 });
   };
@@ -131,6 +162,32 @@ const flyConfig: FlyConfig = {
 const app = "gbox-0123456789ab" as BoxName;
 const token = "box-token" as BoxToken;
 const posts = (rs: readonly FlyRequest[]) => rs.filter((r) => r.method === "POST").map((r) => [r.path, r.body]);
+
+describe("the static host shares one Claude login", () => {
+  const live = (vars: Record<string, string>): Env => ({ MODEL_BACKEND: "anthropic", ANTHROPIC_API_KEY: "fake-key", ...vars }) as unknown as Env;
+  const shared = { BOX_HOST: "static", BOX_SECRET, BOX_STATIC_URL: "https://box.example.test" };
+
+  test("outside DEV_MODE it needs BOX_STATIC_OWNER, which must be an agent key", () => {
+    expect(() => loadConfig(live(shared))).toThrow("BOX_STATIC_OWNER");
+    expect(loadConfig(live({ ...shared, BOX_STATIC_OWNER: "p:telegram:12345" })).box).toMatchObject({ host: "static", owner: "p:telegram:12345" });
+    expect(() => loadConfig(live({ ...shared, BOX_STATIC_OWNER: "12345" }))).toThrow("BOX_STATIC_OWNER");
+  });
+
+  test("with an owner set, anyone else's /claude says it isn't available and their turns stay on the API", async () => {
+    const box = fakeBox({ onlyFor: "own", signedIn: true });
+    const owner = await devChat("own", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    const other = await devChat("oth", { model: scripted([chat("From the API.")]), at: "2099-11-04T10:00", box: box.deps });
+
+    await other.say("/claude");
+    await owner.say("/claude");
+    await other.say("hello");
+
+    expect(await other.received()).toEqual([say("unavailable"), "From the API."]);
+    expect(await owner.received()).toEqual([say("setting_up"), say("connected")]);
+    expect((await other.snapshot()).box).toBeNull();
+    expect(box.parses).toEqual([]);
+  });
+});
 
 describe("fly host", () => {
   test("provisioning sends the contract's requests: app, shared v4 and v6, a data volume, one machine", async () => {
@@ -192,6 +249,27 @@ describe("fly host", () => {
     expect(posts(fly.requests.slice(before)).map(([path]) => path)).toEqual(["/apps"]);
   });
 
+  test("an existing machine whose image or token differs is updated in place with the full config on the same volume", async () => {
+    const fly = fakeFly();
+    await flyHost(flyConfig, fly.fetch).ensure(app, token);
+    const [machine] = fly.machines.get(app)!;
+    const volume = fly.volumes.get(app)![0].id;
+    const before = fly.requests.length;
+
+    const v2 = flyHost({ ...flyConfig, image: "registry.fly.io/giraffes-box:2" }, fly.fetch);
+    expect(await v2.ensure(app, "box-token-2" as BoxToken)).toEqual({ ok: true });
+
+    const updates = posts(fly.requests.slice(before));
+    expect(updates.map(([path]) => path)).toEqual(["/apps", `/apps/${app}/machines/${machine.id}`]);
+    expect(updates[1][1]).toEqual({ config: machineConfig({ ...flyConfig, image: "registry.fly.io/giraffes-box:2" }, "box-token-2" as BoxToken, volume).config });
+    expect(fly.machines.get(app)).toHaveLength(1);
+    expect(fly.volumes.get(app)).toHaveLength(1);
+
+    const settled = fly.requests.length;
+    expect(await v2.ensure(app, "box-token-2" as BoxToken)).toEqual({ ok: true });
+    expect(posts(fly.requests.slice(settled)).map(([path]) => path)).toEqual(["/apps"]);
+  });
+
   test("429 and 5xx are retryable, another 4xx is not, and a name owned elsewhere fails", async () => {
     const fly = fakeFly();
     const host = flyHost(flyConfig, fly.fetch);
@@ -203,6 +281,25 @@ describe("fly host", () => {
     fly.apps.set(app, "someone-else");
     expect(await host.ensure(app, token)).toMatchObject({ ok: false, retryable: false });
     expect(fly.machines.get(app)).toBeUndefined();
+  });
+
+  test("a Fly call that hangs before answering or while sending its body times out as retryable", async () => {
+    const hangs: Fetch = (_url, init) =>
+      new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason)));
+    expect(await flyHost(flyConfig, hangs, () => {}, 20).ensure(app, token)).toMatchObject({ ok: false, retryable: true, detail: expect.stringMatching(/Timeout/) });
+
+    const stalls: Fetch = async (_url, init) =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"id":'));
+            init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason));
+          },
+        }),
+        { status: 201 },
+      );
+    expect(await flyHost(flyConfig, stalls, () => {}, 20).ensure(app, token)).toMatchObject({ ok: false, retryable: true });
+    expect(await flyHost(flyConfig, stalls, () => {}, 20).destroy(app)).toMatchObject({ ok: false, retryable: true });
   });
 
   test("a FlyV1 token goes as-is, and delete forces removal and treats a missing app as done", async () => {
@@ -223,9 +320,11 @@ describe("box client", () => {
   const req = { purpose: "turn" as const, system: "s", user: "u", schema: z.object({ a: z.string() }) };
   const answering = (status: number, body: unknown): Fetch => async () => Response.json(body, { status });
 
-  test("a 409 is signed out; 5xx, 401, a network error and a timeout are unavailable", async () => {
+  test("a 409 is signed out, a 401 is unauthorized; 5xx, a network error and a timeout are unavailable", async () => {
     expect(await boxClient(answering(409, { error: "signed_out" })).parse("https://b", token, req)).toEqual({ kind: "signed_out" });
-    for (const status of [502, 503, 401]) {
+    expect(await boxClient(answering(401, { error: "unauthorized" })).parse("https://b", token, req)).toEqual({ kind: "unauthorized" });
+    expect(await boxClient(answering(401, { error: "unauthorized" })).health("https://b", token)).toEqual({ kind: "unauthorized" });
+    for (const status of [502, 503]) {
       expect(await boxClient(answering(status, {})).parse("https://b", token, req)).toMatchObject({ kind: "unavailable" });
     }
     const down: Fetch = async () => {
@@ -320,29 +419,53 @@ describe("connecting a Claude plan", () => {
     expect(box.created.size).toBe(1);
   });
 
-  test("a provisioning step that dies every time runs out of attempts and tells the person once", async () => {
+  test("a provisioning step that dies every time runs out of attempts, removes what it made, frees the slot and tells the person once", async () => {
     const box = fakeBox({ host: Array(50).fill("die") });
-    const c = await devChat("cy", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    const ledger = memoryLedger();
+    const c = await devChat("cy", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger });
 
     await c.say("/claude");
     await c.advanceTo("2099-11-04T12:00");
 
     expect(await c.received()).toEqual([say("setting_up"), say("setup_failed")]);
     expect(box.ensureCalls).toHaveLength(BOX.maxProvisionAttempts);
-    expect((await c.snapshot()).box?.state).toBe("failed");
+    expect(box.destroyCalls).toEqual([await box.nameOf("cy")]);
+    expect(box.created.size).toBe(0);
+    expect(ledger.boxes.has("p:dev:cy")).toBe(false);
+    expect((await c.snapshot()).box).toBeNull();
   });
 
-  test("a failed box is provisioned again on the next /claude", async () => {
+  test("a provisioning failure that can't be retried is removed at once, and the next /claude starts over", async () => {
     const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }] });
-    const c = await devChat("di", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    const ledger = memoryLedger();
+    const c = await devChat("di", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger });
 
     await c.say("/claude");
     expect(await c.received()).toEqual([say("setting_up"), say("setup_failed")]);
+    expect(box.destroyCalls).toEqual([await box.nameOf("di")]);
+    expect(ledger.boxes.has("p:dev:di")).toBe(false);
 
     await c.say("/claude");
     const [again, link] = await c.received();
     expect(again).toBe(say("setting_up"));
     expect((await linkIn(link, "di", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect(ledger.boxes.has("p:dev:di")).toBe(true);
+  });
+
+  test("/claude while a failed box is still being removed says to try again in a few minutes", async () => {
+    const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }], destroy: ["fail"] });
+    const c = await devChat("dot", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up")]);
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("resetting")]);
+
+    await c.advanceTo("2099-11-04T10:01");
+    expect(await c.received()).toEqual([say("setup_failed")]);
+    expect((await c.snapshot()).box).toBeNull();
   });
 
   test("polling sees the sign-in, flips the box to signed_in, confirms once, and stops polling", async () => {
@@ -414,9 +537,9 @@ describe("connecting a Claude plan", () => {
     expect((await c.snapshot()).spendThisMonthMicro).toBeGreaterThan(0);
   });
 
-  test("an unavailable box sends the turn to the API, and the next turn tries the box again", async () => {
+  test("an unavailable box sends the turn to the API, turns for the next 5 minutes skip the box, and then it is tried again", async () => {
     const box = fakeBox({ signedIn: true });
-    const model = scripted([chat("From the API.")]);
+    const model = scripted([chat("From the API."), chat("Still the API.")]);
     const c = await devChat("hal", { model, at: "2099-11-04T10:00", box: box.deps });
     await c.say("/claude");
     await c.received();
@@ -426,15 +549,74 @@ describe("connecting a Claude plan", () => {
     expect(await c.received()).toEqual(["From the API."]);
     expect((await c.snapshot()).box?.state).toBe("signed_in");
 
-    box.replies.push({ kind: "reply", step: chat("Back on your plan.") });
+    c.clock.set(local("2099-11-04T10:04"));
     await c.say("again");
+    expect(await c.received()).toEqual(["Still the API."]);
+    expect(box.parses).toHaveLength(1);
+
+    c.clock.set(local("2099-11-04T10:05"));
+    box.replies.push({ kind: "reply", step: chat("Back on your plan.") });
+    await c.say("later");
     expect(await c.received()).toEqual(["Back on your plan."]);
     expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
       ["box", "unavailable"],
       ["api", "settled"],
+      ["api", "settled"],
       ["box", "settled"],
     ]);
     model.assertDone();
+  });
+
+  test("a new BOX_IMAGE brings a live box up to date on its next drain, once and without a word to the person", async () => {
+    const box = fakeBox({ signedIn: true });
+    const c = await devChat("ida", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up"), say("connected")]);
+    expect(box.ensuredWith).toEqual(["registry.test/box:1"]);
+
+    box.image = "registry.test/box:2";
+    box.replies.push({ kind: "reply", step: chat("On your plan.") }, { kind: "reply", step: chat("Still on it.") });
+    await c.say("hello");
+    await c.say("again");
+
+    expect(await c.received()).toEqual(["On your plan.", "Still on it."]);
+    expect(box.ensuredWith).toEqual(["registry.test/box:1", "registry.test/box:2"]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+  });
+
+  test("a box that refuses its token is ensured again, silently, and the turn runs on the API", async () => {
+    const box = fakeBox({ signedIn: true });
+    const model = scripted([chat("From the API.")]);
+    const c = await devChat("jo", { model, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    box.replies.push({ kind: "status", status: 401 }, { kind: "reply", step: chat("Back on your plan.") });
+    await c.say("hello");
+    expect(await c.received()).toEqual(["From the API."]);
+    expect(box.ensureCalls).toHaveLength(2);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+
+    await c.say("again");
+    expect(await c.received()).toEqual(["Back on your plan."]);
+    expect(box.ensureCalls).toHaveLength(2);
+  });
+
+  test("an ensure of a live box that fails every time retries every few minutes and never touches its state", async () => {
+    const box = fakeBox({ signedIn: true, host: ["ok", ...Array(100).fill({ retryable: true, detail: "GET /apps: 503" })] });
+    const c = await devChat("kai", { model: scripted([quietCheckin()]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    box.image = "registry.test/box:2";
+    box.replies.push({ kind: "reply", step: chat("On your plan.") });
+    await c.say("hello");
+    await c.advanceTo("2099-11-04T11:00");
+
+    expect(await c.received()).toEqual(["On your plan."]);
+    expect(box.ensureCalls.length).toBeGreaterThan(10);
+    expect(box.ensureCalls.length).toBeLessThan(15);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
   });
 
   test("MAX_BOXES refuses a box past the cap, and the refused person has none", async () => {
@@ -452,6 +634,25 @@ describe("connecting a Claude plan", () => {
     expect([...ledger.boxes.keys()]).toEqual(["p:dev:ivy"]);
   });
 
+  test("a D1 failure while claiming the box says setup can't start now, once, and is not a model failure", async () => {
+    const box = fakeBox();
+    const ledger: MemoryLedger = {
+      ...memoryLedger(),
+      claimBox: async () => {
+        throw new Error("D1 unavailable");
+      },
+    };
+    const c = await devChat("lou", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger });
+
+    await c.say("/claude");
+    await c.advanceTo("2099-11-04T11:00");
+
+    expect(await c.received()).toEqual([say("busy")]);
+    expect(c.logs("turn").map((t) => [t.outcome, t.attempts])).toEqual([["no_model", 1]]);
+    expect(c.logs("model_call")).toEqual([]);
+    expect((await c.snapshot()).box).toBeNull();
+  });
+
   test("/claude in a burst of messages is handled alone, and the model never sees it as part of its batch", async () => {
     const box = fakeBox();
     const model = scripted([chat("Hi!")]);
@@ -465,6 +666,124 @@ describe("connecting a Claude plan", () => {
     expect(sent.slice(0, 2)).toEqual(["Hi!", say("setting_up")]);
     expect(model.calls).toHaveLength(1);
     expect(model.calls[0].user).not.toContain("/claude");
+  });
+});
+
+describe("retiring a box the plan no longer allows", () => {
+  const retiring = (until: string) => boxMessage("retiring", null, until).text;
+  const subscribe = async (kit: BillingKit, user: string, plan: "standard" | "ai") => {
+    expect((await stripeChange(kit, { user, sub: `sub_${user}`, plan, status: "active", type: "customer.subscription.created" })).status).toBe(200);
+  };
+
+  test("with billing on, a lapsed person is told the date once, and the box goes then even though it was signed in", async () => {
+    const box = fakeBox({ signedIn: true });
+    const ledger = memoryLedger();
+    const c = await devChat("uma", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger, billing: billingOn({ TRIAL_DAYS: "1" }).deps });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up"), say("connected")]);
+    box.replies.push({ kind: "reply", step: quietCheckin() });
+
+    await c.advanceTo("2099-11-05T11:00");
+    await c.say("hello");
+    await c.say("still there?");
+    expect(await c.received()).toEqual([retiring("19 November 2099"), NOTICE.lapsed]);
+
+    await c.advanceTo("2099-11-19T10:59");
+    expect(box.destroyCalls).toEqual([]);
+    await c.advanceTo("2099-11-19T11:00");
+
+    expect(await c.received()).toEqual([say("retired")]);
+    expect(box.destroyCalls).toEqual([await box.nameOf("uma")]);
+    expect(ledger.boxes.has("p:dev:uma")).toBe(false);
+    expect((await c.snapshot()).box).toBeNull();
+  });
+
+  test("a plan that allows a box again before the date keeps the box, silently", async () => {
+    const box = fakeBox({ signedIn: true });
+    const kit = billingOn({ TRIAL_DAYS: "1" });
+    const c = await devChat("vic", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, billing: kit.deps });
+    box.replies.push(...Array.from({ length: 30 }, () => ({ kind: "reply" as const, step: quietCheckin() })));
+    await c.say("/claude");
+    await c.advanceTo("2099-11-05T11:00");
+    await c.say("hello");
+    expect(await c.received()).toEqual([say("setting_up"), say("connected"), retiring("19 November 2099"), NOTICE.lapsed]);
+
+    await c.advanceTo("2099-11-06T10:00");
+    await subscribe(kit, "vic", "standard");
+    await c.settle();
+    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active."]);
+    await c.advanceTo("2099-11-25T10:00");
+
+    expect(await c.received()).toEqual([]);
+    expect(box.destroyCalls).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+  });
+
+  test("with billing off, a box is never retired", async () => {
+    const box = fakeBox({ signedIn: true });
+    const c = await devChat("wyn", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    box.replies.push({ kind: "reply", step: chat("From your plan.") }, ...Array.from({ length: 30 }, () => ({ kind: "reply" as const, step: quietCheckin() })));
+    await c.say("/claude");
+    await c.received();
+
+    await c.say("hello");
+    expect(await c.received()).toEqual(["From your plan."]);
+    await c.advanceTo("2099-11-25T10:00");
+
+    expect(await c.received()).toEqual([]);
+    expect(box.destroyCalls).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+  });
+});
+
+describe("a box row written by the code before reclaim reasons", () => {
+  test("a box the old code left failed is removed on the next drain, freeing its slot, and its person told once", async () => {
+    const box = fakeBox();
+    const ledger = memoryLedger();
+    const c = await devChat("rex", { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", box: box.deps, ledger });
+    await c.say("hello");
+    await c.received();
+    const name = await box.nameOf("rex");
+    box.created.add(name);
+    await ledger.claimBox({ agent: "p:dev:rex" as AgentKey, name, host: "fly", at: local("2099-11-04T10:00"), max: 10 });
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName("p:dev:rex"));
+    await runInDurableObject(stub, (_agent, state) => {
+      const sql = state.storage.sql;
+      const created = MIGRATIONS.findIndex((m) => m.includes("CREATE TABLE box ("));
+      sql.exec("DROP TABLE box");
+      sql.exec(MIGRATIONS[created]);
+      sql.exec(MIGRATIONS[created + 1]);
+      sql.exec(
+        "INSERT INTO box (one, name, host, url, state, state_at, error, attempts) VALUES (1, ?, 'fly', ?, 'failed', ?, 'no answer', 10)",
+        name,
+        `https://${name}.box.test`,
+        local("2099-11-04T09:00"),
+      );
+      sql.exec(MIGRATIONS[MIGRATIONS.findLastIndex((m) => m.includes("CREATE TABLE box_next"))]);
+    });
+
+    await c.alarm();
+
+    expect(await c.received()).toEqual([say("setup_failed")]);
+    expect(box.destroyCalls).toEqual([name]);
+    expect(ledger.boxes.has("p:dev:rex")).toBe(false);
+    expect((await c.snapshot()).box).toBeNull();
+  });
+});
+
+describe("log rows queued by the code before the box path", () => {
+  test("a queued model call row without a backend ships as backend 'api'", async () => {
+    const c = await devChat("old", { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00" });
+    await c.say("hello");
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName("p:dev:old"));
+    await runInDurableObject(stub, (_agent, state) => {
+      const { backend: _, ...old } = { ...c.logs("model_call")[0], id: "queued-before-box" };
+      state.storage.sql.exec("INSERT INTO log_outbox (id, stream, row, created_at) VALUES (?, 'model_call', ?, ?)", `model_call:${old.id}`, JSON.stringify(old), 0);
+    });
+
+    await c.alarm();
+
+    expect(c.logs("model_call").map((r) => [r.id, r.backend])).toContainEqual(["queued-before-box", "api"]);
   });
 });
 
@@ -533,7 +852,7 @@ describe("reclaiming a box nobody signed in to", () => {
     expect((await c.snapshot()).box?.state).toBe("signed_in");
   });
 
-  test("a crash between the host's destroy and the row update converges on the retry with one message", async () => {
+  test("a crash between the host's destroy and the row update converges on the retry with one message, without probing again", async () => {
     const box = fakeBox({ destroy: ["die"] });
     const ledger = memoryLedger();
     const c = await devChat("ola", { model: scripted([quietCheckin(), quietCheckin()]), at: "2099-11-04T10:00", box: box.deps, ledger });
@@ -546,13 +865,49 @@ describe("reclaiming a box nobody signed in to", () => {
     expect(ledger.boxes.has("p:dev:ola")).toBe(true);
     await c.say("/claude");
     expect(await c.received()).toEqual([say("resetting")]);
+    const probes = box.healthCalls.length;
 
     await c.advanceTo("2099-11-06T10:05");
 
+    expect(box.healthCalls).toHaveLength(probes);
     expect(await c.received()).toEqual([say("reclaimed")]);
     expect(box.destroyCalls).toEqual([name, name]);
     expect(ledger.boxes.has("p:dev:ola")).toBe(false);
     expect((await c.snapshot()).box).toBeNull();
+  });
+
+  test("a link sent near the end moves the reclaim past that link's expiry", async () => {
+    const box = fakeBox();
+    const c = await devChat("pam", { model: scripted([quietCheckin(), quietCheckin()]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    await c.advanceTo("2099-11-06T09:50");
+    await c.say("/claude");
+    expect(await c.received()).toHaveLength(1);
+    await c.advanceTo("2099-11-06T10:21");
+    expect(box.destroyCalls).toEqual([]);
+
+    await c.advanceTo("2099-11-06T10:23");
+    expect(box.destroyCalls).toEqual([await box.nameOf("pam")]);
+    expect(await c.received()).toEqual([say("reclaimed")]);
+  });
+
+  test("a box that doesn't answer at reclaim time is never destroyed, and is looked at again later", async () => {
+    const box = fakeBox();
+    const c = await devChat("quy", { model: scripted([quietCheckin(), quietCheckin()]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    box.reachable = false;
+    await c.advanceTo("2099-11-06T11:00");
+    expect(box.destroyCalls).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("signed_out");
+
+    box.reachable = true;
+    await c.advanceTo("2099-11-06T11:10");
+    expect(box.destroyCalls).toEqual([await box.nameOf("quy")]);
+    expect(await c.received()).toEqual([say("reclaimed")]);
   });
 
   test("a destroy that fails every time keeps retrying with backoff and tells the person nothing", async () => {

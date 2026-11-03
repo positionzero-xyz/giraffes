@@ -27,18 +27,25 @@ import { boxClient, type BoxClient } from "../box/client";
 import { flyHost } from "../box/fly";
 import { staticHost, type BoxHost, type BoxHostKind, type Fetch } from "../box/host";
 import {
+  afterEnsure,
   afterProbe,
   beginStep,
   BOX,
   boxMessage,
+  goneMessage,
+  needsEnsure,
   needsLink,
   newBox,
   onCommand,
+  onPlan,
   onSignedOut,
   type Box,
   type BoxSay,
   type BoxState,
+  type EnsureStep,
   type Probe,
+  type ProbeStep,
+  type Step,
 } from "../box/machine";
 import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
 import { makeChannels, type ChannelRegistry } from "../channels/channel";
@@ -78,6 +85,7 @@ const LOG_BATCH = 100;
 const LOG_BATCHES_PER_DRAIN = 10;
 const MODEL_RETRY_BASE_MS = 30_000;
 const NO_COST = 0 as MicroUsd;
+const BOX_STEPS_PER_DRAIN = 3;
 const utf8 = new TextEncoder();
 
 export type Clock = { now(): EpochMs };
@@ -87,7 +95,11 @@ export type BoxDeps = {
   readonly client: BoxClient;
   readonly secret: string;
   readonly maxBoxes: number;
+  /** The one person the shared static box serves; null serves everyone. */
+  readonly onlyFor: AgentKey | null;
 };
+
+const boxServes = (deps: BoxDeps | null, agent: AgentKey): deps is BoxDeps => deps !== null && (deps.onlyFor === null || deps.onlyFor === agent);
 
 export type AgentDeps = {
   readonly model: ModelClient;
@@ -140,6 +152,8 @@ export class Agent extends DurableObject<Env> {
   // Each event re-reads the subscription from Stripe; handling them one at a time keeps a slower, older read
   // from landing after a newer one. Like #drain, it lives and dies with this instance.
   #billing: Promise<unknown> = Promise.resolve();
+  /** In memory on purpose: losing it on a restart costs one more try of a box that may still be wedged. */
+  #skipBoxUntil = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -513,7 +527,7 @@ export class Agent extends DurableObject<Env> {
 
   async #boxCommand(view: TurnView, agent: AgentKey): Promise<void> {
     const deps = this.#deps.box;
-    if (!deps) return this.#boxReply(view, agent, null, { box: null, say: "unavailable" });
+    if (!boxServes(deps, agent)) return this.#boxReply(view, agent, null, { box: null, say: "unavailable" });
     if (!planAllowsBox(this.#plan(view.now).kind)) return this.#boxReply(view, agent, null, { box: null, say: "not_in_plan" });
     const now = this.#deps.clock.now();
     const current = this.#store.box();
@@ -525,10 +539,10 @@ export class Agent extends DurableObject<Env> {
       claim = await this.#deps.ledger.claimBox({ agent, name, host: deps.host.kind, at: now, max: deps.maxBoxes });
     } catch (err) {
       console.warn("box claim failed", err);
-      return this.#modelUnavailable(view, agent, { kind: "unavailable", reservation: null, failure: "unavailable" });
+      return this.#boxReply(view, agent, null, { box: null, say: "busy" });
     }
     if (claim === "full") return this.#boxReply(view, agent, deps, { box: null, say: "full" });
-    return this.#boxReply(view, agent, deps, { box: newBox(name, deps.host.kind, deps.host.urlOf(name), now), say: "setting_up" });
+    return this.#boxReply(view, agent, deps, { box: newBox(name, deps.host.kind, deps.host.urlOf(name), deps.host.image, now), say: "setting_up" });
   }
 
   async #boxReply(view: TurnView, agent: AgentKey, deps: BoxDeps | null, t: { readonly box: Box | null; readonly say: BoxSay }): Promise<void> {
@@ -538,6 +552,7 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #boxMessage(deps: BoxDeps, box: Box, say: BoxSay): Promise<{ readonly text: string; readonly note: string }> {
+    if (say === "retiring" && box.retireAt !== null) return boxMessage(say, null, longDate(box.retireAt, this.#agent().tz));
     if (!needsLink(say)) return boxMessage(say, null);
     const exp = (this.#deps.clock.now() + BOX.ticketForMs) as EpochMs;
     const ticket = await signinTicket(await boxToken(deps.secret, box.name), exp);
@@ -552,45 +567,62 @@ export class Agent extends DurableObject<Env> {
 
   async #stepBox(): Promise<void> {
     const deps = this.#deps.box;
-    const current = this.#store.box();
-    if (!deps || !current) return;
-    const step = beginStep(current, this.#deps.clock.now());
-    if (!step) return;
-    if (step.kind === "settled") {
-      return this.#store.applyBox(step.box, await this.#outboxMessage(deps, step.box, step.say), [], this.#deps.clock.now());
+    const box = this.#store.box();
+    if (!deps || !box) return;
+    const now = this.#deps.clock.now();
+    const planned = onPlan(box, !this.#deps.billing.config.on || planAllowsBox(this.#plan(now).kind), now);
+    const current = deps.host.image !== null && planned.box.image !== deps.host.image ? needsEnsure(planned.box, now) : planned.box;
+    if (current !== box) this.#store.applyBox(current, await this.#outboxMessage(deps, current, planned.say), [], now);
+    for (let i = 0; i < BOX_STEPS_PER_DRAIN; i++) {
+      const stored = this.#store.box();
+      const step = stored && beginStep(stored, this.#deps.clock.now());
+      if (!step) return;
+      this.#store.applyBox(step.box, null, [], this.#deps.clock.now());
+      if (step.kind === "reclaim") {
+        await this.#reclaim(deps, step);
+        continue;
+      }
+      if (step.kind === "ensure") {
+        await this.#ensure(deps, step);
+        continue;
+      }
+      const probe = await this.#probe(deps, step);
+      const t = afterProbe(step, probe, this.#deps.clock.now());
+      this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [], this.#deps.clock.now());
     }
-    const claimed = step.box;
-    this.#store.applyBox(claimed, null, [], this.#deps.clock.now());
-    const probe = await this.#probe(deps, claimed, await boxToken(deps.secret, claimed.name));
-    const t = afterProbe(claimed, probe, this.#deps.clock.now());
-    if (t.box.state === "reclaiming") return this.#reclaim(deps, claimed);
-    this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [], this.#deps.clock.now());
   }
 
-  async #reclaim(deps: BoxDeps, box: Box): Promise<void> {
-    const destroyed = await deps.host.destroy(box.name);
+  async #reclaim(deps: BoxDeps, step: Extract<Step, { kind: "reclaim" }>): Promise<void> {
+    const destroyed = await deps.host.destroy(step.box.name);
     if (!destroyed.ok) {
-      console.warn("box reclaim failed", box.name, destroyed.detail);
+      console.warn("box reclaim failed", step.box.name, destroyed.detail);
       return;
     }
     await this.#deps.ledger.releaseBox(this.#agent().key, this.#deps.clock.now());
-    const m = boxMessage("reclaimed", null);
-    this.#store.removeBox(box.name, { texts: [m.text], note: m.note }, this.#deps.clock.now());
+    const m = goneMessage(step.box);
+    this.#store.removeBox(step.box.name, { texts: [m.text], note: m.note }, this.#deps.clock.now());
   }
 
-  async #probe(deps: BoxDeps, box: Box, token: BoxToken): Promise<Probe> {
-    if (box.state === "provisioning") {
-      const ensured = await deps.host.ensure(box.name, token);
+  async #ensure(deps: BoxDeps, step: EnsureStep): Promise<void> {
+    const ensured = await deps.host.ensure(step.box.name, await boxToken(deps.secret, step.box.name));
+    if (!ensured.ok) return console.warn("box ensure failed", step.box.name, ensured.detail);
+    this.#store.applyBox(afterEnsure(step, deps.host.image), null, [], this.#deps.clock.now());
+  }
+
+  async #probe(deps: BoxDeps, step: ProbeStep): Promise<Probe> {
+    const token = await boxToken(deps.secret, step.box.name);
+    if (step.kind === "provision") {
+      const ensured = await deps.host.ensure(step.box.name, token);
       if (!ensured.ok) return { kind: "down", retryable: ensured.retryable, detail: ensured.detail };
     }
-    const health = await deps.client.health(box.url, token);
-    return health.kind === "up" ? health : { kind: "down", retryable: true, detail: health.detail };
+    const health = await deps.client.health(step.box.url, token);
+    return health.kind === "unavailable" ? { kind: "down", retryable: true, detail: health.detail } : health;
   }
 
   async #callBox<T>(system: string, user: string, schema: z.ZodType<T>, agent: AgentKey): Promise<BoxCall<T> | null> {
     const deps = this.#deps.box;
     const box = this.#store.box();
-    if (!deps || box?.state !== "signed_in") return null;
+    if (!boxServes(deps, agent) || box?.state !== "signed_in" || this.#deps.clock.now() < this.#skipBoxUntil) return null;
     const id = crypto.randomUUID();
     const model = routeOf("turn").model;
     const res = await deps.client.parse(box.url, await boxToken(deps.secret, box.name), { purpose: "turn", system, user, schema });
@@ -607,8 +639,12 @@ export class Agent extends DurableObject<Env> {
         this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [missed("rejected")], now);
         return null;
       }
+      case "unauthorized":
+        this.#store.applyBox(needsEnsure(box, now), null, [missed("rejected")], now);
+        return null;
       case "unavailable":
         console.warn("box unavailable", res.detail);
+        this.#skipBoxUntil = now + BOX.skipAfterUnavailableMs;
         this.#store.appendLogs([missed("unavailable")], now);
         return null;
       default:
@@ -863,15 +899,31 @@ function callRow(
   return modelCallRow({ id: r.id, agent, purpose: r.purpose, model: r.model, backend: "api", status, estimate: r.estimate, cost, usage, at });
 }
 
+function longDate(t: EpochMs, tz: TimeZone): string {
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: tz }).format(t);
+}
+
 function boxDeps(c: BoxConfig): BoxDeps | null {
   const f: Fetch = (input, init) => fetch(input, init);
   switch (c.host) {
     case "none":
       return null;
     case "fly":
-      return { host: flyHost({ ...c.fly, appPrefix: c.appPrefix, secret: c.secret }, f), client: boxClient(f), secret: c.secret, maxBoxes: c.maxBoxes };
+      return {
+        host: flyHost({ ...c.fly, appPrefix: c.appPrefix, secret: c.secret }, f),
+        client: boxClient(f),
+        secret: c.secret,
+        maxBoxes: c.maxBoxes,
+        onlyFor: null,
+      };
     case "static":
-      return { host: staticHost({ url: c.staticUrl, appPrefix: c.appPrefix }), client: boxClient(f), secret: c.secret, maxBoxes: c.maxBoxes };
+      return {
+        host: staticHost({ url: c.staticUrl, appPrefix: c.appPrefix }),
+        client: boxClient(f),
+        secret: c.secret,
+        maxBoxes: c.maxBoxes,
+        onlyFor: c.owner,
+      };
     default:
       return assertNever(c);
   }

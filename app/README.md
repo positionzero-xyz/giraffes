@@ -53,8 +53,10 @@ those events. The side panel shows each delivery's intent and status and the pen
      when it starts with `FlyV1 `), and the vars `FLY_ORG` and `BOX_IMAGE`. Optional vars:
      `BOX_APP_PREFIX` (default `gbox-`), `BOX_REGION` (default `sin`), `BOX_VOLUME_GB` (default 5) and
      `MAX_BOXES` (default 10).
-   - `BOX_HOST=static` needs `BOX_SECRET` and `BOX_STATIC_URL`, one box at a fixed URL that every person
-     shares. Start that box with `BOX_TOKEN` set to the token for the name `<BOX_APP_PREFIX>static`:
+   - `BOX_HOST=static` needs `BOX_SECRET` and `BOX_STATIC_URL`, one box at a fixed URL signed in to one
+     Claude account. Outside `DEV_MODE=1` it also needs `BOX_STATIC_OWNER`, the agent key of the one person
+     who may use it (such as `p:telegram:12345`); anyone else's `/claude` says it isn't available. Start
+     that box with `BOX_TOKEN` set to the token for the name `<BOX_APP_PREFIX>static`:
      ```sh
      node -e 'console.log(require("crypto").createHmac("sha256", process.env.BOX_SECRET).update("box:gbox-static").digest("base64url"))'
      ```

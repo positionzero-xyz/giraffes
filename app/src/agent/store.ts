@@ -5,7 +5,7 @@
 import type { PaidPlan, PlanRow, Standing, SubscriptionId } from "../billing/plan";
 import type { CheckoutId } from "../billing/stripe";
 import type { BoxHostKind } from "../box/host";
-import { dueAt, type Box, type BoxState } from "../box/machine";
+import { dueAt, type Box, type BoxState, type ReclaimReason } from "../box/machine";
 import { commandOf } from "./commands";
 import type { BoxName } from "../box/names";
 import {
@@ -105,11 +105,14 @@ type BoxCols = {
   state_at: EpochMs;
   link_sent_at: EpochMs | null;
   signin_poll_until: EpochMs | null;
-  error: string | null;
   attempts: number;
   next_at: EpochMs | null;
   poll_at: EpochMs | null;
   reclaim_at: EpochMs | null;
+  reclaim_reason: ReclaimReason | null;
+  retire_at: EpochMs | null;
+  image: string | null;
+  ensure_at: EpochMs | null;
 };
 
 type PlanCols = {
@@ -134,6 +137,11 @@ function fromJson<T>(text: string): T {
   return JSON.parse(text);
 }
 
+/** Rows queued before the box path have no backend; all of them were API calls. */
+function queuedLog(row: LogRow): LogRow {
+  return row.stream === "model_call" && row.backend === undefined ? { ...row, backend: "api" } : row;
+}
+
 const placeholders = (n: number) => Array.from({ length: n }, () => "?").join(", ");
 
 function toWakeup(r: WakeupCols): PendingWakeup {
@@ -147,7 +155,7 @@ function toInboxItem(r: InboxCols): InboxItem {
 }
 
 function toBox(r: BoxCols): Box {
-  const base = { name: r.name, host: r.host, url: r.url, stateAt: r.state_at };
+  const base = { name: r.name, host: r.host, url: r.url, stateAt: r.state_at, retireAt: r.retire_at, image: r.image, ensureAt: r.ensure_at };
   switch (r.state) {
     case "provisioning":
       return { ...base, state: r.state, attempts: r.attempts, retryAt: r.next_at ?? r.state_at };
@@ -162,10 +170,8 @@ function toBox(r: BoxCols): Box {
       };
     case "signed_in":
       return { ...base, state: r.state };
-    case "failed":
-      return { ...base, state: r.state, error: r.error ?? "" };
     case "reclaiming":
-      return { ...base, state: r.state, attempts: r.attempts, retryAt: r.next_at ?? r.state_at };
+      return { ...base, state: r.state, reason: r.reclaim_reason ?? "unused", attempts: r.attempts, retryAt: r.next_at ?? r.state_at };
     default:
       return assertNever(r.state);
   }
@@ -414,7 +420,7 @@ export class AgentStore {
   box(): Box | null {
     const r = this.sql
       .exec<BoxCols>(
-        "SELECT name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at, poll_at, reclaim_at FROM box",
+        "SELECT name, host, url, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at, reclaim_reason, retire_at, image, ensure_at FROM box",
       )
       .toArray()[0];
     return r ? toBox(r) : null;
@@ -423,12 +429,13 @@ export class AgentStore {
   private writeBox(b: Box): void {
     const out = b.state === "signed_out" ? b : null;
     this.sql.exec(
-      `INSERT INTO box (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at, poll_at, reclaim_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO box (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at,
+         reclaim_reason, retire_at, image, ensure_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (one) DO UPDATE SET name = excluded.name, host = excluded.host, url = excluded.url, state = excluded.state,
          state_at = excluded.state_at, link_sent_at = excluded.link_sent_at, signin_poll_until = excluded.signin_poll_until,
-         error = excluded.error, attempts = excluded.attempts, next_at = excluded.next_at, poll_at = excluded.poll_at,
-         reclaim_at = excluded.reclaim_at`,
+         attempts = excluded.attempts, next_at = excluded.next_at, poll_at = excluded.poll_at, reclaim_at = excluded.reclaim_at,
+         reclaim_reason = excluded.reclaim_reason, retire_at = excluded.retire_at, image = excluded.image, ensure_at = excluded.ensure_at`,
       b.name,
       b.host,
       b.url,
@@ -436,11 +443,14 @@ export class AgentStore {
       b.stateAt,
       out?.linkSentAt ?? null,
       out?.pollUntil ?? null,
-      b.state === "failed" ? b.error : null,
       b.state === "provisioning" || b.state === "reclaiming" ? b.attempts : 0,
       dueAt(b),
       out?.pollAt ?? null,
       out?.reclaimAt ?? null,
+      b.state === "reclaiming" ? b.reason : null,
+      b.retireAt,
+      b.image,
+      b.ensureAt,
     );
   }
 
@@ -788,7 +798,7 @@ export class AgentStore {
     return this.sql
       .exec<{ row: string }>("SELECT row FROM log_outbox ORDER BY created_at, rowid LIMIT ?", limit)
       .toArray()
-      .map((r) => fromJson<LogRow>(r.row));
+      .map((r) => queuedLog(fromJson<LogRow>(r.row)));
   }
 
   logsShipped(rows: readonly LogRow[]): void {

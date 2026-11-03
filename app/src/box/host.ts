@@ -13,6 +13,8 @@ export const HOST_OK: HostResult = { ok: true };
 
 export interface BoxHost {
   readonly kind: BoxHostKind;
+  /** The image `ensure` puts on a machine; null when the host doesn't run one. */
+  readonly image: string | null;
   nameFor(agent: AgentKey): Promise<BoxName>;
   urlOf(name: BoxName): string;
   ensure(name: BoxName, token: BoxToken): Promise<HostResult>;
@@ -23,6 +25,7 @@ export function staticHost(cfg: { readonly url: string; readonly appPrefix: stri
   const name = `${cfg.appPrefix}static` as BoxName;
   return {
     kind: "static",
+    image: null,
     nameFor: async () => name,
     urlOf: () => cfg.url,
     ensure: async () => HOST_OK,

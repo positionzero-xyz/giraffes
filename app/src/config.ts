@@ -1,6 +1,6 @@
 import type { Agent } from "./agent/agent";
 import type { PlanRules } from "./billing/plan";
-import type { MicroUsd } from "./domain";
+import type { AgentKey, MicroUsd } from "./domain";
 
 export interface Env {
   AGENT: DurableObjectNamespace<Agent>;
@@ -25,6 +25,7 @@ export interface Env {
   BOX_VOLUME_GB?: string;
   MAX_BOXES?: string;
   BOX_STATIC_URL?: string;
+  BOX_STATIC_OWNER?: string;
   FLY_API_TOKEN?: string;
   FLY_ORG?: string;
 
@@ -51,7 +52,7 @@ export type BoxConfig =
       readonly host: "fly";
       readonly fly: { readonly apiToken: string; readonly org: string; readonly image: string; readonly region: string; readonly volumeGb: number };
     })
-  | (BoxCommon & { readonly host: "static"; readonly staticUrl: string });
+  | (BoxCommon & { readonly host: "static"; readonly staticUrl: string; readonly owner: AgentKey | null });
 
 export type StripeConfig = {
   readonly secretKey: string;
@@ -127,7 +128,7 @@ function boxCommon(env: Env, why: string): BoxCommon {
   return { secret, appPrefix, maxBoxes: count("MAX_BOXES", env.MAX_BOXES, BOX_DEFAULTS.maxBoxes, 0, 100_000) };
 }
 
-function boxConfig(env: Env): BoxConfig {
+function boxConfig(env: Env, devMode: boolean): BoxConfig {
   const host = present(env.BOX_HOST) ? env.BOX_HOST : "none";
   switch (host) {
     case "none":
@@ -150,7 +151,15 @@ function boxConfig(env: Env): BoxConfig {
     }
     case "static": {
       const why = "BOX_HOST=static";
-      return { host, ...boxCommon(env, why), staticUrl: httpUrl("BOX_STATIC_URL", required(env, "BOX_STATIC_URL", why)) };
+      const owner = present(env.BOX_STATIC_OWNER) ? env.BOX_STATIC_OWNER : null;
+      if (owner === null && !devMode) throw new Error("BOX_HOST=static shares one Claude login, so it needs DEV_MODE=1 or BOX_STATIC_OWNER");
+      if (owner !== null && !/^p:[a-z]+:\S+$/.test(owner)) throw new Error("BOX_STATIC_OWNER must be an agent key, such as p:telegram:12345");
+      return {
+        host,
+        ...boxCommon(env, why),
+        staticUrl: httpUrl("BOX_STATIC_URL", required(env, "BOX_STATIC_URL", why)),
+        owner: owner as AgentKey | null,
+      };
     }
     default:
       throw new Error(`unknown BOX_HOST: ${host}`);
@@ -220,7 +229,7 @@ export function loadConfig(env: Env): Config {
     model: modelConfig(env, devMode),
     line: pair("LINE", env.LINE_CHANNEL_SECRET, env.LINE_CHANNEL_ACCESS_TOKEN, (channelSecret, accessToken) => ({ channelSecret, accessToken })),
     telegram: pair("Telegram", env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_WEBHOOK_SECRET, (botToken, webhookSecret) => ({ botToken, webhookSecret })),
-    box: boxConfig(env),
+    box: boxConfig(env, devMode),
     billing: billingConfig(env),
   };
 }

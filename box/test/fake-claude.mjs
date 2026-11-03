@@ -29,7 +29,8 @@ if (args[0] === "--version") {
   process.stdout.write("Paste code here if prompted > ");
   for await (const line of createInterface({ input: process.stdin })) {
     event(`login read ${line}`);
-    if (line === "good-code#state") {
+    if (line === "slow-code#state") await sleep(600);
+    if (line === "good-code#state" || line === "slow-code#state") {
       writeFileSync(join(dir, "logged-in"), "");
       console.log("Login successful.");
       process.exit(0);
@@ -44,7 +45,7 @@ if (args[0] === "--version") {
 } else if (args[0] === "-p") {
   const user = await stdin();
   event(`turn start ${Date.now()}`);
-  await sleep(150);
+  await sleep(user === "hang" ? 5000 : 150);
   event(`turn end ${Date.now()}`);
   if (!loggedIn) {
     console.log(JSON.stringify({ type: "result", is_error: true, result: "Not logged in · Please run /login" }));

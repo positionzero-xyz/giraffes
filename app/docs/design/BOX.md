@@ -12,7 +12,7 @@ chat ──► Worker ──► Agent DO ──(HTTPS, bearer)──► box  htt
 
 - One box per person. On Fly it is one app, in its own private network, holding one machine (shared-cpu-1x, 2 GB) and one volume mounted at `/data`. The person's Claude login and the CLI's state live on that volume.
 - The machine suspends when idle. Fly's proxy resumes it on the next request, so the Worker has no wake code. Suspend needs 2 GB of memory or less.
-- `static` host: a box at a fixed URL. It is used for local development (`box/up.sh`) and for self-hosting.
+- `static` host: one box at a fixed URL, signed in to one Claude account. It is used for local development (`box/up.sh`) and for self-hosting by one person. Outside `DEV_MODE=1` it needs `BOX_STATIC_OWNER`, the one agent key that may claim it; anyone else's `/claude` says the feature isn't available, and their turns stay on the API path.
 - The Worker never sees the person's Claude credentials or the sign-in code. The code goes from the person's browser straight to their box.
 
 ## Names and secrets
@@ -38,12 +38,13 @@ All JSON. Calls from the Worker carry `Authorization: Bearer <boxToken>`, compar
 
 - `GET /health` (bearer) → `200 {"ok":true,"signedIn":boolean,"authMethod":string,"version":string}`. `signedIn` is `loggedIn` from `claude auth status --json`. Any method counts, so a person's own API key in the box is also "signed in".
 - `POST /parse` (bearer), body `{"model","system","user","jsonSchema"}` as `dev/bridge.ts` takes today.
-  - `200 {"structured","usage","stop"}` exactly as the bridge.
+  - `200 {"structured","usage","stop","costUsd"}`, the first three exactly as the bridge. `costUsd` is the CLI's `total_cost_usd` or null; the Worker logs box turns at cost 0 and ignores it.
   - `409 {"error":"signed_out"}` when the CLI has no login.
-  - `502 {"error":"claude_failed"}` otherwise. Turns run one at a time per box.
+  - `502 {"error":"claude_failed"}` otherwise. Turns run one at a time per box. When the caller closes the request before the reply, the box kills that turn's CLI, and a queued turn whose caller is gone never starts.
 - `GET /signin` (no auth) → the sign-in page. The page reads the ticket from the URL fragment (`#t=<ticket>`), so it never reaches server logs.
-- `POST /signin/start` `{"ticket"}` → `200 {"url"}`. It starts `claude auth login --claudeai` with pipes and `BROWSER=true`, and returns the first `https://claude.com/`, `https://claude.ai/` or `https://platform.claude.com/` link the CLI prints. A second start replaces the first process. The process dies after 10 minutes.
-- `POST /signin/code` `{"ticket","code"}` → `200 {"signedIn":boolean}`. It writes the code and a newline to the CLI's stdin once, waits for the process to exit (up to 60 s), then reads `claude auth status`. The code is never logged.
+- `POST /signin/start` `{"ticket"}` → `200 {"url"}`. It starts `claude auth login --claudeai` with pipes and `BROWSER=true`, and returns the first `https://claude.com/`, `https://claude.ai/` or `https://platform.claude.com/` link the CLI prints. A second start replaces the first process. The process dies after 10 minutes. `502 {"error":"signin_failed"}` when the CLI prints no link within 30 s.
+- `POST /signin/code` `{"ticket","code"}` → `200 {"signedIn":boolean}`. It writes the code and a newline to the CLI's stdin once, waits for the process to exit (up to 60 s, or until the CLI says the code is invalid, when it is killed), then reads `claude auth status`. The code is never logged. `409 {"error":"no_signin"}` when no sign-in is running or it is older than 10 minutes, `400 {"error":"bad_code"}` for an empty or multi-line code.
+- The sign-in process stays owned until it exits. While a code is completing, a start or another code answers `409 {"error":"busy"}`, so two CLIs never share the credentials. The page disables both buttons while a code is submitting.
 - Anything else → 404. Bad or expired auth → 401.
 
 The box pins the CLI version in `box/package-lock.json`, sets `DISABLE_AUTOUPDATER=1`, runs as the unprivileged `agent` user with `HOME` and `CLAUDE_CONFIG_DIR` on `/data`, and runs `claude -p` with `--tools ""` from an empty directory. The browser is not in the MVP image. Booking work adds it back, visible under Xvfb rather than headless.
@@ -53,37 +54,44 @@ The box pins the CLI version in `box/package-lock.json`, sets `DISABLE_AUTOUPDAT
 Per person, in the Agent DO, one row:
 
 ```
-box: { name, host: "fly" | "static", url, state, stateAt, linkSentAt, signinPollUntil, pollAt, reclaimAt, error }
-state: "provisioning" | "signed_out" | "signed_in" | "failed" | "reclaiming"
+box: { name, host: "fly" | "static", url, state, stateAt, linkSentAt, signinPollUntil, pollAt, reclaimAt, reclaimReason, retireAt, image, ensureAt }
+state: "provisioning" | "signed_out" | "signed_in" | "reclaiming"
+reclaimReason: "unused" | "failed" | "retired"     set exactly when state is reclaiming
 ```
 
-The table also keeps `attempts` (provisioning or reclaim attempts so far) and `next_at` (the earliest of the next provisioning attempt, sign-in poll, reclaim or reclaim retry), which the alarm time includes. Provisioning gives up after 10 attempts, 15 s apart and doubling to 5 minutes, sets `failed` and tells the person once. A box that is already signed in when it first answers `/health` goes straight to `signed_in`.
+The table also keeps `attempts` (provisioning or reclaim attempts so far) and `next_at` (the earliest of the next provisioning attempt, sign-in poll, reclaim, reclaim retry, retire and ensure), which the alarm time includes. Each step stores its retry time before it calls out, so a crash mid-step retries later rather than at once. Provisioning gives up after 10 attempts, 15 s apart and doubling to 5 minutes, or at once on a failure that can't be retried, and the box goes straight to `reclaiming` with reason `failed`. A box that is already signed in when it first answers `/health` goes straight to `signed_in`.
 
 - `/claude` (exact text, Telegram, LINE or dev) runs without the model:
   - No box: insert one in `provisioning` and reply that the box is being set up. The drain then provisions it step by step. Each step is idempotent, so a crash or a retry resumes where it stopped. When the box answers `/health`, the state becomes `signed_out` and the person gets the sign-in link.
-  - `signed_out` or `failed`: send a fresh sign-in link. For `failed`, retry provisioning first.
+  - `signed_out`: send a fresh sign-in link.
   - `signed_in`: say it is connected.
-  - `reclaiming`: say the unused box is being removed and to send `/claude` again in a minute.
+  - `reclaiming`: say the old box is being removed and to send `/claude` again in a few minutes.
   - A plan without the box (`ai`, `lapsed`): say the plan doesn't include it and point at `/plan`.
+  - The D1 claim fails: say setup can't start right now and to try again in a few minutes. The turn's outcome is `no_model`, as for every command; it is not retried and not logged as a model failure.
 - After a link goes out, the drain polls `/health` every 30 s for 30 minutes. When `signedIn` turns true, the state becomes `signed_in` and the person is told their turns now use their Claude plan.
-- Reclaim: the first link sets `reclaimAt` to 48 hours later. A later link doesn't move it. A box that has ever been signed in has `reclaimAt` null and is never removed on its own. When `reclaimAt` passes, the box moves to `reclaiming` and the drain takes one last look at `/health`. If the box is signed in, it becomes `signed_in` as above. Otherwise the host destroys it (Fly `DELETE /apps/{app}?force=true`; on `static` there is nothing to destroy), the D1 `boxes` row gets `deleted_at`, and the DO row goes, together with a message saying `/claude` sets it up again. The steps run in that order and each is done when repeated, so a crash between them resumes from the top on the retry. A failed destroy retries from 15 s, doubling to an hour, and tells the person nothing.
+- Reclaim of an unused box: the first link sets `reclaimAt` to 48 hours later. Each later link moves it to at least that link's ticket expiry plus 2 minutes (a code posted just before expiry can take the box's 60 s exit wait to land), so every outstanding ticket is dead by then: `reclaimAt = max(first link + 48 h, latest link + 30 min + 2 min)`. A box that has ever been signed in has `reclaimAt` null and is never removed for being unused. When `reclaimAt` passes, the drain takes one last look at `/health`, still in `signed_out`. Signed in: it becomes `signed_in` as above. Answered and signed out: it moves to `reclaiming` with reason `unused`. No answer: nothing is destroyed, and the last look runs again 5 minutes later.
+- Reclaiming, for any reason, skips `/health` and runs the reclaim: the host destroys the box (Fly `DELETE /apps/{app}?force=true`; on `static` there is nothing to destroy), the D1 `boxes` row gets `deleted_at`, and the DO row goes, together with one message for the reason. `unused`: nobody signed in for 2 days, and `/claude` sets it up again. `failed`: setup failed, and `/claude` starts over. `retired`: the plan doesn't include it, and `/plan` shows the plans. The steps run in that order and each is done when repeated, so a crash between them resumes from the top on the retry. A failed destroy retries from 15 s, doubling to an hour, and tells the person nothing.
+- Retire: with `BILLING=on`, when the drain sees a box (in any state but `reclaiming`) whose person's plan no longer allows one (`planAllowsBox` false), it sets `retireAt` to 14 days later and tells the person once, with the date, that the box will be removed unless their plan resumes. If the plan allows a box again before then, `retireAt` is cleared silently. At `retireAt` the box moves to `reclaiming` with reason `retired`, even if it was signed in, since it holds only their Claude login. With `BILLING=off` this never fires. The drain runs on the person's messages and daily check-in, so a lapse is seen within a day.
+- Keeping machines current: the row keeps `image`, the `BOX_IMAGE` the box was last ensured with. When the drain sees a live box (`signed_out` or `signed_in`) whose `image` differs from `BOX_IMAGE`, or a box answers `401` to `/health` or `/parse` (a token from another `BOX_SECRET`), it sets `ensureAt` and runs the host's `ensure` for that box, with the same retries every 5 minutes until it succeeds. The box's state doesn't change and the person hears nothing. A turn whose `/parse` got `401` runs on the API path.
 - Turns: if the box is `signed_in` and `planAllowsBox` says yes (`trial`, `standard`, `plus`), `#callModel` sends the turn to the box and reserves no API spend, since the person's own plan pays. The ledger logs the call with `backend = 'box'` and cost 0.
   - `signed_out` from the box: set `signed_out`, tell the person once with a new link, and run this turn on the API path.
-  - unavailable (timeout 120 s, 5xx, network): run this turn on the API path. The usual per-person cap and the global ceiling apply.
+  - unavailable (timeout 120 s, 5xx, network): run this turn on the API path, and send every turn for the next 5 minutes straight to the API path too. That skip is kept in memory, so a restart of the DO costs at most one more try. The usual per-person cap and the global ceiling apply.
 - `BOX_HOST=none` (the default) turns all of this off. `/claude` then says the feature isn't available yet.
 - `MAX_BOXES` caps boxes across everyone. The D1 table `boxes` is the inventory, used to count boxes and to find orphans. A reclaimed box frees its slot, and the same person can claim it again.
 
 ## Fly host
 
-Machines REST API at `https://api.machines.dev/v1`, with `FLY_API_TOKEN` (an org token) and `FLY_ORG`. Steps, each treating "already exists" as done:
+Machines REST API at `https://api.machines.dev/v1`, with `FLY_API_TOKEN` (an org token) and `FLY_ORG`. Every call, reading its body included, times out after 15 s, and a timeout, a network error, a 429 or a 5xx is retryable. Steps, each treating "already exists" as done:
 
 1. `POST /apps` `{app_name, org_slug, network: app_name}`.
 2. `POST /apps/{app}/ip_assignments` `{type:"shared_v4"}`, then `{type:"v6"}`.
 3. `POST /apps/{app}/volumes` `{name:"data", region, size_gb: BOX_VOLUME_GB}`.
-4. `POST /apps/{app}/machines` with the image `BOX_IMAGE`, `guest {cpu_kind:"shared", cpus:1, memory_mb:2048}`, `env {BOX_TOKEN}`, the mount at `/data`, one service on 443/80 to port 8789 with `autostop:"suspend"`, `autostart:true`, `min_machines_running:0`, and `restart {policy:"on-failure"}`.
+4. `POST /apps/{app}/machines` with the image `BOX_IMAGE`, `guest {cpu_kind:"shared", cpus:1, memory_mb:2048}`, `env {BOX_TOKEN}`, the mount at `/data`, one service on 443/80 to port 8789 with `autostop:"suspend"`, `autostart:true`, `min_machines_running:0`, and `restart {policy:"on-failure"}`. When the app already has a machine, its config is compared with that one, counting only the values we set (Fly adds its own). If any differs (image, `BOX_TOKEN`, guest, services, mount or restart), `POST /apps/{app}/machines/{id}` `{config}` updates it in place with the full config on the same volume; otherwise the step is done.
 5. Wait until `https://<app>.fly.dev/health` answers.
 
-Delete is `DELETE /apps/{app}?force=true`, which removes the person's data. A 404 counts as done. Besides an operator, only the reclaim of a box that was never signed in triggers it.
+Delete is `DELETE /apps/{app}?force=true`, which removes the person's data. A 404 counts as done. Besides an operator, only a reclaim triggers it: an unused box, a failed setup, or a box retired by its plan.
+
+`scripts/fly-verify.ts --yes` runs these steps against the real API with a throwaway app: it provisions, provisions again (which must create and update nothing), waits for `/health`, starts a sign-in, suspends the machine through the Machines API, waits for `suspended`, calls `/health` through the proxy and prints how long the resume took. A failure names its step, and the app is deleted at the end either way.
 
 ## Plans and billing
 
@@ -155,6 +163,6 @@ A refresh re-reads the person's standing. When it moves their plan, the person i
 
 ## Configuration
 
-Box: `BOX_HOST` (`none` | `fly` | `static`), `BOX_SECRET`, `BOX_APP_PREFIX`, `BOX_IMAGE`, `BOX_REGION` (default `sin`), `BOX_VOLUME_GB` (default 5), `MAX_BOXES`, `BOX_STATIC_URL`, `FLY_API_TOKEN`, `FLY_ORG`.
+Box: `BOX_HOST` (`none` | `fly` | `static`), `BOX_SECRET`, `BOX_APP_PREFIX`, `BOX_IMAGE`, `BOX_REGION` (default `sin`), `BOX_VOLUME_GB` (default 5), `MAX_BOXES`, `BOX_STATIC_URL`, `BOX_STATIC_OWNER` (an agent key such as `p:telegram:12345`; `static` needs it unless `DEV_MODE=1`), `FLY_API_TOKEN`, `FLY_ORG`.
 
 Billing: `BILLING` (`off` | `on`), `TRIAL_DAYS` (default 14), `PLUS_SEATS` (default 3), `PLUS_MAX_SEATS` (default 6), `AI_CAP_USD` (default 1). `BILLING=on` also needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`, `STRIPE_PRICE_AI` and `PUBLIC_URL`.

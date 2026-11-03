@@ -316,7 +316,40 @@ describe("delivery", () => {
       ["OK.", "2099-11-04T21:00"],
       ["Did the bins go out?", "2099-11-05T08:00"],
     ]);
-    expect(c.logs("unasked").map((l) => [l.status, l.day])).toEqual([["sent", "2099-11-04"]]);
+    expect(c.logs("unasked").map((l) => [l.status, l.day])).toEqual([["sent", "2099-11-05"]]);
+    model.assertDone();
+  });
+
+  test("an unasked message a retry carries into the next day counts against that day's budget", async () => {
+    const own = (key: string, at: string) => schedule(key, at, `Follow up ${key}`, false);
+    const model = scripted([
+      turn({
+        actions: [own("a", "2099-11-04T21:59"), own("b", "2099-11-05T08:10"), own("c", "2099-11-05T08:20"), own("d", "2099-11-05T08:30"), send("Noted.")],
+        task: ["plan", "trip", "started"],
+      }),
+      chat("Update a."),
+      chat("Update b."),
+      chat("Update c."),
+      chat("Update d."),
+    ]);
+    const c = await devChat("una", { model, at: "2099-11-04T21:00", deliveries: [{ kind: "sent" }, { kind: "retry", afterMs: 120_000 }] });
+    await c.say("plan my trip");
+
+    await c.advanceTo("2099-11-05T08:45");
+
+    expect(c.channel.delivered.map((d) => [d.text, wall(d.at)])).toEqual([
+      ["Noted.", "2099-11-04T21:00"],
+      ["Update a.", "2099-11-05T08:00"],
+      ["Update b.", "2099-11-05T08:10"],
+      ["Update c.", "2099-11-05T08:20"],
+    ]);
+    expect(c.logs("unasked").map((l) => [l.text, l.status, l.day])).toEqual([
+      ["Update a.", "sent", "2099-11-05"],
+      ["Update b.", "sent", "2099-11-05"],
+      ["Update c.", "sent", "2099-11-05"],
+      ["Update d.", "dropped_budget", null],
+    ]);
+    expect((await c.snapshot()).unaskedSentToday).toBe(3);
     model.assertDone();
   });
 

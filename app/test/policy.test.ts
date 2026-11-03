@@ -95,7 +95,13 @@ describe("unasked budget", () => {
   test("an admitted row is held by quiet hours on every attempt, and sends on its admitted day past the budget", () => {
     const admitted = "2026-11-04" as LocalDate;
     expect(admitUnasked({ ...input, admitted, now: at("2026-11-04T22:01+07:00"), sentToday: 0 })).toEqual({ verdict: "defer", until: at("2026-11-05T08:00+07:00") });
-    expect(admitUnasked({ ...input, admitted, now: at("2026-11-05T08:00+07:00"), sentToday: 3 })).toEqual({ verdict: "send", day: admitted });
+    expect(admitUnasked({ ...input, admitted, now: at("2026-11-04T21:00+07:00"), sentToday: 3 })).toEqual({ verdict: "send", day: admitted });
+  });
+
+  test("a row admitted on an earlier day is admitted again against the day it goes out", () => {
+    const admitted = "2026-11-04" as LocalDate;
+    expect(admitUnasked({ ...input, admitted, now: at("2026-11-05T08:00+07:00"), sentToday: 2 })).toEqual({ verdict: "send", day: "2026-11-05" });
+    expect(admitUnasked({ ...input, admitted, now: at("2026-11-05T08:00+07:00"), sentToday: 3 })).toEqual({ verdict: "drop", reason: "budget" });
   });
 
   test("a blocked person is dropped before anything else", () => {

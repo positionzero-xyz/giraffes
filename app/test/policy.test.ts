@@ -221,6 +221,31 @@ describe("reminders", () => {
   });
 });
 
+describe("corrections", () => {
+  const checkinEvent: AgentEvent = { kind: "checkin", day: "2026-11-04" as LocalDate, dueAt: NOW, firedAt: NOW };
+
+  test("a wake-up or check-in turn that confirms a rejected action is corrected too", () => {
+    const fired = planTurn(output([{ type: "cancel_wakeup", key: "gym" }, send("I cancelled the gym reminder.")]), view({ batch: { items: [item(wakeupEvent(NOW, NOW))] } }));
+    expect(fired.outbound).toMatchObject({ intent: "requested", texts: ["I cancelled the gym reminder.", NOTICE.cancelNotFound] });
+
+    const checkin = planTurn(output([schedule("dentist", "tomorrow 9"), send("Your dentist reminder is set.")]), view({ batch: { items: [item(checkinEvent)] } }));
+    expect(checkin.outbound).toMatchObject({ intent: "unasked", texts: ["Your dentist reminder is set.", NOTICE.reminderBadTime] });
+  });
+
+  test("a rejected wake-up the agent set for itself is logged, never shown", () => {
+    const pending = [reminder("follow-up", local("2026-11-06T10:00"), "agent")];
+    const commit = planTurn(output([schedule("follow-up", "2026-11-07T10:00", false), send("Nice.")]), view({ pending }));
+    expect(commit.outbound?.texts).toEqual(["Nice."]);
+    expect(commit.rejected).toEqual([{ action: "schedule_wakeup:follow-up", reason: "duplicate" }]);
+  });
+
+  test("a turn that sends nothing shows no correction, and still logs the rejection", () => {
+    const commit = planTurn(output([schedule("dentist", "tomorrow 9")]), view());
+    expect(commit.outbound).toBeNull();
+    expect(commit.rejected).toEqual([{ action: "schedule_wakeup:dentist", reason: "bad_time" }]);
+  });
+});
+
 describe("lateness", () => {
   test("exactly one hour is on time; a minute more is late", () => {
     expect(isLate({ dueAt: at("2026-11-04T09:00Z"), firedAt: at("2026-11-04T10:00Z") })).toBe(false);

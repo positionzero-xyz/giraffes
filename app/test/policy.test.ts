@@ -501,9 +501,14 @@ describe("alarm and compaction", () => {
   });
 
   test("the turn prompt asks only for what a model without tools can do", () => {
-    expect(TURN_SYSTEM).not.toMatch(/search|sources|price ranges/i);
+    expect(TURN_SYSTEM).not.toMatch(/search|sources|price ranges|you found/i);
     expect(TURN_SYSTEM.match(/opportunistic by default/gi)).toHaveLength(1);
     expect(TURN_SYSTEM).toContain("Never invent an event, a price or an opening.");
+  });
+
+  test("the turn prompt says a pending key can't be scheduled again", () => {
+    expect(TURN_SYSTEM).not.toContain("is ignored");
+    expect(TURN_SYSTEM).toContain("Scheduling a key that is still pending is rejected.");
   });
 
   test("system prompts are byte-stable constants", () => {

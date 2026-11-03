@@ -114,6 +114,12 @@ describe("LINE delivery", () => {
     expect(seen.map((s) => s.url.split("/").pop())).toEqual(["reply", "push"]);
   });
 
+  test("after LINE refuses a reply token, a push that must be retried is retried without that token", async () => {
+    const seen = stubFetch((s) => (s.url.endsWith("/reply") ? Response.json({ message: "Invalid reply token" }, { status: 400 }) : new Response("upstream down", { status: 503 })));
+    expect(await line().deliver(outbound({ reply: fresh }), NOW)).toMatchObject({ kind: "in_doubt" });
+    expect(seen.map((s) => s.url.split("/").pop())).toEqual(["reply", "push"]);
+  });
+
   test("a retried push that LINE already accepted counts as sent", async () => {
     stubFetch(() => Response.json({ message: "The retry key is already accepted" }, { status: 409 }));
     expect(await line().deliver(outbound(), NOW)).toEqual({ kind: "sent", via: "push" });

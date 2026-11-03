@@ -1,7 +1,27 @@
 import { DurableObject } from "cloudflare:workers";
 import type { z } from "zod";
+import { boxClient, type BoxClient } from "../box/client";
+import { flyHost } from "../box/fly";
+import { staticHost, type BoxHost, type BoxHostKind, type Fetch } from "../box/host";
+import {
+  afterProbe,
+  beginStep,
+  BOX,
+  boxMessage,
+  isBoxCommand,
+  needsLink,
+  newBox,
+  onCommand,
+  onSignedOut,
+  planAllowsBox,
+  type Box,
+  type BoxSay,
+  type BoxState,
+  type Probe,
+} from "../box/machine";
+import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
 import { makeChannels, type ChannelRegistry } from "../channels/channel";
-import { loadConfig, type Env } from "../config";
+import { loadConfig, type BoxConfig, type Env } from "../config";
 import { assertNever, intentOf, type AgentKey, type EpochMs, type EventKey, type InboundEnvelope, type MicroUsd, type PersonStatus, type TimeZone } from "../domain";
 import { d1Ledger, modelCallRow, type LeaseAnswer, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
 import { makeModelClient, routeOf, type ModelClient, type ModelId, type ModelResult, type Purpose, type Usage } from "../model/model";
@@ -12,7 +32,7 @@ import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../poli
 import { compactionCommit, CompactionOutputSchema, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import { migrate } from "./schema";
-import { AgentStore, type AgentRow, type OutboxRow, type OutboxView, type Reservation, type Settlement } from "./store";
+import { AgentStore, type AgentRow, type BoxMessage, type OutboxRow, type OutboxView, type Reservation, type Settlement } from "./store";
 import {
   bypassModel,
   logsForTurn,
@@ -39,12 +59,25 @@ const utf8 = new TextEncoder();
 
 export type Clock = { now(): EpochMs };
 
+export type BoxDeps = {
+  readonly host: BoxHost;
+  readonly client: BoxClient;
+  readonly secret: string;
+  readonly maxBoxes: number;
+};
+
 export type AgentDeps = {
   readonly model: ModelClient;
   readonly ledger: Ledger;
   readonly channels: ChannelRegistry;
   readonly clock: Clock;
+  /** Null when BOX_HOST=none. */
+  readonly box: BoxDeps | null;
 };
+
+type BoxCall<T> =
+  | { readonly kind: "box_ok"; readonly value: T; readonly usage: Usage; readonly id: string; readonly model: ModelId }
+  | { readonly kind: "box_failed"; readonly usage: Usage | null; readonly id: string; readonly model: ModelId };
 
 type ModelCall<T> =
   | { readonly kind: "ok"; readonly value: T; readonly reservation: Reservation; readonly usage: Usage }
@@ -59,6 +92,7 @@ export type AgentSnapshot = {
   readonly pendingWakeups: readonly PendingWakeup[];
   readonly unaskedSentToday: number;
   readonly spendThisMonthMicro: MicroUsd;
+  readonly box: { readonly host: BoxHostKind; readonly state: BoxState } | null;
 };
 
 export class Agent extends DurableObject<Env> {
@@ -100,6 +134,7 @@ export class Agent extends DurableObject<Env> {
   async snapshot(): Promise<AgentSnapshot> {
     const now = this.#deps.clock.now();
     const a = this.#store.agent();
+    const box = this.#store.box();
     return {
       agent: a ? { key: a.key, status: a.status, tz: a.tz } : null,
       turns: this.#store.recentTurns(50),
@@ -107,6 +142,7 @@ export class Agent extends DurableObject<Env> {
       pendingWakeups: this.#store.pendingWakeups(),
       unaskedSentToday: a ? this.#store.unaskedAdmitted(localDate(now, a.tz)) : 0,
       spendThisMonthMicro: this.#store.monthSpend(utcMonth(now)).spent,
+      box: box ? { host: box.host, state: box.state } : null,
     };
   }
 
@@ -131,6 +167,7 @@ export class Agent extends DurableObject<Env> {
           this.#fireDueWakeups();
         }
       });
+      await this.#phase("box", () => this.#stepBox());
       await this.#phase("delivery", () => this.#deliverReady());
       await this.#phase("log flush", () => this.#flushLogs());
       await this.#phase("compaction", () => this.#compactIfDue());
@@ -184,9 +221,15 @@ export class Agent extends DurableObject<Env> {
     const view = this.#view(batch, a);
     const bypass = bypassModel(view);
     if (bypass) return this.#commit(planWithoutModel(view, bypass), view, a.key, { kind: "none" }, null);
+    if (isBoxCommand(batch.items[0].event)) return this.#boxCommand(view, a.key);
 
-    const call = await this.#callModel("turn", TURN_SYSTEM, renderUser(view), TurnOutputSchema, batch.items[0].key, a.key);
+    const call = await this.#callModel(TURN_SYSTEM, renderUser(view), TurnOutputSchema, batch.items[0].key, a.key);
     switch (call.kind) {
+      case "box_ok":
+      case "box_failed": {
+        const commit = call.kind === "box_ok" ? planTurn(call.value, view) : planWithoutModel(view, { kind: "model_failed" });
+        return this.#commit(commit, view, a.key, { kind: "box", id: call.id, model: call.model, usage: call.usage }, null);
+      }
       case "ok": {
         const settle = { reservation: call.reservation, cost: costOf(call.reservation.model, call.usage) };
         return this.#commit(planTurn(call.value, view), view, a.key, settledCall(settle, call.usage), settle);
@@ -214,10 +257,114 @@ export class Agent extends DurableObject<Env> {
     call: TurnCall,
     settle: Settlement | null,
     extra: readonly LogRow[] = [],
+    box: Box | null = null,
   ): void {
     const now = this.#deps.clock.now();
     const logs = [...logsForTurn({ agent, commit, view, call, startedAt: view.now, now }), ...extra];
-    this.#store.commitTurn(commit, settle, logs, now);
+    this.#store.commitTurn(commit, settle, logs, now, box);
+  }
+
+  async #boxCommand(view: TurnView, agent: AgentKey): Promise<void> {
+    const deps = this.#deps.box;
+    if (!deps) return this.#boxReply(view, agent, null, { box: null, say: "unavailable" });
+    const now = this.#deps.clock.now();
+    const current = this.#store.box();
+    if (current) return this.#boxReply(view, agent, deps, onCommand(current, now));
+
+    const name = await deps.host.nameFor(agent);
+    let claim: "granted" | "full";
+    try {
+      claim = await this.#deps.ledger.claimBox({ agent, name, host: deps.host.kind, at: now, max: deps.maxBoxes });
+    } catch (err) {
+      console.warn("box claim failed", err);
+      return this.#modelUnavailable(view, agent, { kind: "unavailable", reservation: null, failure: "unavailable" });
+    }
+    if (claim === "full") return this.#boxReply(view, agent, deps, { box: null, say: "full" });
+    return this.#boxReply(view, agent, deps, { box: newBox(name, deps.host.kind, deps.host.urlOf(name), now), say: "setting_up" });
+  }
+
+  async #boxReply(view: TurnView, agent: AgentKey, deps: BoxDeps | null, t: { readonly box: Box | null; readonly say: BoxSay }): Promise<void> {
+    const message = deps && t.box ? await this.#boxMessage(deps, t.box, t.say) : boxMessage(t.say, null);
+    const commit = planWithoutModel(view, { kind: "command", text: message.text, note: message.note });
+    this.#commit(commit, view, agent, { kind: "none" }, null, [], t.box);
+  }
+
+  async #boxMessage(deps: BoxDeps, box: Box, say: BoxSay): Promise<{ readonly text: string; readonly note: string }> {
+    if (!needsLink(say)) return boxMessage(say, null);
+    const exp = (this.#deps.clock.now() + BOX.ticketForMs) as EpochMs;
+    const ticket = await signinTicket(await boxToken(deps.secret, box.name), exp);
+    return boxMessage(say, signinUrl(box.url, ticket));
+  }
+
+  async #outboxMessage(deps: BoxDeps, box: Box, say: BoxSay | null): Promise<BoxMessage | null> {
+    if (say === null) return null;
+    const m = await this.#boxMessage(deps, box, say);
+    return { texts: [m.text], note: m.note };
+  }
+
+  async #stepBox(): Promise<void> {
+    const deps = this.#deps.box;
+    const current = this.#store.box();
+    if (!deps || !current) return;
+    const step = beginStep(current, this.#deps.clock.now());
+    if (!step) return;
+    if (step.kind === "settled") {
+      return this.#store.applyBox(step.box, await this.#outboxMessage(deps, step.box, step.say), [], this.#deps.clock.now());
+    }
+    const claimed = step.box;
+    this.#store.applyBox(claimed, null, [], this.#deps.clock.now());
+    const probe = await this.#probe(deps, claimed, await boxToken(deps.secret, claimed.name));
+    const t = afterProbe(claimed, probe, this.#deps.clock.now());
+    this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [], this.#deps.clock.now());
+  }
+
+  async #probe(deps: BoxDeps, box: Box, token: BoxToken): Promise<Probe> {
+    if (box.state === "provisioning") {
+      const ensured = await deps.host.ensure(box.name, token);
+      if (!ensured.ok) return { kind: "down", retryable: ensured.retryable, detail: ensured.detail };
+    }
+    const health = await deps.client.health(box.url, token);
+    return health.kind === "up" ? health : { kind: "down", retryable: true, detail: health.detail };
+  }
+
+  /** A turn goes to the person's own signed-in box first; null means the API path takes it. */
+  async #callBox<T>(system: string, user: string, schema: z.ZodType<T>, agent: AgentKey): Promise<BoxCall<T> | null> {
+    const deps = this.#deps.box;
+    const box = this.#store.box();
+    if (!deps || box?.state !== "signed_in" || !planAllowsBox(agent)) return null;
+    const id = crypto.randomUUID();
+    const model = routeOf("turn").model;
+    const res = await deps.client.parse(box.url, await boxToken(deps.secret, box.name), { purpose: "turn", system, user, schema });
+    const now = this.#deps.clock.now();
+    const missed = (status: "rejected" | "unavailable"): LogRow =>
+      modelCallRow({ id, agent, purpose: "turn", model, backend: "box", status, estimate: NO_COST, cost: NO_COST, usage: null, at: now });
+    switch (res.kind) {
+      case "ok":
+        return { kind: "box_ok", value: res.value, usage: res.usage, id, model };
+      case "failed":
+        return { kind: "box_failed", usage: res.usage, id, model };
+      case "signed_out": {
+        const t = onSignedOut(box, now);
+        this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [missed("rejected")], now);
+        return null;
+      }
+      case "unavailable":
+        console.warn("box unavailable", res.detail);
+        this.#store.appendLogs([missed("unavailable")], now);
+        return null;
+      default:
+        return assertNever(res);
+    }
+  }
+
+  async #callModel<T>(
+    system: string,
+    user: string,
+    schema: z.ZodType<T>,
+    eventKey: EventKey,
+    agent: AgentKey,
+  ): Promise<ModelCall<T> | BoxCall<T>> {
+    return (await this.#callBox(system, user, schema, agent)) ?? this.#callApi("turn", system, user, schema, eventKey, agent);
   }
 
   #commitPoison(batch: Batch): void {
@@ -238,7 +385,7 @@ export class Agent extends DurableObject<Env> {
     this.#store.releaseBatch(keys, (now + MODEL_RETRY_BASE_MS * 2 ** (attempts - 1)) as EpochMs, settle, logs, now);
   }
 
-  async #callModel<T>(
+  async #callApi<T>(
     purpose: Purpose,
     system: string,
     user: string,
@@ -358,7 +505,7 @@ export class Agent extends DurableObject<Env> {
     if (!plan) return;
     let call: ModelCall<z.infer<typeof CompactionOutputSchema>>;
     try {
-      call = await this.#callModel("compaction", COMPACTION_SYSTEM, plan.user, CompactionOutputSchema, null, a.key);
+      call = await this.#callApi("compaction", COMPACTION_SYSTEM, plan.user, CompactionOutputSchema, null, a.key);
     } catch (err) {
       this.#store.compactionFailed(this.#deps.clock.now(), null, []);
       throw err;
@@ -414,6 +561,7 @@ export class Agent extends DurableObject<Env> {
       outboxReadyAt: r.outboxReadyAt,
       logsReadyAt: r.logsReadyAt,
       compactionRetryAt: r.compactionRetryAt,
+      boxAt: this.#deps.box ? r.boxAt : null,
     });
     if (t === null) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(t);
@@ -447,7 +595,21 @@ function callRow(
   usage: Usage | null,
   at: EpochMs,
 ): LogRow {
-  return modelCallRow({ id: r.id, agent, purpose: r.purpose, model: r.model, status, estimate: r.estimate, cost, usage, at });
+  return modelCallRow({ id: r.id, agent, purpose: r.purpose, model: r.model, backend: "api", status, estimate: r.estimate, cost, usage, at });
+}
+
+function boxDeps(c: BoxConfig): BoxDeps | null {
+  const f: Fetch = (input, init) => fetch(input, init);
+  switch (c.host) {
+    case "none":
+      return null;
+    case "fly":
+      return { host: flyHost({ ...c.fly, appPrefix: c.appPrefix, secret: c.secret }, f), client: boxClient(f), secret: c.secret, maxBoxes: c.maxBoxes };
+    case "static":
+      return { host: staticHost({ url: c.staticUrl, appPrefix: c.appPrefix }), client: boxClient(f), secret: c.secret, maxBoxes: c.maxBoxes };
+    default:
+      return assertNever(c);
+  }
 }
 
 function defaultDeps(env: Env): AgentDeps {
@@ -457,5 +619,6 @@ function defaultDeps(env: Env): AgentDeps {
     ledger: d1Ledger(env.LEDGER, SPEND.globalCeilingMicro),
     channels: makeChannels(config),
     clock: { now: () => Date.now() as EpochMs },
+    box: boxDeps(config.box),
   };
 }

@@ -1,0 +1,469 @@
+import { describe, expect, test } from "vitest";
+import { z } from "zod";
+import { boxClient } from "../src/box/client";
+import { flyHost, type FlyConfig } from "../src/box/fly";
+import type { Fetch } from "../src/box/host";
+import { BOX, boxMessage, type BoxSay } from "../src/box/machine";
+import { boxName, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
+import { loadConfig, type Env } from "../src/config";
+import type { AgentKey, EpochMs } from "../src/domain";
+import { BOX_SECRET, chat, devChat, fakeBox, local, memoryLedger, scripted } from "./testkit";
+
+const say = (s: BoxSay) => boxMessage(s, null).text;
+const LINK = /^https:\/\/([a-z0-9-]+)\.box\.test\/signin#t=(\d+)\.([A-Za-z0-9_-]+)$/m;
+
+describe("names and secrets", () => {
+  test("the box token and the sign-in ticket match the contract's test vector", async () => {
+    const token = await boxToken("test-secret-0123456789abcdef", "gbox-0123456789ab" as BoxName);
+    expect(token).toBe("b-UiaAiUIgin1zs4CJbKAY68m8rphXVQwWrWHSMO2U4");
+    expect(await signinTicket(token, 1790000000000 as EpochMs)).toBe("1790000000000.AA1PzFmYf_4obmGHsfd0634YPiMbVDnmjYWbmYI62kM");
+  });
+
+  test("a box name is the prefix and 16 hex characters of HMAC(secret, 'name:' + agent key)", async () => {
+    const { createHmac } = await import("node:crypto");
+    const agent = "p:telegram:12345" as AgentKey;
+    const expected = `gbox-${createHmac("sha256", BOX_SECRET).update(`name:${agent}`).digest("hex").slice(0, 16)}`;
+    expect(await boxName(BOX_SECRET, "gbox-", agent)).toBe(expected);
+    expect(await boxName(BOX_SECRET, "gbox-", "p:telegram:12346" as AgentKey)).not.toBe(expected);
+  });
+});
+
+const env = (vars: Record<string, string>): Env => ({ MODEL_BACKEND: "scripted", DEV_MODE: "1", ...vars }) as unknown as Env;
+
+describe("configuration", () => {
+  const fly = { BOX_HOST: "fly", BOX_SECRET, FLY_API_TOKEN: "fake-token", FLY_ORG: "giraffes", BOX_IMAGE: "registry.fly.io/giraffes-box:1" };
+
+  test("BOX_HOST defaults to none", () => {
+    expect(loadConfig(env({})).box).toEqual({ host: "none" });
+  });
+
+  test("fly takes the contract's defaults", () => {
+    expect(loadConfig(env(fly)).box).toEqual({
+      host: "fly",
+      secret: BOX_SECRET,
+      appPrefix: "gbox-",
+      maxBoxes: 10,
+      fly: { apiToken: "fake-token", org: "giraffes", image: "registry.fly.io/giraffes-box:1", region: "sin", volumeGb: 5 },
+    });
+  });
+
+  test.each(["FLY_API_TOKEN", "FLY_ORG", "BOX_IMAGE", "BOX_SECRET"])("fly without %s fails at load", (name) => {
+    const vars: Record<string, string> = { ...fly };
+    delete vars[name];
+    expect(() => loadConfig(env(vars))).toThrow(name);
+  });
+
+  test("static needs its URL and the secret, and bad values fail at load", () => {
+    expect(loadConfig(env({ BOX_HOST: "static", BOX_SECRET, BOX_STATIC_URL: "http://127.0.0.1:8789/" })).box).toMatchObject({
+      host: "static",
+      staticUrl: "http://127.0.0.1:8789",
+    });
+    expect(() => loadConfig(env({ BOX_HOST: "static", BOX_SECRET }))).toThrow("BOX_STATIC_URL");
+    expect(() => loadConfig(env({ BOX_HOST: "static", BOX_STATIC_URL: "http://127.0.0.1:8789" }))).toThrow("BOX_SECRET");
+    expect(() => loadConfig(env({ ...fly, BOX_SECRET: "short" }))).toThrow("BOX_SECRET");
+    expect(() => loadConfig(env({ ...fly, MAX_BOXES: "ten" }))).toThrow("MAX_BOXES");
+    expect(() => loadConfig(env({ BOX_HOST: "docker" }))).toThrow("BOX_HOST");
+  });
+});
+
+type FlyRequest = { readonly method: string; readonly path: string; readonly body: unknown; readonly authorization: string | null };
+
+function fakeFly(org = "giraffes") {
+  const apps = new Map<string, string>();
+  const ips = new Map<string, { ip: string; shared: boolean }[]>();
+  const volumes = new Map<string, { id: string; name: string; state: string }[]>();
+  const machines = new Map<string, { id: string }[]>();
+  const requests: FlyRequest[] = [];
+  const failures: { method: string; path: string; status: number }[] = [];
+  let n = 0;
+  const fetch: Fetch = async (input, init) => {
+    const url = new URL(input);
+    const path = url.pathname.replace(/^\/v1/, "") + url.search;
+    const method = init?.method ?? "GET";
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    requests.push({ method, path, body, authorization: new Headers(init?.headers).get("authorization") });
+    const failure = failures.findIndex((f) => f.method === method && f.path === path);
+    if (failure >= 0) return new Response("boom", { status: failures.splice(failure, 1)[0].status });
+    const [, app, sub] = url.pathname.match(/^\/v1\/apps(?:\/([^/]+))?(?:\/(\w+))?$/) ?? [];
+    if (!app && method === "POST") {
+      if (apps.has(body.app_name)) return Response.json({ error: "Validation failed: Name has already been taken" }, { status: 422 });
+      apps.set(body.app_name, body.org_slug);
+      return Response.json({ id: `app${++n}`, created_at: 1 }, { status: 201 });
+    }
+    if (!app || !apps.has(app)) return Response.json({ error: "not found" }, { status: 404 });
+    if (!sub && method === "GET") return Response.json({ name: app, organization: { slug: apps.get(app) } });
+    if (!sub && method === "DELETE") {
+      apps.delete(app);
+      return new Response(null, { status: 202 });
+    }
+    const list = <T>(m: Map<string, T[]>) => m.get(app) ?? m.set(app, []).get(app)!;
+    if (sub === "ip_assignments" && method === "GET") return Response.json({ ips: list(ips) });
+    if (sub === "ip_assignments") {
+      if (body.type === "shared_v4" && list(ips).some((i) => i.shared)) return Response.json({ error: "already has a shared v4" }, { status: 422 });
+      list(ips).push(body.type === "shared_v4" ? { ip: "66.241.124.1", shared: true } : { ip: `2a09:8280:1::${++n}`, shared: false });
+      return Response.json({ ip: "x" });
+    }
+    if (sub === "volumes" && method === "GET") return Response.json(list(volumes));
+    if (sub === "volumes") {
+      const v = { id: `vol_${++n}`, name: body.name, state: "created" };
+      list(volumes).push(v);
+      return Response.json(v);
+    }
+    if (sub === "machines" && method === "GET") return Response.json(list(machines));
+    if (sub === "machines") {
+      list(machines).push({ id: `m${++n}` });
+      return Response.json({ id: `m${n}` });
+    }
+    return Response.json({ error: "no route" }, { status: 404 });
+  };
+  return { fetch, apps, ips, volumes, machines, requests, failures, org };
+}
+
+const flyConfig: FlyConfig = {
+  apiToken: "fake-org-token",
+  org: "giraffes",
+  image: "registry.fly.io/giraffes-box:1",
+  region: "sin",
+  volumeGb: 5,
+  appPrefix: "gbox-",
+  secret: BOX_SECRET,
+};
+const app = "gbox-0123456789ab" as BoxName;
+const token = "box-token" as BoxToken;
+const posts = (rs: readonly FlyRequest[]) => rs.filter((r) => r.method === "POST").map((r) => [r.path, r.body]);
+
+describe("fly host", () => {
+  test("provisioning sends the contract's requests: app, shared v4 and v6, a data volume, one machine", async () => {
+    const fly = fakeFly();
+    const host = flyHost(flyConfig, fly.fetch);
+
+    expect(await host.ensure(app, token)).toEqual({ ok: true });
+
+    expect(posts(fly.requests)).toEqual([
+      ["/apps", { app_name: app, org_slug: "giraffes", network: app }],
+      [`/apps/${app}/ip_assignments`, { type: "shared_v4" }],
+      [`/apps/${app}/ip_assignments`, { type: "v6" }],
+      [`/apps/${app}/volumes`, { name: "data", region: "sin", size_gb: 5 }],
+      [
+        `/apps/${app}/machines`,
+        {
+          region: "sin",
+          config: {
+            image: "registry.fly.io/giraffes-box:1",
+            guest: { cpu_kind: "shared", cpus: 1, memory_mb: 2048 },
+            env: { BOX_TOKEN: "box-token" },
+            mounts: [{ volume: fly.volumes.get(app)![0].id, path: "/data" }],
+            services: [
+              {
+                protocol: "tcp",
+                internal_port: 8789,
+                ports: [
+                  { port: 443, handlers: ["tls", "http"] },
+                  { port: 80, handlers: ["http"], force_https: true },
+                ],
+                autostop: "suspend",
+                autostart: true,
+                min_machines_running: 0,
+              },
+            ],
+            restart: { policy: "on-failure" },
+          },
+        },
+      ],
+    ]);
+    expect(new Set(fly.requests.map((r) => r.authorization))).toEqual(new Set(["Bearer fake-org-token"]));
+    expect(host.urlOf(app)).toBe(`https://${app}.fly.dev`);
+  });
+
+  test("a run that failed midway resumes, and a run after success creates nothing", async () => {
+    const fly = fakeFly();
+    const host = flyHost(flyConfig, fly.fetch);
+    fly.failures.push({ method: "POST", path: `/apps/${app}/volumes`, status: 503 });
+
+    expect(await host.ensure(app, token)).toMatchObject({ ok: false, retryable: true });
+    expect(await host.ensure(app, token)).toEqual({ ok: true });
+    const before = fly.requests.length;
+    expect(await host.ensure(app, token)).toEqual({ ok: true });
+
+    expect(fly.apps.size).toBe(1);
+    expect(fly.ips.get(app)!.map((i) => i.shared)).toEqual([true, false]);
+    expect(fly.volumes.get(app)).toHaveLength(1);
+    expect(fly.machines.get(app)).toHaveLength(1);
+    expect(posts(fly.requests.slice(before)).map(([path]) => path)).toEqual(["/apps"]);
+  });
+
+  test("429 and 5xx are retryable, another 4xx is not, and a name owned elsewhere fails", async () => {
+    const fly = fakeFly();
+    const host = flyHost(flyConfig, fly.fetch);
+    fly.failures.push({ method: "POST", path: "/apps", status: 429 });
+    expect(await host.ensure(app, token)).toMatchObject({ ok: false, retryable: true });
+    fly.failures.push({ method: "POST", path: "/apps", status: 400 });
+    expect(await host.ensure(app, token)).toMatchObject({ ok: false, retryable: false });
+
+    fly.apps.set(app, "someone-else");
+    expect(await host.ensure(app, token)).toMatchObject({ ok: false, retryable: false });
+    expect(fly.machines.get(app)).toBeUndefined();
+  });
+
+  test("a FlyV1 token goes as-is, and delete forces removal and treats a missing app as done", async () => {
+    const fly = fakeFly();
+    const host = flyHost({ ...flyConfig, apiToken: "FlyV1 fm2_fake" }, fly.fetch);
+    await host.ensure(app, token);
+
+    expect(await host.destroy(app)).toEqual({ ok: true });
+    expect(await host.destroy(app)).toEqual({ ok: true });
+
+    expect(fly.requests.filter((r) => r.method === "DELETE").map((r) => r.path)).toEqual([`/apps/${app}?force=true`, `/apps/${app}?force=true`]);
+    expect(new Set(fly.requests.map((r) => r.authorization))).toEqual(new Set(["FlyV1 fm2_fake"]));
+    expect(fly.apps.size).toBe(0);
+  });
+});
+
+describe("box client", () => {
+  const req = { purpose: "turn" as const, system: "s", user: "u", schema: z.object({ a: z.string() }) };
+  const answering = (status: number, body: unknown): Fetch => async () => Response.json(body, { status });
+
+  test("a 409 is signed out; 5xx, 401, a network error and a timeout are unavailable", async () => {
+    expect(await boxClient(answering(409, { error: "signed_out" })).parse("https://b", token, req)).toEqual({ kind: "signed_out" });
+    for (const status of [502, 503, 401]) {
+      expect(await boxClient(answering(status, {})).parse("https://b", token, req)).toMatchObject({ kind: "unavailable" });
+    }
+    const down: Fetch = async () => {
+      throw new TypeError("fetch failed");
+    };
+    expect(await boxClient(down).parse("https://b", token, req)).toMatchObject({ kind: "unavailable" });
+    const hang: Fetch = (_url, init) =>
+      new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason)));
+    expect(await boxClient(hang, { parseMs: 20, healthMs: 20 }).parse("https://b", token, req)).toMatchObject({
+      kind: "unavailable",
+      detail: expect.stringMatching(/Timeout/),
+    });
+    expect(await boxClient(hang, { parseMs: 20, healthMs: 20 }).health("https://b", token)).toMatchObject({ kind: "unavailable" });
+  });
+
+  test("a reply is parsed as the bridge's, and the default parse timeout is 120 s", async () => {
+    const ok = answering(200, { structured: { a: "hi" }, usage: { input_tokens: 5, output_tokens: 2 }, stop: "end" });
+    expect(await boxClient(ok).parse("https://b", token, req)).toEqual({
+      kind: "ok",
+      value: { a: "hi" },
+      usage: { inputTokens: 5, outputTokens: 2, cacheWriteTokens: 0, cacheReadTokens: 0 },
+    });
+    const bad = answering(200, { structured: { a: 1 }, usage: null, stop: "end" });
+    expect(await boxClient(bad).parse("https://b", token, req)).toMatchObject({ kind: "failed" });
+    let timeout: AbortSignal | undefined;
+    await boxClient(async (_u, init) => {
+      timeout = init?.signal ?? undefined;
+      return Response.json({ error: "signed_out" }, { status: 409 });
+    }).parse("https://b", token, req);
+    expect(timeout).toBeDefined();
+  });
+});
+
+async function linkIn(text: string, user: string, sentAt: EpochMs) {
+  const m = text.match(LINK);
+  if (!m) throw new Error(`no sign-in link in ${JSON.stringify(text)}`);
+  const [, name, exp, mac] = m;
+  const expected = await signinTicket(await boxToken(BOX_SECRET, name as BoxName), Number(exp) as EpochMs);
+  return { name, exp: Number(exp), valid: expected === `${exp}.${mac}`, expiresInMs: Number(exp) - sentAt, user };
+}
+
+describe("connecting a Claude plan", () => {
+  test("with BOX_HOST=none, /claude says it isn't available and calls no model", async () => {
+    const model = scripted([]);
+    const c = await devChat("nia", { model, at: "2099-11-04T10:00" });
+
+    await c.say("/claude");
+
+    expect(await c.received()).toEqual([say("unavailable")]);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(model.calls).toHaveLength(0);
+  });
+
+  test("/claude with no box records it, provisions it, and sends one sign-in link that polling then stops chasing", async () => {
+    const box = fakeBox();
+    const ledger = memoryLedger();
+    const model = scripted([]);
+    const c = await devChat("ann", { model, at: "2099-11-04T10:00", box: box.deps, ledger });
+
+    await c.say("/claude");
+
+    const [setup, link, ...rest] = await c.received();
+    expect([setup, rest]).toEqual([say("setting_up"), []]);
+    const l = await linkIn(link, "ann", local("2099-11-04T10:00"));
+    expect({ name: l.name, valid: l.valid, expiresInMs: l.expiresInMs }).toEqual({ name: await box.nameOf("ann"), valid: true, expiresInMs: 30 * 60_000 });
+    expect((await c.snapshot()).box).toEqual({ host: "fly", state: "signed_out" });
+    expect(ledger.boxes.get("p:dev:ann")).toEqual({ name: await box.nameOf("ann"), host: "fly" });
+    expect(JSON.stringify((await c.snapshot()).turns)).not.toContain("#t=");
+
+    await c.advanceTo("2099-11-04T11:00");
+
+    expect(await c.received()).toEqual([]);
+    expect(box.healthCalls).toHaveLength(1 + BOX.pollForMs / BOX.pollEveryMs);
+    expect((await c.snapshot()).box?.state).toBe("signed_out");
+    expect(model.calls).toHaveLength(0);
+  });
+
+  test("a provisioning step that died after creating the app is retried and converges on one app and one link", async () => {
+    const box = fakeBox({ host: ["die"] });
+    const c = await devChat("bo", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up")]);
+    expect((await c.snapshot()).box?.state).toBe("provisioning");
+
+    await c.advanceTo("2099-11-04T10:01");
+
+    const sent = await c.received();
+    expect(sent).toHaveLength(1);
+    expect((await linkIn(sent[0], "bo", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect(box.ensureCalls).toHaveLength(2);
+    expect(box.created.size).toBe(1);
+  });
+
+  test("a provisioning step that dies every time runs out of attempts and tells the person once", async () => {
+    const box = fakeBox({ host: Array(50).fill("die") });
+    const c = await devChat("cy", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+
+    await c.say("/claude");
+    await c.advanceTo("2099-11-04T12:00");
+
+    expect(await c.received()).toEqual([say("setting_up"), say("setup_failed")]);
+    expect(box.ensureCalls).toHaveLength(BOX.maxProvisionAttempts);
+    expect((await c.snapshot()).box?.state).toBe("failed");
+  });
+
+  test("a failed box is provisioned again on the next /claude", async () => {
+    const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }] });
+    const c = await devChat("di", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up"), say("setup_failed")]);
+
+    await c.say("/claude");
+    const [again, link] = await c.received();
+    expect(again).toBe(say("setting_up"));
+    expect((await linkIn(link, "di", local("2099-11-04T10:00"))).valid).toBe(true);
+  });
+
+  test("polling sees the sign-in, flips the box to signed_in, confirms once, and stops polling", async () => {
+    const box = fakeBox();
+    const c = await devChat("eli", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    await c.advanceTo("2099-11-04T10:01");
+    box.signedIn = true;
+    await c.advanceTo("2099-11-04T10:02");
+
+    expect(await c.received()).toEqual([say("connected")]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+    const polls = box.healthCalls.length;
+    await c.advanceTo("2099-11-04T10:30");
+    expect(box.healthCalls).toHaveLength(polls);
+
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("already_connected")]);
+  });
+
+  test("a signed-in person's turn runs on their box with their token, reserves no spend, and is logged as backend 'box'", async () => {
+    const box = fakeBox({ signedIn: true });
+    const model = scripted([]);
+    const c = await devChat("fin", { model, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up"), say("connected")]);
+
+    box.replies.push({ kind: "reply", step: chat("Hello from your own plan.") });
+    await c.say("hello");
+
+    expect(await c.received()).toEqual(["Hello from your own plan."]);
+    expect(box.parses).toEqual([{ authorization: `Bearer ${await boxToken(BOX_SECRET, await box.nameOf("fin"))}`, user: expect.stringContaining("Person: hello") }]);
+    expect(model.calls).toHaveLength(0);
+    expect((await c.snapshot()).spendThisMonthMicro).toBe(0);
+    expect(c.logs("model_call").map((r) => [r.backend, r.status, r.costMicro, r.estimateMicro])).toEqual([["box", "settled", 0, 0]]);
+    expect(c.logs("turn").map((r) => [r.outcome, r.costMicro])).toEqual([
+      ["no_model", 0],
+      ["acted", 0],
+    ]);
+  });
+
+  test("a box that answers signed_out mid-turn is marked, the person gets one fresh link, and the turn and the next run on the API", async () => {
+    const box = fakeBox({ signedIn: true });
+    const model = scripted([chat("From the API."), chat("Still the API.")]);
+    const c = await devChat("gus", { model, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+    box.signedIn = false;
+    box.replies.push({ kind: "signed_out" });
+
+    await c.say("hello");
+
+    const [notice, reply] = await c.received();
+    expect(notice.startsWith(say("signed_out_link").split("\n")[0])).toBe(true);
+    expect((await linkIn(notice, "gus", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect(reply).toBe("From the API.");
+    expect((await c.snapshot()).box?.state).toBe("signed_out");
+
+    await c.say("again");
+    expect(await c.received()).toEqual(["Still the API."]);
+    expect(box.parses).toHaveLength(1);
+    expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
+      ["box", "rejected"],
+      ["api", "settled"],
+      ["api", "settled"],
+    ]);
+    expect((await c.snapshot()).spendThisMonthMicro).toBeGreaterThan(0);
+  });
+
+  test("an unavailable box sends the turn to the API, and the next turn tries the box again", async () => {
+    const box = fakeBox({ signedIn: true });
+    const model = scripted([chat("From the API.")]);
+    const c = await devChat("hal", { model, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    box.replies.push({ kind: "status", status: 503 });
+    await c.say("hello");
+    expect(await c.received()).toEqual(["From the API."]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+
+    box.replies.push({ kind: "reply", step: chat("Back on your plan.") });
+    await c.say("again");
+    expect(await c.received()).toEqual(["Back on your plan."]);
+    expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
+      ["box", "unavailable"],
+      ["api", "settled"],
+      ["box", "settled"],
+    ]);
+    model.assertDone();
+  });
+
+  test("MAX_BOXES refuses a box past the cap, and the refused person has none", async () => {
+    const box = fakeBox({ maxBoxes: 1 });
+    const ledger = memoryLedger();
+    const ann = await devChat("ivy", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger });
+    const bob = await devChat("jon", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger });
+
+    await ann.say("/claude");
+    await bob.say("/claude");
+
+    expect((await ann.received())[0]).toBe(say("setting_up"));
+    expect(await bob.received()).toEqual([say("full")]);
+    expect((await bob.snapshot()).box).toBeNull();
+    expect([...ledger.boxes.keys()]).toEqual(["p:dev:ivy"]);
+  });
+
+  test("/claude in a burst of messages is handled alone, and the model never sees it as part of its batch", async () => {
+    const box = fakeBox();
+    const model = scripted([chat("Hi!")]);
+    const c = await devChat("kim", { model, at: "2099-11-04T10:00", box: box.deps });
+
+    await c.post("hi");
+    await c.post("/claude");
+    await c.settle();
+
+    const sent = await c.received();
+    expect(sent.slice(0, 2)).toEqual(["Hi!", say("setting_up")]);
+    expect(model.calls).toHaveLength(1);
+    expect(model.calls[0].user).not.toContain("/claude");
+  });
+});

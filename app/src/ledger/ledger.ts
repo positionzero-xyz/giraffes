@@ -10,6 +10,8 @@ import {
   type TaskStatus,
   type UtcMonth,
 } from "../domain";
+import type { BoxHostKind } from "../box/host";
+import type { BoxName } from "../box/names";
 import type { ModelId, Purpose, Usage } from "../model/model";
 import { REMINDER_REJECTIONS } from "../policy/schedule";
 
@@ -43,6 +45,7 @@ export type LogRow =
       readonly agent: AgentKey;
       readonly purpose: Purpose;
       readonly model: ModelId;
+      readonly backend: Backend;
       readonly status: ModelCallStatus;
       readonly estimateMicro: MicroUsd;
       readonly costMicro: MicroUsd;
@@ -91,6 +94,9 @@ export const MODEL_CALL_STATUSES = [
 ] as const;
 export type ModelCallStatus = (typeof MODEL_CALL_STATUSES)[number];
 
+export const BACKENDS = ["api", "box"] as const;
+export type Backend = (typeof BACKENDS)[number];
+
 export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "model_failed", "poison", "no_model", "stale"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 
@@ -105,6 +111,7 @@ export function modelCallRow(input: {
   readonly agent: AgentKey;
   readonly purpose: Purpose;
   readonly model: ModelId;
+  readonly backend: Backend;
   readonly status: ModelCallStatus;
   readonly estimate: MicroUsd;
   readonly cost: MicroUsd;
@@ -117,6 +124,7 @@ export function modelCallRow(input: {
     agent: input.agent,
     purpose: input.purpose,
     model: input.model,
+    backend: input.backend,
     status: input.status,
     estimateMicro: input.estimate,
     costMicro: input.cost,
@@ -138,9 +146,19 @@ export type LeaseRequest = {
 
 export type LeaseAnswer = { readonly kind: "granted"; readonly micro: MicroUsd } | { readonly kind: "ceiling" };
 
+export type BoxClaim = {
+  readonly agent: AgentKey;
+  readonly name: BoxName;
+  readonly host: BoxHostKind;
+  readonly at: EpochMs;
+  readonly max: number;
+};
+
 export interface Ledger {
   append(rows: readonly LogRow[]): Promise<void>;
   requestLease(req: LeaseRequest): Promise<LeaseAnswer>;
+  /** Records the box in the inventory unless MAX_BOXES are live. A retry for a box already recorded is granted. */
+  claimBox(req: BoxClaim): Promise<"granted" | "full">;
 }
 
 const APPEND_CHUNK = 100;
@@ -177,9 +195,9 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
     case "model_call":
       return db
         .prepare(
-          `INSERT INTO model_call (id, agent_key, purpose, model, status, estimate_micro, cost_micro,
+          `INSERT INTO model_call (id, agent_key, purpose, model, backend, status, estimate_micro, cost_micro,
              input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         )
         .bind(
@@ -187,6 +205,7 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
           row.agent,
           row.purpose,
           row.model,
+          row.backend,
           row.status,
           row.estimateMicro,
           row.costMicro,
@@ -239,6 +258,20 @@ export function d1Ledger(db: D1Database, ceiling: MicroUsd): Ledger {
       ]);
       const row = granted?.results[0];
       return row ? { kind: "granted", micro: row.micro as MicroUsd } : { kind: "ceiling" };
+    },
+    async claimBox(req) {
+      const [, live] = await db.batch([
+        db
+          .prepare(
+            `INSERT INTO boxes (agent_key, name, host, created_at)
+             SELECT ?1, ?2, ?3, ?4
+             WHERE (SELECT COUNT(*) FROM boxes WHERE deleted_at IS NULL) < ?5
+             ON CONFLICT (agent_key) DO NOTHING`,
+          )
+          .bind(req.agent, req.name, req.host, req.at, req.max),
+        db.prepare("SELECT 1 AS one FROM boxes WHERE agent_key = ?1 AND deleted_at IS NULL").bind(req.agent),
+      ]);
+      return live?.results.length ? "granted" : "full";
     },
   };
 }

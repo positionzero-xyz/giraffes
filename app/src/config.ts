@@ -14,7 +14,28 @@ export interface Env {
   TELEGRAM_WEBHOOK_SECRET?: string;
 
   DEV_MODE?: string;
+
+  BOX_HOST?: string;
+  BOX_SECRET?: string;
+  BOX_APP_PREFIX?: string;
+  BOX_IMAGE?: string;
+  BOX_REGION?: string;
+  BOX_VOLUME_GB?: string;
+  MAX_BOXES?: string;
+  BOX_STATIC_URL?: string;
+  FLY_API_TOKEN?: string;
+  FLY_ORG?: string;
 }
+
+type BoxCommon = { readonly secret: string; readonly appPrefix: string; readonly maxBoxes: number };
+
+export type BoxConfig =
+  | { readonly host: "none" }
+  | (BoxCommon & {
+      readonly host: "fly";
+      readonly fly: { readonly apiToken: string; readonly org: string; readonly image: string; readonly region: string; readonly volumeGb: number };
+    })
+  | (BoxCommon & { readonly host: "static"; readonly staticUrl: string });
 
 export type Config = {
   readonly devMode: boolean;
@@ -24,6 +45,7 @@ export type Config = {
     | { readonly backend: "scripted" };
   readonly line: { readonly channelSecret: string; readonly accessToken: string } | null;
   readonly telegram: { readonly botToken: string; readonly webhookSecret: string } | null;
+  readonly box: BoxConfig;
 };
 
 const present = (v: string | undefined): v is string => v !== undefined && v !== "";
@@ -52,6 +74,68 @@ function modelConfig(env: Env, devMode: boolean): Config["model"] {
   }
 }
 
+const BOX_DEFAULTS = { appPrefix: "gbox-", region: "sin", volumeGb: 5, maxBoxes: 10 } as const;
+const MIN_SECRET_CHARS = 16;
+
+function required(env: Env, name: keyof Env, why: string): string {
+  const v = env[name];
+  if (typeof v !== "string" || v === "") throw new Error(`${why} needs ${name}`);
+  return v;
+}
+
+function count(name: string, raw: string | undefined, fallback: number, min: number, max: number): number {
+  if (!present(raw)) return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) throw new Error(`${name} must be an integer from ${min} to ${max}`);
+  return n;
+}
+
+function boxCommon(env: Env, why: string): BoxCommon {
+  const secret = required(env, "BOX_SECRET", why);
+  if (secret.length < MIN_SECRET_CHARS) throw new Error(`BOX_SECRET must be at least ${MIN_SECRET_CHARS} characters`);
+  const appPrefix = present(env.BOX_APP_PREFIX) ? env.BOX_APP_PREFIX : BOX_DEFAULTS.appPrefix;
+  if (!/^[a-z][a-z0-9-]{0,29}$/.test(appPrefix)) throw new Error("BOX_APP_PREFIX must be lowercase letters, digits and dashes, starting with a letter");
+  return { secret, appPrefix, maxBoxes: count("MAX_BOXES", env.MAX_BOXES, BOX_DEFAULTS.maxBoxes, 0, 100_000) };
+}
+
+function boxConfig(env: Env): BoxConfig {
+  const host = present(env.BOX_HOST) ? env.BOX_HOST : "none";
+  switch (host) {
+    case "none":
+      return { host };
+    case "fly": {
+      const why = "BOX_HOST=fly";
+      const region = present(env.BOX_REGION) ? env.BOX_REGION : BOX_DEFAULTS.region;
+      if (!/^[a-z]{3}$/.test(region)) throw new Error("BOX_REGION must be a three-letter Fly region");
+      return {
+        host,
+        ...boxCommon(env, why),
+        fly: {
+          apiToken: required(env, "FLY_API_TOKEN", why),
+          org: required(env, "FLY_ORG", why),
+          image: required(env, "BOX_IMAGE", why),
+          region,
+          volumeGb: count("BOX_VOLUME_GB", env.BOX_VOLUME_GB, BOX_DEFAULTS.volumeGb, 1, 500),
+        },
+      };
+    }
+    case "static": {
+      const why = "BOX_HOST=static";
+      const raw = required(env, "BOX_STATIC_URL", why);
+      let url: URL;
+      try {
+        url = new URL(raw);
+      } catch {
+        throw new Error("BOX_STATIC_URL must be an http or https URL");
+      }
+      if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("BOX_STATIC_URL must be an http or https URL");
+      return { host, ...boxCommon(env, why), staticUrl: raw.replace(/\/+$/, "") };
+    }
+    default:
+      throw new Error(`unknown BOX_HOST: ${host}`);
+  }
+}
+
 export function loadConfig(env: Env): Config {
   const devMode = env.DEV_MODE === "1";
   return {
@@ -59,5 +143,6 @@ export function loadConfig(env: Env): Config {
     model: modelConfig(env, devMode),
     line: pair("LINE", env.LINE_CHANNEL_SECRET, env.LINE_CHANNEL_ACCESS_TOKEN, (channelSecret, accessToken) => ({ channelSecret, accessToken })),
     telegram: pair("Telegram", env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_WEBHOOK_SECRET, (botToken, webhookSecret) => ({ botToken, webhookSecret })),
+    box: boxConfig(env),
   };
 }

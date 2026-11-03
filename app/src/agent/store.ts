@@ -2,8 +2,12 @@
  * Every method is synchronous: SQLite calls in a Durable Object don't await, so a method body is
  * atomic with respect to other requests.
  */
+import type { BoxHostKind } from "../box/host";
+import { dueAt, isBoxCommand, type Box, type BoxState } from "../box/machine";
+import type { BoxName } from "../box/names";
 import {
   assertNever,
+  eventKey,
   type AgentEvent,
   type AgentEventKind,
   type AgentKey,
@@ -30,7 +34,7 @@ import type { ModelId, Purpose } from "../model/model";
 import type { Firing, NewWakeup, PendingWakeup } from "../policy/schedule";
 import type { MonthSpend } from "../policy/spend";
 import { COMPACTION, compactionDue, type CompactionCommit, type CompactionInput } from "./compaction";
-import { TURN, type Batch, type InboxItem, type TurnCommit, type TurnRow } from "./turn";
+import { TURN, type Batch, type InboxItem, type Outbound, type TurnCommit, type TurnRow } from "./turn";
 
 export type AgentRow = {
   readonly key: AgentKey;
@@ -90,6 +94,20 @@ type OutboxCols = {
   attempts: number;
 };
 type ReservationCols = { id: string; month: UtcMonth; purpose: Purpose; model: ModelId; estimate_micro: MicroUsd };
+type BoxCols = {
+  name: BoxName;
+  host: BoxHostKind;
+  url: string;
+  state: BoxState;
+  state_at: EpochMs;
+  link_sent_at: EpochMs | null;
+  signin_poll_until: EpochMs | null;
+  error: string | null;
+  attempts: number;
+  next_at: EpochMs | null;
+};
+
+export type BoxMessage = { readonly texts: readonly [string, ...string[]]; readonly note: string };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEDUPE_WINDOW_MS = 14 * DAY_MS;
@@ -113,6 +131,22 @@ function toWakeup(r: WakeupCols): PendingWakeup {
 
 function toInboxItem(r: InboxCols): InboxItem {
   return { key: r.event_key, event: fromJson<AgentEvent>(r.payload), attempts: r.attempts, receivedAt: r.received_at };
+}
+
+function toBox(r: BoxCols): Box {
+  const base = { name: r.name, host: r.host, url: r.url, stateAt: r.state_at };
+  switch (r.state) {
+    case "provisioning":
+      return { ...base, state: r.state, attempts: r.attempts, retryAt: r.next_at ?? r.state_at };
+    case "signed_out":
+      return { ...base, state: r.state, linkSentAt: r.link_sent_at, pollAt: r.next_at, pollUntil: r.signin_poll_until };
+    case "signed_in":
+      return { ...base, state: r.state };
+    case "failed":
+      return { ...base, state: r.state, error: r.error ?? "" };
+    default:
+      return assertNever(r.state);
+  }
 }
 
 function toBatch(items: readonly InboxItem[]): Batch | null {
@@ -210,6 +244,7 @@ export class AgentStore {
               agent: agent.key,
               purpose: r.purpose,
               model: r.model,
+              backend: "api",
               status: "recovered_after_crash",
               estimate: r.estimate,
               cost: r.estimate,
@@ -236,7 +271,8 @@ export class AgentStore {
         .toArray();
       const [head] = ready;
       if (!head) return null;
-      const end = head.kind === "message" ? ready.findIndex((r) => r.kind !== "message") : 1;
+      const command = (r: (typeof ready)[number]) => r.kind === "message" && isBoxCommand(fromJson<AgentEvent>(r.payload));
+      const end = head.kind === "message" && !command(head) ? ready.findIndex((r) => r.kind !== "message" || command(r)) : 1;
       const rows = end === -1 ? ready : ready.slice(0, end);
       const keys = rows.map((r) => r.event_key);
       this.sql.exec(
@@ -296,9 +332,10 @@ export class AgentStore {
       .map(toWakeup);
   }
 
-  commitTurn(commit: TurnCommit, settle: Settlement | null, logs: readonly LogRow[], now: EpochMs): void {
+  commitTurn(commit: TurnCommit, settle: Settlement | null, logs: readonly LogRow[], now: EpochMs, box: Box | null = null): void {
     const [firstKey] = commit.batchKeys;
     this.tx(() => {
+      if (box) this.writeBox(box);
       for (const t of commit.turns) {
         this.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES (?, ?, ?, ?)", t.role, t.text, t.at, t.eventKey);
       }
@@ -317,22 +354,7 @@ export class AgentStore {
       if (commit.reachability) {
         this.sql.exec("UPDATE agent SET status = ?, status_at = ?", commit.reachability.status, commit.reachability.at);
       }
-      const out = commit.outbound;
-      if (out) {
-        this.sql.exec(
-          `INSERT INTO outbox (id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, ready_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          crypto.randomUUID(),
-          firstKey,
-          out.triggerKind,
-          out.intent,
-          JSON.stringify(out.texts),
-          out.reply?.token ?? null,
-          out.reply?.expiresAt ?? null,
-          now,
-          now,
-        );
-      }
+      if (commit.outbound) this.insertOutbox(firstKey, commit.outbound, now);
       this.sql.exec(
         `UPDATE inbox SET status = 'done', outcome = ?, finished_at = ? WHERE event_key IN (${placeholders(commit.batchKeys.length)})`,
         commit.outcome,
@@ -342,6 +364,66 @@ export class AgentStore {
       if (settle) this.settleRow(settle);
       this.insertLogs(logs, now);
     });
+  }
+
+  private insertOutbox(key: EventKey, out: Outbound, now: EpochMs): void {
+    this.sql.exec(
+      `INSERT INTO outbox (id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, ready_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      crypto.randomUUID(),
+      key,
+      out.triggerKind,
+      out.intent,
+      JSON.stringify(out.texts),
+      out.reply?.token ?? null,
+      out.reply?.expiresAt ?? null,
+      now,
+      now,
+    );
+  }
+
+  box(): Box | null {
+    const r = this.sql
+      .exec<BoxCols>("SELECT name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at FROM box")
+      .toArray()[0];
+    return r ? toBox(r) : null;
+  }
+
+  private writeBox(b: Box): void {
+    this.sql.exec(
+      `INSERT INTO box (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, error, attempts, next_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (one) DO UPDATE SET name = excluded.name, host = excluded.host, url = excluded.url, state = excluded.state,
+         state_at = excluded.state_at, link_sent_at = excluded.link_sent_at, signin_poll_until = excluded.signin_poll_until,
+         error = excluded.error, attempts = excluded.attempts, next_at = excluded.next_at`,
+      b.name,
+      b.host,
+      b.url,
+      b.state,
+      b.stateAt,
+      b.state === "signed_out" ? b.linkSentAt : null,
+      b.state === "signed_out" ? b.pollUntil : null,
+      b.state === "failed" ? b.error : null,
+      b.state === "provisioning" ? b.attempts : 0,
+      dueAt(b),
+    );
+  }
+
+  /** A box change and the message it owes the person land together, so a crash can't send one without the other. */
+  applyBox(b: Box, message: BoxMessage | null, logs: readonly LogRow[], now: EpochMs): void {
+    this.tx(() => {
+      this.writeBox(b);
+      if (message) {
+        const key = eventKey.box(b.name);
+        this.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES ('note', ?, ?, ?)", message.note, now, key);
+        this.insertOutbox(key, { texts: message.texts, intent: "requested", triggerKind: "message" }, now);
+      }
+      this.insertLogs(logs, now);
+    });
+  }
+
+  appendLogs(logs: readonly LogRow[], now: EpochMs): void {
+    this.tx(() => this.insertLogs(logs, now));
   }
 
   private insertWakeup(w: NewWakeup, createdBy: string, now: EpochMs): void {
@@ -626,6 +708,7 @@ export class AgentStore {
     readonly outboxReadyAt: EpochMs | null;
     readonly logsReadyAt: EpochMs | null;
     readonly compactionRetryAt: EpochMs | null;
+    readonly boxAt: EpochMs | null;
   } {
     const min = (query: string) => this.sql.exec<{ t: EpochMs | null }>(query).one().t;
     const compaction = this.sql
@@ -645,6 +728,7 @@ export class AgentStore {
       outboxReadyAt: min("SELECT MIN(ready_at) AS t FROM outbox WHERE status IN ('pending', 'sending')"),
       logsReadyAt: min("SELECT CASE WHEN EXISTS (SELECT 1 FROM log_outbox) THEN retry_at END AS t FROM log_flush"),
       compactionRetryAt: compaction.retry_at > now && compactionDue(compaction.turns, compaction.notes) ? compaction.retry_at : null,
+      boxAt: min("SELECT MIN(next_at) AS t FROM box"),
     };
   }
 

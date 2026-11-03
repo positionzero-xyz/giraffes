@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS model_call (
   agent_key          TEXT NOT NULL,
   purpose            TEXT NOT NULL CHECK (purpose IN ('turn', 'compaction', 'planning')),
   model              TEXT NOT NULL,
+  backend            TEXT NOT NULL DEFAULT 'api' CHECK (backend IN ('api', 'box')),
   status             TEXT NOT NULL CHECK (status IN ('settled', 'refused_user_cap', 'refused_global_ceiling', 'recovered_after_crash', 'unavailable', 'rejected', 'in_doubt')),
   estimate_micro     INTEGER NOT NULL,
   cost_micro         INTEGER NOT NULL,
@@ -67,6 +68,14 @@ CREATE TABLE IF NOT EXISTS action_rejection (
   at        INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS action_rejection_agent_time ON action_rejection (agent_key, at);
+
+CREATE TABLE IF NOT EXISTS boxes (
+  agent_key  TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  host       TEXT NOT NULL CHECK (host IN ('fly', 'static')),
+  created_at INTEGER NOT NULL,
+  deleted_at INTEGER
+);
 
 CREATE TABLE IF NOT EXISTS spend_lease (
   agent_key  TEXT NOT NULL,

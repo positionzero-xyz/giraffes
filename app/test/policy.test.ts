@@ -491,9 +491,10 @@ describe("output budgets", () => {
 describe("alarm and compaction", () => {
   test("the alarm is the earliest need, never in the past, and absent when nothing waits", () => {
     const now = at("2026-11-04T10:00Z");
-    const none = { inboxReadyAt: null, wakeupFireAt: null, outboxReadyAt: null, logsReadyAt: null, compactionRetryAt: null };
+    const none = { inboxReadyAt: null, wakeupFireAt: null, outboxReadyAt: null, logsReadyAt: null, compactionRetryAt: null, boxAt: null };
     expect(nextAlarm({ ...none, now, wakeupFireAt: at("2026-11-04T12:00Z"), outboxReadyAt: at("2026-11-04T11:00Z") })).toBe(at("2026-11-04T11:00Z"));
     expect(nextAlarm({ ...none, now, inboxReadyAt: at("2026-11-04T09:00Z") })).toBe(now);
+    expect(nextAlarm({ ...none, now, boxAt: at("2026-11-04T10:00:30Z"), logsReadyAt: at("2026-11-04T10:05Z") })).toBe(at("2026-11-04T10:00:30Z"));
     expect(nextAlarm({ ...none, now })).toBeNull();
   });
 

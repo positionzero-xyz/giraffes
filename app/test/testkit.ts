@@ -3,7 +3,10 @@
  * it, which would race the test's explicit runs; far-future fake times keep every alarm in the future.
  */
 import { env, runInDurableObject, SELF } from "cloudflare:test";
-import type { Agent, AgentSnapshot } from "../src/agent/agent";
+import type { Agent, AgentSnapshot, BoxDeps } from "../src/agent/agent";
+import { boxClient } from "../src/box/client";
+import type { BoxHost, HostResult } from "../src/box/host";
+import { boxName, type BoxName } from "../src/box/names";
 import type { ChannelAdapter } from "../src/channels/channel";
 import { personAgentKey, type EpochMs, type LocalDateTime, type MicroUsd } from "../src/domain";
 import type { LeaseAnswer, Ledger, LogRow } from "../src/ledger/ledger";
@@ -28,15 +31,25 @@ export function fakeClock(start: EpochMs): FakeClock {
   };
 }
 
-export type MemoryLedger = Ledger & { readonly rows: readonly LogRow[] };
+export type MemoryLedger = Ledger & {
+  readonly rows: readonly LogRow[];
+  readonly boxes: ReadonlyMap<string, { readonly name: string; readonly host: string }>;
+};
 
 export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): MemoryLedger {
   const ceiling = opts.ceilingMicro ?? SPEND.globalCeilingMicro;
   const rows: LogRow[] = [];
   const seen = new Set<string>();
   const leases = new Map<string, { month: string; micro: MicroUsd }>();
+  const boxes = new Map<string, { name: string; host: string }>();
   return {
     rows,
+    boxes,
+    async claimBox(req) {
+      if (!boxes.has(req.agent) && boxes.size >= req.max) return "full";
+      if (!boxes.has(req.agent)) boxes.set(req.agent, { name: req.name, host: req.host });
+      return "granted";
+    },
     async append(batch) {
       for (const row of batch) {
         const key = `${row.stream}:${row.id}`;
@@ -117,6 +130,7 @@ export async function devChat(
     readonly at: string;
     readonly ledger?: MemoryLedger;
     readonly deliveries?: readonly DeliveryStep[];
+    readonly box?: BoxDeps;
   },
 ): Promise<DevChat> {
   const clock = fakeClock(local(opts.at));
@@ -124,7 +138,8 @@ export async function devChat(
   const channel = scriptedChannel(opts.deliveries);
   const stub = env.AGENT.get(env.AGENT.idFromName(personAgentKey({ channel: "dev", channelUserId: user })));
   const channels = { line: channel, telegram: channel, dev: channel };
-  await runInDurableObject<Agent, void>(stub, (agent) => agent.withDeps({ model: opts.model, clock, ledger, channels }));
+  const box = opts.box ? { box: opts.box } : {};
+  await runInDurableObject<Agent, void>(stub, (agent) => agent.withDeps({ model: opts.model, clock, ledger, channels, ...box }));
   let seen = 0;
   const nextAlarm = () => runInDurableObject(stub, (_agent, state) => state.storage.getAlarm());
 
@@ -189,3 +204,83 @@ export const quiet = () => ({ type: "quiet" });
 export const throws = (): ScriptStep => ({ kind: "throw" });
 export const hold = (then: ScriptStep): ScriptStep => ({ kind: "hold", then });
 export const chat = (text: string): ScriptStep => turn({ actions: [send(text)], task: ["chat", "chat", "none"] });
+
+export const BOX_SECRET = "test-secret-0123456789abcdef";
+
+export type HostStep = "ok" | "die" | { readonly retryable: boolean; readonly detail: string };
+
+export type BoxReplyStep =
+  | { readonly kind: "reply"; readonly step: ScriptStep }
+  | { readonly kind: "signed_out" }
+  | { readonly kind: "status"; readonly status: number };
+
+export type FakeBox = {
+  readonly deps: BoxDeps;
+  /** Apps the host has created; a step that died after creating one leaves it here, as a real crash would. */
+  readonly created: Set<string>;
+  readonly ensureCalls: string[];
+  readonly healthCalls: string[];
+  readonly parses: { readonly authorization: string | null; readonly user: string }[];
+  readonly replies: BoxReplyStep[];
+  signedIn: boolean;
+  nameOf(user: string): Promise<BoxName>;
+};
+
+/** A BoxHost and the box's HTTP server behind the real box client, wired through a fake fetch. */
+export function fakeBox(opts: { readonly maxBoxes?: number; readonly host?: readonly HostStep[]; readonly signedIn?: boolean } = {}): FakeBox {
+  const steps = [...(opts.host ?? [])];
+  const box = {
+    created: new Set<string>(),
+    ensureCalls: [] as string[],
+    healthCalls: [] as string[],
+    parses: [] as { authorization: string | null; user: string }[],
+    replies: [] as BoxReplyStep[],
+    signedIn: opts.signedIn ?? false,
+    nameOf: (user: string) => boxName(BOX_SECRET, "gbox-", personAgentKey({ channel: "dev", channelUserId: user })),
+  };
+  const host: BoxHost = {
+    kind: "fly",
+    nameFor: (agent) => boxName(BOX_SECRET, "gbox-", agent),
+    urlOf: (name) => `https://${name}.box.test`,
+    async ensure(name): Promise<HostResult> {
+      box.ensureCalls.push(name);
+      const step = steps.shift() ?? "ok";
+      if (step === "die") {
+        box.created.add(name);
+        throw new Error("the host step died after creating the app");
+      }
+      if (step !== "ok") return { ok: false, ...step };
+      box.created.add(name);
+      return { ok: true };
+    },
+  };
+  const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
+    const url = new URL(input);
+    const name = url.hostname.replace(/\.box\.test$/, "");
+    if (!box.created.has(name)) throw new TypeError("fetch failed: no such host");
+    const authorization = new Headers(init?.headers).get("authorization");
+    if (url.pathname === "/health") {
+      box.healthCalls.push(name);
+      return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test" });
+    }
+    if (url.pathname === "/parse") {
+      const body = JSON.parse(String(init?.body)) as { user: string };
+      box.parses.push({ authorization, user: body.user });
+      const step = box.replies.shift();
+      if (!step) throw new Error("the box got a turn the test didn't script");
+      switch (step.kind) {
+        case "signed_out":
+          return Response.json({ error: "signed_out" }, { status: 409 });
+        case "status":
+          return Response.json({ error: "claude_failed" }, { status: step.status });
+        case "reply": {
+          if (step.step.kind !== "output") throw new Error("a box reply must be an output step");
+          return Response.json({ structured: step.step.value, usage: { input_tokens: 900, output_tokens: 90 }, stop: "end" });
+        }
+      }
+    }
+    return new Response("not found", { status: 404 });
+  };
+  const deps: BoxDeps = { host, client: boxClient(fetch), secret: BOX_SECRET, maxBoxes: opts.maxBoxes ?? 10 };
+  return Object.assign(box, { deps });
+}

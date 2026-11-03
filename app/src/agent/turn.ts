@@ -429,7 +429,8 @@ export type NoModelReason =
   | { readonly kind: "stale_lifecycle" }
   | { readonly kind: "refused_budget"; readonly alreadyToldToday: boolean }
   | { readonly kind: "model_failed" }
-  | { readonly kind: "poison" };
+  | { readonly kind: "poison" }
+  | { readonly kind: "command"; readonly text: string; readonly note: string };
 
 export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "block" | "stale_lifecycle" }> | null {
   const e = trigger(view);
@@ -449,6 +450,7 @@ function textWithoutModel(view: TurnView, notice: string | null): string | null 
 export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit {
   let outcome: TurnOutcome;
   let text: string | null = null;
+  let note: string | null = null;
   switch (why.kind) {
     case "block":
       outcome = "no_model";
@@ -465,11 +467,17 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
       outcome = why.kind;
       text = textWithoutModel(view, NOTICE.failed);
       break;
+    case "command":
+      outcome = "no_model";
+      text = why.text;
+      note = why.note;
+      break;
     default:
       return assertNever(why);
   }
   const turns = personTurns(view);
-  if (text !== null) turns.push({ role: "note", text, at: view.now, eventKey: view.batch.items[0].key });
+  const kept = note ?? text;
+  if (kept !== null) turns.push({ role: "note", text: kept, at: view.now, eventKey: view.batch.items[0].key });
   return {
     batchKeys: batchKeys(view),
     outcome,
@@ -494,6 +502,7 @@ export type TurnCall =
       readonly usage: Usage | null;
     }
   | { readonly kind: "refused"; readonly scope: "user_cap" | "global_ceiling"; readonly model: ModelId; readonly estimate: MicroUsd }
+  | { readonly kind: "box"; readonly id: string; readonly model: ModelId; readonly usage: Usage | null }
   | { readonly kind: "none" };
 
 export function logsForTurn(input: {
@@ -532,6 +541,7 @@ export function logsForTurn(input: {
           agent,
           purpose: "turn",
           model: call.model,
+          backend: "api",
           status: "settled",
           estimate: call.estimate,
           cost: call.cost,
@@ -547,10 +557,27 @@ export function logsForTurn(input: {
           agent,
           purpose: "turn",
           model: call.model,
+          backend: "api",
           status: call.scope === "user_cap" ? "refused_user_cap" : "refused_global_ceiling",
           estimate: call.estimate,
           cost: NO_COST,
           usage: null,
+          at: input.now,
+        }),
+      );
+      break;
+    case "box":
+      rows.push(
+        modelCallRow({
+          id: call.id,
+          agent,
+          purpose: "turn",
+          model: call.model,
+          backend: "box",
+          status: "settled",
+          estimate: NO_COST,
+          cost: NO_COST,
+          usage: call.usage,
           at: input.now,
         }),
       );

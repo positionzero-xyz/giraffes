@@ -124,6 +124,21 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE memory ADD COLUMN compaction_failures INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE memory ADD COLUMN compaction_retry_at INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  CREATE TABLE box (
+    one                INTEGER PRIMARY KEY CHECK (one = 1),
+    name               TEXT NOT NULL,
+    host               TEXT NOT NULL CHECK (host IN ('fly', 'static')),
+    url                TEXT NOT NULL,
+    state              TEXT NOT NULL CHECK (state IN ('provisioning', 'signed_out', 'signed_in', 'failed')),
+    state_at           INTEGER NOT NULL,
+    link_sent_at       INTEGER,
+    signin_poll_until  INTEGER,
+    error              TEXT,
+    attempts           INTEGER NOT NULL DEFAULT 0,
+    next_at            INTEGER
+  );
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

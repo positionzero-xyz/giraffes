@@ -1,7 +1,9 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { TASK_KINDS, TASK_STATUSES, type AgentEventKind, type AgentKey, type EpochMs, type MicroUsd, type UtcMonth } from "../src/domain";
-import { ACTION_REJECTIONS, d1Ledger, MODEL_CALL_STATUSES, TURN_OUTCOMES, UNASKED_STATUSES, type LogRow } from "../src/ledger/ledger";
+import type { BoxName } from "../src/box/names";
+import { BOX_HOST_KINDS } from "../src/box/host";
+import { ACTION_REJECTIONS, BACKENDS, d1Ledger, MODEL_CALL_STATUSES, TURN_OUTCOMES, UNASKED_STATUSES, type LogRow } from "../src/ledger/ledger";
 import { PURPOSES } from "../src/model/model";
 
 const month = "2099-11" as UtcMonth;
@@ -24,6 +26,35 @@ describe("global ceiling leases", () => {
 
     const total = await env.LEDGER.prepare("SELECT SUM(micro) AS s FROM spend_lease WHERE month = ?").bind(month).first<{ s: number }>();
     expect(total?.s).toBe(1_000_000);
+  });
+});
+
+describe("box inventory", () => {
+  test("boxes are recorded until MAX_BOXES are live, and a retried claim for a recorded box is granted", async () => {
+    const ledger = d1Ledger(env.LEDGER, micro(1_000_000));
+    const claim = (who: string) => ledger.claimBox({ agent: agent(who), name: `gbox-${who}` as BoxName, host: "fly", at, max: 2 });
+
+    expect(await claim("a")).toBe("granted");
+    expect(await claim("b")).toBe("granted");
+    expect(await claim("c")).toBe("full");
+    expect(await claim("a")).toBe("granted");
+
+    const rows = await env.LEDGER.prepare("SELECT agent_key, name, host FROM boxes ORDER BY agent_key").all();
+    expect(rows.results).toEqual([
+      { agent_key: "p:dev:a", name: "gbox-a", host: "fly" },
+      { agent_key: "p:dev:b", name: "gbox-b", host: "fly" },
+    ]);
+  });
+
+  test("a deleted box frees its slot", async () => {
+    const ledger = d1Ledger(env.LEDGER, micro(1_000_000));
+    const claim = (who: string) => ledger.claimBox({ agent: agent(who), name: `gbox-${who}` as BoxName, host: "fly", at, max: 1 });
+    expect(await claim("a")).toBe("granted");
+    expect(await claim("b")).toBe("full");
+
+    await env.LEDGER.prepare("UPDATE boxes SET deleted_at = ? WHERE agent_key = 'p:dev:a'").bind(at).run();
+
+    expect(await claim("b")).toBe("granted");
   });
 });
 
@@ -56,6 +87,7 @@ describe("log shipping", () => {
         agent: agent("a"),
         purpose: "turn",
         model: "claude-haiku-5-5",
+        backend: "api",
         status: "settled",
         estimateMicro: micro(900),
         costMicro: micro(700),
@@ -89,6 +121,7 @@ describe("log shipping", () => {
       agent: agent("a"),
       purpose: "turn",
       model: "claude-haiku-5-5",
+      backend: "api",
       status: "not_a_status",
       estimateMicro: micro(900),
       costMicro: micro(700),
@@ -119,6 +152,8 @@ describe("schema", () => {
       "turn_log.outcome": TURN_OUTCOMES,
       "model_call.purpose": PURPOSES,
       "model_call.status": MODEL_CALL_STATUSES,
+      "model_call.backend": BACKENDS,
+      "boxes.host": BOX_HOST_KINDS,
       "unasked_message.status": UNASKED_STATUSES,
       "action_rejection.reason": ACTION_REJECTIONS,
     };

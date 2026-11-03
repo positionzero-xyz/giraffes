@@ -3,7 +3,7 @@ import { NOTICE } from "../src/agent/turn";
 import { priceOf, routeOf } from "../src/model/model";
 import { costOf, SPEND } from "../src/policy/spend";
 import { type ScriptStep } from "../src/model/scripted";
-import { chat, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, throws, turn } from "./testkit";
+import { chat, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, throws, turn, wall } from "./testkit";
 
 const until = async (done: () => boolean) => {
   for (let i = 0; i < 2000 && !done(); i++) await new Promise((r) => setTimeout(r, 1));
@@ -201,6 +201,26 @@ describe("failure and duplicate safety", () => {
     expect(await c.received()).toEqual([NOTICE.failed]);
     expect(c.logs("turn").map((l) => l.outcome)).toEqual(["poison"]);
     expect(c.logs("model_call").map((l) => l.status)).toEqual(["in_doubt", "in_doubt", "in_doubt"]);
+    model.assertDone();
+  });
+});
+
+describe("delivery", () => {
+  test("an unasked message admitted at 21:59 whose send fails waits for 08:00 on retry", async () => {
+    const model = scripted([
+      turn({ actions: [schedule("bins", "2099-11-04T21:59", "Ask about the bins", false), send("OK.")], task: ["chat", "bins", "started"] }),
+      chat("Did the bins go out?"),
+    ]);
+    const c = await devChat("uma", { model, at: "2099-11-04T21:00", deliveries: [{ kind: "sent" }, { kind: "retry", afterMs: 120_000 }] });
+    await c.say("I need to take the bins out later");
+
+    await c.advanceTo("2099-11-05T08:30");
+
+    expect(c.channel.delivered.map((d) => [d.text, wall(d.at)])).toEqual([
+      ["OK.", "2099-11-04T21:00"],
+      ["Did the bins go out?", "2099-11-05T08:00"],
+    ]);
+    expect(c.logs("unasked").map((l) => [l.status, l.day])).toEqual([["sent", "2099-11-04"]]);
     model.assertDone();
   });
 });

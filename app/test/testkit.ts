@@ -9,11 +9,12 @@ import { personAgentKey, type EpochMs, type LocalDateTime, type MicroUsd } from 
 import type { LeaseAnswer, Ledger, LogRow } from "../src/ledger/ledger";
 import { scripted, type ScriptStep, type ScriptedModel } from "../src/model/scripted";
 import { SPEND } from "../src/policy/spend";
-import { DEFAULT_TIME_ZONE, fromLocal } from "../src/policy/time";
+import { DEFAULT_TIME_ZONE, fromLocal, toLocal } from "../src/policy/time";
 
 export { scripted };
 
 export const local = (s: string): EpochMs => fromLocal(s as LocalDateTime, DEFAULT_TIME_ZONE);
+export const wall = (t: EpochMs): string => toLocal(t, DEFAULT_TIME_ZONE);
 
 export type FakeClock = { now(): EpochMs; set(t: EpochMs): void };
 

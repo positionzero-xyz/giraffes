@@ -45,6 +45,25 @@ those events. The side panel shows each delivery's intent and status and the pen
    - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`
 
    A channel needs both of its secrets or neither. Without them its webhook answers 404.
+
+   To let people connect their own Claude plan (`/claude`, see `docs/design/BOX.md`), set `BOX_HOST`:
+   - `BOX_HOST=none` (the default): `/claude` replies that it isn't available, and nothing else changes.
+   - `BOX_HOST=fly` needs the secrets `BOX_SECRET` (at least 16 characters; every box name and token
+     derives from it, so changing it orphans every box) and `FLY_API_TOKEN` (an org token, sent as-is
+     when it starts with `FlyV1 `), and the vars `FLY_ORG` and `BOX_IMAGE`. Optional vars:
+     `BOX_APP_PREFIX` (default `gbox-`), `BOX_REGION` (default `sin`), `BOX_VOLUME_GB` (default 5) and
+     `MAX_BOXES` (default 10).
+   - `BOX_HOST=static` needs `BOX_SECRET` and `BOX_STATIC_URL`, one box at a fixed URL that every person
+     shares. Start that box with `BOX_TOKEN` set to the token for the name `<BOX_APP_PREFIX>static`:
+     ```sh
+     node -e 'console.log(require("crypto").createHmac("sha256", process.env.BOX_SECRET).update("box:gbox-static").digest("base64url"))'
+     ```
+
+   Before turning on `fly`, check the account with a throwaway box. It creates billable resources for a
+   few minutes and deletes them:
+   ```sh
+   FLY_API_TOKEN=... FLY_ORG=... BOX_IMAGE=... BOX_SECRET=... node scripts/fly-verify.ts --yes
+   ```
    Never set `DEV_MODE` in production: it opens the `/dev` routes and the unauthenticated dev channel.
 3. `npx wrangler deploy`
 4. Point the webhooks at the Worker: LINE at `https://<worker>/webhook/line`, and Telegram with
@@ -77,3 +96,21 @@ npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO model_ca
 
 The second command recreates both tables with the current CHECKs, their indexes and the view. Run the
 same commands with `--local` to migrate the dev ledger.
+
+The box path adds the `boxes` table, which re-running the schema file creates, and a `backend` column on
+`model_call`, which it can't add to an existing table. Add the column once, before deploying code that
+writes it:
+
+```sh
+npx wrangler d1 execute giraffes-ledger --remote --command "ALTER TABLE model_call ADD COLUMN backend TEXT NOT NULL DEFAULT 'api' CHECK (backend IN ('api', 'box'))"
+npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
+```
+
+If you rebuild `model_call` with the commands above instead, the rebuilt table already has the column, so
+skip the `ALTER`. `SELECT *` copies by position, so replace the copy of `model_call` in the third command
+with one that names the old columns, and every old row gets `backend = 'api'`:
+
+```sh
+INSERT INTO model_call (id, agent_key, purpose, model, status, estimate_micro, cost_micro, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at)
+SELECT id, agent_key, purpose, model, status, estimate_micro, cost_micro, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at FROM model_call_old
+```

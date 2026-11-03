@@ -18,7 +18,7 @@ chat ──► Worker ──► Agent DO ──(HTTPS, bearer)──► box  htt
 ## Names and secrets
 
 - `BOX_SECRET` is one Worker secret. Every per-box value derives from it.
-- Box name: `BOX_APP_PREFIX` + the first 16 hex characters of `HMAC-SHA256(BOX_SECRET, "name:" + agentKey)`. Fly app names are global, so the prefix is ours, and the HMAC keeps names from being guessed from chat ids.
+- Box name: `BOX_APP_PREFIX` + the first 16 hex characters of `HMAC-SHA256(BOX_SECRET, "name:" + agentKey)`. Fly app names are global, so the prefix is ours, and the HMAC keeps names from being guessed from chat ids. On the `static` host every person shares the one box, which holds one `BOX_TOKEN`, so its name is fixed: `BOX_APP_PREFIX` + `static`.
 - Box token: `base64url(HMAC-SHA256(BOX_SECRET, "box:" + name))`. The Worker recomputes it. The box receives it once, in the `BOX_TOKEN` environment variable.
 - Sign-in ticket: `exp + "." + base64url(HMAC-SHA256(boxToken, "signin:" + exp))`, where `exp` is epoch milliseconds. The box accepts it while `now < exp`. The Worker issues it for 30 minutes.
 
@@ -56,6 +56,8 @@ Per person, in the Agent DO, one row:
 box: { name, host: "fly" | "static", url, state, stateAt, linkSentAt, signinPollUntil, error }
 state: "provisioning" | "signed_out" | "signed_in" | "failed"
 ```
+
+The table also keeps `attempts` (provisioning attempts so far) and `next_at` (the next provisioning attempt or sign-in poll), which the alarm time includes. Provisioning gives up after 10 attempts, 15 s apart and doubling to 5 minutes, sets `failed` and tells the person once. A box that is already signed in when it first answers `/health` goes straight to `signed_in`.
 
 - `/claude` (exact text, Telegram, LINE or dev) runs without the model:
   - No box: insert one in `provisioning` and reply that the box is being set up. The drain then provisions it step by step. Each step is idempotent, so a crash or a retry resumes where it stopped. When the box answers `/health`, the state becomes `signed_out` and the person gets the sign-in link.

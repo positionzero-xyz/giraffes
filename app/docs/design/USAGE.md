@@ -12,7 +12,7 @@ Each person is one Durable Object, `Agent`, with one way in (`enqueue`) and one 
                                                           Agent.alarm() ◄──┘   the only executor
                                                              │
      recover, fire due wake-ups, then per batch: model turn ─► one SQL transaction ─► deliver
-     then: deliver deferred rows ─► flush logs ─► compact one page ─► prune ─► re-arm
+     then: box step ─► deliver deferred rows ─► flush logs ─► compact one page ─► prune ─► re-arm
 ```
 
 ## Call site 1: the Worker routes a webhook to a person's agent
@@ -67,7 +67,31 @@ If the wake-up fires more than an hour late, the prompt says so and code prepend
 
 The check-in has the reserved key `daily-checkin`. Code creates it on first contact, on a newer follow, and when a blocked person writes again, and it inserts the successor in the firing transaction. Its inbox key is `checkin:<local date>`, so it fires at most once per local day. While a person is blocked, due wake-ups are skipped.
 
-## Call site 4: a test drives a conversation
+## Call site 4: a person connects their Claude plan
+
+With `BOX_HOST` set to `fly` or `static`, the person sends `/claude`. `BOX.md` has the full contract.
+
+1. The message is claimed as a batch of its own and never reaches the model. With no box, the agent claims a slot in D1's `boxes`, inserts the `box` row in `provisioning`, and replies that it is setting up. Past `MAX_BOXES` it says it can't connect another plan.
+2. The drain's box phase runs the host's `ensure` (Fly app, IPs, volume, machine) and then `GET /health` with the box token. When the box answers, the row becomes `signed_out` and the outbox gets `https://<box>/signin#t=<ticket>`, valid for 30 minutes.
+3. The drain polls `/health` every 30 s for 30 minutes. When `signedIn` turns true, the row becomes `signed_in` and the person is told.
+4. From then on `#callModel` sends each turn to the box's `/parse` first. No spend is reserved, and `model_call` logs it with `backend = 'box'` and cost 0.
+
+```ts
+test("a signed-in person's turn runs on their box with their token, reserves no spend, and is logged as backend 'box'", async () => {
+	const box = fakeBox({ signedIn: true });
+	const c = await devChat("fin", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+	await c.say("/claude");
+
+	box.replies.push({ kind: "reply", step: chat("Hello from your own plan.") });
+	await c.say("hello");
+
+	expect(c.logs("model_call").map((r) => [r.backend, r.status, r.costMicro])).toEqual([["box", "settled", 0]]);
+});
+```
+
+`scripts/fly-verify.ts --yes` runs the same Fly host code against the real Machines API with a throwaway app and deletes it afterwards.
+
+## Call site 5: a test drives a conversation
 
 `app/test/agent.test.ts` runs inside the Workers runtime with `@cloudflare/vitest-pool-workers`. `devChat` posts to the real `/webhook/dev` route and swaps in a scripted model, a fake clock, an in-memory ledger and a scripted channel. The scripted model checks every canned output against the real schema, so a schema change breaks the script, not production.
 
@@ -107,4 +131,5 @@ Every log row lands in D1 (`app/src/ledger/d1-schema.sql`). The MVP gates are vi
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_weekly_delegation"
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM unasked_with_followup WHERE followed = 1"
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT reason, COUNT(*) FROM action_rejection GROUP BY reason"
+npx wrangler d1 execute giraffes-ledger --remote --command "SELECT backend, status, COUNT(*) FROM model_call GROUP BY backend, status"
 ```

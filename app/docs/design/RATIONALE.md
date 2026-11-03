@@ -20,8 +20,8 @@ The LINE reply token is single-use and lives for about a minute. Pushes are bill
 `Agent` (one DO per person, `app/src/agent/agent.ts`) has three public methods, `enqueue`, `alarm` and `snapshot`, plus the test-only `withDeps`.
 
 - `enqueue` runs one transaction. It does `INSERT OR IGNORE` into `inbox`, and on first contact it also creates the `agent` row and the first daily check-in. It arms the alarm no later than now, then starts a drain with `ctx.waitUntil(this.alarm())`, so a reply never waits on alarm scheduling. The alarm is the durable backstop if that drain dies.
-- `alarm` is the only code that calls a model, changes memory or sends a message. A drain runs isolated phases in order: turns, delivery, log flush, compaction, prune. The turns phase recovers what a dead instance left, fires due wake-ups, then loops over batches (claim, turn, deliver, fire due wake-ups) for at most 60 s. A phase that throws is logged and the next phase still runs, so a failing compaction can't hold back delivery or log shipping.
-- The alarm time is computed, never stored. It is the earliest of the inbox `ready_at`, the fire time of the earliest pending wake-up, the outbox `ready_at`, the log retry time, and the compaction retry time while a due compaction is backing off, so no "next alarm" field can drift from the tables.
+- `alarm` is the only code that calls a model, changes memory or sends a message. A drain runs isolated phases in order: turns, box, delivery, log flush, compaction, prune. The turns phase recovers what a dead instance left, fires due wake-ups, then loops over batches (claim, turn, deliver, fire due wake-ups) for at most 60 s. A phase that throws is logged and the next phase still runs, so a failing compaction can't hold back delivery or log shipping.
+- The alarm time is computed, never stored. It is the earliest of the inbox `ready_at`, the fire time of the earliest pending wake-up, the outbox `ready_at`, the log retry time, the compaction retry time while a due compaction is backing off, and the box's next step while a box is configured, so no "next alarm" field can drift from the tables.
 - A second `alarm()` while a drain runs joins the in-flight promise. The guard is in memory on purpose. A DO has one live instance, so the guard can't outlive the work it protects, and `recover()` treats whatever a dead instance left as crashed.
 
 While a turn awaits the model, the only operations that can interleave are an inbox insert and a read.
@@ -37,10 +37,11 @@ While a turn awaits the model, the only operations that can interleave are an in
 | `outbox` | everything leaving | one row per turn with all its texts; `id` is a UUID and the LINE retry key; `intent` is set by code; `admitted_day` charges the budget once per local day; `in_doubt` bars the reply token |
 | `spend_month` + `reservation` | per-person spend and global leases | reserved spend is `SUM(reservation)`, never stored |
 | `log_outbox` + `log_flush` | log rows not yet in D1, and their backoff | written in the same transaction as the fact they record |
+| `box` (0 or 1 row) | the person's box and its state | `next_at` is the next provisioning attempt or sign-in poll, and null in any other state |
 
 Derived, not stored: unasked messages sent today (`COUNT` over `admitted_day`), lateness (`firedAt - dueAt`), reserved spend, whether the person was already told about the monthly limit today (inbox outcomes), and the alarm time.
 
-D1 (`app/src/ledger/d1-schema.sql`) holds the cross-user facts: append-only `agent`, `turn_log`, `model_call`, `unasked_message`, `lifecycle` and `action_rejection`, plus `spend_lease`. The gates are SQL views.
+D1 (`app/src/ledger/d1-schema.sql`) holds the cross-user facts: append-only `agent`, `turn_log`, `model_call`, `unasked_message`, `lifecycle` and `action_rejection`, plus `spend_lease` and the `boxes` inventory. The gates are SQL views.
 
 ### Types carry the invariants (`app/src/domain.ts`)
 
@@ -69,6 +70,7 @@ app/src/agent/compaction.ts  planCompaction, compactionCommit (pure)
 app/src/agent/prompt.ts      byte-stable system prompts and the opportunism playbook
 app/src/policy/{time,schedule,outreach,spend}.ts   pure rules
 app/src/model/{model,anthropic,bridge,scripted}.ts routes, prices, three backends
+app/src/box/{names,host,fly,client,machine}.ts     box secrets, Fly and static hosts, box client, box state machine
 app/src/channels/{channel,line,telegram,dev}.ts    port, registry, three adapters
 app/src/ledger/{ledger.ts,d1-schema.sql}           D1 append, leases, gate views
 app/dev/{bridge.ts,chat.html}                      local `claude -p` bridge, dev chat page
@@ -76,6 +78,18 @@ app/test/testkit.ts, app/test/{agent,channels,ledger,model,policy}.test.ts
 ```
 
 Tracing a flow takes three files: `worker.ts`, `agent.ts`, and one pure module.
+
+### The box path
+
+`BOX.md` is the contract with the box. The Worker side keeps the same shape as the rest of the agent:
+
+- **One row, one state machine.** `box/machine.ts` is pure. `newBox`, `onCommand`, `beginStep`, `afterProbe` and `onSignedOut` return the next row and what to tell the person. The agent writes both in one transaction (`applyBox`), so a link is never sent for a state that didn't commit.
+- **Provisioning is a drain step.** `beginStep` commits the attempt and the next attempt's time (15 s, doubling to 5 minutes) before any network call. Then the host's `ensure` runs, and `/health` decides. Every Fly step reads current state first and treats "already exists" as done, so a crash anywhere resumes. After 10 attempts the box is `failed` and the person is told once.
+- **The alarm wakes for it.** `next_at` joins the alarm minimum, but only while `BOX_HOST` isn't `none`, so turning the feature off can't leave an alarm that wakes for nothing.
+- **Inventory before the row.** `/claude` claims a D1 `boxes` slot with one conditional insert, as leases do. A retry of the same person's claim is granted. If D1 can't be reached, the command backs off like an unavailable model.
+- **The ticket stays out of prompts.** The sign-in link is in the outbox row only. The turn history keeps the text with `<sign-in link>` in its place.
+- **Routing.** `#callModel` tries `#callBox` first for turns. Compaction always uses the API. `planAllowsBox` is the plan check, and it allows everyone until billing lands.
+- **The static host has one fixed name,** `BOX_APP_PREFIX` + `static`, because its box holds one `BOX_TOKEN` and the token derives from the name. Every person on a static host shares that box.
 
 ## Policy decided by code
 
@@ -125,6 +139,7 @@ The Anthropic client runs with `maxRetries: 0`, so every billed attempt passes t
 - **Crash after commit, before or during a send.** `recover()` turns `sending` back to `pending` with `in_doubt = 1`. A LINE reply that answered 5xx or lost its connection is marked in doubt the same way. So is a push that must be retried after LINE refused the reply token, so the retry doesn't present that token again. An in-doubt row is read without its reply token, so LINE pushes it with `X-Line-Retry-Key = outbox.id`, and a 409 counts as sent. If the lost attempt was a reply that landed, the person sees a duplicate. Telegram sends one `sendMessage` per row, texts joined by blank lines, so a retry repeats the whole row once and never part of it. A crash after a Telegram send that landed also duplicates. Budget admission was recorded before the send, so it is never charged twice.
 - **Delivery failure.** A 429 or 5xx retries after 30 s, or after Telegram's `retry_after`. LINE's monthly-quota 429 fails at once. A row is dropped after 5 attempts.
 - **Duplicate webhook.** `inbox.event_key` is `line:<webhookEventId>`, `tg:<update_id>` or `dev:<client id>`, inserted with `INSERT OR IGNORE`. Done rows are kept 14 days for this.
+- **Box unavailable or signed out.** A turn on a `signed_in` box that times out (120 s), gets a 5xx or loses the network runs on the API path, with the usual caps, and is logged as a `box` call with status `unavailable`. A `409 signed_out` sets the box to `signed_out`, sends one fresh link, logs `rejected`, and runs the turn on the API. Later turns stay on the API until polling sees the sign-in. A crash mid-call re-runs the turn, which costs nothing on the box.
 - **Webhook enqueue fails.** The Worker answers 200 only after every envelope is in its inbox. Otherwise the request fails with 500, and the channel's redelivery is the retry. LINE redelivery is off by default and must be turned on.
 - **Alarm fires twice.** A concurrent call joins the in-flight drain. A sequential call finds nothing due, because a wake-up is closed in the transaction that inserts `wake:<id>`, and check-ins are keyed `checkin:<local date>`.
 - **Message during a model call.** `enqueue` inserts it. The in-flight turn commits as planned, and the next batch's prompt contains the previous reply. Consecutive messages already pending when a batch is claimed (up to 10) become one turn. There is no debounce.

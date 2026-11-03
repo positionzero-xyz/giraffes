@@ -80,6 +80,27 @@ describe("log shipping", () => {
     const followed = await env.LEDGER.prepare("SELECT followed FROM unasked_with_followup WHERE id = 'o-1'").first<{ followed: number }>();
     expect(followed?.followed).toBe(0);
   });
+
+  test("a row the ledger refuses fails the flush instead of vanishing", async () => {
+    const ledger = d1Ledger(env.LEDGER, micro(1_000_000));
+    const refused = {
+      stream: "model_call",
+      id: "r-refused",
+      agent: agent("a"),
+      purpose: "turn",
+      model: "claude-haiku-5-5",
+      status: "not_a_status",
+      estimateMicro: micro(900),
+      costMicro: micro(700),
+      inputTokens: 1000,
+      outputTokens: 100,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      at,
+    } as unknown as LogRow;
+
+    await expect(ledger.append([refused])).rejects.toThrow(/CHECK/);
+  });
 });
 
 describe("schema", () => {

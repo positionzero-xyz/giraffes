@@ -526,7 +526,9 @@ export function logsForTurn(input: {
     default:
       assertNever(call);
   }
-  commit.rejected.forEach((r, i) => rows.push({ stream: "rejection", id: `${turnId}|${i}`, agent, turnId, action: r.action, reason: r.reason, at: input.now }));
+  rows.push(
+    ...commit.rejected.map((r, i): LogRow => ({ stream: "rejection", id: `${turnId}|${i}`, agent, turnId, action: r.action, reason: r.reason, at: input.now })),
+  );
   if (commit.reachability !== null) {
     rows.push({
       stream: "lifecycle",

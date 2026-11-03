@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { CompactionOutputSchema, planCompaction } from "../src/agent/compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "../src/agent/prompt";
-import { NOTICE, planTurn, TURN, TurnOutputSchema, type Batch, type InboxItem, type TurnOutput, type TurnView } from "../src/agent/turn";
+import { NOTICE, planTurn, planWithoutModel, TURN, TurnOutputSchema, type Batch, type InboxItem, type TurnOutput, type TurnView } from "../src/agent/turn";
 import {
   CHECKIN_KEY,
   TASK_KINDS,
@@ -225,6 +225,11 @@ describe("lateness", () => {
   test("a late wake-up whose model forgot the notice gets the fixed one", () => {
     const commit = planTurn(output([send("Call the clinic.")]), fired(90));
     expect(commit.outbound?.texts).toEqual([`${NOTICE.lateFallback("2026-11-04 09:00")}\nCall the clinic.`]);
+  });
+
+  test("a late requested reminder written by code also says it is late", () => {
+    const commit = planWithoutModel(fired(90), { kind: "model_failed" });
+    expect(commit.outbound).toMatchObject({ intent: "requested", texts: [`${NOTICE.lateFallback("2026-11-04 09:00")}\nReminder: Take the bins out`] });
   });
 });
 

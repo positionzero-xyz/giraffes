@@ -143,6 +143,57 @@ describe("reminders", () => {
   });
 });
 
+describe("requested reminders without a model", () => {
+  const setClinic = (usage?: { inputTokens: number }) =>
+    turn({ actions: [schedule("clinic", "2099-11-04T18:00", "call the clinic"), send("Done.")], task: ["reminder", "clinic", "started"], usage });
+  const unavailable: ScriptStep = { kind: "fail", failure: "unavailable" };
+
+  test.each([
+    ["the model's output is invalid", "wes", [{ kind: "fail", failure: "invalid_output" }]],
+    ["the model refuses", "wim", [{ kind: "fail", failure: "refused_by_model" }]],
+    ["the model call crashes three times", "wyn", [throws(), throws(), throws()]],
+    ["the model is unavailable for minutes", "wyatt", Array.from({ length: 5 }, () => unavailable)],
+  ] satisfies [string, string, ScriptStep[]][])("a reminder still arrives, written by code, when %s", async (_, user, atFiring) => {
+    const model = scripted([setClinic(), ...atFiring]);
+    const c = await devChat(user, { model, at: "2099-11-04T10:00" });
+    await c.say("remind me at 6pm to call the clinic");
+    await c.received();
+
+    await c.advanceTo("2099-11-04T18:30");
+
+    expect(await c.received()).toEqual(["Reminder: call the clinic"]);
+    expect((await c.snapshot()).outbox.at(-1)?.intent).toBe("requested");
+    model.assertDone();
+  });
+
+  test("a reminder still arrives, written by code, when the person is over their monthly cap", async () => {
+    const inputThatSpendsTheCap = (SPEND.userCapMicro * 1_000_000) / priceOf(routeOf("turn").model).inputPerM;
+    const model = scripted([setClinic({ inputTokens: inputThatSpendsTheCap })]);
+    const c = await devChat("xia", { model, at: "2099-11-04T10:00" });
+    await c.say("remind me at 6pm to call the clinic");
+    await c.received();
+
+    await c.advanceTo("2099-11-04T18:00");
+
+    expect(c.channel.delivered.map((d) => [d.text, wall(d.at)])).toEqual([
+      ["Done.", "2099-11-04T10:00"],
+      ["Reminder: call the clinic", "2099-11-04T18:00"],
+    ]);
+  });
+
+  test("the model gets minutes, not seconds, to come back before the code-written reminder", async () => {
+    const model = scripted([setClinic(), unavailable, unavailable, unavailable, chat("Time to call the clinic!")]);
+    const c = await devChat("yan", { model, at: "2099-11-04T10:00" });
+    await c.say("remind me at 6pm to call the clinic");
+    await c.received();
+
+    await c.advanceTo("2099-11-04T18:30");
+
+    expect(c.channel.delivered.slice(1).map((d) => [d.text, wall(d.at)])).toEqual([["Time to call the clinic!", "2099-11-04T18:03"]]);
+    model.assertDone();
+  });
+});
+
 describe("failure and duplicate safety", () => {
   test("a redelivered webhook is processed once", async () => {
     const model = scripted([chat("Got it.")]);

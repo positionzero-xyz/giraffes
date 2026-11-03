@@ -137,6 +137,6 @@ export const send = (text: string) => ({ type: "send", text });
 export const schedule = (key: string, at: string, note: string, asked = true) => ({ type: "schedule_wakeup", key, at, note, asked });
 export const cancel = (key: string) => ({ type: "cancel_wakeup", key });
 export const quiet = () => ({ type: "quiet" });
-export const crash = (): ScriptStep => ({ kind: "crash" });
+export const throws = (): ScriptStep => ({ kind: "throw" });
 export const hold = (then: ScriptStep): ScriptStep => ({ kind: "hold", then });
 export const chat = (text: string): ScriptStep => turn({ actions: [send(text)], task: ["chat", "chat", "none"] });

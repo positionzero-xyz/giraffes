@@ -3,7 +3,7 @@ import type { ModelClient, ModelRequest, ModelResult, Purpose, Usage } from "./m
 export type ScriptStep =
   | { readonly kind: "output"; readonly value: unknown; readonly usage?: Partial<Usage> }
   | { readonly kind: "fail"; readonly failure: "invalid_output" | "refused_by_model" | "unavailable" }
-  | { readonly kind: "crash" }
+  | { readonly kind: "throw" }
   | { readonly kind: "hold"; readonly then: ScriptStep };
 
 export type ScriptedModel = ModelClient & {
@@ -14,8 +14,10 @@ export type ScriptedModel = ModelClient & {
 
 const DEFAULT_USAGE: Usage = { inputTokens: 1000, outputTokens: 100, cacheWriteTokens: 0, cacheReadTokens: 0 };
 
-export function scripted(steps: readonly ScriptStep[]): ScriptedModel {
+/** Compaction calls play `opts.compaction` when given, so a test can script them apart from turns. */
+export function scripted(steps: readonly ScriptStep[], opts: { readonly compaction?: readonly ScriptStep[] } = {}): ScriptedModel {
   const queue = [...steps];
+  const compaction = opts.compaction ? [...opts.compaction] : queue;
   const calls: { purpose: Purpose; system: string; user: string }[] = [];
   let released = false;
 
@@ -28,8 +30,8 @@ export function scripted(steps: readonly ScriptStep[]): ScriptedModel {
       }
       case "fail":
         return { ok: false, failure: step.failure, usage: step.failure === "unavailable" ? null : DEFAULT_USAGE };
-      case "crash":
-        throw new Error("scripted crash during the model call");
+      case "throw":
+        throw new Error("scripted exception from the model call");
       case "hold":
         // A flag the test flips, not a promise the test creates: the agent never waits on a promise
         // that belongs to another request context.
@@ -44,11 +46,12 @@ export function scripted(steps: readonly ScriptStep[]): ScriptedModel {
       released = true;
     },
     assertDone() {
-      if (queue.length > 0) throw new Error(`${queue.length} scripted step(s) never used`);
+      const left = queue.length + (compaction === queue ? 0 : compaction.length);
+      if (left > 0) throw new Error(`${left} scripted step(s) never used`);
     },
     async parse<T>(req: ModelRequest<T>): Promise<ModelResult<T>> {
       calls.push({ purpose: req.purpose, system: req.system, user: req.user });
-      const step = queue.shift();
+      const step = (req.purpose === "compaction" ? compaction : queue).shift();
       if (!step) throw new Error(`unexpected model call #${calls.length} (${req.purpose}): the script has no step left`);
       return play(step, req);
     },

@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { NOTICE } from "../src/agent/turn";
 import { priceOf, routeOf } from "../src/model/model";
 import { SPEND } from "../src/policy/spend";
-import { chat, crash, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, turn } from "./testkit";
+import { chat, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, throws, turn } from "./testkit";
 
 const until = async (done: () => boolean) => {
   for (let i = 0; i < 2000 && !done(); i++) await new Promise((r) => setTimeout(r, 1));
@@ -177,7 +177,7 @@ describe("crash and duplicate safety", () => {
   });
 
   test("a crash during the model call re-runs the turn once and applies it once", async () => {
-    const model = scripted([crash(), chat("hi")]);
+    const model = scripted([throws(), chat("hi")]);
     const c = await devChat("jon", { model, at: "2099-11-04T10:00" });
 
     await c.say("hello");
@@ -192,7 +192,7 @@ describe("crash and duplicate safety", () => {
   });
 
   test("an event that crashes three times is poisoned with a fixed apology", async () => {
-    const model = scripted([crash(), crash(), crash()]);
+    const model = scripted([throws(), throws(), throws()]);
     const c = await devChat("kim", { model, at: "2099-11-04T10:00" });
 
     await c.say("hello");
@@ -261,6 +261,38 @@ describe("reachability", () => {
     const after = await c.snapshot();
     expect(after.agent?.status).toBe("active");
     expect(after.pendingWakeups.map((w) => [w.kind, w.dueAt])).toEqual([["checkin", local("2099-11-06T09:00")]]);
+    model.assertDone();
+  });
+});
+
+describe("housekeeping", () => {
+  test("a compaction call that always throws is retried only after a backoff, while turns are answered and logs ship", async () => {
+    const replies = Array.from({ length: 33 }, (_, i) => chat(`Reply ${i}.`));
+    const model = scripted(replies, { compaction: [throws(), throws()] });
+    const c = await devChat("oli", { model, at: "2099-11-04T10:00" });
+    const compactions = () => model.calls.filter((call) => call.purpose === "compaction").length;
+    for (let i = 0; i < 30; i++) await c.say(`message ${i}`);
+    expect(compactions()).toBe(0);
+
+    await c.post("message 30");
+    for (let i = 0; i < 5; i++) await c.alarm();
+
+    expect(compactions()).toBe(1);
+    await c.settle();
+    expect((await c.received()).at(-1)).toBe("Reply 30.");
+    expect(c.logs("turn")).toHaveLength(31);
+    const calls = c.logs("model_call");
+    expect(calls.filter((l) => l.purpose === "compaction").map((l) => l.status)).toEqual(["in_doubt"]);
+    expect((await c.snapshot()).spendThisMonthMicro).toBe(calls.reduce((sum, l) => sum + l.costMicro, 0));
+
+    c.clock.set(local("2099-11-04T10:01"));
+    await c.say("message 31");
+    expect(compactions()).toBe(1);
+
+    c.clock.set(local("2099-11-04T10:06"));
+    await c.say("message 32");
+    expect(compactions()).toBe(2);
+    expect(await c.received()).toEqual(["Reply 31.", "Reply 32."]);
     model.assertDone();
   });
 });

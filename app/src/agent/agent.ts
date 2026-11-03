@@ -459,7 +459,7 @@ export class Agent extends DurableObject<Env> {
       claim = await this.#deps.ledger.claimBox({ agent, name, host: deps.host.kind, at: now, max: deps.maxBoxes });
     } catch (err) {
       console.warn("box claim failed", err);
-      return this.#modelUnavailable(view, agent, { kind: "unavailable", reservation: null, failure: "unavailable" });
+      return this.#boxReply(view, agent, null, { box: null, say: "busy" });
     }
     if (claim === "full") return this.#boxReply(view, agent, deps, { box: null, say: "full" });
     return this.#boxReply(view, agent, deps, { box: newBox(name, deps.host.kind, deps.host.urlOf(name), deps.host.image, now), say: "setting_up" });

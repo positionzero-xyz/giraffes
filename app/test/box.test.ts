@@ -10,7 +10,21 @@ import { MIGRATIONS } from "../src/agent/schema";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs } from "../src/domain";
 import { NOTICE } from "../src/agent/turn";
-import { billingOn, BOX_SECRET, chat, devChat, fakeBox, local, memoryLedger, postStripe, quiet, scripted, subscriptionEvent, turn } from "./testkit";
+import {
+  billingOn,
+  BOX_SECRET,
+  chat,
+  devChat,
+  fakeBox,
+  local,
+  memoryLedger,
+  postStripe,
+  quiet,
+  scripted,
+  subscriptionEvent,
+  turn,
+  type MemoryLedger,
+} from "./testkit";
 
 const say = (s: BoxSay) => boxMessage(s, null).text;
 const LINK = /^https:\/\/([a-z0-9-]+)\.box\.test\/signin#t=(\d+)\.([A-Za-z0-9_-]+)$/m;
@@ -618,6 +632,25 @@ describe("connecting a Claude plan", () => {
     expect(await bob.received()).toEqual([say("full")]);
     expect((await bob.snapshot()).box).toBeNull();
     expect([...ledger.boxes.keys()]).toEqual(["p:dev:ivy"]);
+  });
+
+  test("a D1 failure while claiming the box says setup can't start now, once, and is not a model failure", async () => {
+    const box = fakeBox();
+    const ledger: MemoryLedger = {
+      ...memoryLedger(),
+      claimBox: async () => {
+        throw new Error("D1 unavailable");
+      },
+    };
+    const c = await devChat("lou", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger });
+
+    await c.say("/claude");
+    await c.advanceTo("2099-11-04T11:00");
+
+    expect(await c.received()).toEqual([say("busy")]);
+    expect(c.logs("turn").map((t) => [t.outcome, t.attempts])).toEqual([["no_model", 1]]);
+    expect(c.logs("model_call")).toEqual([]);
+    expect((await c.snapshot()).box).toBeNull();
   });
 
   test("/claude in a burst of messages is handled alone, and the model never sees it as part of its batch", async () => {

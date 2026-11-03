@@ -62,6 +62,7 @@ export type Probe =
 export const BOX_SAYS = [
   "unavailable",
   "full",
+  "busy",
   "setting_up",
   "still_setting_up",
   "link",
@@ -97,6 +98,7 @@ const LINK_NOTE = "<sign-in link>";
 const SAY: Readonly<Record<BoxSay, (link: string, until: string) => string>> = {
   unavailable: () => "Connecting your own Claude plan isn't available yet.",
   full: () => "I can't connect another Claude plan right now. Please try again later.",
+  busy: () => "I can't start setting up your Claude connection right now. Please try again in a few minutes.",
   setting_up: () => "Setting up your Claude connection. I'll send you a sign-in link in a few minutes.",
   still_setting_up: () => "Your Claude connection is still being set up. I'll send the sign-in link when it's ready.",
   link: (link) => `Sign in to Claude here to connect your plan. The link works for 30 minutes.\n${link}`,

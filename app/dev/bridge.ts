@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { z } from "zod";
 
 const PORT = Number(process.env.BRIDGE_PORT ?? 8789);
+const HOST = process.env.BRIDGE_HOST ?? "127.0.0.1";
 const CLAUDE = process.env.CLAUDE_BIN ?? "claude";
 const ALIAS: Readonly<Record<string, string>> = { "claude-haiku-5-5": "haiku", "claude-sonnet-5-5": "sonnet" };
 
@@ -92,4 +93,4 @@ createServer((req, res) => {
     console.error(err);
     if (!res.headersSent) json(res, 500, { error: String(err) });
   });
-}).listen(PORT, "127.0.0.1", () => console.log(`claude bridge on http://127.0.0.1:${PORT}`));
+}).listen(PORT, HOST, () => console.log(`claude bridge on http://${HOST}:${PORT}`));

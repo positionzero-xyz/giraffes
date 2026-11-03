@@ -158,6 +158,12 @@ describe("reminders", () => {
     expect(commit.outbound?.texts).toEqual(["Will do."]);
   });
 
+  test("at 10:00:59, 10:00 is still now and 09:59 has passed", () => {
+    const commit = planTurn(output([schedule("now", "2026-11-04T10:00"), schedule("gone", "2026-11-04T09:59")]), view({ now: (NOW + 59_000) as EpochMs }));
+    expect(commit.wakeupsAdd.map((w) => w.key)).toEqual(["now"]);
+    expect(commit.rejected).toEqual([{ action: "schedule_wakeup:gone", reason: "past" }]);
+  });
+
   test("a key that is already pending is dropped, within a turn and across turns", () => {
     const pending = [reminder("dentist", local("2026-11-06T09:00"))];
     const commit = planTurn(output([schedule("dentist", "2026-11-07T09:00"), schedule("gym", "2026-11-05T07:00"), schedule("gym", "2026-11-05T08:00")]), view({ pending }));

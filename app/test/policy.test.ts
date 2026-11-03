@@ -439,20 +439,20 @@ describe("spend", () => {
   });
 
   test("within the lease, a call is reserved locally", () => {
-    expect(decideReservation({ spent: usd(1), reserved: usd(0.1), leased: usd(1.5) }, usd(0.002))).toEqual({ kind: "reserve" });
+    expect(decideReservation({ spent: usd(1), reserved: usd(0.1), leased: usd(1.5) }, usd(0.002), SPEND.userCapMicro)).toEqual({ kind: "reserve" });
   });
 
   test("the user cap refuses before asking for a lease", () => {
-    expect(decideReservation({ spent: usd(14.999), reserved: usd(0), leased: usd(15) }, usd(0.002))).toEqual({ kind: "refuse", scope: "user_cap" });
+    expect(decideReservation({ spent: usd(14.999), reserved: usd(0), leased: usd(15) }, usd(0.002), SPEND.userCapMicro)).toEqual({ kind: "refuse", scope: "user_cap" });
   });
 
   test("open reservations count against the cap", () => {
-    expect(decideReservation({ spent: usd(14), reserved: usd(0.999), leased: usd(15) }, usd(0.002))).toEqual({ kind: "refuse", scope: "user_cap" });
+    expect(decideReservation({ spent: usd(14), reserved: usd(0.999), leased: usd(15) }, usd(0.002), SPEND.userCapMicro)).toEqual({ kind: "refuse", scope: "user_cap" });
   });
 
   test("a short lease asks for a chunk, capped by what the user cap leaves", () => {
-    expect(decideReservation({ spent: usd(1), reserved: usd(0), leased: usd(1) }, usd(0.002))).toEqual({ kind: "need_lease", chunk: SPEND.leaseChunkMicro });
-    expect(decideReservation({ spent: usd(14.6), reserved: usd(0), leased: usd(14.6) }, usd(0.002))).toEqual({ kind: "need_lease", chunk: usd(0.4) });
+    expect(decideReservation({ spent: usd(1), reserved: usd(0), leased: usd(1) }, usd(0.002), SPEND.userCapMicro)).toEqual({ kind: "need_lease", chunk: SPEND.leaseChunkMicro });
+    expect(decideReservation({ spent: usd(14.6), reserved: usd(0), leased: usd(14.6) }, usd(0.002), SPEND.userCapMicro)).toEqual({ kind: "need_lease", chunk: usd(0.4) });
   });
 });
 

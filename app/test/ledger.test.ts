@@ -5,6 +5,7 @@ import type { BoxName } from "../src/box/names";
 import { BOX_HOST_KINDS } from "../src/box/host";
 import { ACTION_REJECTIONS, BACKENDS, d1Ledger, MODEL_CALL_STATUSES, TURN_OUTCOMES, UNASKED_STATUSES, type LogRow } from "../src/ledger/ledger";
 import { PURPOSES } from "../src/model/model";
+import { PAID_PLANS, SUBSCRIPTION_STATUSES } from "../src/billing/plan";
 
 const month = "2099-11" as UtcMonth;
 const at = 4_100_000_000_000 as EpochMs;
@@ -172,6 +173,8 @@ describe("schema", () => {
       "boxes.host": BOX_HOST_KINDS,
       "unasked_message.status": UNASKED_STATUSES,
       "action_rejection.reason": ACTION_REJECTIONS,
+      "billing_subscription.plan": PAID_PLANS,
+      "billing_subscription.status": SUBSCRIPTION_STATUSES,
     };
 
     for (const [column, values] of Object.entries(expected)) expect(allowed.get(column), column).toEqual([...values].sort());

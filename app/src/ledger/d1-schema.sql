@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS turn_log (
   task_kind          TEXT CHECK (task_kind IN ('chat', 'reminder', 'plan', 'booking', 'site', 'group', 'other')),
   task_key           TEXT,
   task_status        TEXT NOT NULL CHECK (task_status IN ('none', 'started', 'progressed', 'completed', 'failed')),
-  outcome            TEXT NOT NULL CHECK (outcome IN ('acted', 'quiet', 'refused_budget', 'model_failed', 'poison', 'no_model', 'stale')),
+  outcome            TEXT NOT NULL CHECK (outcome IN ('acted', 'quiet', 'refused_budget', 'lapsed', 'model_failed', 'poison', 'no_model', 'stale')),
   refused_for_budget INTEGER NOT NULL CHECK (refused_for_budget IN (0, 1)),
   cost_micro         INTEGER NOT NULL,
   attempts           INTEGER NOT NULL,
@@ -75,6 +75,35 @@ CREATE TABLE IF NOT EXISTS boxes (
   host       TEXT NOT NULL CHECK (host IN ('fly', 'static')),
   created_at INTEGER NOT NULL,
   deleted_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS billing_subscription (
+  id         TEXT PRIMARY KEY,
+  owner_key  TEXT NOT NULL,
+  plan       TEXT NOT NULL CHECK (plan IN ('standard', 'plus', 'ai')),
+  status     TEXT NOT NULL CHECK (status IN ('incomplete', 'incomplete_expired', 'trialing', 'active', 'past_due', 'unpaid', 'paused', 'canceled')),
+  period_end INTEGER NOT NULL,
+  event_at   INTEGER NOT NULL,
+  seats      INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS billing_subscription_owner ON billing_subscription (owner_key);
+
+CREATE TABLE IF NOT EXISTS billing_seat (
+  agent_key       TEXT PRIMARY KEY,
+  subscription_id TEXT NOT NULL,
+  joined_at       INTEGER NOT NULL,
+  left_at         INTEGER
+);
+CREATE INDEX IF NOT EXISTS billing_seat_subscription ON billing_seat (subscription_id, left_at);
+
+CREATE TABLE IF NOT EXISTS billing_invite (
+  code            TEXT PRIMARY KEY,
+  subscription_id TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  expires_at      INTEGER NOT NULL,
+  used_by         TEXT,
+  used_at         INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS spend_lease (

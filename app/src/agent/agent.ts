@@ -1,5 +1,24 @@
 import { DurableObject } from "cloudflare:workers";
 import type { z } from "zod";
+import { apiCapOf, NO_STANDING, PAID_PLANS, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan } from "../billing/plan";
+import {
+  BILLING_BUSY,
+  BILLING_OFF,
+  INVITE_FOR_MS,
+  INVITE_NOT_OWNER,
+  inviteFull,
+  inviteText,
+  JOIN,
+  LEFT,
+  NO_LINKS,
+  NOT_SEATED,
+  planChanged,
+  planChoices,
+  planStatus,
+  type Links,
+} from "../billing/say";
+import { d1Billing, type BillingStore } from "../billing/store";
+import { stripeApi, type BillingEvent, type StripeApi } from "../billing/stripe";
 import { boxClient, type BoxClient } from "../box/client";
 import { flyHost } from "../box/fly";
 import { staticHost, type BoxHost, type BoxHostKind, type Fetch } from "../box/host";
@@ -20,8 +39,8 @@ import {
 import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
 import { makeChannels, type ChannelRegistry } from "../channels/channel";
 import { commandOf, type Command } from "./commands";
-import { loadConfig, type BoxConfig, type Env } from "../config";
-import { assertNever, intentOf, type AgentKey, type EpochMs, type EventKey, type InboundEnvelope, type MicroUsd, type PersonStatus, type TimeZone } from "../domain";
+import { loadConfig, type BillingConfig, type BoxConfig, type Env } from "../config";
+import { assertNever, eventKey, intentOf, type AgentKey, type EpochMs, type EventKey, type InboundEnvelope, type MicroUsd, type PersonStatus, type TimeZone } from "../domain";
 import { d1Ledger, modelCallRow, type LeaseAnswer, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
 import { makeModelClient, routeOf, type ModelClient, type ModelId, type ModelResult, type Purpose, type Usage } from "../model/model";
 import { admitUnasked, OUTREACH } from "../policy/outreach";
@@ -31,10 +50,11 @@ import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../poli
 import { compactionCommit, CompactionOutputSchema, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import { migrate } from "./schema";
-import { AgentStore, type AgentRow, type BoxMessage, type OutboxRow, type OutboxView, type Reservation, type Settlement } from "./store";
+import { AgentStore, type AgentRow, type NoteMessage, type OutboxRow, type OutboxView, type Reservation, type Settlement } from "./store";
 import {
   bypassModel,
   logsForTurn,
+  NOTICE,
   planTurn,
   planWithoutModel,
   renderUser,
@@ -72,7 +92,21 @@ export type AgentDeps = {
   readonly clock: Clock;
   /** Null when BOX_HOST=none. */
   readonly box: BoxDeps | null;
+  readonly billing: BillingDeps;
 };
+
+export type BillingDeps = {
+  readonly config: BillingConfig;
+  readonly store: BillingStore;
+  /** Null when BILLING=off. */
+  readonly stripe: StripeApi | null;
+};
+
+const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function inviteCode(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => INVITE_ALPHABET[b % INVITE_ALPHABET.length]).join("");
+}
 
 type BoxCall<T> =
   | { readonly kind: "box_ok"; readonly value: T; readonly usage: Usage; readonly id: string; readonly model: ModelId }
@@ -92,6 +126,7 @@ export type AgentSnapshot = {
   readonly unaskedSentToday: number;
   readonly spendThisMonthMicro: MicroUsd;
   readonly box: { readonly host: BoxHostKind; readonly state: BoxState } | null;
+  readonly plan: Plan;
 };
 
 export class Agent extends DurableObject<Env> {
@@ -114,11 +149,53 @@ export class Agent extends DurableObject<Env> {
       tz: DEFAULT_TIME_ZONE,
       checkinLocal: SCHEDULE.defaultCheckinLocal,
       checkin: checkinWakeup(now, DEFAULT_TIME_ZONE, SCHEDULE.defaultCheckinLocal),
+      trialEndsAt: trialEnd(now, this.#deps.billing.config.rules),
     };
     if (this.#store.enqueue(envelope, first, now) === "duplicate") return "duplicate";
     await this.#armNoLaterThan(now);
     this.ctx.waitUntil(this.alarm());
     return "queued";
+  }
+
+  /**
+   * One Stripe event for this person's subscription. It is recorded as handled only after every seat
+   * holder has been refreshed, so a failure anywhere makes Stripe deliver it again, and the redelivery
+   * redoes each step, all of which are done when repeated.
+   */
+  async billingEvent(e: BillingEvent): Promise<"applied" | "duplicate"> {
+    if (this.#store.billingEventSeen(e.id)) return "duplicate";
+    const { store } = this.#deps.billing;
+    await store.applySubscription(e.subscription, this.#deps.clock.now());
+    await this.refreshPlan(e.subscription.owner);
+    if (e.subscription.plan === "plus") {
+      for (const member of await store.members(e.subscription.id)) {
+        await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member);
+      }
+    }
+    this.#store.billingEventDone(e.id, this.#deps.clock.now());
+    return "applied";
+  }
+
+  /** Re-reads the person's standing from D1 and tells them when it moved their plan. */
+  async refreshPlan(agent: AgentKey): Promise<void> {
+    const { config, store } = this.#deps.billing;
+    const standing = await store.standing(agent);
+    const now = this.#deps.clock.now();
+    const before = this.#plan(now);
+    const trialEndsAt = this.#store.plan()?.trialEndsAt ?? trialEnd(now, config.rules);
+    const after = planOf({ trialEndsAt, ...standing }, now, config.on, config.rules);
+    const text = config.on ? planChanged(before, after, now) : null;
+    const message = text ? { key: eventKey.billing("plan"), message: { texts: [text] as const, note: text } } : null;
+    this.#store.applyStanding(standing, trialEndsAt, message, now);
+    if (message) {
+      await this.#armNoLaterThan(now);
+      this.ctx.waitUntil(this.alarm());
+    }
+  }
+
+  #plan(now: EpochMs): Plan {
+    const { config } = this.#deps.billing;
+    return planOf(this.#store.plan(), now, config.on, config.rules);
   }
 
   /** Cloudflare may invoke it more than once; joining the in-flight drain makes that harmless. */
@@ -142,6 +219,7 @@ export class Agent extends DurableObject<Env> {
       unaskedSentToday: a ? this.#store.unaskedAdmitted(localDate(now, a.tz)) : 0,
       spendThisMonthMicro: this.#store.monthSpend(utcMonth(now)).spent,
       box: box ? { host: box.host, state: box.state } : null,
+      plan: this.#plan(now),
     };
   }
 
@@ -222,8 +300,13 @@ export class Agent extends DurableObject<Env> {
     if (bypass) return this.#commit(planWithoutModel(view, bypass), view, a.key, { kind: "none" }, null);
     const command = commandOf(batch.items[0].event);
     if (command) return this.#command(command, view, a.key);
+    const plan = this.#plan(view.now);
+    if (plan.kind === "lapsed") {
+      const alreadyToldToday = this.#store.toldToday("lapsed", startOfLocalDay(view.now, view.tz));
+      return this.#commit(planWithoutModel(view, { kind: "lapsed", alreadyToldToday }), view, a.key, { kind: "none" }, null);
+    }
 
-    const call = await this.#callModel(TURN_SYSTEM, renderUser(view), TurnOutputSchema, batch.items[0].key, a.key);
+    const call = await this.#callModel(TURN_SYSTEM, renderUser(view), TurnOutputSchema, batch.items[0].key, a.key, plan);
     switch (call.kind) {
       case "box_ok":
       case "box_failed": {
@@ -239,7 +322,7 @@ export class Agent extends DurableObject<Env> {
         return this.#commit(planWithoutModel(view, { kind: "model_failed" }), view, a.key, settledCall(settle, call.usage), settle);
       }
       case "refused": {
-        const alreadyToldToday = this.#store.refusedToday(startOfLocalDay(view.now, view.tz));
+        const alreadyToldToday = this.#store.toldToday("refused_budget", startOfLocalDay(view.now, view.tz));
         const commit = planWithoutModel(view, { kind: "refused_budget", alreadyToldToday });
         return this.#commit(commit, view, a.key, { kind: "refused", scope: call.scope, model: call.model, estimate: call.estimate }, null);
       }
@@ -268,14 +351,100 @@ export class Agent extends DurableObject<Env> {
     switch (command.kind) {
       case "claude":
         return this.#boxCommand(view, agent);
+      case "plan":
+      case "invite":
+      case "join":
+      case "leave": {
+        if (!this.#deps.billing.config.on && command.kind !== "plan") return this.#reply(view, agent, BILLING_OFF);
+        let reply: { readonly text: string; readonly note: string };
+        try {
+          reply = await this.#billingCommand(command, view, agent);
+        } catch (err) {
+          console.warn("billing command failed", command.kind, err);
+          reply = { text: BILLING_BUSY, note: BILLING_BUSY };
+        }
+        return this.#reply(view, agent, reply.text, reply.note);
+      }
       default:
-        return assertNever(command.kind);
+        return assertNever(command);
     }
+  }
+
+  #reply(view: TurnView, agent: AgentKey, text: string, note: string = text): void {
+    this.#commit(planWithoutModel(view, { kind: "command", text, note }), view, agent, { kind: "none" }, null);
+  }
+
+  /** Reads D1 before answering, so the reply is current even if a refresh from an event never arrived. */
+  async #standingNow(agent: AgentKey): Promise<Plan> {
+    const { config, store } = this.#deps.billing;
+    const standing = config.on ? await store.standing(agent) : NO_STANDING;
+    const now = this.#deps.clock.now();
+    this.#store.applyStanding(standing, trialEnd(now, config.rules), null, now);
+    return this.#plan(now);
+  }
+
+  async #billingCommand(
+    command: Extract<Command, { kind: "plan" | "invite" | "join" | "leave" }>,
+    view: TurnView,
+    agent: AgentKey,
+  ): Promise<{ readonly text: string; readonly note: string }> {
+    const { config, store } = this.#deps.billing;
+    const now = this.#deps.clock.now();
+    const say = (text: string) => ({ text, note: text });
+    switch (command.kind) {
+      case "plan": {
+        const plan = await this.#standingNow(agent);
+        const places = plan.kind === "plus" && plan.role === "owner" ? await store.places(agent) : null;
+        const status = planStatus(plan, now, places);
+        if (!config.on || (plan.kind !== "trial" && plan.kind !== "lapsed")) return say(status);
+        const links = await this.#checkoutLinks(agent, view.batch.items[0].key);
+        if (!links) return say(`${status}\n${NO_LINKS}`);
+        const choices = planChoices(config.rules, links);
+        return { text: `${status}\n${choices.text}`, note: `${status}\n${choices.note}` };
+      }
+      case "invite": {
+        const code = inviteCode();
+        const r = await store.invite(agent, code, now, (now + INVITE_FOR_MS) as EpochMs);
+        if (r.kind === "created") return { text: inviteText(code), note: inviteText("<code>") };
+        return say(r.kind === "full" ? inviteFull(r.seats) : INVITE_NOT_OWNER);
+      }
+      case "join": {
+        const r = await store.join(command.code, agent, now);
+        if (r === "joined") await this.#standingNow(agent);
+        return say(JOIN[r]);
+      }
+      case "leave": {
+        if (!(await store.leave(agent, now))) return say(NOT_SEATED);
+        const plan = await this.#standingNow(agent);
+        return say(`${LEFT}\n${plan.kind === "lapsed" ? NOTICE.lapsed : planStatus(plan, now, null)}`);
+      }
+      default:
+        return assertNever(command);
+    }
+  }
+
+  /** Keyed by the person and the message, so a retried turn gets the same Checkout Sessions back. */
+  async #checkoutLinks(agent: AgentKey, key: EventKey): Promise<Links | null> {
+    const stripe = this.#deps.billing.stripe;
+    if (!stripe) return null;
+    const results = await Promise.all(
+      PAID_PLANS.map(async (plan) => ({ plan, result: await stripe.checkout({ agent, plan, idempotencyKey: `${agent}|${key}|${plan}` }) })),
+    );
+    const links: Partial<Record<PaidPlan, string>> = {};
+    for (const { plan, result } of results) {
+      if (!result.ok) {
+        console.warn("checkout failed", plan, result.detail);
+        return null;
+      }
+      links[plan] = result.url;
+    }
+    return links as Links;
   }
 
   async #boxCommand(view: TurnView, agent: AgentKey): Promise<void> {
     const deps = this.#deps.box;
     if (!deps) return this.#boxReply(view, agent, null, { box: null, say: "unavailable" });
+    if (!planAllowsBox(this.#plan(view.now).kind)) return this.#boxReply(view, agent, null, { box: null, say: "not_in_plan" });
     const now = this.#deps.clock.now();
     const current = this.#store.box();
     if (current) return this.#boxReply(view, agent, deps, onCommand(current, now));
@@ -305,7 +474,7 @@ export class Agent extends DurableObject<Env> {
     return boxMessage(say, signinUrl(box.url, ticket));
   }
 
-  async #outboxMessage(deps: BoxDeps, box: Box, say: BoxSay | null): Promise<BoxMessage | null> {
+  async #outboxMessage(deps: BoxDeps, box: Box, say: BoxSay | null): Promise<NoteMessage | null> {
     if (say === null) return null;
     const m = await this.#boxMessage(deps, box, say);
     return { texts: [m.text], note: m.note };
@@ -388,8 +557,10 @@ export class Agent extends DurableObject<Env> {
     schema: z.ZodType<T>,
     eventKey: EventKey,
     agent: AgentKey,
+    plan: Plan,
   ): Promise<ModelCall<T> | BoxCall<T>> {
-    return (await this.#callBox(system, user, schema, agent)) ?? this.#callApi("turn", system, user, schema, eventKey, agent);
+    const box = planAllowsBox(plan.kind) ? await this.#callBox(system, user, schema, agent) : null;
+    return box ?? this.#callApi("turn", system, user, schema, eventKey, agent, plan);
   }
 
   #commitPoison(batch: Batch): void {
@@ -417,13 +588,15 @@ export class Agent extends DurableObject<Env> {
     schema: z.ZodType<T>,
     eventKey: EventKey | null,
     agent: AgentKey,
+    plan: Plan,
   ): Promise<ModelCall<T>> {
     const route = routeOf(purpose);
+    const cap = apiCapOf(plan.kind, this.#deps.billing.config.rules);
     const now = this.#deps.clock.now();
     const month = utcMonth(now);
     const est = estimate(route.model, utf8.encode(system).length + utf8.encode(user).length, route.maxTokens);
     for (;;) {
-      const decision = decideReservation(this.#store.monthSpend(month), est);
+      const decision = decideReservation(this.#store.monthSpend(month), est, cap);
       if (decision.kind === "reserve") break;
       if (decision.kind === "refuse") return { kind: "refused", scope: decision.scope, model: route.model, estimate: est };
       const seq = this.#store.beginLease(month);
@@ -526,11 +699,13 @@ export class Agent extends DurableObject<Env> {
   async #compactIfDue(): Promise<void> {
     const a = this.#store.agent();
     if (!a || this.#store.compactionRetryAt() > this.#deps.clock.now()) return;
+    const person = this.#plan(this.#deps.clock.now());
+    if (person.kind === "lapsed") return;
     const plan = planCompaction(this.#store.compactionInput());
     if (!plan) return;
     let call: ModelCall<z.infer<typeof CompactionOutputSchema>>;
     try {
-      call = await this.#callApi("compaction", COMPACTION_SYSTEM, plan.user, CompactionOutputSchema, null, a.key);
+      call = await this.#callApi("compaction", COMPACTION_SYSTEM, plan.user, CompactionOutputSchema, null, a.key, person);
     } catch (err) {
       this.#store.compactionFailed(this.#deps.clock.now(), null, []);
       throw err;
@@ -645,5 +820,10 @@ function defaultDeps(env: Env): AgentDeps {
     channels: makeChannels(config),
     clock: { now: () => Date.now() as EpochMs },
     box: boxDeps(config.box),
+    billing: {
+      config: config.billing,
+      store: d1Billing(env.LEDGER),
+      stripe: config.billing.on ? stripeApi(config.billing.stripe, config.billing.rules, (input, init) => fetch(input, init)) : null,
+    },
   };
 }

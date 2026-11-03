@@ -34,6 +34,8 @@ export const eventKey = {
   checkin: (day: LocalDate): EventKey => `checkin:${day}` as EventKey,
   /** Messages a box step sends on its own, such as the sign-in link once provisioning finishes. */
   box: (name: string): EventKey => `box:${name}` as EventKey,
+  /** Messages a plan change sends on its own, such as a payment that went through. */
+  billing: (what: string): EventKey => `billing:${what}` as EventKey,
 } as const;
 
 export type WakeupId = Brand<number, "WakeupId">;

@@ -162,6 +162,23 @@ export const MIGRATIONS: readonly string[] = [
   DROP TABLE box;
   ALTER TABLE box_next RENAME TO box;
   `,
+  `
+  CREATE TABLE plan (
+    one                INTEGER PRIMARY KEY CHECK (one = 1),
+    trial_ends_at      INTEGER NOT NULL,
+    own_subscription   TEXT,
+    own_plan           TEXT CHECK (own_plan IN ('standard', 'plus', 'ai')),
+    seat_subscription  TEXT,
+    seat_owner         TEXT,
+    updated_at         INTEGER NOT NULL,
+    CHECK ((own_subscription IS NULL) = (own_plan IS NULL)),
+    CHECK ((seat_subscription IS NULL) = (seat_owner IS NULL))
+  );
+  CREATE TABLE billing_event (
+    id  TEXT PRIMARY KEY,
+    at  INTEGER NOT NULL
+  );
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

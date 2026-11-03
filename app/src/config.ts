@@ -1,4 +1,6 @@
 import type { Agent } from "./agent/agent";
+import type { PlanRules } from "./billing/plan";
+import type { MicroUsd } from "./domain";
 
 export interface Env {
   AGENT: DurableObjectNamespace<Agent>;
@@ -25,6 +27,19 @@ export interface Env {
   BOX_STATIC_URL?: string;
   FLY_API_TOKEN?: string;
   FLY_ORG?: string;
+
+  BILLING?: string;
+  TRIAL_DAYS?: string;
+  PLUS_SEATS?: string;
+  PLUS_MAX_SEATS?: string;
+  AI_CAP_USD?: string;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_PRICE_STANDARD?: string;
+  STRIPE_PRICE_PLUS?: string;
+  STRIPE_PRICE_SEAT?: string;
+  STRIPE_PRICE_AI?: string;
+  PUBLIC_URL?: string;
 }
 
 type BoxCommon = { readonly secret: string; readonly appPrefix: string; readonly maxBoxes: number };
@@ -37,6 +52,17 @@ export type BoxConfig =
     })
   | (BoxCommon & { readonly host: "static"; readonly staticUrl: string });
 
+export type StripeConfig = {
+  readonly secretKey: string;
+  readonly webhookSecret: string;
+  readonly prices: { readonly standard: string; readonly plus: string; readonly seat: string; readonly ai: string };
+  readonly publicUrl: string;
+};
+
+export type BillingConfig =
+  | { readonly on: false; readonly rules: PlanRules }
+  | { readonly on: true; readonly rules: PlanRules; readonly stripe: StripeConfig };
+
 export type Config = {
   readonly devMode: boolean;
   readonly model:
@@ -46,6 +72,7 @@ export type Config = {
   readonly line: { readonly channelSecret: string; readonly accessToken: string } | null;
   readonly telegram: { readonly botToken: string; readonly webhookSecret: string } | null;
   readonly box: BoxConfig;
+  readonly billing: BillingConfig;
 };
 
 const present = (v: string | undefined): v is string => v !== undefined && v !== "";
@@ -121,18 +148,65 @@ function boxConfig(env: Env): BoxConfig {
     }
     case "static": {
       const why = "BOX_HOST=static";
-      const raw = required(env, "BOX_STATIC_URL", why);
-      let url: URL;
-      try {
-        url = new URL(raw);
-      } catch {
-        throw new Error("BOX_STATIC_URL must be an http or https URL");
-      }
-      if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("BOX_STATIC_URL must be an http or https URL");
-      return { host, ...boxCommon(env, why), staticUrl: raw.replace(/\/+$/, "") };
+      return { host, ...boxCommon(env, why), staticUrl: httpUrl("BOX_STATIC_URL", required(env, "BOX_STATIC_URL", why)) };
     }
     default:
       throw new Error(`unknown BOX_HOST: ${host}`);
+  }
+}
+
+const PLAN_DEFAULTS = { trialDays: 14, plusSeats: 3, plusMaxSeats: 6, aiCapUsd: 1 } as const;
+
+function httpUrl(name: string, raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`${name} must be an http or https URL`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`${name} must be an http or https URL`);
+  return raw.replace(/\/+$/, "");
+}
+
+function planRules(env: Env): PlanRules {
+  const plusSeats = count("PLUS_SEATS", env.PLUS_SEATS, PLAN_DEFAULTS.plusSeats, 1, 50);
+  const plusMaxSeats = count("PLUS_MAX_SEATS", env.PLUS_MAX_SEATS, PLAN_DEFAULTS.plusMaxSeats, plusSeats, 50);
+  const usd = present(env.AI_CAP_USD) ? Number(env.AI_CAP_USD) : PLAN_DEFAULTS.aiCapUsd;
+  if (!Number.isFinite(usd) || usd < 0 || usd > 1000) throw new Error("AI_CAP_USD must be a number of dollars from 0 to 1000");
+  return {
+    trialDays: count("TRIAL_DAYS", env.TRIAL_DAYS, PLAN_DEFAULTS.trialDays, 0, 365),
+    plusSeats,
+    plusMaxSeats,
+    aiCapMicro: Math.round(usd * 1_000_000) as MicroUsd,
+  };
+}
+
+function billingConfig(env: Env): BillingConfig {
+  const rules = planRules(env);
+  const mode = present(env.BILLING) ? env.BILLING : "off";
+  switch (mode) {
+    case "off":
+      return { on: false, rules };
+    case "on": {
+      const why = "BILLING=on";
+      return {
+        on: true,
+        rules,
+        stripe: {
+          secretKey: required(env, "STRIPE_SECRET_KEY", why),
+          webhookSecret: required(env, "STRIPE_WEBHOOK_SECRET", why),
+          prices: {
+            standard: required(env, "STRIPE_PRICE_STANDARD", why),
+            plus: required(env, "STRIPE_PRICE_PLUS", why),
+            seat: required(env, "STRIPE_PRICE_SEAT", why),
+            ai: required(env, "STRIPE_PRICE_AI", why),
+          },
+          publicUrl: httpUrl("PUBLIC_URL", required(env, "PUBLIC_URL", why)),
+        },
+      };
+    }
+    default:
+      throw new Error(`unknown BILLING: ${mode}`);
   }
 }
 
@@ -144,5 +218,6 @@ export function loadConfig(env: Env): Config {
     line: pair("LINE", env.LINE_CHANNEL_SECRET, env.LINE_CHANNEL_ACCESS_TOKEN, (channelSecret, accessToken) => ({ channelSecret, accessToken })),
     telegram: pair("Telegram", env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_WEBHOOK_SECRET, (botToken, webhookSecret) => ({ botToken, webhookSecret })),
     box: boxConfig(env),
+    billing: billingConfig(env),
   };
 }

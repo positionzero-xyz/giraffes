@@ -97,7 +97,7 @@ export type ModelCallStatus = (typeof MODEL_CALL_STATUSES)[number];
 export const BACKENDS = ["api", "box"] as const;
 export type Backend = (typeof BACKENDS)[number];
 
-export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "model_failed", "poison", "no_model", "stale"] as const;
+export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "lapsed", "model_failed", "poison", "no_model", "stale"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 
 export const ACTION_REJECTIONS = [...REMINDER_REJECTIONS, "not_pending", "too_many_sends", "too_many_actions", "too_long"] as const;

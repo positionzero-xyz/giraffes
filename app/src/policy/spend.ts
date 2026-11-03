@@ -7,7 +7,8 @@ export const SPEND = {
   leaseChunkMicro: 500_000 as MicroUsd,
 } as const;
 
-export const CHARS_PER_TOKEN = 3;
+/** Room for the request framing and the output schema the API adds to the prompt. */
+export const SCHEMA_ALLOWANCE_TOKENS = 4_000;
 
 export type MonthSpend = {
   readonly spent: MicroUsd;
@@ -16,7 +17,7 @@ export type MonthSpend = {
 };
 
 function priced(model: ModelId, usage: Usage): MicroUsd {
-  const p = priceOf(model);
+  const p = priceOf(model, usage.inputTokens + usage.cacheWriteTokens + usage.cacheReadTokens);
   const microTimesMillion =
     usage.inputTokens * p.inputPerM +
     usage.outputTokens * p.outputPerM +
@@ -25,11 +26,15 @@ function priced(model: ModelId, usage: Usage): MicroUsd {
   return Math.ceil(microTimesMillion / 1_000_000) as MicroUsd;
 }
 
-export function estimate(model: ModelId, promptChars: number, maxTokens: number): MicroUsd {
+/**
+ * An upper bound on the bill. No token is shorter than one UTF-8 byte in any script, cache writes are
+ * the dearest way to pay for input, and the output can't pass `maxTokens`.
+ */
+export function estimate(model: ModelId, promptBytes: number, maxTokens: number): MicroUsd {
   return priced(model, {
-    inputTokens: Math.ceil(promptChars / CHARS_PER_TOKEN),
+    inputTokens: 0,
     outputTokens: maxTokens,
-    cacheWriteTokens: 0,
+    cacheWriteTokens: promptBytes + SCHEMA_ALLOWANCE_TOKENS,
     cacheReadTokens: 0,
   });
 }

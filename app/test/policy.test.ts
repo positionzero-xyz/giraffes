@@ -17,7 +17,7 @@ import {
 import { priceOf } from "../src/model/model";
 import { admitUnasked, quietUntil } from "../src/policy/outreach";
 import { fireAt, isLate, nextAlarm, planFiring, wakeupOrigin, type PendingWakeup } from "../src/policy/schedule";
-import { CHARS_PER_TOKEN, costOf, decideReservation, estimate, SPEND } from "../src/policy/spend";
+import { costOf, decideReservation, estimate, SCHEMA_ALLOWANCE_TOKENS, SPEND } from "../src/policy/spend";
 import { fromLocal, nextLocalTime, parseLocalDateTime, parseTimeZone, toLocal } from "../src/policy/time";
 
 const BKK = parseTimeZone("Asia/Bangkok")!;
@@ -279,7 +279,7 @@ describe("lifecycle order", () => {
 describe("spend", () => {
   test("estimates and costs are whole micro-dollars, rounded up", () => {
     const haiku = priceOf("claude-haiku-5-5");
-    expect(estimate("claude-haiku-5-5", 3_000, 1_200)).toBe(((3_000 / CHARS_PER_TOKEN) * haiku.inputPerM + 1_200 * haiku.outputPerM) / 1_000_000);
+    expect(estimate("claude-haiku-5-5", 3_000, 1_200)).toBe(((3_000 + SCHEMA_ALLOWANCE_TOKENS) * haiku.cacheWritePerM + 1_200 * haiku.outputPerM) / 1_000_000);
     expect(costOf("claude-haiku-5-5", { inputTokens: 1, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 })).toBe(1);
     expect(costOf("claude-sonnet-5-5", { inputTokens: 1_000, outputTokens: 100, cacheWriteTokens: 1_000, cacheReadTokens: 10_000 })).toBe(2_000 + 1_000 + 2_500 + 2_000);
   });

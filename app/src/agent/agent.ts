@@ -35,6 +35,7 @@ const LOG_BATCH = 100;
 const LOG_BATCHES_PER_DRAIN = 10;
 const MODEL_RETRY_BASE_MS = 30_000;
 const NO_COST = 0 as MicroUsd;
+const utf8 = new TextEncoder();
 
 export type Clock = { now(): EpochMs };
 
@@ -48,7 +49,7 @@ export type AgentDeps = {
 type ModelCall<T> =
   | { readonly kind: "ok"; readonly value: T; readonly reservation: Reservation; readonly usage: Usage }
   | { readonly kind: "failed"; readonly reservation: Reservation; readonly usage: Usage | null }
-  | { readonly kind: "unavailable"; readonly reservation: Reservation | null }
+  | { readonly kind: "unavailable"; readonly reservation: Reservation | null; readonly inDoubt: boolean }
   | { readonly kind: "refused"; readonly scope: "user_cap" | "global_ceiling"; readonly model: ModelId; readonly estimate: MicroUsd };
 
 export type AgentSnapshot = {
@@ -202,7 +203,7 @@ export class Agent extends DurableObject<Env> {
         return this.#commit(commit, view, a.key, { kind: "refused", scope: call.scope, model: call.model, estimate: call.estimate }, null);
       }
       case "unavailable":
-        return this.#modelUnavailable(view, a.key, call.reservation);
+        return this.#modelUnavailable(view, a.key, call);
       default:
         return assertNever(call);
     }
@@ -227,10 +228,9 @@ export class Agent extends DurableObject<Env> {
     this.#commit(planWithoutModel(view, { kind: "poison" }), view, a.key, { kind: "none" }, null);
   }
 
-  #modelUnavailable(view: TurnView, agent: AgentKey, reservation: Reservation | null): void {
+  #modelUnavailable(view: TurnView, agent: AgentKey, call: Unavailable): void {
     const now = this.#deps.clock.now();
-    const settle = reservation ? { reservation, cost: NO_COST } : null;
-    const logs = reservation ? [callRow(agent, reservation, "unavailable", NO_COST, null, now)] : [];
+    const { settle, logs } = closeUnavailable(call, agent, now);
     const attempts = Math.max(...view.batch.items.map((i) => i.attempts));
     if (attempts >= TURN.maxModelAttempts) {
       return this.#commit(planWithoutModel(view, { kind: "model_failed" }), view, agent, { kind: "none" }, settle, logs);
@@ -250,7 +250,7 @@ export class Agent extends DurableObject<Env> {
     const route = routeOf(purpose);
     const now = this.#deps.clock.now();
     const month = utcMonth(now);
-    const est = estimate(route.model, system.length + user.length, route.maxTokens);
+    const est = estimate(route.model, utf8.encode(system).length + utf8.encode(user).length, route.maxTokens);
     for (;;) {
       const decision = decideReservation(this.#store.monthSpend(month), est);
       if (decision.kind === "reserve") break;
@@ -261,7 +261,7 @@ export class Agent extends DurableObject<Env> {
         answer = await this.#deps.ledger.requestLease({ agent, month, seq, micro: decision.chunk, at: now });
       } catch (err) {
         console.warn("lease request failed", err);
-        return { kind: "unavailable", reservation: null };
+        return { kind: "unavailable", reservation: null, inDoubt: false };
       }
       if (answer.kind === "ceiling") {
         this.#store.denyLease(month, seq);
@@ -282,7 +282,9 @@ export class Agent extends DurableObject<Env> {
       throw err;
     }
     if (res.ok) return { kind: "ok", value: res.value, reservation, usage: res.usage };
-    if (res.failure === "unavailable") return { kind: "unavailable", reservation };
+    if (res.failure === "unavailable" || res.failure === "in_doubt") {
+      return { kind: "unavailable", reservation, inDoubt: res.failure === "in_doubt" };
+    }
     return { kind: "failed", reservation, usage: res.usage };
   }
 
@@ -371,11 +373,10 @@ export class Agent extends DurableObject<Env> {
         this.#store.compactionFailed(now, { reservation: call.reservation, cost }, [callRow(a.key, call.reservation, "settled", cost, call.usage, now)]);
         return;
       }
-      case "unavailable":
-        if (!call.reservation) return this.#store.compactionFailed(now, null, []);
-        return this.#store.compactionFailed(now, { reservation: call.reservation, cost: NO_COST }, [
-          callRow(a.key, call.reservation, "unavailable", NO_COST, null, now),
-        ]);
+      case "unavailable": {
+        const { settle, logs } = closeUnavailable(call, a.key, now);
+        return this.#store.compactionFailed(now, settle, logs);
+      }
       case "refused":
         return this.#store.compactionFailed(now, null, []);
       default:
@@ -417,6 +418,16 @@ export class Agent extends DurableObject<Env> {
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current > t) await this.ctx.storage.setAlarm(t);
   }
+}
+
+type Unavailable = Extract<ModelCall<unknown>, { kind: "unavailable" }>;
+
+/** A call the API turned away costs nothing; one whose response was lost may have been billed in full. */
+function closeUnavailable(call: Unavailable, agent: AgentKey, now: EpochMs): { settle: Settlement | null; logs: LogRow[] } {
+  const r = call.reservation;
+  if (!r) return { settle: null, logs: [] };
+  const cost = call.inDoubt ? r.estimate : NO_COST;
+  return { settle: { reservation: r, cost }, logs: [callRow(agent, r, call.inDoubt ? "in_doubt" : "unavailable", cost, null, now)] };
 }
 
 function settledCall(settle: Settlement, usage: Usage | null): TurnCall {

@@ -23,11 +23,26 @@ export type Price = {
   readonly cacheWritePerM: number;
   readonly cacheReadPerM: number;
 };
-const PRICES: Readonly<Record<ModelId, Price>> = {
-  "claude-haiku-5-5": { inputPerM: 100_000, outputPerM: 500_000, cacheWritePerM: 125_000, cacheReadPerM: 10_000 },
-  "claude-sonnet-5-5": { inputPerM: 2_000_000, outputPerM: 10_000_000, cacheWritePerM: 2_500_000, cacheReadPerM: 200_000 },
+type RateCard = {
+  readonly base: Price;
+  readonly longPrompt: { readonly aboveTokens: number; readonly price: Price } | null;
 };
-export const priceOf = (m: ModelId): Price => PRICES[m];
+const PRICES: Readonly<Record<ModelId, RateCard>> = {
+  "claude-haiku-5-5": {
+    base: { inputPerM: 100_000, outputPerM: 500_000, cacheWritePerM: 125_000, cacheReadPerM: 10_000 },
+    longPrompt: { aboveTokens: 100_000, price: { inputPerM: 500_000, outputPerM: 2_500_000, cacheWritePerM: 625_000, cacheReadPerM: 50_000 } },
+  },
+  "claude-sonnet-5-5": {
+    base: { inputPerM: 2_000_000, outputPerM: 10_000_000, cacheWritePerM: 2_500_000, cacheReadPerM: 200_000 },
+    longPrompt: null,
+  },
+};
+
+/** The prompt's size picks the rate card; input, cache-write and cache-read tokens all count toward it. */
+export function priceOf(m: ModelId, promptTokens = 0): Price {
+  const { base, longPrompt } = PRICES[m];
+  return longPrompt && promptTokens > longPrompt.aboveTokens ? longPrompt.price : base;
+}
 
 export type Usage = {
   readonly inputTokens: number;

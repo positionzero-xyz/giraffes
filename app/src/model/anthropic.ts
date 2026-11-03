@@ -2,7 +2,10 @@ import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { routeOf, type ModelClient, type ModelRequest, type ModelResult, type Usage } from "./model";
 
-const transient = (status: number | undefined) => status === undefined || status === 408 || status === 429 || status >= 500;
+// 429 and 529 mean the API turned the request away before running it. A dropped connection, a timeout or
+// another 5xx can come after the work was done and billed.
+const turnedAway = (status: number | undefined) => status === 429 || status === 529;
+const inDoubt = (status: number | undefined) => status === undefined || status === 408 || status >= 500;
 
 export function anthropicModel(apiKey: string): ModelClient {
   // Every billed attempt has to pass through its own spend reservation, so the SDK must not retry.
@@ -20,7 +23,8 @@ export function anthropicModel(apiKey: string): ModelClient {
           output_config: { format: zodOutputFormat(req.schema), effort: route.effort },
         });
       } catch (err) {
-        if (err instanceof Anthropic.APIError && transient(err.status)) return { ok: false, failure: "unavailable", usage: null };
+        if (err instanceof Anthropic.APIError && turnedAway(err.status)) return { ok: false, failure: "unavailable", usage: null };
+        if (err instanceof Anthropic.APIError && inDoubt(err.status)) return { ok: false, failure: "in_doubt", usage: null };
         throw err;
       }
 

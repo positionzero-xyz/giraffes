@@ -262,8 +262,14 @@ describe("corrections", () => {
     expect(commit.rejected).toEqual([{ action: "schedule_wakeup:follow-up", reason: "duplicate" }]);
   });
 
-  test("a turn that sends nothing shows no correction, and still logs the rejection", () => {
+  test("a person who wrote in hears the correction even when the model sent nothing", () => {
     const commit = planTurn(output([schedule("dentist", "tomorrow 9")]), view());
+    expect(commit.outbound).toMatchObject({ intent: "reply", texts: [NOTICE.reminderBadTime] });
+    expect(commit.rejected).toEqual([{ action: "schedule_wakeup:dentist", reason: "bad_time" }]);
+  });
+
+  test("a check-in that sends nothing shows no correction, and still logs the rejection", () => {
+    const commit = planTurn(output([schedule("dentist", "tomorrow 9")]), view({ batch: { items: [item(checkinEvent)] } }));
     expect(commit.outbound).toBeNull();
     expect(commit.rejected).toEqual([{ action: "schedule_wakeup:dentist", reason: "bad_time" }]);
   });

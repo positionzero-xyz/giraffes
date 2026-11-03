@@ -34,6 +34,9 @@ function toEvent(u: Update): { readonly chatId: number; readonly at: EpochMs; re
 
 const SendError = z.object({ parameters: z.object({ retry_after: z.number() }).optional() });
 
+/** sendMessage's text limit. The turn caps keep a whole outbox row under it; channels.test.ts pins that. */
+export const MAX_TEXT = 4096;
+
 export function telegramChannel(secrets: { botToken: string; webhookSecret: string } | null): ChannelAdapter {
   if (!secrets) return disabledChannel("telegram");
   const api = `https://api.telegram.org/bot${secrets.botToken}`;
@@ -57,29 +60,27 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
     },
 
     /**
-     * Telegram has no idempotency key. A crash after sendMessage succeeded but before the outbox row was
-     * marked sent re-sends on recovery: the person may see a duplicate.
+     * One sendMessage per row, so a retry never repeats part of it. Telegram has no idempotency key: a
+     * crash after sendMessage succeeded but before the outbox row was marked sent re-sends on recovery,
+     * and the person may see a duplicate.
      */
     async deliver(msg: OutboundMessage): Promise<Delivery> {
       try {
-        for (const text of msg.texts) {
-          const res = await fetch(`${api}/sendMessage`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ chat_id: msg.to.channelUserId, text }),
-          });
-          if (res.ok) continue;
-          const body: unknown = await res.json().catch(() => null);
-          const detail = `${res.status} ${JSON.stringify(body)}`;
-          if (res.status === 403) return { kind: "recipient_gone" };
-          if (res.status === 429) {
-            const retryAfter = SendError.safeParse(body).data?.parameters?.retry_after;
-            return { kind: "retry", afterMs: retryAfter === undefined ? CHANNEL_RETRY_MS : retryAfter * 1000, detail };
-          }
-          if (res.status >= 500) return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail };
-          return { kind: "failed", detail };
+        const res = await fetch(`${api}/sendMessage`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chat_id: msg.to.channelUserId, text: msg.texts.join("\n\n") }),
+        });
+        if (res.ok) return { kind: "sent", via: "push" };
+        const body: unknown = await res.json().catch(() => null);
+        const detail = `${res.status} ${JSON.stringify(body)}`;
+        if (res.status === 403) return { kind: "recipient_gone" };
+        if (res.status === 429) {
+          const retryAfter = SendError.safeParse(body).data?.parameters?.retry_after;
+          return { kind: "retry", afterMs: retryAfter === undefined ? CHANNEL_RETRY_MS : retryAfter * 1000, detail };
         }
-        return { kind: "sent", via: "push" };
+        if (res.status >= 500) return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail };
+        return { kind: "failed", detail };
       } catch (err) {
         return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail: String(err) };
       }

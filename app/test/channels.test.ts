@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { lineChannel } from "../src/channels/line";
-import { telegramChannel } from "../src/channels/telegram";
+import { MAX_TEXT as TELEGRAM_MAX_TEXT, telegramChannel } from "../src/channels/telegram";
+import { NOTICE, TURN } from "../src/agent/turn";
 import type { EpochMs, Identity, OutboundMessage, OutboxId } from "../src/domain";
 
 type Seen = { url: string; headers: Headers; body: unknown };
@@ -210,6 +211,13 @@ describe("Telegram delivery", () => {
 
     expect(delivery).toEqual({ kind: "sent", via: "push" });
     expect(accepted.map((s) => [s.url, s.body])).toEqual([["https://api.telegram.org/bot123:abc/sendMessage", { chat_id: "777000111", text: "Done.\n\n(note)" }]]);
+  });
+
+  test("the longest row a turn can produce fits one Telegram message", () => {
+    const notices = Object.values(NOTICE).map((n) => (typeof n === "string" ? n : n("x".repeat(TURN.maxNoteChars))));
+    const longestSend = TURN.maxLateNoticeChars + "\n".length + TURN.maxTextChars;
+    const longestText = Math.max(longestSend, notices.join("\n").length);
+    expect(TURN.maxSendsPerTurn * longestText + "\n\n".length * (TURN.maxSendsPerTurn - 1)).toBeLessThanOrEqual(TELEGRAM_MAX_TEXT);
   });
 
   test("a block is reported as the recipient being gone; flood control retries when told", async () => {

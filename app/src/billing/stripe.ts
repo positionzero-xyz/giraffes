@@ -3,7 +3,7 @@ import type { Fetch } from "../box/host";
 import type { StripeConfig } from "../config";
 import { CHANNEL_IDS, type AgentKey, type EpochMs } from "../domain";
 import { PAID_PLANS, SUBSCRIPTION_STATUSES, type CustomerId, type PaidPlan, type PlanRules, type Subscription, type SubscriptionId } from "./plan";
-import { formBody, STRIPE_API, STRIPE_EVENT_TYPES, type Form } from "./wire";
+import { formBody, PRICE_NAMES, priceKey, STRIPE_API, STRIPE_EVENT_TYPES, type Form, type PriceName } from "./wire";
 
 export const DONE_PATH = "/billing/done";
 const SIGNATURE_TOLERANCE_MS = 5 * 60_000;
@@ -170,17 +170,21 @@ export type SubscriptionRead =
 
 const idOf = (x: string | { readonly id: string }) => (typeof x === "string" ? x : x.id);
 
-export function parseSubscription(raw: unknown, cfg: StripeConfig, rules: PlanRules): SubscriptionRead {
+/** By product or lookup key rather than price id, so a price replaced by `stripe-setup.ts` still counts for those on it. */
+function priceName(price: z.infer<typeof Price>): PriceName | null {
+  return PRICE_NAMES.find((n) => priceKey(n) === idOf(price.product) || priceKey(n) === price.lookup_key) ?? null;
+}
+
+export function parseSubscription(raw: unknown, rules: PlanRules): SubscriptionRead {
   if (raw === null) return { kind: "not_ours", reason: "no such subscription" };
   const sub = StripeSubscription.safeParse(raw);
   if (!sub.success) return { kind: "invalid", reason: "unreadable subscription" };
   const owner = agentKey(sub.data.metadata?.agent_key);
   if (!owner) return { kind: "not_ours", reason: "subscription without our agent key" };
-  const items = sub.data.items.data.map((i) => ({ price: i.price.id, quantity: i.quantity ?? 1 }));
-  const priced = (price: string) => items.find((i) => i.price === price);
-  const plan = PAID_PLANS.find((p) => priced(cfg.prices[p])) ?? paidPlan(sub.data.metadata?.plan);
+  const items = sub.data.items.data.map((i) => ({ name: priceName(i.price), quantity: i.quantity ?? 1 }));
+  const plan = PAID_PLANS.find((p) => items.some((i) => i.name === p)) ?? paidPlan(sub.data.metadata?.plan);
   if (!plan) return { kind: "not_ours", reason: "subscription for none of our prices" };
-  const extra = priced(cfg.prices.seat)?.quantity ?? 0;
+  const extra = items.filter((i) => i.name === "seat").reduce((n, i) => n + i.quantity, 0);
   return {
     kind: "ours",
     subscription: {

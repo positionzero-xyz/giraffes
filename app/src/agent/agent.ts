@@ -170,7 +170,7 @@ export class Agent extends DurableObject<Env> {
     if (!config.on || !stripe) throw new Error("a Stripe event reached a DO with billing off");
     const fetched = await stripe.subscription(e.subscription);
     if (!fetched.ok) throw new Error(`subscription read failed: ${fetched.detail}`);
-    const read = parseSubscription(fetched.value, config.stripe, config.rules);
+    const read = parseSubscription(fetched.value, config.rules);
     if (read.kind === "invalid") throw new Error(`subscription read failed: ${read.reason}`);
     if (read.kind === "not_ours" || read.subscription.owner !== e.owner) {
       console.warn("stripe event ignored", e.id, read.kind === "not_ours" ? read.reason : "owner differs from the event's");

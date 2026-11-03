@@ -1,7 +1,6 @@
-import { formBody, STRIPE_API, STRIPE_EVENT_TYPES, type Form } from "./wire.ts";
+import { formBody, PRICE_NAMES, priceKey, STRIPE_API, STRIPE_EVENT_TYPES, type Form, type PriceName } from "./wire.ts";
 
-export const PRICE_NAMES = ["standard", "plus", "seat", "ai"] as const;
-export type PriceName = (typeof PRICE_NAMES)[number];
+export { PRICE_NAMES, type PriceName };
 
 export const DEFAULT_AMOUNTS: Readonly<Record<PriceName, number>> = { standard: 29900, plus: 69900, seat: 19900, ai: 17900 };
 
@@ -11,8 +10,6 @@ const PRODUCT_NAMES: Readonly<Record<PriceName, string>> = {
   seat: "Giraffes Plus extra place",
   ai: "Giraffes AI",
 };
-
-const lookupKey = (p: PriceName) => `giraffes_${p}`;
 
 type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -48,19 +45,19 @@ export async function stripeSetup(o: {
 
   const prices = {} as Record<PriceName, string>;
   for (const name of PRICE_NAMES) {
-    const product = lookupKey(name);
+    const product = priceKey(name);
     if ((await call("GET", `/products/${product}`)).status === 404) {
       await call("POST", "/products", { id: product, name: PRODUCT_NAMES[name] });
       log.push(`product ${product}: created`);
     } else {
       log.push(`product ${product}: exists`);
     }
-    const found = await call<{ data: Price[] }>("GET", "/prices", { "lookup_keys[0]": lookupKey(name), active: "true" });
+    const found = await call<{ data: Price[] }>("GET", "/prices", { "lookup_keys[0]": priceKey(name), active: "true" });
     const current = found.body.data[0];
     const amount = o.amounts[name];
     if (current && current.product === product && current.unit_amount === amount && current.currency === "thb" && current.recurring?.interval === "month") {
       prices[name] = current.id;
-      log.push(`price ${lookupKey(name)}: exists (${amount} satang a month)`);
+      log.push(`price ${priceKey(name)}: exists (${amount} satang a month)`);
       continue;
     }
     const made = await call<Price>("POST", "/prices", {
@@ -68,11 +65,11 @@ export async function stripeSetup(o: {
       currency: "thb",
       unit_amount: amount,
       "recurring[interval]": "month",
-      lookup_key: lookupKey(name),
+      lookup_key: priceKey(name),
       transfer_lookup_key: "true",
     });
     prices[name] = made.body.id;
-    log.push(`price ${lookupKey(name)}: created (${amount} satang a month)${current ? `, replacing ${current.id}` : ""}`);
+    log.push(`price ${priceKey(name)}: created (${amount} satang a month)${current ? `, replacing ${current.id}` : ""}`);
   }
 
   const url = `${o.publicUrl.replace(/\/+$/, "")}/webhook/stripe`;

@@ -164,15 +164,25 @@ describe("stripe boundary", () => {
 
   test("a subscription read from Stripe gives its owner, customer, plan and capped Plus places", () => {
     const plus = stripeSubscription({ user: "ann", sub: "sub_1", plan: "plus", status: "past_due", extraSeats: 10, customer: "cus_ann" });
-    expect(parseSubscription(plus, cfg, rules)).toEqual({
+    expect(parseSubscription(plus, rules)).toEqual({
       kind: "ours",
       subscription: { id: "sub_1", owner: "p:dev:ann", customer: "cus_ann", plan: "plus", status: "past_due", seats: 6 },
     });
     const byMetadata = { ...stripeSubscription({ user: "ann", sub: "sub_2", plan: "ai", status: "active" }), items: { data: [] } };
-    expect(parseSubscription(byMetadata, cfg, rules)).toMatchObject({ kind: "ours", subscription: { plan: "ai", seats: 1 } });
-    expect(parseSubscription({ ...plus, metadata: {} }, cfg, rules)).toMatchObject({ kind: "not_ours" });
-    expect(parseSubscription(null, cfg, rules)).toMatchObject({ kind: "not_ours" });
-    expect(parseSubscription({ id: "sub_3" }, cfg, rules)).toMatchObject({ kind: "invalid" });
+    expect(parseSubscription(byMetadata, rules)).toMatchObject({ kind: "ours", subscription: { plan: "ai", seats: 1 } });
+    expect(parseSubscription({ ...plus, metadata: {} }, rules)).toMatchObject({ kind: "not_ours" });
+    expect(parseSubscription(null, rules)).toMatchObject({ kind: "not_ours" });
+    expect(parseSubscription({ id: "sub_3" }, rules)).toMatchObject({ kind: "invalid" });
+  });
+
+  test("our prices are known by product or lookup key, so a replaced price still counts the places people pay for", () => {
+    const replaced = (name: string, quantity: number) => ({ price: { id: `price_${name}_2025`, product: `giraffes_${name}`, lookup_key: null }, quantity });
+    const plus = { ...stripeSubscription({ user: "ann", sub: "sub_1", plan: "plus", status: "active" }), items: { data: [replaced("plus", 1), replaced("seat", 2)] } };
+    expect(parseSubscription(plus, rules)).toMatchObject({ kind: "ours", subscription: { plan: "plus", seats: 5 } });
+
+    const keyed = (name: string) => ({ price: { id: `price_${name}_manual`, product: { id: "prod_manual" }, lookup_key: `giraffes_${name}` }, quantity: 1 });
+    const switched = { ...stripeSubscription({ user: "ann", sub: "sub_2", plan: "plus", status: "active" }), items: { data: [keyed("standard")] } };
+    expect(parseSubscription(switched, rules)).toMatchObject({ kind: "ours", subscription: { plan: "standard", seats: 1 } });
   });
 
   test("an event names the subscription and the owner's agent key, and carries no state", () => {

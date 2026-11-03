@@ -137,6 +137,19 @@ describe("LINE delivery", () => {
     stubFetch(() => new Response("upstream down", { status: 503 }));
     expect(await line().deliver(outbound(), NOW)).toMatchObject({ kind: "retry" });
   });
+
+  test("a reply that hit an outage or a dropped connection may have been accepted, so it is in doubt", async () => {
+    stubFetch(() => new Response("upstream down", { status: 503 }));
+    expect(await line().deliver(outbound({ reply: fresh }), NOW)).toMatchObject({ kind: "in_doubt" });
+
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("Network connection lost."));
+    expect(await line().deliver(outbound({ reply: fresh }), NOW)).toMatchObject({ kind: "in_doubt" });
+
+    vi.restoreAllMocks();
+    stubFetch(() => Response.json({ message: "Too many requests" }, { status: 429 }));
+    expect(await line().deliver(outbound({ reply: fresh }), NOW)).toMatchObject({ kind: "retry" });
+  });
 });
 
 const TG_SECRET = "tg-webhook-secret";

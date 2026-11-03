@@ -57,7 +57,6 @@ export type StripeConfig = {
   readonly secretKey: string;
   readonly webhookSecret: string;
   readonly prices: { readonly standard: string; readonly plus: string; readonly seat: string; readonly ai: string };
-  /** The customer portal configuration `stripe-setup.ts` makes; portal sessions name it. */
   readonly portalConfiguration: string;
   readonly publicUrl: string;
 };

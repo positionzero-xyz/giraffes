@@ -15,7 +15,6 @@ type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
 type SetupResult = {
   readonly prices: Readonly<Record<PriceName, string>>;
-  /** The customer portal configuration, set to STRIPE_PORTAL_CONFIGURATION. */
   readonly portal: string;
   /** `secret` is only known when the endpoint was created by this run. */
   readonly webhook: { readonly id: string; readonly secret: string | null };
@@ -26,7 +25,7 @@ type Price = { id: string; product: string; unit_amount: number | null; currency
 type Endpoint = { id: string; url: string; secret?: string };
 type PortalConfiguration = { id: string; active: boolean; metadata: Record<string, string> | null };
 
-/** Plus with extra places has two products, which the portal can cancel but not switch. */
+/** No seat price: the portal can't switch a subscription with two products, such as Plus with extra places. */
 const PORTAL_PLANS = ["standard", "plus", "ai"] as const satisfies readonly PriceName[];
 
 function portalForm(prices: Readonly<Record<PriceName, string>>, returnUrl: string): Form {

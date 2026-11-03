@@ -1,9 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { planCompaction } from "../src/agent/compaction";
+import { CompactionOutputSchema, planCompaction } from "../src/agent/compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "../src/agent/prompt";
-import { NOTICE, planTurn, type Batch, type InboxItem, type TurnOutput, type TurnView } from "../src/agent/turn";
+import { NOTICE, planTurn, TURN, TurnOutputSchema, type Batch, type InboxItem, type TurnOutput, type TurnView } from "../src/agent/turn";
 import {
   CHECKIN_KEY,
+  TASK_KINDS,
+  TASK_STATUSES,
   eventKey,
   intentOf,
   type AgentEvent,
@@ -14,7 +16,7 @@ import {
   type WakeupId,
   type WakeupKey,
 } from "../src/domain";
-import { priceOf } from "../src/model/model";
+import { priceOf, routeOf } from "../src/model/model";
 import { admitUnasked, quietUntil } from "../src/policy/outreach";
 import { fireAt, isLate, nextAlarm, planFiring, wakeupOrigin, type PendingWakeup } from "../src/policy/schedule";
 import { costOf, decideReservation, estimate, SCHEMA_ALLOWANCE_TOKENS, SPEND } from "../src/policy/spend";
@@ -310,6 +312,40 @@ describe("spend", () => {
   test("a short lease asks for a chunk, capped by what the user cap leaves", () => {
     expect(decideReservation({ spent: usd(1), reserved: usd(0), leased: usd(1) }, usd(0.002))).toEqual({ kind: "need_lease", chunk: SPEND.leaseChunkMicro });
     expect(decideReservation({ spent: usd(14.6), reserved: usd(0), leased: usd(14.6) }, usd(0.002))).toEqual({ kind: "need_lease", chunk: usd(0.4) });
+  });
+});
+
+describe("output budgets", () => {
+  // Every token is at least one UTF-8 byte, and Thai takes 3 bytes a character, so the byte length of the
+  // largest output the schema accepts, written in Thai, is the most tokens a valid output can need.
+  const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
+  const thai = (n: number) => "ก".repeat(n);
+  const longest = <T extends string>(xs: readonly T[]) => xs.reduce((a, b) => (b.length > a.length ? b : a));
+
+  test("the largest turn output the schema accepts fits the turn's output budget", () => {
+    const key = "k".repeat(40);
+    const actions = [
+      { type: "send", text: thai(TURN.maxTextChars) },
+      { type: "schedule_wakeup", key, at: "2099-11-04T10:00", note: thai(TURN.maxNoteChars), asked: false },
+      { type: "cancel_wakeup", key },
+      { type: "remember", note: thai(TURN.maxNoteChars) },
+    ];
+    const biggest = actions.reduce((a, b) => (bytes(b) > bytes(a) ? b : a));
+    const output = {
+      actions: Array.from({ length: TURN.maxActions }, () => biggest),
+      lateNotice: thai(TurnOutputSchema.shape.lateNotice.unwrap().maxLength ?? 0),
+      task: { kind: longest(TASK_KINDS), key, status: longest(TASK_STATUSES) },
+    };
+
+    expect(TurnOutputSchema.safeParse(output).success).toBe(true);
+    expect(bytes(output)).toBeLessThanOrEqual(routeOf("turn").maxTokens);
+  });
+
+  test("the longest summary the compaction schema accepts fits the compaction's output budget", () => {
+    const output = { summary: thai(CompactionOutputSchema.shape.summary.maxLength ?? 0) };
+
+    expect(CompactionOutputSchema.safeParse(output).success).toBe(true);
+    expect(bytes(output)).toBeLessThanOrEqual(routeOf("compaction").maxTokens);
   });
 });
 

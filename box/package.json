@@ -1,0 +1,9 @@
+{
+  "name": "giraffes-box",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.316",
+    "zod": "4.6.7"
+  }
+}

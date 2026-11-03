@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { NOTICE } from "../src/agent/turn";
+import type { EpochMs } from "../src/domain";
 import { priceOf, routeOf } from "../src/model/model";
 import { costOf, SPEND } from "../src/policy/spend";
 import { type ScriptStep } from "../src/model/scripted";
@@ -309,6 +310,38 @@ describe("reachability", () => {
     const after = await c.snapshot();
     expect(after.agent?.status).toBe("active");
     expect(after.pendingWakeups.map((w) => [w.kind, w.dueAt])).toEqual([["checkin", local("2099-11-06T09:00")]]);
+    model.assertDone();
+  });
+
+  test("a blocked person who writes again is answered, and their check-ins resume", async () => {
+    const model = scripted([chat("Hi!"), chat("Welcome back!")]);
+    const c = await devChat("pat", { model, at: "2099-11-04T10:00" });
+    await c.say("hi");
+    await c.received();
+    await c.say("/block", { at: local("2099-11-04T11:00") });
+    await c.advanceTo("2099-11-05T12:00");
+
+    await c.say("are you still there?");
+
+    expect(await c.received()).toEqual(["Welcome back!"]);
+    const after = await c.snapshot();
+    expect(after.agent?.status).toBe("active");
+    expect(after.pendingWakeups.map((w) => [w.kind, wall(w.dueAt)])).toEqual([["checkin", "2099-11-06T09:00"]]);
+    model.assertDone();
+  });
+
+  test("a failed send doesn't make a follow stamped earlier in the same second look stale", async () => {
+    const model = scripted([chat("Hi!"), chat("Welcome back!")]);
+    const c = await devChat("rho", { model, at: "2099-11-04T10:00", deliveries: [{ kind: "gone" }] });
+    const second = local("2099-11-04T10:00");
+    c.clock.set((second + 500) as EpochMs);
+
+    await c.say("hi", { at: second });
+    expect((await c.snapshot()).agent?.status).toBe("blocked");
+    await c.say("/follow", { at: second });
+
+    expect(await c.received()).toEqual(["Welcome back!"]);
+    expect((await c.snapshot()).agent?.status).toBe("active");
     model.assertDone();
   });
 });

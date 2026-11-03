@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { NOTICE } from "../src/agent/turn";
 import { planAllowsBox, planOf, type PlanRules, type Subscription, type SubscriptionId } from "../src/billing/plan";
-import { BILLING_OFF, inviteFull, JOIN, LEFT, NO_LINKS, NOT_SEATED } from "../src/billing/say";
+import { BILLING_BUSY, BILLING_OFF, inviteFull, JOIN, LEFT, NO_LINKS, NOT_SEATED } from "../src/billing/say";
 import { d1Billing, type BillingStore } from "../src/billing/store";
 import { checkoutForm, parseEvent, parseSubscription, stripeApi, verifySignature } from "../src/billing/stripe";
 import { DEFAULT_AMOUNTS, stripeSetup } from "../src/billing/setup";
@@ -613,6 +613,92 @@ describe("plus seats", () => {
 
     expect(await owner.received()).toEqual([NOTICE.lapsed]);
     expect(await member.received()).toEqual([NOTICE.lapsed]);
+  });
+
+  test("a Plus owner who moves to Standard takes every member off the plan", async () => {
+    const kit = billingOn({ TRIAL_DAYS: "0" });
+    const at = "2099-11-04T10:00";
+    const owner = await devChat("wren", { model: scripted([]), at, billing: kit.deps });
+    const member = await devChat("xia", { model: scripted([]), at, billing: kit.deps });
+    await pay(kit, owner, "wren", "plus");
+    await owner.say("/invite");
+    await member.say(`/join ${codeIn((await owner.received()).at(-1) ?? "")}`);
+    await member.received();
+
+    await stripeChange(kit, { user: "wren", sub: "sub_wren", plan: "standard", status: "active" });
+    await owner.settle();
+    await member.settle();
+
+    expect(await owner.received()).toEqual(["Thanks. Your Standard plan is active."]);
+    expect(await member.received()).toEqual([NOTICE.lapsed]);
+    expect((await member.snapshot()).plan.kind).toBe("lapsed");
+  });
+
+  test("a /leave repeated after its refresh failed answers as if it had just left", async () => {
+    const real = d1Billing(env.LEDGER);
+    let failures = 0;
+    const flaky: BillingStore = {
+      ...real,
+      async standing(a, now) {
+        if (failures-- > 0) throw new Error("D1 unavailable");
+        return real.standing(a, now);
+      },
+    };
+    const kit = billingOn();
+    const at = "2099-11-04T10:00";
+    const owner = await devChat("yan", { model: scripted([]), at, billing: kit.deps });
+    const member = await devChat("zoe", { model: scripted([]), at, billing: { ...kit.deps, store: flaky } });
+    await pay(kit, owner, "yan", "plus");
+    await owner.say("/invite");
+    await member.say(`/join ${codeIn((await owner.received()).at(-1) ?? "")}`);
+    await member.received();
+
+    failures = 1;
+    await member.say("/leave");
+    await member.say("/leave");
+    await member.say("/leave");
+
+    expect(await member.received()).toEqual([BILLING_BUSY, `${LEFT}\nYou're on the free trial, with 14 days left.`, NOT_SEATED]);
+    expect(await real.members("sub_yan" as SubscriptionId)).toEqual([]);
+  });
+});
+
+describe("each turn's plan", () => {
+  test("a turn reads the plan from D1, so a payment whose refresh was lost still counts", async () => {
+    const kit = billingOn({ TRIAL_DAYS: "0" });
+    const c = await devChat("abe", { model: scripted([chat("Hello again.")]), at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("/plan");
+    await c.received();
+
+    await kit.deps.store.applySubscription({ id: "sub_abe" as SubscriptionId, owner: agent("abe"), customer: null, plan: "standard", status: "active", seats: 1 }, c.clock.now());
+    await c.say("hello");
+
+    expect(await c.received()).toEqual(["Hello again."]);
+  });
+
+  test("with D1 unreachable a turn uses the plan last refreshed, paid or lapsed", async () => {
+    const real = d1Billing(env.LEDGER);
+    let down = false;
+    const flaky: BillingStore = {
+      ...real,
+      async standing(a, now) {
+        if (down) throw new Error("D1 unavailable");
+        return real.standing(a, now);
+      },
+    };
+    const kit = billingOn({ TRIAL_DAYS: "0" }, flaky);
+    const paid = await devChat("bo", { model: scripted([chat("Still answering.")]), at: "2099-11-04T10:00", billing: kit.deps });
+    const unpaid = await devChat("cal", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await paid.say("/plan");
+    await pay(kit, paid, "bo", "standard");
+    await paid.received();
+
+    down = true;
+    await paid.say("hello");
+    await unpaid.say("hello");
+
+    expect(await paid.received()).toEqual(["Still answering."]);
+    expect(await unpaid.received()).toEqual([NOTICE.lapsed]);
   });
 });
 

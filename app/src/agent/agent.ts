@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { z } from "zod";
-import { apiCapOf, NO_STANDING, PAID_PLANS, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan } from "../billing/plan";
+import { apiCapOf, NO_STANDING, PAID_PLANS, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan, type Standing } from "../billing/plan";
 import {
   BILLING_BUSY,
   BILLING_OFF,
@@ -180,10 +180,8 @@ export class Agent extends DurableObject<Env> {
     const sub = read.subscription;
     await store.applySubscription(sub, this.#deps.clock.now());
     await this.refreshPlan(sub.owner);
-    if (sub.plan === "plus") {
-      for (const member of await store.members(sub.id)) {
-        await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member);
-      }
+    for (const member of await store.members(sub.id)) {
+      await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member);
     }
     this.#store.billingEventDone(e.id, this.#deps.clock.now());
     return "applied";
@@ -207,6 +205,20 @@ export class Agent extends DurableObject<Env> {
   #plan(now: EpochMs): Plan {
     const { config } = this.#deps.billing;
     return planOf(this.#store.plan(), now, config.on, config.rules);
+  }
+
+  /** D1 is the truth; the projection a refresh keeps stands in only while D1 can't be read. */
+  async #planNow(agent: AgentKey, now: EpochMs): Promise<Plan> {
+    const { config, store } = this.#deps.billing;
+    if (!config.on) return this.#plan(now);
+    let standing: Standing;
+    try {
+      standing = await store.standing(agent, now);
+    } catch (err) {
+      console.warn("standing unreadable, using the last refreshed plan", err);
+      return this.#plan(now);
+    }
+    return planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, true, config.rules);
   }
 
   /** Cloudflare may invoke it more than once; joining the in-flight drain makes that harmless. */
@@ -311,7 +323,7 @@ export class Agent extends DurableObject<Env> {
     if (bypass) return this.#commit(planWithoutModel(view, bypass), view, a.key, { kind: "none" }, null);
     const command = commandOf(batch.items[0].event);
     if (command) return this.#command(command, view, a.key);
-    const plan = this.#plan(view.now);
+    const plan = await this.#planNow(a.key, view.now);
     if (plan.kind === "lapsed") {
       const alreadyToldToday = this.#store.toldToday("lapsed", startOfLocalDay(view.now, view.tz));
       return this.#commit(planWithoutModel(view, { kind: "lapsed", alreadyToldToday }), view, a.key, { kind: "none" }, null);
@@ -385,12 +397,12 @@ export class Agent extends DurableObject<Env> {
     this.#commit(planWithoutModel(view, { kind: "command", text, note }), view, agent, { kind: "none" }, null);
   }
 
-  async #standingNow(agent: AgentKey): Promise<Plan> {
+  async #standingNow(agent: AgentKey): Promise<{ readonly plan: Plan; readonly standing: Standing }> {
     const { config, store } = this.#deps.billing;
     const now = this.#deps.clock.now();
     const standing = config.on ? await store.standing(agent, now) : NO_STANDING;
     this.#store.applyStanding(standing, null, now);
-    return this.#plan(now);
+    return { plan: this.#plan(now), standing };
   }
 
   async #billingCommand(
@@ -403,7 +415,7 @@ export class Agent extends DurableObject<Env> {
     const say = (text: string) => ({ text, note: text });
     switch (command.kind) {
       case "plan": {
-        const plan = await this.#standingNow(agent);
+        const { plan } = await this.#standingNow(agent);
         const places = plan.kind === "plus" && plan.role === "owner" ? await store.places(agent, now) : null;
         const status = planStatus(plan, now, places);
         if (!config.on || (plan.kind !== "trial" && plan.kind !== "lapsed")) return say(status);
@@ -424,8 +436,9 @@ export class Agent extends DurableObject<Env> {
         return say(JOIN[r]);
       }
       case "leave": {
-        if (!(await store.leave(agent, now))) return say(NOT_SEATED);
-        const plan = await this.#standingNow(agent);
+        const closed = await store.leave(agent, now);
+        if (!closed && !this.#store.plan()?.seat) return say(NOT_SEATED);
+        const { plan } = await this.#standingNow(agent);
         return say(`${LEFT}\n${plan.kind === "lapsed" ? NOTICE.lapsed : planStatus(plan, now, null)}`);
       }
       default:

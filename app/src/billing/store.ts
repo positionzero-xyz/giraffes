@@ -29,6 +29,8 @@ const countingSeat = (s: string, now: string) =>
      AND (SELECT COUNT(*) FROM billing_seat o WHERE o.subscription_id = ${s}.subscription_id AND o.left_at IS NULL
           AND (o.joined_at < ${s}.joined_at OR (o.joined_at = ${s}.joined_at AND o.agent_key < ${s}.agent_key))) < cb.seats - 1)`;
 
+const OWN_ORDER: Readonly<Record<PaidPlan, number>> = { plus: 0, standard: 1, ai: 2 };
+
 type JoinRow = {
   used_by: AgentKey | null;
   expires_at: EpochMs;
@@ -68,23 +70,18 @@ export function d1Billing(db: D1Database): BillingStore {
     },
 
     async standing(agent, now) {
-      const [own, seat] = await db.batch<Record<string, unknown>>([
-        db
-          .prepare(
-            `SELECT id, plan FROM billing_subscription b WHERE owner_key = ?1 AND ${paying("b", "?2")}
-             ORDER BY CASE plan WHEN 'plus' THEN 0 WHEN 'standard' THEN 1 ELSE 2 END, id LIMIT 1`,
-          )
-          .bind(agent, now),
-        db
-          .prepare(
-            `SELECT s.subscription_id AS id, b.owner_key AS owner FROM billing_seat s JOIN billing_subscription b ON b.id = s.subscription_id
-             WHERE s.agent_key = ?1 AND ${countingSeat("s", "?2")}`,
-          )
-          .bind(agent, now),
-      ]);
-      const o = own?.results[0] as { id: SubscriptionId; plan: PaidPlan } | undefined;
-      const m = seat?.results[0] as { id: SubscriptionId; owner: AgentKey } | undefined;
-      return { own: o ? { id: o.id, plan: o.plan } : null, seat: m ? { id: m.id, owner: m.owner } : null };
+      const rows = await db
+        .prepare(
+          `SELECT 'own' AS kind, b.id, b.plan, b.owner_key AS owner FROM billing_subscription b WHERE b.owner_key = ?1 AND ${paying("b", "?2")}
+           UNION ALL
+           SELECT 'seat', s.subscription_id, b.plan, b.owner_key FROM billing_seat s JOIN billing_subscription b ON b.id = s.subscription_id
+           WHERE s.agent_key = ?1 AND ${countingSeat("s", "?2")}`,
+        )
+        .bind(agent, now)
+        .all<{ kind: "own" | "seat"; id: SubscriptionId; plan: PaidPlan; owner: AgentKey }>();
+      const own = rows.results.filter((r) => r.kind === "own").sort((x, y) => OWN_ORDER[x.plan] - OWN_ORDER[y.plan] || (x.id < y.id ? -1 : 1))[0];
+      const seat = rows.results.find((r) => r.kind === "seat");
+      return { own: own ? { id: own.id, plan: own.plan } : null, seat: seat ? { id: seat.id, owner: seat.owner } : null };
     },
 
     async members(id) {

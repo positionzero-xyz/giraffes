@@ -130,6 +130,25 @@ describe("health and parse", () => {
     const marks = events().map((e) => e.split(" ")[1]);
     assert.deepEqual(marks, ["start", "end", "start", "end", "start", "end"]);
   });
+
+  it("kills a turn's CLI when the caller hangs up, so the next turn doesn't wait behind it", async () => {
+    signIn(true);
+    const hangUp = new AbortController();
+    const abandoned = fetch(`${base}/parse`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: bearer },
+      body: JSON.stringify(turn("hang")),
+      signal: hangUp.signal,
+    }).catch(() => null);
+    await new Promise((r) => setTimeout(r, 300));
+    hangUp.abort();
+    await abandoned;
+
+    const started = Date.now();
+    assert.equal((await call("POST", "/parse", { auth: bearer, body: turn("next") })).status, 200);
+    assert.ok(Date.now() - started < 3000, `the next turn waited ${Date.now() - started}ms`);
+    assert.deepEqual(events().map((e) => e.split(" ").slice(0, 2).join(" ")), ["turn start", "turn start", "turn end"]);
+  });
 });
 
 describe("sign-in", () => {

@@ -87,7 +87,11 @@ export function createBox({ token, cli, now = Date.now }: BoxOptions): Server {
   async function parse(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const parsed = readParseRequest(await readJson(req));
     if (!parsed) return sendJson(res, 400, { error: "bad_request" });
-    const reply = await oneTurnAtATime(() => parseTurn(cli, parsed));
+    const abandoned = new AbortController();
+    res.on("close", () => {
+      if (!res.writableFinished) abandoned.abort();
+    });
+    const reply = await oneTurnAtATime(() => parseTurn(cli, parsed, abandoned.signal));
     sendJson(res, reply.status, reply.body);
   }
 

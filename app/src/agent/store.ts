@@ -133,6 +133,11 @@ function fromJson<T>(text: string): T {
   return JSON.parse(text);
 }
 
+/** Rows queued before the box path have no backend; all of them were API calls. */
+function queuedLog(row: LogRow): LogRow {
+  return row.stream === "model_call" && row.backend === undefined ? { ...row, backend: "api" } : row;
+}
+
 const placeholders = (n: number) => Array.from({ length: n }, () => "?").join(", ");
 
 function toWakeup(r: WakeupCols): PendingWakeup {
@@ -759,7 +764,7 @@ export class AgentStore {
     return this.sql
       .exec<{ row: string }>("SELECT row FROM log_outbox ORDER BY created_at, rowid LIMIT ?", limit)
       .toArray()
-      .map((r) => fromJson<LogRow>(r.row));
+      .map((r) => queuedLog(fromJson<LogRow>(r.row)));
   }
 
   logsShipped(rows: readonly LogRow[]): void {

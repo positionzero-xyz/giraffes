@@ -1,3 +1,4 @@
+import { env as testEnv, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import { boxClient } from "../src/box/client";
@@ -484,6 +485,22 @@ describe("connecting a Claude plan", () => {
     expect(sent.slice(0, 2)).toEqual(["Hi!", say("setting_up")]);
     expect(model.calls).toHaveLength(1);
     expect(model.calls[0].user).not.toContain("/claude");
+  });
+});
+
+describe("log rows queued by the code before the box path", () => {
+  test("a queued model call row without a backend ships as backend 'api'", async () => {
+    const c = await devChat("old", { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00" });
+    await c.say("hello");
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName("p:dev:old"));
+    await runInDurableObject(stub, (_agent, state) => {
+      const { backend: _, ...old } = { ...c.logs("model_call")[0], id: "queued-before-box" };
+      state.storage.sql.exec("INSERT INTO log_outbox (id, stream, row, created_at) VALUES (?, 'model_call', ?, ?)", `model_call:${old.id}`, JSON.stringify(old), 0);
+    });
+
+    await c.alarm();
+
+    expect(c.logs("model_call").map((r) => [r.id, r.backend])).toContainEqual(["queued-before-box", "api"]);
   });
 });
 

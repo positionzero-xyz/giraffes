@@ -39,7 +39,7 @@ The person texts "remind me tomorrow 9am to call the clinic".
 2. The drain recovers anything a dead instance left (rows in `processing` or `sending`, open reservations), then fires due wake-ups into the inbox.
 3. It claims a batch, starting with the oldest ready event. If that event is a message, the consecutive ready messages behind it join, up to 10 in all.
 4. `renderUser` builds the prompt after the byte-stable system prompt: local now in the person's zone, the memory summary and newest 50 notes, pending wake-ups with their keys, unasked messages left today, the last 30 turns, and the batch.
-5. `#callModel("turn", …)` reserves the estimate against the person's month in local SQLite, asks D1 for a lease chunk only when the local lease is short, then calls the model once. The model returns:
+5. `#callModel("turn", …)` reserves the estimate against the person's month in local SQLite, under the monthly cap their plan sets, asks D1 for a lease chunk only when the local lease is short, then calls the model once. A lapsed person gets no model call: the turn ends with one notice a day instead. The model returns:
    ```json
    { "actions": [
        { "type": "schedule_wakeup", "key": "call-clinic", "at": "2026-11-05T09:00", "note": "Remind: call the clinic", "asked": true },
@@ -74,7 +74,7 @@ With `BOX_HOST` set to `fly` or `static`, the person sends `/claude`. `BOX.md` h
 1. The message is claimed as a batch of its own and never reaches the model. With no box, the agent claims a slot in D1's `boxes`, inserts the `box` row in `provisioning`, and replies that it is setting up. Past `MAX_BOXES` it says it can't connect another plan.
 2. The drain's box phase runs the host's `ensure` (Fly app, IPs, volume, machine) and then `GET /health` with the box token. When the box answers, the row becomes `signed_out` and the outbox gets `https://<box>/signin#t=<ticket>`, valid for 30 minutes.
 3. The drain polls `/health` every 30 s for 30 minutes. When `signedIn` turns true, the row becomes `signed_in` and the person is told.
-4. From then on `#callModel` sends each turn to the box's `/parse` first. No spend is reserved, and `model_call` logs it with `backend = 'box'` and cost 0.
+4. From then on, while the plan includes the box, `#callModel` sends each turn to the box's `/parse` first. No spend is reserved, and `model_call` logs it with `backend = 'box'` and cost 0.
 
 ```ts
 test("a signed-in person's turn runs on their box with their token, reserves no spend, and is logged as backend 'box'", async () => {
@@ -91,7 +91,32 @@ test("a signed-in person's turn runs on their box with their token, reserves no 
 
 `scripts/fly-verify.ts --yes` runs the same Fly host code against the real Machines API with a throwaway app and deletes it afterwards.
 
-## Call site 5: a test drives a conversation
+A box still `signed_out` 48 hours after its first link, never signed in, is reclaimed: the host destroys it, the D1 `boxes` row is marked deleted, the DO row goes, and the person is told `/claude` sets it up again.
+
+## Call site 5: a person pays
+
+With `BILLING=on` (`BOX.md`, "Plans and billing", has the contract), the person's first message started a 14-day trial. They send `/plan`.
+
+1. The command runs without the model. It reads the person's standing from D1, says the plan and the days left, and adds one Stripe Checkout link per plan, created with the idempotency key `<agent key>|<message key>|<plan>`.
+2. The person pays. Stripe posts `checkout.session.completed` and `customer.subscription.created` to `/webhook/stripe`, in either order. The Worker checks the signature, turns each into one subscription snapshot, and calls the owner's `Agent.billingEvent`.
+3. The DO skips an event id it has handled. Otherwise D1 keeps the snapshot if it is newer than the stored one, the owner's projection is refreshed, every Plus seat holder's DO is refreshed, and the event id is recorded last. A person whose plan moved gets one message, such as "Thanks. Your Standard plan is active."
+4. From the next turn on, `planAllowsBox` and the plan's API cap decide the turn's path.
+
+```ts
+test("a payment after the trial lapsed is announced and the model answers again", async () => {
+	const kit = billingOn({ TRIAL_DAYS: "0" });
+	const c = await devChat("eve", { model: scripted([chat("Welcome back.")]), at: "2099-11-04T10:00", billing: kit.deps });
+	await c.say("/plan");
+
+	await postStripe(checkoutEvent({ user: "eve", sub: "sub_eve", plan: "standard", created: "2099-11-04T10:01" }));
+	await c.settle();
+	expect(await c.received()).toEqual(["Thanks. Your Standard plan is active."]);
+});
+```
+
+A Plus owner sends `/invite` for a one-time code, another person sends `/join <code>` to take a seat, and `/leave` gives it up. Seats are D1 rows, so a join checks and claims a place in one batch.
+
+## Call site 6: a test drives a conversation
 
 `app/test/agent.test.ts` runs inside the Workers runtime with `@cloudflare/vitest-pool-workers`. `devChat` posts to the real `/webhook/dev` route and swaps in a scripted model, a fake clock, an in-memory ledger and a scripted channel. The scripted model checks every canned output against the real schema, so a schema change breaks the script, not production.
 
@@ -132,4 +157,5 @@ npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_w
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM unasked_with_followup WHERE followed = 1"
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT reason, COUNT(*) FROM action_rejection GROUP BY reason"
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT backend, status, COUNT(*) FROM model_call GROUP BY backend, status"
+npx wrangler d1 execute giraffes-ledger --remote --command "SELECT plan, status, COUNT(*) FROM billing_subscription GROUP BY plan, status"
 ```

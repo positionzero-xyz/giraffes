@@ -64,6 +64,22 @@ those events. The side panel shows each delivery's intent and status and the pen
    ```sh
    FLY_API_TOKEN=... FLY_ORG=... BOX_IMAGE=... BOX_SECRET=... node scripts/fly-verify.ts --yes
    ```
+   Plans and payments (`/plan`, `/invite`, `/join <code>`, `/leave`, see `docs/design/BOX.md`) follow `BILLING`:
+   - `BILLING=off` (the default): nobody pays and nobody lapses. `/plan` says it is the free beta.
+   - `BILLING=on` needs the secrets `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`, and the vars
+     `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`, `STRIPE_PRICE_AI` and `PUBLIC_URL`
+     (the Worker's https URL; Checkout sends people back to `PUBLIC_URL/billing/done`). Optional vars:
+     `TRIAL_DAYS` (default 14, counted from a person's first message), `PLUS_SEATS` (default 3 people,
+     the owner included), `PLUS_MAX_SEATS` (default 6) and `AI_CAP_USD` (the AI plan's monthly model
+     cost cap, default 1).
+
+   Create the Stripe side with a test key first. It makes the products, THB monthly prices and the
+   webhook endpoint for `PUBLIC_URL/webhook/stripe`, and prints the values above. Run it again and it
+   creates nothing. Amounts are satang flags (`--standard 29900 --plus 69900 --seat 19900 --ai 17900`
+   are the defaults), and a live key also needs `--live`:
+   ```sh
+   STRIPE_SECRET_KEY=sk_test_... PUBLIC_URL=https://<worker> node scripts/stripe-setup.ts --yes
+   ```
    Never set `DEV_MODE` in production: it opens the `/dev` routes and the unauthenticated dev channel.
 3. `npx wrangler deploy`
 4. Point the webhooks at the Worker: LINE at `https://<worker>/webhook/line`, and Telegram with
@@ -96,6 +112,17 @@ npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO model_ca
 
 The second command recreates both tables with the current CHECKs, their indexes and the view. Run the
 same commands with `--local` to migrate the dev ledger.
+
+Billing adds the `billing_subscription`, `billing_seat` and `billing_invite` tables, which re-running the
+schema file creates, and the turn outcome `lapsed`, which an old `turn_log` CHECK refuses. Rebuild
+`turn_log` before deploying billing. The second command recreates the table, its indexes and views, and
+the billing tables:
+
+```sh
+npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW gate_weekly_delegation; DROP VIEW weekly_delegation; DROP VIEW unasked_with_followup; DROP INDEX turn_log_agent_time; DROP INDEX turn_log_task; ALTER TABLE turn_log RENAME TO turn_log_old"
+npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
+npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO turn_log SELECT * FROM turn_log_old; DROP TABLE turn_log_old"
+```
 
 The box path adds the `boxes` table, which re-running the schema file creates, and a `backend` column on
 `model_call`, which it can't add to an existing table. Add the column once, before deploying code that

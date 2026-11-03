@@ -20,6 +20,7 @@ import {
   local,
   postStripe,
   quiet,
+  schedule,
   scripted,
   signStripe,
   STRIPE_VARS,
@@ -230,6 +231,20 @@ describe("trial and lapse", () => {
     expect(model.calls).toHaveLength(1);
     expect(box.parses).toEqual([]);
     expect(c.logs("turn").filter((t) => t.eventKind === "message").map((t) => t.outcome)).toEqual(["acted", "no_model", "lapsed", "lapsed", "lapsed"]);
+  });
+
+  test("a reminder the person asked for still arrives after the trial ends, written by code, with no model call", async () => {
+    const kit = billingOn({ TRIAL_DAYS: "1" });
+    const model = scripted([turn({ actions: [schedule("vet", "2099-11-06T09:30", "Call the vet"), { type: "send", text: "Will do." }], task: ["reminder", "vet", "started"] })]);
+    const c = await devChat("dot", { model, at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("remind me on the 6th at 9:30 to call the vet");
+    expect(await c.received()).toEqual(["Will do."]);
+
+    c.clock.set(local("2099-11-06T09:30"));
+    await c.settle();
+
+    expect(await c.received()).toEqual([NOTICE.reminder("Call the vet")]);
+    expect(model.calls).toHaveLength(1);
   });
 
   test("/plan during the trial gives the days left and three Checkout links, which stay out of the history", async () => {

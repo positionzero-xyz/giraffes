@@ -1,166 +1,174 @@
-# Rationale: week-1 agent core (opus candidate)
+# Rationale: week-1 agent core
 
 ## Problem
 
 Build a per-person agent on Cloudflare Workers and SQLite-backed Durable Objects. A person texts it on LINE, Telegram or a dev page. It replies, keeps reminders, sends one daily check-in, and never resets its memory. The platform makes the shape non-obvious in four ways:
 
-- **A Durable Object is not serial across `await`.** While a turn awaits the model call, other requests are delivered to the same object. "One event at a time" therefore has to be built.
-- **There is one alarm per object.** That one alarm must serve wake-ups, debounced messages, delivery retries and log shipping.
-- **Every external effect can happen twice or not at all.** That covers webhooks, alarms, LINE pushes, Telegram sends and D1 writes. A crash can land between any two of them.
-- **Two facts cross users.** The global $1,500 ceiling and the gate logs need one owner each. A per-person object can't own them.
+- **A Durable Object is not serial across `await`.** While a turn awaits the model call, other requests reach the same object. "One event at a time" has to be built.
+- **There is one alarm per object.** It must serve wake-ups, model retries, delivery retries and log shipping.
+- **Every external effect can happen twice or not at all.** That covers webhooks, alarms, model calls, LINE and Telegram sends, and D1 writes. A crash can land between any two of them.
+- **Two facts cross users.** The global $1,500 ceiling and the gate logs need one owner each, and a per-person object can't own them.
 
-Constraints that cross the boundary: the LINE reply token is single-use and lives for about a minute; pushes are billed, and only pushes take `X-Line-Retry-Key`. Telegram has no idempotency key. The week-2 job-result event, versioned jobs, approvals, groups and invites must fit in later without rework.
+The LINE reply token is single-use and lives for about a minute. Pushes are billed, and only pushes take `X-Line-Retry-Key`. Telegram has no idempotency key. The week-2 job-result event, versioned jobs, approvals, groups and invites must fit in later without rework.
 
-## Usage (caller's view)
-
-See `USAGE.md`. In short, the Worker calls `agent.enqueue(envelope)` and returns 200. Everything else happens in `agent.alarm()`. A test drives `devChat(...).say(...)` / `.advanceTo(...)` / `.received()` against the real Worker route, using a scripted model and a fake clock.
+`USAGE.md` shows the call sites. The code is the authority. Where a doc disagrees with it, fix the doc.
 
 ## Shape
 
-### Core idea: one way in, one executor, derived alarm
+### One way in, one executor, a derived alarm
 
-`Agent` (one DO per person, `app/src/agent/agent.ts`) has three public methods: `enqueue`, `alarm`, `snapshot` (plus a test-only `withDeps`).
+`Agent` (one DO per person, `app/src/agent/agent.ts`) has three public methods, `enqueue`, `alarm` and `snapshot`, plus the test-only `withDeps`.
 
-- `enqueue` does one `INSERT OR IGNORE` into `inbox` and arms the alarm no later than the row's `ready_at`. It never processes anything.
-- `alarm` is the only code that calls a model, changes memory or sends a message. It drains in a fixed priority order: recover → fire due wake-ups → turns (each followed by delivery) → compaction → deferred delivery → ship logs → prune. Then it re-arms.
-- The alarm time is **computed, never stored**: `nextAlarm(min of inbox ready_at, fireAt(earliest pending wake-up), outbox ready_at, log retry_at)`. No "next alarm" field can drift from the tables, per single-source-of-truth.
-- A second `alarm()` call while a drain runs joins the in-flight promise. The guard is in memory on purpose. A DO has one live instance, so the guard can't outlive the work it protects. Anything the dead instance left in flight, the next drain's `recover()` treats as crashed.
+- `enqueue` runs one transaction. It does `INSERT OR IGNORE` into `inbox`, and on first contact it also creates the `agent` row and the first daily check-in. It arms the alarm no later than now, then starts a drain with `ctx.waitUntil(this.alarm())`, so a reply never waits on alarm scheduling. The alarm is the durable backstop if that drain dies.
+- `alarm` is the only code that calls a model, changes memory or sends a message. A drain runs isolated phases in order: turns, delivery, log flush, compaction, prune. The turns phase recovers what a dead instance left, fires due wake-ups, then loops over batches (claim, turn, deliver, fire due wake-ups) for at most 60 s. A phase that throws is logged and the next phase still runs, so a failing compaction can't hold back delivery or log shipping.
+- The alarm time is computed, never stored. It is the earliest of the inbox `ready_at`, the fire time of the earliest pending wake-up, the outbox `ready_at` and the log retry time, so no "next alarm" field can drift from the tables.
+- A second `alarm()` while a drain runs joins the in-flight promise. The guard is in memory on purpose. A DO has one live instance, so the guard can't outlive the work it protects, and `recover()` treats whatever a dead instance left as crashed.
 
-This makes serial processing explicit without a lock table. While a turn awaits the model, the only operations that can interleave are an `INSERT` into the inbox and a read.
+While a turn awaits the model, the only operations that can interleave are an inbox insert and a read.
 
-### Data structures (DO SQLite, `app/src/agent/schema.ts`)
+### Data (DO SQLite, `app/src/agent/schema.ts`)
 
-| Table | Owner of | Key invariant |
+| Table | Holds | Key invariant |
 |---|---|---|
-| `inbox` | the durable queue, all event kinds | `event_key UNIQUE`; status `pending → processing → done/failed`; `attempts` bounds crash retries |
-| `turn` | verbatim recent conversation | prompt reads the last 30 only, so the prompt stays bounded even when compaction lags |
-| `memory` (1 row) + `memory_note` | compacted past + model notes | compaction is compare-and-set on `through_turn_seq` |
-| `wakeup` | reminders and the check-in | partial `UNIQUE(key) WHERE status='pending'` is the duplicate rule; check-in successor inserted in the same tx as its firing |
-| `outbox` | everything leaving | one row per turn (all its texts); `id` = UUID = LINE retry key; `intent` decided by code; `admitted_day` makes budget admission idempotent |
-| `spend_month` + `reservation` | per-user spend and global-ceiling leases | `reserved` is `SUM(reservation)`, never stored |
-| `log_outbox` | log rows not yet in D1 | written in the same tx as the fact it records |
+| `inbox` | the durable queue, all event kinds | `event_key UNIQUE`; `pending → processing → done/failed`; `attempts` bounds retries |
+| `turn` | verbatim recent conversation | a turn prompt reads the newest 30 |
+| `memory` (1 row) + `memory_note` | compacted summary, model notes | compaction is compare-and-set on `through_turn_seq`; a turn prompt reads the newest 50 notes |
+| `wakeup` | reminders and the check-in | partial `UNIQUE(key) WHERE status = 'pending'`; `origin` is `person`, `agent` or `system` |
+| `outbox` | everything leaving | one row per turn with all its texts; `id` is a UUID and the LINE retry key; `intent` is set by code; `admitted_day` charges the budget once; `in_doubt` bars the reply token |
+| `spend_month` + `reservation` | per-person spend and global leases | reserved spend is `SUM(reservation)`, never stored |
+| `log_outbox` + `log_flush` | log rows not yet in D1, and their backoff | written in the same transaction as the fact they record |
 
-Derived, not stored: unasked-sent-today (`COUNT` over `outbox.admitted_day`), lateness (`firedAt − dueAt`), reserved spend, "already told them about the limit today" (the inbox outcomes), the alarm time.
+Derived, not stored: unasked messages sent today (`COUNT` over `admitted_day`), lateness (`firedAt - dueAt`), reserved spend, whether the person was already told about the monthly limit today (inbox outcomes), and the alarm time.
 
-Cross-user (D1, `app/src/ledger/d1-schema.sql`): append-only `agent`, `turn_log`, `model_call`, `unasked_message`, `lifecycle`, plus `spend_lease`. The gates are SQL views. "Did a completed task follow this unasked message" is a view, not an update.
+D1 (`app/src/ledger/d1-schema.sql`) holds the cross-user facts: append-only `agent`, `turn_log`, `model_call`, `unasked_message`, `lifecycle` and `action_rejection`, plus `spend_lease`. The gates are SQL views.
 
 ### Types carry the invariants (`app/src/domain.ts`)
 
-- Branded `EpochMs`, `MicroUsd` (integer), `TimeZone`, `LocalDateTime`, `EventKey`, `WakeupKey`, `OutboxId`, `AgentKey`. An `EventKey` can only come from the `eventKey.*` constructors, so every dedupe key has a stated source.
-- `intentOf(event)` decides reply vs unasked from the event kind. The model has no field for it, so it can't route around the budget or quiet hours.
-- The model reads and writes only local wall time (`LocalDateTime`). Zone math lives in `policy/time.ts` alone.
-- `ChannelRegistry` is a mapped type over `CHANNEL_IDS`. Adding a channel id without an adapter fails the build, so there is no hand-synced list.
-- `LogRow` is one union. Each variant maps to one D1 table in one exhaustive switch.
-- `AgentEvent` is a union stored as JSON with no SQL CHECK on kind. Week 2's `job_result` is one new variant, and the exhaustive switches name every place that has to handle it.
+- Branded `EpochMs`, `MicroUsd` (integer), `TimeZone`, `LocalDateTime`, `EventKey`, `WakeupKey`, `OutboxId` and `AgentKey`. An `EventKey` comes only from the `eventKey.*` constructors, so every dedupe key has a stated source.
+- `intentOf(event)` returns `reply`, `requested` or `unasked` from the event kind and the wake-up origin. The model has no intent field.
+- The model reads and writes local wall time only. Zone math lives in `policy/time.ts`.
+- `ChannelRegistry` is a mapped type over `CHANNEL_IDS`, so a channel id without an adapter fails the build.
+- `LogRow` is one union, and each variant maps to one D1 table in one exhaustive switch.
+- `AgentEvent` is stored as JSON with no SQL CHECK on kind. Week 2's `job_result` is one new variant, and the exhaustive switches name every place that must handle it.
 
 ### Where validation lives
 
-- Channel adapters authenticate and parse. They do the HMAC over the raw body (LINE), the constant-time header compare (Telegram), and identity extraction. Wire types never leave `channels/<name>.ts`.
-- `loadConfig` validates env once.
-- Model output is validated twice. The zod schema checks shape in the backend. `planTurn` checks meaning: times, limits, keys. Inside the agent, everything is trusted typed data (per boundary-discipline).
-
-### Interface depth
-
-The Worker learns one method (`enqueue`). A channel implements two (`receive`, `deliver`). A model backend implements one (`parse`). Behind `enqueue` sit queueing, coalescing, scheduling, budget, spend reservation, global leasing, compaction, delivery with reply-or-push, and crash recovery. None of that is a caller's concern. All policy is pure and lives in `policy/` (`schedule`, `outreach`, `spend`, `time`) and `agent/turn.ts` / `compaction.ts`. Every function there is testable without the runtime.
+Channel adapters authenticate and parse: the HMAC over the raw body for LINE, a constant-time header compare for Telegram, and identity extraction. Wire types never leave `channels/<name>.ts`. `loadConfig` validates env once. The zod schema checks the shape of model output in the backend, and `planTurn` checks its meaning (times, limits, keys). Inside the agent, data is trusted and typed.
 
 ### Module map
 
 ```
-app/src/worker.ts            routes /webhook/:channel → adapter.receive → Agent.enqueue; dev routes
-app/src/config.ts            Env → Config (only reader of env strings)
+app/src/worker.ts            /webhook/:channel → adapter.receive → Agent.enqueue; dev routes
+app/src/config.ts            Env → Config, the only reader of env strings
 app/src/domain.ts            branded units, ids, events, intent, outbound, task labels
-app/src/agent/agent.ts       the DO: enqueue, alarm drain, metered model call, delivery, re-arm
-app/src/agent/store.ts       the only SQL; sync methods; tx wrapper (imported only by agent.ts)
-app/src/agent/schema.ts      DO DDL + migrate()
+app/src/agent/agent.ts       the DO: enqueue, drain phases, metered model call, delivery, re-arm
+app/src/agent/store.ts       all DO SQL, synchronous methods (imported only by agent.ts)
+app/src/agent/schema.ts      DO DDL and migrate()
 app/src/agent/turn.ts        TurnOutputSchema, renderUser, planTurn, planWithoutModel, logsForTurn (pure)
 app/src/agent/compaction.ts  planCompaction, compactionCommit (pure)
-app/src/agent/prompt.ts      byte-stable system prompts + playbook placeholder
+app/src/agent/prompt.ts      byte-stable system prompts and the opportunism playbook
 app/src/policy/{time,schedule,outreach,spend}.ts   pure rules
-app/src/model/{model,anthropic,bridge,scripted}.ts port + routing + prices, three backends
-app/src/channels/{channel,line,telegram,dev}.ts    port + registry, three adapters
-app/src/ledger/{ledger.ts,d1-schema.sql}           D1 append + leases, gate views
-app/dev/{bridge.ts,chat.html}                      local claude -p bridge, dev chat page
-app/test/{testkit,agent.test,policy.test}.ts
+app/src/model/{model,anthropic,bridge,scripted}.ts routes, prices, three backends
+app/src/channels/{channel,line,telegram,dev}.ts    port, registry, three adapters
+app/src/ledger/{ledger.ts,d1-schema.sql}           D1 append, leases, gate views
+app/dev/{bridge.ts,chat.html}                      local `claude -p` bridge, dev chat page
+app/test/testkit.ts, app/test/{agent,channels,ledger,model,policy}.test.ts
 ```
 
-Tracing any flow takes three files: `worker.ts` → `agent.ts` → one pure module (`turn.ts`, `policy/*`).
+Tracing a flow takes three files: `worker.ts`, `agent.ts`, and one pure module.
 
-### Dominant access patterns, traced
+## Policy decided by code
 
-1. **Inbound message → reply (hot path).** Worker: `adapter.receive` → `enqueue`, which is one INSERT, plus `getAlarm`/`setAlarm`. After the 1.5 s debounce, `alarm`: `claimBatch` (indexed `inbox(status, ready_at, seq)`) → `turnContext` (memory row, notes, last 30 turns by PK desc, pending wake-ups by index) → `decideReservation` over `spend_month` + `SUM(reservation)` (local, no network) → one model call → `commitTurn` (one tx) → `deliverReady` → LINE reply API. Network hops: the model and the channel. D1 isn't touched on the hot path: logs ship after the inbox empties, and a lease is requested about once per $0.50 of a person's spend.
-2. **Wake-up scheduled and fired.** Scheduling happens inside the turn's commit (partial unique index). Firing: `#rearm` → alarm at `fireAt(min due_at)` → `dueWakeups` (index `wakeup(status, due_at)`) → `planFiring` → `applyFiring` (inbox insert keyed `wake:<id>`) → same turn path, with `intent = unasked` → `admitUnasked` at delivery.
-3. **Daily check-in.** The same as a wake-up, with key `daily-checkin` and inbox key `checkin:<local date>`. The successor is inserted in the firing transaction, and `follow` ensures one exists.
-4. **Gate queries.** D1 views over append-only tables, indexed by `(agent_key, time)`. 100 users × a few hundred rows a week is trivially small.
-5. **Global ceiling.** About once per $0.50 per person, there is one conditional `INSERT … SELECT … WHERE SUM + chunk <= ceiling` in D1. Nothing per call.
+**Who asked decides budget and quiet hours.** A wake-up is `person` only when the turn was started by the person's own message and the model sets `asked: true`. Every wake-up scheduled during a proactive turn is `agent`. The daily check-in (09:00 local) is `system`.
 
-### Failure cases
+- A `person` wake-up fires at its due time, even between 22:00 and 08:00. Its message is `requested`, so it skips the unasked budget and quiet hours.
+- An `agent` or `system` wake-up due in quiet hours fires at 08:00. Its message is `unasked`. Every delivery attempt checks quiet hours and defers to 08:00. The first attempt admitted charges the daily budget of 3 and records `admitted_day`, and later attempts are not charged again. Past the budget, the row is dropped and logged as `dropped_budget`.
+- A reply to a message or a follow is `reply` and is never limited.
 
-- **Crash mid-event.** The claim committed `processing` and `attempts+1`, and the reservation row is durable. Nothing else is written until `commitTurn`, which is one transaction: turns, wake-ups, notes, outbox, inbox done, settle and logs land together or not at all. The next drain's `recover()` puts the batch back to `pending` and settles the orphaned reservation at its estimate. The model can't tell us what it billed, so we charge conservatively and log `recovered_after_crash`. The event is then re-run from scratch, and none of its effects were applied before. After 3 claims, the batch commits a `poison` turn with a fixed apology, so a crash loop can't eat the person's queue.
-- **Crash after commit, before or while sending.** The outbox row is `pending` or `sending`. `recover()` turns `sending` into `pending` with `in_doubt = 1`. LINE: an in-doubt row skips the reply token and pushes with `X-Line-Retry-Key = outbox.id`. If the first push landed, LINE answers 409, which we treat as sent. If the first attempt was a reply that landed, the person sees a duplicate; we accept that. Telegram: resent, with a possible duplicate. We accept a rare duplicate over a lost reminder. Budget admission was recorded with `admitted_day` before the fetch, so it is never charged twice.
-- **Duplicate webhook delivery.** `inbox.event_key` is `line:<webhookEventId>` / `tg:<update_id>` / `dev:<client id>`, and the insert is `INSERT OR IGNORE`. A redelivery returns `"duplicate"` and the Worker still answers 200. Done rows are kept 14 days for this.
-- **Alarm firing twice.** A concurrent second call joins the in-flight drain. A sequential second call finds nothing due: wake-ups were closed in the same transaction that inserted `wake:<id>`, and even a replayed insert is ignored by the unique key. Check-ins are additionally keyed per local day.
-- **Message arriving while a model call is in flight.** `enqueue` inserts it, which is allowed during the outbound fetch. The in-flight turn commits as planned. The drain loop then claims the new message in the next batch, and that turn's prompt contains the previous reply. The 1.5 s debounce plus batching of consecutive ready messages folds a burst of texts into one turn before any call starts.
-- **Model unavailable.** The batch goes back to `pending` with backoff (`releaseBatch`) and attempts are kept, so a long outage ends as `model_failed`, not a loop. Invalid output or a refusal commits a fixed "say it again" reply for messages and nothing for proactive events. All of it is logged.
-- **D1 down.** Logs wait in `log_outbox` and ship later with deterministic ids (exactly once in effect). A lease request that can't reach D1 makes the turn retry later. It never runs the call unreserved.
+**Requested reminders have a floor.** When a `person` wake-up's turn gets no usable model answer, code sends `Reminder: <note>` from the stored row, led by the fixed late notice when it is more than an hour late. That covers invalid output, a refusal, a poisoned batch, a budget refusal, and five unavailable attempts (about 7.5 minutes). A chat message gets three model attempts (about 90 s) before the fixed "say it again" reply. Agent wake-ups and check-ins send nothing on failure.
 
-### What it deliberately does not do
+**Code corrects what it rejects.** `planTurn` rejects a reminder that is before the current minute, more than 366 days ahead, the 21st pending, a key already pending, an unreadable time, or the check-in key. It also rejects a cancel with nothing pending. In a reply turn, a code-written correction goes out in the same delivery, so a model confirmation can't go out alone. A correction displaces the third send when the turn already has three. Every rejection, in any turn, is logged to `action_rejection`. A reminder for the current minute is accepted and fires on the next alarm.
 
-- No in-request processing, and no `ctx.waitUntil` turns.
-- No lock rows.
-- No stored alarm time.
-- No model-chosen ids, intents or time zones.
-- No mutable counters for anything that can be counted.
-- No D1 write inside a turn.
-- No Cloudflare Queues.
-- No Agents SDK.
+**Lateness.** A wake-up that fires more than an hour after its due time tells the model so. Code prepends the model's `lateNotice`, or a fixed one when the model left it out.
 
-## Synthesis decision
+**Send caps.** A turn sends at most 3 texts of 600 characters each, in at most 6 actions. Notes are capped at 300 characters and the late notice at 200. The output budgets (`maxTokens` 12,000 for turns and 12,500 for compaction) fit the largest output each schema accepts, even in Thai, and `policy.test.ts` pins that.
 
-Two candidates were sketched in parallel (Claude Opus and GPT-6.1 Sol), and a third model (Gemini 3.8 Flash) judged them read-only. This sketch (Opus) is the base. The judge scored it 26/30 against 21/30, and the orchestrator's own reading agreed. Both candidates converged on the same core: an inbox in the person's DO, an in-memory drain promise plus recovery from storage, one transaction per turn, a derived alarm, pure policy and log export to D1. The base won on crash-safe delivery (it resends in doubt, with LINE's retry key, rather than possibly losing a reminder), local-only spend on the hot path, and reminder keys the model can name across turns.
+**Reachability.** Follow and block events carry the platform's timestamp. One older than the last recorded change is logged as `stale` and changes nothing. A block skips the model. A message from a blocked person, written at or after that block, sets them active and re-creates a missing check-in, so the reply is delivered. A send that fails because the person is gone (Telegram 403) marks them blocked but leaves the timestamp alone, because our clock isn't comparable with the platform's. While a person is blocked, their wake-ups are skipped (the check-in gets no successor) and their outbox rows are dropped.
 
-Amendments to the sketch, which the implementation follows:
+**Time zone.** Week 1 runs every person on Asia/Bangkok time. The `agent.tz` column exists and the zone math takes a zone, but nothing sets a per-person zone yet. A Telegram user elsewhere gets reminder times and quiet hours in Bangkok time.
 
-1. **No debounce.** `enqueue` still inserts and arms the alarm as the durable backstop. It also starts the drain at once through `ctx.waitUntil`, so a reply never waits on alarm scheduling. Messages already pending when a batch is claimed are still folded into one turn. (From the Sol candidate.)
-2. **`maxRetries: 0` on the Anthropic client.** Every billed attempt goes through its own reservation, so the SDK can't retry past the spend ledger. (From the Sol candidate.)
-3. **Ordered lifecycle.** Reachability keeps the provider timestamp of the last follow, unfollow or block. An older or replayed lifecycle event is logged but can't change reachability. (From the Sol candidate.)
-4. **Wake-up origin decides budget and quiet hours.** Each wake-up stores who asked for it: `person`, `agent`, or `system` (the daily check-in). A message caused by a `person` wake-up is a requested reminder. It skips the unasked budget and fires at the time the person chose, even inside quiet hours. `agent` and `system` wake-ups are unasked, so they count against the budget and wait for quiet hours to end. Code sets the origin. A wake-up scheduled during a turn started by the person's own message may be `person` when the model marks it as asked for. Any wake-up scheduled during a proactive turn is `agent`. The cap of 20 pending wake-ups bounds the rest.
-5. **Fix.** `spend_lease` inserts use the `agent_key` column that the D1 schema defines.
+## Spend
 
-Not taken: the Sol candidate's typed week-2 job and approval stubs. The `AgentEvent` union already leaves the slot, and stubs written before the booking probe would be guesses.
+`estimate()` is an upper bound on the bill. It counts the prompt's UTF-8 bytes (no token is shorter than a byte), adds 4,000 tokens for the injected schema and framing, prices all of it at the cache-write rate, and adds the route's full `maxTokens` of output. The prompt size picks the rate card, so a Haiku prompt over 100K tokens is priced on the long-context card.
+
+The reservation is local. `spent + reserved + estimate` must fit the person's $15 monthly cap. When it exceeds the person's lease, the agent asks D1 for a $0.50 chunk of the global ceiling with one conditional `INSERT … SELECT … WHERE SUM + chunk <= ceiling`. That is about one D1 round trip per $0.50 of a person's spend, and none per call. A lease request that can't reach D1 retries the turn later. It never runs the call unreserved.
+
+Settlement follows what is known about the bill:
+
+| Outcome | Charged | `model_call.status` |
+|---|---|---|
+| a response, valid or not | its usage | `settled` |
+| 429 or 529, or the dev bridge is down | $0 | `unavailable` |
+| no response, a 408, or another 5xx | the estimate | `in_doubt` |
+| the call threw in process | the estimate | `in_doubt` |
+| the instance died mid-call | the estimate, charged by `recover()` | `recovered_after_crash` |
+
+The Anthropic client runs with `maxRetries: 0`, so every billed attempt passes through its own reservation.
+
+## Failure cases
+
+- **Crash mid-turn.** The claim committed `processing` and `attempts + 1`, and the reservation is durable. `commitTurn` is one transaction: turns, wake-ups, notes, outbox, inbox done, settlement and logs land together or not at all. `recover()` puts the batch back to `pending` and settles orphaned reservations at their estimate. After 3 claims the batch is poisoned. A message gets a fixed apology, a requested reminder gets its floor, and anything else gets nothing.
+- **Model unavailable.** The batch goes back to `pending` with a 30 s doubling backoff, and attempts are kept. A long outage ends as `model_failed` after 3 attempts, or 5 for a requested reminder. Invalid output or a refusal ends the turn the same way at once.
+- **Crash after commit, before or during a send.** `recover()` turns `sending` back to `pending` with `in_doubt = 1`. A LINE reply that answered 5xx or lost its connection is marked in doubt the same way. An in-doubt row is read without its reply token, so LINE pushes it with `X-Line-Retry-Key = outbox.id`, and a 409 counts as sent. If the lost attempt was a reply that landed, the person sees a duplicate. Telegram sends one `sendMessage` per row, texts joined by blank lines, so a retry repeats the whole row once and never part of it. A crash after a Telegram send that landed also duplicates. Budget admission was recorded before the send, so it is never charged twice.
+- **Delivery failure.** A 429 or 5xx retries after 30 s, or after Telegram's `retry_after`. LINE's monthly-quota 429 fails at once. A row is dropped after 5 attempts.
+- **Duplicate webhook.** `inbox.event_key` is `line:<webhookEventId>`, `tg:<update_id>` or `dev:<client id>`, inserted with `INSERT OR IGNORE`. Done rows are kept 14 days for this.
+- **Webhook enqueue fails.** The Worker answers 200 only after every envelope is in its inbox. Otherwise the request fails with 500, and the channel's redelivery is the retry. LINE redelivery is off by default and must be turned on.
+- **Alarm fires twice.** A concurrent call joins the in-flight drain. A sequential call finds nothing due, because a wake-up is closed in the transaction that inserts `wake:<id>`, and check-ins are keyed `checkin:<local date>`.
+- **Message during a model call.** `enqueue` inserts it. The in-flight turn commits as planned, and the next batch's prompt contains the previous reply. Consecutive messages already pending when a batch is claimed (up to 10) become one turn. There is no debounce.
+- **Compaction fails.** Compaction runs when there are more than 60 turns or 40 notes. Each call folds one page: up to the oldest 30 turns, always keeping the newest 30, and up to 40 notes, folding toward 20. Any outcome other than success backs off 5 minutes, doubling to a day. The backoff is stored on the `memory` row and reset on success. A backlog shrinks one page per drain.
+- **D1 down.** Logs wait in `log_outbox` and ship later with deterministic ids, backing off from 10 s, doubling to an hour.
+
+### What it does not do
+
+No turn runs inside the webhook request. There are no lock rows, no stored alarm time, no model-chosen ids or time zones, no mutable counters for anything countable, no D1 write inside a turn, no Cloudflare Queues and no Agents SDK.
 
 ## Tradeoffs accepted
 
-- **Debounce.** We accept 1.5 s of added reply latency on every message in exchange for one turn (one model call, one coherent reply) per burst of texts.
-- **Crash cost.** We accept charging a crashed call's full estimate in exchange for never under-counting spend after a crash.
-- **Unused leases.** We accept up to $0.50 per active person of unused global lease at month end ($50 at 100 people) in exchange for no cross-user hop on the per-call path and no global hot row.
-- **Duplicate sends.** We accept a possible duplicate on Telegram, and on an in-doubt LINE reply, after a crash in the send window, in exchange for never losing a reminder.
-- **Budget order.** We accept that unasked budget is first come, first served within a day. A fourth reminder the person asked for is dropped, exactly as the brief's rule says. See the open questions.
-- **Lossy compaction lag.** When compaction lags (budget or failure), turns between the summary and the 30-turn window drop out of the prompt until it catches up. In exchange, the prompt size is bounded and a reply never waits on compaction.
-- **English notices.** Code-generated notices (quiet hours, limits, the late-notice fallback) are English. The model writes the late notice itself in the person's language, and code inserts the fallback only when the model omitted it.
-- **One coarse DO class.** One `Agent` class holds everything for a person, with no actor per concern, in exchange for one transaction boundary per turn. The class is large, but the store and the pure planners keep each file single-purpose.
+- **No debounce.** A reply starts at once. In exchange, a burst of texts that arrives during a model call becomes more than one turn.
+- **Charging the estimate when the bill is unknown.** Spend is never under-counted after a crash or a lost response, at the cost of over-charging some calls.
+- **Unused leases.** Up to $0.50 per active person of unused global lease at month end ($50 at 100 people), in exchange for no cross-user hop per call and no global hot row.
+- **Duplicate sends.** A crash in the send window can duplicate a Telegram message or an in-doubt LINE reply, in exchange for never losing a reminder.
+- **Lossy compaction lag.** While compaction lags, turns between the summary and the 30-turn window are missing from the prompt. In exchange, the prompt is bounded and a reply never waits on compaction.
+- **English notices.** Code-written text is English: corrections, the monthly limit, the late-notice fallback and the requested-reminder floor. The model writes its own late notice in the person's language.
+- **One coarse DO class.** One `Agent` holds everything for a person, which gives one transaction per turn. The store and the pure planners keep each file single-purpose.
 
 ## Alternatives considered
 
-- **Process inline in the webhook request**, awaiting the turn before answering. It looks simplest, but it exposes timeouts and interleaving to every caller. Two webhooks for one person would run two turns concurrently, and a crash loses the event with no retry. Rejected because it pushes the hardest invariant (serial, crash-safe) onto every entry point.
-- **Cloudflare Queues** (a global queue, with a consumer calling the DO). This adds a hop and a second durable queue whose ordering per person isn't guaranteed. The DO's SQLite is already a durable serial queue. Rejected as two ways to do one task.
-- **A lock or lease row** (`processing_until`) instead of the in-memory guard. That takes expiry tuning and a stale-lease path. A DO's single-instance guarantee already gives the property, and `recover()` handles the dead-instance case. Rejected as a structure that adds a failure mode to solve one that can't occur.
-- **The global ceiling in a singleton DO, with reserve and settle per call.** Every model call would make a cross-object round trip to one hot object, and a crash between reserve and settle leaks global reservations that need their own recovery. Leases keep per-actor state per the separate-before-serializing principle, with the merge at the one point that needs it.
-- **Analytics Engine for logs.** It samples, retains data for a limited time, and has no joins or exact counts. The gates need exact per-person weekly counts and joins (unasked → completed task). Rejected.
-- **The Cloudflare Agents SDK** (`this.schedule`, state sync). It owns the alarm and its own schedule table. Our alarm must be the minimum over four tables with quiet-hours-aware fire times, and serial semantics across awaits must be explicit. Rejected: we would be working around the abstraction.
-- **The model rewrites its whole memory each turn** (a `memory` field in the output). That costs output tokens on every turn and lets a single bad turn erase facts. Rejected for append-only notes plus periodic compaction, with compare-and-set.
-- **Model-declared message intent or model-assigned wake-up ids.** Either lets the model bypass the budget or create silent duplicates. Rejected. Intent is derived, and keys are namespaced and unique among pending.
+- **Process inline in the webhook request.** Two webhooks for one person would run two turns at once, and a crash loses the event. Rejected because it pushes the serial, crash-safe invariant onto every entry point.
+- **A 1.5 s debounce on every message.** It folds a burst into one turn but delays every reply. Replaced by starting the drain from `enqueue` and batching what is already pending.
+- **Cloudflare Queues.** A second durable queue with no per-person ordering, when the DO's SQLite already is one. Rejected.
+- **A lock or lease row** instead of the in-memory guard. It needs expiry tuning and a stale-lease path for a case that a DO's single instance already rules out. Rejected.
+- **The global ceiling in a singleton DO**, reserved and settled per call. Every call would hop to one hot object, and a crash between reserve and settle leaks reservations. Leases keep state per actor and merge at the one point that needs it.
+- **Analytics Engine for logs.** It samples, expires data and has no joins. The gates need exact weekly counts and joins. Rejected.
+- **The Cloudflare Agents SDK.** It owns the alarm and its own schedule table, and our alarm is the minimum over four tables with quiet-hours-aware fire times. Rejected.
+- **The model rewrites its whole memory each turn.** It costs output tokens every turn and lets one bad turn erase facts. Rejected for append-only notes plus compare-and-set compaction.
+- **Counting requested reminders against the unasked budget.** A heavy reminder user would lose the fourth reminder they asked for. Rejected.
+- **Typed week-2 job and approval stubs.** The `AgentEvent` union already leaves the slot, and stubs written before the booking probe would be guesses. Not taken.
 
 ## Open questions and risks
 
-- Should reminders the person explicitly asked for count against the 3/day unasked budget? The brief says every non-reply counts, so this design counts them. A heavy reminder user would lose the 4th.
-- Is 1.5 s the right debounce, or should a lone short message ("ok") skip it?
-- Is "charge the estimate on crash" acceptable for the cost gate, or should recovered calls be reported separately? They are separately labeled in `model_call.status`.
-- `zodOutputFormat` with a `discriminatedUnion` of actions: does structured output on Haiku 5.5 accept the resulting `anyOf`? If not, flatten to one object with a `type` enum and optional fields, validated in `planTurn`. That is a local change.
-- Is the system prompt long enough to clear the minimum cacheable prefix on Haiku 5.5? If not, caching silently does nothing. Measure it in week 1.
-- Should the dev transcript expose raw outbox rows (useful when driving) or only what the person would see?
-- **Risk: the 15-minute alarm wall-clock limit.** A drain is capped at 60 s of new batches and re-arms for now, so one person can't hold an alarm.
-- **Risk: LINE quota exhaustion.** It returns 429 on push. This design drops the push and logs it as failed. The operator alert at 70% of quota is not designed here.
+- Is charging the estimate on a crash or a lost response acceptable for the cost gate? Those calls are labeled in `model_call.status`.
+- Does structured output on Haiku 5.5 accept the `anyOf` that `zodOutputFormat` makes from the action union? If not, flatten it to one object with a `type` enum, validated in `planTurn`.
+- Does the system prompt clear Haiku 5.5's minimum cacheable prefix? If not, caching silently does nothing.
+- The only guard on the requested bypass of budget and quiet hours is the model's `asked` flag on a message turn, bounded by the 20 pending reminders.
+- Compaction backoff is not part of the alarm time, so compaction resumes only when something else wakes the drain.
+- A drain stops starting batches after 60 s and re-arms for now, which keeps one person well inside the 15-minute alarm limit.
+- LINE quota exhaustion fails every push, and nothing alerts the operator.
 
-## Next implementation step
+Known ordering races, all open:
 
-Fill in `policy/time.ts` and `policy/outreach.ts` and make `test/policy.test.ts` pass. Every later piece trusts their answers.
+- A model backoff can reorder a person's messages. A message that arrives during the backoff is claimed and answered first, without the earlier one in its prompt.
+- Concurrent LINE envelopes for one person can swap. The Worker enqueues one webhook's events in parallel, and `inbox.seq` follows arrival order.
+- A cancel can lose to a firing reminder. If the wake-up fires before the cancel's turn runs, the cancel finds nothing pending and the reminder still goes out.
+- Telegram lifecycle events in the same second can misorder. Their timestamps are whole seconds, so two of them tie and apply in inbox order.
+- A reply recorded in history may never have been delivered. The agent's text is committed to `turn` before delivery, and a dropped or failed row stays in the prompt as said.

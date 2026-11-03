@@ -1,158 +1,110 @@
 # Agent core: usage
 
-Written before the types. The type sketch under `app/` is derived from this file; where they disagree, this file wins.
+This file shows how callers use the agent core. The code is the authority. Where this file disagrees with it, fix this file. `RATIONALE.md` explains why the core is shaped this way. `../../README.md` covers running and deploying it.
 
 ## The one idea
 
-Each person is one Durable Object, `Agent`. It has exactly **one way in** (`enqueue`) and exactly **one executor** (`alarm`). Everything the outside world tells the agent is appended to its SQLite inbox and nothing else happens in the request. All work (model turns, firing wake-ups, delivering messages, compaction, shipping logs) happens inside `alarm()`, which drains durable tables and then re-arms the alarm to the earliest thing any table says is due. There is no stored "next alarm" value and no in-request processing, so there is nothing to keep in sync and nothing that can interleave.
+Each person is one Durable Object, `Agent`, with one way in (`enqueue`) and one executor (`alarm`). `enqueue` appends the event to the SQLite inbox, arms the alarm, and starts a drain with `ctx.waitUntil`. The drain is the only code that calls the model, fires wake-ups, delivers messages, compacts memory and ships logs. When it finishes, it sets the alarm to the earliest time any table says is due.
 
 ```
- LINE / Telegram / dev ──► worker.ts ──► adapter.receive(req) ──► Agent.enqueue(envelope)   (INSERT OR IGNORE, set alarm)
+ LINE / Telegram / dev ──► worker.ts ──► adapter.receive(req) ──► Agent.enqueue(envelope)   INSERT OR IGNORE, arm, waitUntil(alarm())
                                                                            │
                                                           Agent.alarm() ◄──┘   the only executor
                                                              │
-     fire due wake-ups ─► inbox    take next batch ─► model turn ─► one SQL transaction ─► deliver outbox ─► flush logs ─► re-arm
+     recover, fire due wake-ups, then per batch: model turn ─► one SQL transaction ─► deliver
+     then: deliver deferred rows ─► flush logs ─► compact one page ─► prune ─► re-arm
 ```
 
-## Quickstart (local, no accounts)
+## Call site 1: the Worker routes a webhook to a person's agent
 
-```sh
-# terminal 1: the Claude-login bridge (dev only; the Worker can't spawn processes)
-bun app/dev/bridge.ts                    # listens on 127.0.0.1:8789, runs `claude -p` per call
-
-# terminal 2
-cd app && wrangler dev                   # MODEL_BACKEND=bridge, DEV_MODE=1 in .dev.vars
-open http://localhost:8787/dev           # minimal chat page, user picker, live transcript
-```
-
-`.dev.vars`:
-
-```
-MODEL_BACKEND=bridge
-MODEL_BRIDGE_URL=http://127.0.0.1:8789
-DEV_MODE=1
-```
-
-Production sets `MODEL_BACKEND=anthropic` and `ANTHROPIC_API_KEY`, plus the LINE and Telegram secrets. Tests set `MODEL_BACKEND=scripted` and inject a script per test.
-
-## Call site 1: the Worker routes a LINE webhook to a person's agent
-
-`app/src/worker.ts`. One route serves every channel. The adapter owns signature checks and payload shapes, so the Worker never sees a LINE type.
+`app/src/worker.ts`. One route serves every channel. The adapter owns signature checks and payload shapes, so the Worker never sees a LINE or Telegram type.
 
 ```ts
-export default {
-  async fetch(req: Request, rawEnv: Env): Promise<Response> {
-    const config = loadConfig(rawEnv);                     // validates env once, at the boundary
-    const url = new URL(req.url);
-    const hook = url.pathname.match(/^\/webhook\/(line|telegram|dev)$/);
-    if (req.method === "POST" && hook) {
-      const adapter = makeChannels(config)[hook[1] as ChannelId];
-      const received = await adapter.receive(req);         // verifies x-line-signature over the raw body
-      if (received.kind === "rejected") return new Response(null, { status: received.status });
-      // Durable before we answer 200. If any enqueue throws we answer 500 and the channel redelivers;
-      // the inbox's UNIQUE(event_key) makes the redelivery a no-op for the ones that landed.
-      await Promise.all(received.envelopes.map((e) => agentStub(rawEnv, e.agent).enqueue(e)));
-      return new Response("ok");
-    }
-    if (config.devMode) return devRoutes(req, rawEnv);    // GET /dev, GET /dev/transcript?user=
-    return new Response("not found", { status: 404 });
-  },
-};
-
-// A person is keyed by channel + channel user ID. No account linking in week 1.
-const agentStub = (env: Env, key: AgentKey) => env.AGENT.get(env.AGENT.idFromName(key));
-```
-
-`enqueue` returns in one synchronous SQLite write, well inside LINE's webhook timeout. The reply token from the webhook rides along inside the envelope as an opaque `ReplyHandle`.
-
-## Call site 2: one event, end to end
-
-The person texts "remind me tomorrow 9am to call the clinic". Inside the `Agent` Durable Object:
-
-1. `enqueue(envelope)` runs `INSERT OR IGNORE INTO inbox (event_key = 'line:<webhookEventId>', ready_at = now + 1.5s)` and sets the alarm to `ready_at` if that is earlier than the current one. Returns `"queued"` (or `"duplicate"` on a redelivery).
-2. `alarm()` starts a drain. First it recovers anything a crashed run left behind (rows in `processing` or `sending`, open spend reservations).
-3. It moves due wake-ups into the inbox (none here), then takes the next **batch**: the oldest ready event, plus any consecutive ready `message` events behind it, so three quick texts become one turn.
-4. It builds the prompt: byte-stable system prompt (rules + playbook) first, then memory summary, notes, the last 30 turns, pending wake-ups with their keys, the batch, local "now", today's unasked budget left.
-5. `#callModel("turn", prompt, TurnOutputSchema)` estimates cost, reserves it against the person's month (local SQLite, no network) and, if the local lease from the global ceiling is short, asks the ledger for another chunk. Then it calls the model once. The model returns:
-   ```json
-   { "actions": [
-       { "type": "schedule_wakeup", "key": "call-clinic", "at": "2026-11-05T09:00", "note": "Remind: call the clinic" },
-       { "type": "send", "text": "Done. I'll remind you tomorrow at 9." } ],
-     "task": { "kind": "reminder", "key": "call-clinic", "status": "started" } }
-   ```
-6. `planTurn(output, ctx)` (pure) validates every action: local time to instant in the person's zone, not in the past, under 20 pending, key not already pending. It returns a `TurnCommit`, never a partial.
-7. One `transactionSync`: append the person's text and the agent's text to `turn`, insert the wake-up, insert one outbox row (`intent = 'reply'`, both texts, the reply handle), mark the inbox rows `done`, settle the reservation to actual cost, append log rows to `log_outbox`.
-8. Delivery: the LINE adapter sees a fresh reply token and calls the free reply API. If the token is stale it pushes with `X-Line-Retry-Key = outbox.id`.
-9. After the inbox is empty: compaction if the verbatim turns crossed the threshold, flush `log_outbox` to D1, then `#rearm()` sets the alarm to the earliest of: ready inbox rows, the next wake-up's fire time, the next outbox retry, pending logs.
-
-## Call site 3: a wake-up is scheduled and fires
-
-The wake-up from call site 2 is a row in `wakeup` (`key = 'call-clinic'`, `due_at`, `status = 'pending'`). `#rearm()` includes `fireAt(due_at, tz)` in its minimum, so the Durable Object alarm is set for 09:00 Bangkok time.
-
-At 09:00 `alarm()` runs `planFiring(now, tz, dueWakeups)` (pure). For each due row it returns either "fire" or "defer until 08:00" (quiet hours). Firing is one transaction:
-
-```ts
-// inside Agent.#fireDueWakeups(), simplified
-for (const f of planFiring(now, person.tz, store.dueWakeups(this.sql, now))) {
-  if (f.kind === "defer") continue;                       // re-arm will pick up f.until
-  store.tx(this.ctx, () => {
-    store.insertInbox(this.sql, { key: eventKey.wakeup(f.wakeup.id), event: f.event, readyAt: now });   // INSERT OR IGNORE
-    store.markWakeupFired(this.sql, f.wakeup.id, now);
-    if (f.next) store.insertWakeup(this.sql, f.next);     // the daily check-in schedules its successor
-  });
+const channel = req.method === "POST" ? url.pathname.match(WEBHOOK)?.[1] : undefined;
+if (channel !== undefined && isChannelId(channel)) {
+	const received = await makeChannels(config)[channel].receive(req);
+	if (received.kind === "rejected") return new Response(null, { status: received.status });
+	await Promise.all(received.envelopes.map((e) => agentStub(env, e.agent).enqueue(e)));
+	return new Response("ok");
 }
 ```
 
-The event then goes through the same turn as a message, with two differences decided by code, not the model:
+A person is keyed by channel and channel user id (`p:<channel>:<id>`). There is no account linking in week 1. If any `enqueue` throws, the request fails with 500 and the channel redelivers. `UNIQUE(event_key)` makes the redelivery a no-op for the envelopes that landed. A LINE reply token travels inside the envelope as a `ReplyHandle`.
 
-- Its sends are `intent = 'unasked'`, so delivery checks quiet hours and the daily budget (3) before sending. Over budget, the row is dropped and logged to `unasked_message` with `status = 'dropped_budget'`.
-- If `firedAt - dueAt > 1h`, the prompt states the real due time and the turn must carry a `lateNotice`. Code prepends it to the first text, and falls back to a fixed notice if the model left it out.
+## Call site 2: one message, end to end
 
-The daily check-in is a wake-up of kind `checkin` with the reserved key `daily-checkin`. Code creates it on first contact and on `follow`, and inserts its successor when it fires. Its inbox key is `checkin:<local date>`, so there is at most one check-in per local day, whatever happens to the rows.
+The person texts "remind me tomorrow 9am to call the clinic".
+
+1. `enqueue(envelope)` inserts `event_key = 'line:<webhookEventId>'` with `ready_at = now`, arms the alarm no later than now, starts a drain, and returns `"queued"`. A redelivery returns `"duplicate"`.
+2. The drain recovers anything a dead instance left (rows in `processing` or `sending`, open reservations), then fires due wake-ups into the inbox.
+3. It claims a batch, starting with the oldest ready event. If that event is a message, the consecutive ready messages behind it join, up to 10 in all.
+4. `renderUser` builds the prompt after the byte-stable system prompt: local now in the person's zone, the memory summary and newest 50 notes, pending wake-ups with their keys, unasked messages left today, the last 30 turns, and the batch.
+5. `#callModel("turn", …)` reserves the estimate against the person's month in local SQLite, asks D1 for a lease chunk only when the local lease is short, then calls the model once. The model returns:
+   ```json
+   { "actions": [
+       { "type": "schedule_wakeup", "key": "call-clinic", "at": "2026-11-05T09:00", "note": "Remind: call the clinic", "asked": true },
+       { "type": "send", "text": "Done. I'll remind you tomorrow at 9." } ],
+     "task": { "kind": "reminder", "key": "call-clinic", "status": "started" } }
+   ```
+6. `planTurn(output, view)` is pure. It converts the local time to an instant, admits or rejects each action, and returns one `TurnCommit`. Because a message started the turn and `asked` is true, the wake-up's origin is `person`. A rejected action adds a code-written correction to the reply and a row to `action_rejection`.
+7. One transaction appends the person's text and the agent's text to `turn`, inserts the wake-up, inserts one outbox row (`intent = 'reply'`, both texts, the reply handle), marks the inbox row `done`, settles the reservation at the real cost, and appends log rows to `log_outbox`.
+8. Delivery uses the free LINE reply API while the token is fresh and the row is not in doubt. Otherwise it pushes with `X-Line-Retry-Key = outbox.id`.
+9. After the batches, the drain delivers any deferred rows, flushes `log_outbox` to D1, compacts one page if due, prunes, and re-arms.
+
+## Call site 3: a wake-up fires
+
+The wake-up from call site 2 is a `wakeup` row (`key = 'call-clinic'`, `origin = 'person'`, `status = 'pending'`). The re-arm includes its fire time, so the alarm is set for 09:00 Bangkok time.
+
+At 09:00 `planFiring` (pure) returns a firing for each due row whose fire time has passed. One transaction inserts the inbox event keyed `wake:<id>` and marks the wake-up `fired`. The event then runs through the same turn as a message. Its origin decides the rest:
+
+| Origin | Created by | Fire time | Outbox intent | On delivery |
+|---|---|---|---|---|
+| `person` | a message turn with `asked: true` | due time, even at night | `requested` | sent; no budget, no quiet hours |
+| `agent` | any other `schedule_wakeup` | 08:00 if due in quiet hours | `unasked` | quiet hours on every attempt; budget of 3 a day |
+| `system` | code: the daily check-in at 09:00 | as `agent` | `unasked` | as `agent` |
+
+If the wake-up fires more than an hour late, the prompt says so and code prepends the late notice to the first text. If a `person` wake-up gets no usable model answer, code sends `Reminder: <note>` instead.
+
+The check-in has the reserved key `daily-checkin`. Code creates it on first contact, on a newer follow, and when a blocked person writes again, and it inserts the successor in the firing transaction. Its inbox key is `checkin:<local date>`, so it fires at most once per local day. While a person is blocked, due wake-ups are skipped.
 
 ## Call site 4: a test drives a conversation
 
-`app/test/agent.test.ts`, with `vitest` and `@cloudflare/vitest-pool-workers`. The scripted model validates each canned output against the real schema, so a schema change breaks the script, not production.
+`app/test/agent.test.ts` runs inside the Workers runtime with `@cloudflare/vitest-pool-workers`. `devChat` posts to the real `/webhook/dev` route and swaps in a scripted model, a fake clock, an in-memory ledger and a scripted channel. The scripted model checks every canned output against the real schema, so a schema change breaks the script, not production.
 
 ```ts
-import { devChat, schedule, scripted, send, turn } from "./testkit";
+test("a reminder the person asked for at 23:00 arrives at 23:00 and isn't counted as unasked", async () => {
+	const model = scripted([
+		turn({ actions: [schedule("bins", "2099-11-04T23:00", "Take the bins out"), send("Will do.")], task: ["reminder", "bins", "started"] }),
+		turn({ actions: [send("Take the bins out!")], task: ["reminder", "bins", "completed"] }),
+	]);
+	const c = await devChat("dan", { model, at: "2099-11-04T21:30" });
 
-test("a reminder set at 21:30 for 23:00 is held until 08:00 and says it is late", async () => {
-  const model = scripted([
-    turn({ actions: [schedule("bins", "2026-11-04T23:00", "Take the bins out"), send("Will do.")], task: ["reminder", "bins", "started"] }),
-    turn({ actions: [send("Take the bins out!")], lateNotice: "Sorry, this was due at 23:00 last night.", task: ["reminder", "bins", "completed"] }),
-  ]);
-  const chat = await devChat("alice", { model, at: "2026-11-04T21:30", tz: "Asia/Bangkok" });
+	await c.say("remind me at 11pm to take the bins out");
+	expect(await c.received()).toEqual(["Will do."]);
 
-  await chat.say("remind me at 11pm to take the bins out");
-  expect(await chat.received()).toEqual([
-    "Will do.\n(I don't send messages between 22:00 and 08:00, so this reminder will come at 08:00.)",
-  ]);
-
-  await chat.advanceTo("2026-11-05T08:00");               // moves the fake clock, runs the DO alarm until idle
-  expect(await chat.received()).toEqual(["Sorry, this was due at 23:00 last night.\nTake the bins out!"]);
-
-  expect((await chat.snapshot()).unaskedSentToday).toBe(1);
-  expect(chat.logs("turn").map((l) => l.taskStatus)).toEqual(["started", "completed"]);
+	await c.advanceTo("2099-11-04T23:00");
+	expect(await c.received()).toEqual(["Take the bins out!"]);
+	expect((await c.snapshot()).unaskedSentToday).toBe(0);
+	expect(c.logs("unasked")).toEqual([]);
 });
 ```
 
-Pure policy is tested without the Worker runtime (`app/test/policy.test.ts`):
+`advanceTo` moves the fake clock from alarm to alarm and runs each drain until idle. Scenarios use 2099 dates so that no stored alarm fires on the real clock. Pure policy is tested without the Durable Object in `app/test/policy.test.ts`:
 
 ```ts
-import { admitUnasked } from "../src/policy/outreach";
-
-test("fourth unasked message of the local day is dropped", () => {
-  const v = admitUnasked({ now: at("2026-11-04T15:00+07:00"), tz: BKK, sentToday: 3, dailyBudget: 3, status: "active" });
-  expect(v).toEqual({ verdict: "drop", reason: "budget" });
+test("an admitted row is held by quiet hours on every attempt, and sends on its admitted day past the budget", () => {
+	const admitted = "2026-11-04" as LocalDate;
+	expect(admitUnasked({ ...input, admitted, now: at("2026-11-04T22:01+07:00"), sentToday: 0 })).toEqual({ verdict: "defer", until: at("2026-11-05T08:00+07:00") });
+	expect(admitUnasked({ ...input, admitted, now: at("2026-11-05T08:00+07:00"), sentToday: 3 })).toEqual({ verdict: "send", day: admitted });
 });
 ```
 
 ## Querying across users
 
-Every log row lands in D1 (`app/src/ledger/d1-schema.sql`). The MVP gates are views over it, for example:
+Every log row lands in D1 (`app/src/ledger/d1-schema.sql`). The MVP gates are views over it:
 
 ```sh
-wrangler d1 execute giraffes-ledger --command "SELECT * FROM gate_weekly_delegation"
-wrangler d1 execute giraffes-ledger --command "SELECT * FROM unasked_with_followup WHERE followed = 1"
+npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_weekly_delegation"
+npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM unasked_with_followup WHERE followed = 1"
+npx wrangler d1 execute giraffes-ledger --remote --command "SELECT reason, COUNT(*) FROM action_rejection GROUP BY reason"
 ```

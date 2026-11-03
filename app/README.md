@@ -49,9 +49,29 @@ those events. The side panel shows each delivery's intent and status and the pen
 3. `npx wrangler deploy`
 4. Point the webhooks at the Worker: LINE at `https://<worker>/webhook/line`, and Telegram with
    `setWebhook` at `https://<worker>/webhook/telegram` with `secret_token` set to `TELEGRAM_WEBHOOK_SECRET`.
+5. In the LINE Developers console, turn on **Webhook redelivery** for the channel. It is off by default.
+   When an event can't be queued, the Worker answers 500 and relies on LINE to send the event again.
+   Telegram retries a failed webhook on its own.
 
 The gate queries are views in the ledger, for example:
 
 ```sh
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_weekly_delegation"
 ```
+
+### Update an existing ledger
+
+Re-running `src/ledger/d1-schema.sql` adds new tables and views, such as `action_rejection`. Do that
+before you deploy code that writes to them, or log shipping backs off until the table exists. Re-running
+the file doesn't change the CHECK constraints of a table that already exists. In a ledger created before
+`model_call.status` allowed `in_doubt`, the `INSERT OR IGNORE` that ships logs silently skips every
+`in_doubt` row, so the cost views under-count. To migrate the CHECK, rebuild the table:
+
+```sh
+npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW cost_per_agent_week; DROP INDEX model_call_agent_time; ALTER TABLE model_call RENAME TO model_call_old"
+npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
+npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO model_call SELECT * FROM model_call_old; DROP TABLE model_call_old"
+```
+
+The second command recreates `model_call` with the current CHECK, its index and the view. Run the same
+commands with `--local` to migrate the dev ledger.

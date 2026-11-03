@@ -4,8 +4,8 @@ import type { Fetch } from "../box/host";
 import type { StripeConfig } from "../config";
 import { CHANNEL_IDS, type AgentKey, type EpochMs } from "../domain";
 import { PAID_PLANS, SUBSCRIPTION_STATUSES, type PaidPlan, type PlanRules, type Subscription, type SubscriptionId } from "./plan";
+import { formBody, STRIPE_API, STRIPE_EVENT_TYPES, type Form } from "./wire";
 
-export const STRIPE_API = "https://api.stripe.com/v1";
 export const DONE_PATH = "/billing/done";
 export const SIGNATURE_TOLERANCE_MS = 5 * 60_000;
 
@@ -16,13 +16,6 @@ export interface StripeApi {
   checkout(req: CheckoutRequest): Promise<CheckoutResult>;
 }
 
-type Form = Record<string, string | number>;
-
-export function formBody(form: Form): string {
-  return Object.entries(form)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
-    .join("&");
-}
 
 export function checkoutForm(cfg: StripeConfig, rules: PlanRules, req: CheckoutRequest): Form {
   const done = `${cfg.publicUrl}${DONE_PATH}`;
@@ -109,12 +102,6 @@ export async function verifySignature(payload: string, header: string | null, se
   return false;
 }
 
-export const STRIPE_EVENT_TYPES = [
-  "checkout.session.completed",
-  "customer.subscription.created",
-  "customer.subscription.updated",
-  "customer.subscription.deleted",
-] as const;
 
 /** A Stripe event as the person's Durable Object takes it: one subscription, as of that event. */
 export type BillingEvent = { readonly id: string; readonly subscription: Subscription };

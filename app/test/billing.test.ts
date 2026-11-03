@@ -4,7 +4,9 @@ import { NOTICE } from "../src/agent/turn";
 import { planAllowsBox, planOf, supersedes, type PlanRules, type Subscription, type SubscriptionId } from "../src/billing/plan";
 import { BILLING_OFF, inviteFull, JOIN, LEFT, NO_LINKS, NOT_SEATED } from "../src/billing/say";
 import { d1Billing, type BillingStore } from "../src/billing/store";
-import { checkoutForm, formBody, parseEvent, stripeApi, verifySignature } from "../src/billing/stripe";
+import { checkoutForm, parseEvent, stripeApi, verifySignature } from "../src/billing/stripe";
+import { DEFAULT_AMOUNTS, stripeSetup } from "../src/billing/setup";
+import { formBody, STRIPE_EVENT_TYPES } from "../src/billing/wire";
 import { boxMessage } from "../src/box/machine";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs, MicroUsd } from "../src/domain";
@@ -508,5 +510,82 @@ describe("the ai plan", () => {
     expect(await c.received()).toEqual(["Sure.", NOTICE.monthlyLimit]);
     expect((await c.snapshot()).spendThisMonthMicro).toBeGreaterThanOrEqual(1_000_000);
     expect(model.calls).toHaveLength(1);
+  });
+});
+
+describe("stripe setup", () => {
+  function fakeAccount() {
+    const products = new Set<string>();
+    const prices: { id: string; product: string; unit_amount: number; currency: string; recurring: { interval: string }; lookup_key: string | null; active: boolean }[] = [];
+    const endpoints: { id: string; url: string; events: string[] }[] = [];
+    const posts: string[] = [];
+    let n = 0;
+    const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
+      const url = new URL(input);
+      const path = url.pathname.replace(/^\/v1/, "");
+      const form = new URLSearchParams(init?.method === "POST" ? String(init.body) : url.search);
+      if (new Headers(init?.headers).get("authorization") !== "Bearer sk_test_fake") return Response.json({ error: { message: "bad key" } }, { status: 401 });
+      if (init?.method === "POST") posts.push(path);
+      const product = path.match(/^\/products\/(\w+)$/)?.[1];
+      if (product) return products.has(product) ? Response.json({ id: product }) : Response.json({ error: { message: "No such product" } }, { status: 404 });
+      if (path === "/products") {
+        products.add(form.get("id")!);
+        return Response.json({ id: form.get("id") });
+      }
+      if (path === "/prices" && init?.method !== "POST") {
+        return Response.json({ data: prices.filter((p) => p.active && p.lookup_key === form.get("lookup_keys[0]")) });
+      }
+      if (path === "/prices") {
+        if (form.get("transfer_lookup_key") === "true") for (const p of prices) if (p.lookup_key === form.get("lookup_key")) p.lookup_key = null;
+        const p = { id: `price_${++n}`, product: form.get("product")!, unit_amount: Number(form.get("unit_amount")), currency: form.get("currency")!, recurring: { interval: form.get("recurring[interval]")! }, lookup_key: form.get("lookup_key"), active: true };
+        prices.push(p);
+        return Response.json(p);
+      }
+      const events = () => [...form.entries()].filter(([k]) => k.startsWith("enabled_events")).map(([, v]) => v);
+      if (path === "/webhook_endpoints" && init?.method !== "POST") return Response.json({ data: endpoints });
+      if (path === "/webhook_endpoints") {
+        endpoints.push({ id: `we_${++n}`, url: form.get("url")!, events: events() });
+        return Response.json({ ...endpoints.at(-1), secret: "whsec_made" });
+      }
+      const endpoint = endpoints.find((e) => path === `/webhook_endpoints/${e.id}`);
+      if (endpoint) {
+        endpoint.events = events();
+        return Response.json(endpoint);
+      }
+      return Response.json({ error: { message: "no route" } }, { status: 400 });
+    };
+    return { fetch, products, prices, endpoints, posts };
+  }
+  const opts = (fetch: ReturnType<typeof fakeAccount>["fetch"], amounts = DEFAULT_AMOUNTS) => ({ secretKey: "sk_test_fake", publicUrl: "https://giraffes.test/", amounts, fetch });
+
+  test("a first run creates four products, four THB monthly prices and the endpoint for the events the Worker handles", async () => {
+    const account = fakeAccount();
+    const r = await stripeSetup(opts(account.fetch));
+
+    expect([...account.products].sort()).toEqual(["giraffes_ai", "giraffes_plus", "giraffes_seat", "giraffes_standard"]);
+    expect(account.prices.map((p) => [p.lookup_key, p.unit_amount, p.currency, p.recurring.interval])).toEqual([
+      ["giraffes_standard", 29900, "thb", "month"],
+      ["giraffes_plus", 69900, "thb", "month"],
+      ["giraffes_seat", 19900, "thb", "month"],
+      ["giraffes_ai", 17900, "thb", "month"],
+    ]);
+    expect(account.endpoints).toEqual([{ id: r.webhook.id, url: "https://giraffes.test/webhook/stripe", events: [...STRIPE_EVENT_TYPES] }]);
+    expect(r.webhook.secret).toBe("whsec_made");
+    expect(Object.values(r.prices)).toEqual(account.prices.map((p) => p.id));
+  });
+
+  test("a second run creates nothing, and a changed amount makes one new price that takes the lookup key", async () => {
+    const account = fakeAccount();
+    const first = await stripeSetup(opts(account.fetch));
+    const posts = account.posts.length;
+
+    const again = await stripeSetup(opts(account.fetch));
+    expect(account.posts.slice(posts)).toEqual([`/webhook_endpoints/${first.webhook.id}`]);
+    expect(again).toMatchObject({ prices: first.prices, webhook: { id: first.webhook.id, secret: null } });
+
+    const raised = await stripeSetup(opts(account.fetch, { ...DEFAULT_AMOUNTS, ai: 19900 }));
+    expect(raised.prices.ai).not.toBe(first.prices.ai);
+    expect({ ...raised.prices, ai: first.prices.ai }).toEqual(first.prices);
+    expect(account.prices.filter((p) => p.lookup_key === "giraffes_ai").map((p) => p.unit_amount)).toEqual([19900]);
   });
 });

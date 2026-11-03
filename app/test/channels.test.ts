@@ -192,13 +192,24 @@ describe("Telegram webhook", () => {
 describe("Telegram delivery", () => {
   const msg = outbound({ to: { channel: "telegram", channelUserId: "777000111" } });
 
-  test("each text is one sendMessage to the person's chat", async () => {
-    const seen = stubFetch(() => Response.json({ ok: true, result: {} }));
-    expect(await telegram().deliver(msg, NOW)).toEqual({ kind: "sent", via: "push" });
-    expect(seen.map((s) => [s.url, s.body])).toEqual([
-      ["https://api.telegram.org/bot123:abc/sendMessage", { chat_id: "777000111", text: "Done." }],
-      ["https://api.telegram.org/bot123:abc/sendMessage", { chat_id: "777000111", text: "(note)" }],
-    ]);
+  test("a row's texts go out as one message, so a retry after flood control repeats nothing", async () => {
+    let limited = false;
+    const accepted: Seen[] = [];
+    stubFetch((s) => {
+      if (!limited && JSON.stringify(s.body).includes("(note)")) {
+        limited = true;
+        return Response.json({ ok: false, error_code: 429, parameters: { retry_after: 1 } }, { status: 429 });
+      }
+      accepted.push(s);
+      return Response.json({ ok: true, result: {} });
+    });
+
+    let delivery = await telegram().deliver(msg, NOW);
+    expect(delivery).toMatchObject({ kind: "retry", afterMs: 1000 });
+    delivery = await telegram().deliver(msg, NOW);
+
+    expect(delivery).toEqual({ kind: "sent", via: "push" });
+    expect(accepted.map((s) => [s.url, s.body])).toEqual([["https://api.telegram.org/bot123:abc/sendMessage", { chat_id: "777000111", text: "Done.\n\n(note)" }]]);
   });
 
   test("a block is reported as the recipient being gone; flood control retries when told", async () => {

@@ -191,8 +191,8 @@ export class Agent extends DurableObject<Env> {
 
   async refreshPlan(agent: AgentKey): Promise<void> {
     const { config, store } = this.#deps.billing;
-    const standing = await store.standing(agent);
     const now = this.#deps.clock.now();
+    const standing = await store.standing(agent, now);
     const before = this.#plan(now);
     const after = planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, config.on, config.rules);
     const text = config.on ? planChanged(before, after, now) : null;
@@ -387,8 +387,8 @@ export class Agent extends DurableObject<Env> {
 
   async #standingNow(agent: AgentKey): Promise<Plan> {
     const { config, store } = this.#deps.billing;
-    const standing = config.on ? await store.standing(agent) : NO_STANDING;
     const now = this.#deps.clock.now();
+    const standing = config.on ? await store.standing(agent, now) : NO_STANDING;
     this.#store.applyStanding(standing, null, now);
     return this.#plan(now);
   }
@@ -404,7 +404,7 @@ export class Agent extends DurableObject<Env> {
     switch (command.kind) {
       case "plan": {
         const plan = await this.#standingNow(agent);
-        const places = plan.kind === "plus" && plan.role === "owner" ? await store.places(agent) : null;
+        const places = plan.kind === "plus" && plan.role === "owner" ? await store.places(agent, now) : null;
         const status = planStatus(plan, now, places);
         if (!config.on || (plan.kind !== "trial" && plan.kind !== "lapsed")) return say(status);
         const links = await this.#checkoutLinks(agent, view.batch.items[0].key);

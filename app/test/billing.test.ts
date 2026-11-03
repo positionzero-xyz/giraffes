@@ -447,6 +447,28 @@ describe("the subscription store", () => {
     expect(await after(s("incomplete_expired"))).toBe("incomplete_expired");
     expect(await after(s("active"))).toBe("incomplete_expired");
   });
+
+  test("past_due keeps paying for 14 days from when it was first seen, then counts as lapsed", async () => {
+    const store = d1Billing(env.LEDGER);
+    const day = (d: number) => (local("2099-11-04T10:00") + d * 86_400_000) as EpochMs;
+    const due: Subscription = { id: "sub_due" as SubscriptionId, owner: agent("due"), customer: null, plan: "standard", status: "past_due", seats: 1 };
+    const own = async (at: EpochMs) => (await store.standing(agent("due"), at)).own;
+
+    await store.applySubscription(due, day(0));
+    await store.applySubscription(due, day(10));
+    expect(await own(day(13.9))).toEqual({ id: "sub_due", plan: "standard" });
+    expect(await own(day(14))).toBeNull();
+
+    await store.applySubscription({ ...due, status: "active" }, day(15));
+    await store.applySubscription(due, day(16));
+    expect(await own(day(29.9))).toEqual({ id: "sub_due", plan: "standard" });
+    expect(await own(day(30))).toBeNull();
+
+    const plus: Subscription = { ...due, id: "sub_due_plus" as SubscriptionId, plan: "plus", seats: 3 };
+    await store.applySubscription(plus, day(0));
+    expect(await store.invite(agent("due"), "DUEDUE", day(1), day(30))).toEqual({ kind: "created" });
+    expect(await store.join("DUEDUE", agent("late"), day(14))).toBe("ended");
+  });
 });
 
 describe("plus seats", () => {
@@ -546,9 +568,9 @@ describe("plus seats", () => {
     let failures = 1;
     const flaky: BillingStore = {
       ...real,
-      async standing(a) {
+      async standing(a, now) {
         if (failures-- > 0) throw new Error("D1 unavailable");
-        return real.standing(a);
+        return real.standing(a, now);
       },
     };
     const kit = billingOn({ TRIAL_DAYS: "0" });

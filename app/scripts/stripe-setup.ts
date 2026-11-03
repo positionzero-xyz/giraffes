@@ -7,7 +7,7 @@ function fail(message: string): never {
   process.exit(2);
 }
 
-if (!args.includes("--yes")) fail("This creates products, prices and a webhook endpoint in the Stripe account. Re-run with --yes.");
+if (!args.includes("--yes")) fail("This creates products, prices, a customer portal configuration and a webhook endpoint in the Stripe account. Re-run with --yes.");
 
 const secretKey = process.env.STRIPE_SECRET_KEY ?? fail("STRIPE_SECRET_KEY is required");
 const publicUrl = process.env.PUBLIC_URL ?? fail("PUBLIC_URL is required, the Worker's https URL");
@@ -31,6 +31,7 @@ console.log("BILLING=on");
 console.log(`PUBLIC_URL=${publicUrl.replace(/\/+$/, "")}`);
 console.log("STRIPE_SECRET_KEY=<the key you ran this with>");
 for (const name of PRICE_NAMES) console.log(`STRIPE_PRICE_${name.toUpperCase()}=${result.prices[name]}`);
+console.log(`STRIPE_PORTAL_CONFIGURATION=${result.portal}`);
 console.log(
   result.webhook.secret
     ? `STRIPE_WEBHOOK_SECRET=${result.webhook.secret}`

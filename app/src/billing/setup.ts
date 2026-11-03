@@ -15,6 +15,8 @@ type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
 type SetupResult = {
   readonly prices: Readonly<Record<PriceName, string>>;
+  /** The customer portal configuration, set to STRIPE_PORTAL_CONFIGURATION. */
+  readonly portal: string;
   /** `secret` is only known when the endpoint was created by this run. */
   readonly webhook: { readonly id: string; readonly secret: string | null };
   readonly log: readonly string[];
@@ -22,6 +24,29 @@ type SetupResult = {
 
 type Price = { id: string; product: string; unit_amount: number | null; currency: string; recurring: { interval: string } | null };
 type Endpoint = { id: string; url: string; secret?: string };
+type PortalConfiguration = { id: string; active: boolean; metadata: Record<string, string> | null };
+
+/** Plus with extra places has two products, which the portal can cancel but not switch. */
+const PORTAL_PLANS = ["standard", "plus", "ai"] as const satisfies readonly PriceName[];
+
+function portalForm(prices: Readonly<Record<PriceName, string>>, returnUrl: string): Form {
+  const form: Form = {
+    "metadata[giraffes]": "portal",
+    default_return_url: returnUrl,
+    "features[payment_method_update][enabled]": "true",
+    "features[invoice_history][enabled]": "true",
+    "features[subscription_cancel][enabled]": "true",
+    "features[subscription_cancel][mode]": "at_period_end",
+    "features[subscription_update][enabled]": "true",
+    "features[subscription_update][default_allowed_updates][0]": "price",
+    "features[subscription_update][proration_behavior]": "create_prorations",
+  };
+  PORTAL_PLANS.forEach((name, i) => {
+    form[`features[subscription_update][products][${i}][product]`] = priceKey(name);
+    form[`features[subscription_update][products][${i}][prices][0]`] = prices[name];
+  });
+  return form;
+}
 
 export async function stripeSetup(o: {
   readonly secretKey: string;
@@ -72,16 +97,30 @@ export async function stripeSetup(o: {
     log.push(`price ${priceKey(name)}: created (${amount} satang a month)${current ? `, replacing ${current.id}` : ""}`);
   }
 
-  const url = `${o.publicUrl.replace(/\/+$/, "")}/webhook/stripe`;
+  const base = o.publicUrl.replace(/\/+$/, "");
+  const portalSettings = portalForm(prices, `${base}/billing/done`);
+  const configurations = await call<{ data: PortalConfiguration[] }>("GET", "/billing_portal/configurations", { active: "true", limit: 100 });
+  const ours = configurations.body.data.find((c) => c.metadata?.giraffes === "portal");
+  let portal: string;
+  if (ours) {
+    await call("POST", `/billing_portal/configurations/${ours.id}`, portalSettings);
+    portal = ours.id;
+    log.push(`portal configuration ${portal}: exists, features set`);
+  } else {
+    portal = (await call<PortalConfiguration>("POST", "/billing_portal/configurations", portalSettings)).body.id;
+    log.push(`portal configuration ${portal}: created`);
+  }
+
+  const url = `${base}/webhook/stripe`;
   const events = Object.fromEntries(STRIPE_EVENT_TYPES.map((t, i) => [`enabled_events[${i}]`, t]));
   const endpoints = await call<{ data: Endpoint[] }>("GET", "/webhook_endpoints", { limit: 100 });
   const existing = endpoints.body.data.find((e) => e.url === url);
   if (existing) {
     await call("POST", `/webhook_endpoints/${existing.id}`, events);
     log.push(`webhook ${url}: exists, events set`);
-    return { prices, webhook: { id: existing.id, secret: null }, log };
+    return { prices, portal, webhook: { id: existing.id, secret: null }, log };
   }
   const made = await call<Endpoint>("POST", "/webhook_endpoints", { url, description: "Giraffes Worker", ...events });
   log.push(`webhook ${url}: created`);
-  return { prices, webhook: { id: made.body.id, secret: made.body.secret ?? null }, log };
+  return { prices, portal, webhook: { id: made.body.id, secret: made.body.secret ?? null }, log };
 }

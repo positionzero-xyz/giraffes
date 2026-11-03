@@ -843,6 +843,7 @@ describe("stripe setup", () => {
     const products = new Set<string>();
     const prices: { id: string; product: string; unit_amount: number; currency: string; recurring: { interval: string }; lookup_key: string | null; active: boolean }[] = [];
     const endpoints: { id: string; url: string; events: string[] }[] = [];
+    const portals: { id: string; form: Record<string, string> }[] = [];
     const posts: string[] = [];
     let n = 0;
     const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
@@ -872,6 +873,18 @@ describe("stripe setup", () => {
         endpoints.push({ id: `we_${++n}`, url: form.get("url")!, events: events() });
         return Response.json({ ...endpoints.at(-1), secret: "whsec_made" });
       }
+      if (path === "/billing_portal/configurations" && init?.method !== "POST") {
+        return Response.json({ data: portals.map((c) => ({ id: c.id, active: true, metadata: { giraffes: c.form["metadata[giraffes]"] } })) });
+      }
+      if (path === "/billing_portal/configurations") {
+        portals.push({ id: `bpc_${++n}`, form: Object.fromEntries(form) });
+        return Response.json({ id: portals.at(-1)?.id });
+      }
+      const portal = portals.find((c) => path === `/billing_portal/configurations/${c.id}`);
+      if (portal) {
+        portal.form = Object.fromEntries(form);
+        return Response.json({ id: portal.id });
+      }
       const endpoint = endpoints.find((e) => path === `/webhook_endpoints/${e.id}`);
       if (endpoint) {
         endpoint.events = events();
@@ -879,7 +892,7 @@ describe("stripe setup", () => {
       }
       return Response.json({ error: { message: "no route" } }, { status: 400 });
     };
-    return { fetch, products, prices, endpoints, posts };
+    return { fetch, products, prices, endpoints, portals, posts };
   }
   const opts = (fetch: ReturnType<typeof fakeAccount>["fetch"], amounts = DEFAULT_AMOUNTS) => ({ secretKey: "sk_test_fake", publicUrl: "https://giraffes.test/", amounts, fetch });
 
@@ -905,12 +918,39 @@ describe("stripe setup", () => {
     const posts = account.posts.length;
 
     const again = await stripeSetup(opts(account.fetch));
-    expect(account.posts.slice(posts)).toEqual([`/webhook_endpoints/${first.webhook.id}`]);
-    expect(again).toMatchObject({ prices: first.prices, webhook: { id: first.webhook.id, secret: null } });
+    expect(account.posts.slice(posts)).toEqual([`/billing_portal/configurations/${first.portal}`, `/webhook_endpoints/${first.webhook.id}`]);
+    expect(again).toMatchObject({ prices: first.prices, portal: first.portal, webhook: { id: first.webhook.id, secret: null } });
 
     const raised = await stripeSetup(opts(account.fetch, { ...DEFAULT_AMOUNTS, ai: 19900 }));
     expect(raised.prices.ai).not.toBe(first.prices.ai);
     expect({ ...raised.prices, ai: first.prices.ai }).toEqual(first.prices);
     expect(account.prices.filter((p) => p.lookup_key === "giraffes_ai").map((p) => p.unit_amount)).toEqual([19900]);
+    expect(account.portals).toHaveLength(1);
+    expect(account.portals[0].form["features[subscription_update][products][2][prices][0]"]).toBe(raised.prices.ai);
+  });
+
+  test("the portal configuration lets a person update their card, see invoices, cancel at period end and switch plans", async () => {
+    const account = fakeAccount();
+    const r = await stripeSetup(opts(account.fetch));
+
+    expect(account.portals.map((c) => c.id)).toEqual([r.portal]);
+    expect(account.portals[0].form).toEqual({
+      "metadata[giraffes]": "portal",
+      default_return_url: "https://giraffes.test/billing/done",
+      "features[payment_method_update][enabled]": "true",
+      "features[invoice_history][enabled]": "true",
+      "features[subscription_cancel][enabled]": "true",
+      "features[subscription_cancel][mode]": "at_period_end",
+      "features[subscription_update][enabled]": "true",
+      "features[subscription_update][default_allowed_updates][0]": "price",
+      "features[subscription_update][proration_behavior]": "create_prorations",
+      "features[subscription_update][products][0][product]": "giraffes_standard",
+      "features[subscription_update][products][0][prices][0]": r.prices.standard,
+      "features[subscription_update][products][1][product]": "giraffes_plus",
+      "features[subscription_update][products][1][prices][0]": r.prices.plus,
+      "features[subscription_update][products][2][product]": "giraffes_ai",
+      "features[subscription_update][products][2][prices][0]": r.prices.ai,
+    });
+    expect(r.log).toContain(`portal configuration ${r.portal}: created`);
   });
 });

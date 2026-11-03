@@ -196,6 +196,29 @@ describe("reminders", () => {
     expect(commit.wakeupsAdd.map((w) => w.dueAt)).toEqual([local("2026-11-07T09:00")]);
   });
 
+  test("a reminder moves whichever order the cancel and the schedule come in", () => {
+    const pending = [reminder("dentist", local("2026-11-06T09:00"))];
+    const commit = planTurn(output([schedule("dentist", "2026-11-07T09:00"), { type: "cancel_wakeup", key: "dentist" }]), view({ pending }));
+    expect(commit.wakeupsCancel).toEqual(["dentist"]);
+    expect(commit.wakeupsAdd.map((w) => w.dueAt)).toEqual([local("2026-11-07T09:00")]);
+    expect(commit.rejected).toEqual([]);
+  });
+
+  test("a move whose new time is rejected keeps the original reminder, and the correction says so", () => {
+    const pending = [reminder("dentist", local("2026-11-06T09:00"))];
+    const commit = planTurn(output([{ type: "cancel_wakeup", key: "dentist" }, schedule("dentist", "friday at 9"), send("Moved!")]), view({ pending }));
+    expect(commit.wakeupsCancel).toEqual([]);
+    expect(commit.wakeupsAdd).toEqual([]);
+    expect(commit.outbound?.texts).toEqual(["Moved!", `${NOTICE.reminderBadTime}\n${"(Your reminder is still set for 2026-11-06 09:00.)"}`]);
+  });
+
+  test("with 20 pending, one can be replaced whichever order the model writes it in", () => {
+    const twenty = Array.from({ length: 20 }, (_, i) => reminder(`r${i}`, local("2026-11-06T09:00")));
+    const commit = planTurn(output([schedule("new", "2026-11-06T10:00"), { type: "cancel_wakeup", key: "r0" }]), view({ pending: twenty }));
+    expect(commit.wakeupsCancel).toEqual(["r0"]);
+    expect(commit.wakeupsAdd.map((w) => w.key)).toEqual(["new"]);
+  });
+
   test("the check-in can't be cancelled or scheduled by the model", () => {
     const pending = [checkin(local("2026-11-05T09:00"))];
     const commit = planTurn(output([{ type: "cancel_wakeup", key: CHECKIN_KEY }, schedule(CHECKIN_KEY, "2026-11-05T10:00")]), view({ pending }));

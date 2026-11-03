@@ -67,6 +67,24 @@ describe("reminders", () => {
     ]);
   });
 
+  test("a move whose new time code rejects keeps the original reminder, and the person is told", async () => {
+    const model = scripted([
+      turn({ actions: [schedule("dentist", "2099-11-05T09:00", "Dentist"), send("Set for 9.")], task: ["reminder", "dentist", "started"] }),
+      turn({ actions: [schedule("dentist", "tomorrow at 10", "Dentist"), cancel("dentist"), send("Moved to 10!")], task: ["reminder", "dentist", "progressed"] }),
+    ]);
+    const c = await devChat("mo", { model, at: "2099-11-04T10:00" });
+    await c.say("remind me about the dentist tomorrow at 9");
+    await c.received();
+
+    await c.say("actually make it 10");
+
+    expect(await c.received()).toEqual([
+      ["Moved to 10!", NOTICE.reminderBadTime, "(Your reminder is still set for 2099-11-05 09:00.)"].join("\n"),
+    ]);
+    const reminders = (await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder");
+    expect(reminders.map((w) => [w.key, wall(w.dueAt)])).toEqual([["dentist", "2099-11-05T09:00"]]);
+  });
+
   test("'remind me at 18:00' fires through the alarm and is delivered", async () => {
     const model = scripted([
       turn({ actions: [schedule("call-clinic", "2099-11-04T18:00", "Remind: call the clinic"), send("Done.")], task: ["reminder", "call-clinic", "started"] }),

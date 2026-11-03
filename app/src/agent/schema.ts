@@ -179,6 +179,30 @@ export const MIGRATIONS: readonly string[] = [
     at  INTEGER NOT NULL
   );
   `,
+  `
+  CREATE TABLE plan_next (
+    one                INTEGER PRIMARY KEY CHECK (one = 1),
+    trial_ends_at      INTEGER,
+    own_subscription   TEXT,
+    own_plan           TEXT CHECK (own_plan IN ('standard', 'plus', 'ai')),
+    seat_subscription  TEXT,
+    seat_owner         TEXT,
+    updated_at         INTEGER NOT NULL,
+    CHECK ((own_subscription IS NULL) = (own_plan IS NULL)),
+    CHECK ((seat_subscription IS NULL) = (seat_owner IS NULL))
+  );
+  INSERT INTO plan_next (one, trial_ends_at, own_subscription, own_plan, seat_subscription, seat_owner, updated_at)
+    SELECT one, NULL, own_subscription, own_plan, seat_subscription, seat_owner, updated_at FROM plan;
+  DROP TABLE plan;
+  ALTER TABLE plan_next RENAME TO plan;
+  `,
+  `
+  CREATE TABLE checkout_session (
+    id          TEXT PRIMARY KEY,
+    event_key   TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+  );
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

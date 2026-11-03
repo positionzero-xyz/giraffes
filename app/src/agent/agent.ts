@@ -1,16 +1,20 @@
 import { DurableObject } from "cloudflare:workers";
 import type { z } from "zod";
-import { apiCapOf, NO_STANDING, PAID_PLANS, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan } from "../billing/plan";
+import { apiCapOf, NO_STANDING, PAID_PLANS, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan, type Standing, type SubscriptionId } from "../billing/plan";
 import {
   BILLING_BUSY,
   BILLING_OFF,
+  DUPLICATE,
   INVITE_FOR_MS,
   INVITE_NOT_OWNER,
   inviteFull,
   inviteText,
   JOIN,
   LEFT,
+  manage,
+  MANAGE_NOTE,
   NO_LINKS,
+  NO_PORTAL,
   NOT_SEATED,
   planChanged,
   planChoices,
@@ -18,7 +22,7 @@ import {
   type Links,
 } from "../billing/say";
 import { d1Billing, type BillingStore } from "../billing/store";
-import { stripeApi, type BillingEvent, type StripeApi } from "../billing/stripe";
+import { parseSubscription, stripeApi, type BillingEvent, type StripeApi } from "../billing/stripe";
 import { boxClient, type BoxClient } from "../box/client";
 import { flyHost } from "../box/fly";
 import { staticHost, type BoxHost, type BoxHostKind, type Fetch } from "../box/host";
@@ -133,6 +137,9 @@ export class Agent extends DurableObject<Env> {
   // A DO interleaves requests during `await fetch`. The guard is in memory on purpose: there is one live
   // instance per DO, and if it dies the drain dies with it, so the guard never outlives the work it protects.
   #drain: Promise<void> | null = null;
+  // Each event re-reads the subscription from Stripe; handling them one at a time keeps a slower, older read
+  // from landing after a newer one. Like #drain, it lives and dies with this instance.
+  #billing: Promise<unknown> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -147,7 +154,7 @@ export class Agent extends DurableObject<Env> {
       tz: DEFAULT_TIME_ZONE,
       checkinLocal: SCHEDULE.defaultCheckinLocal,
       checkin: checkinWakeup(now, DEFAULT_TIME_ZONE, SCHEDULE.defaultCheckinLocal),
-      trialEndsAt: trialEnd(now, this.#deps.billing.config.rules),
+      trialEndsAt: this.#deps.billing.config.on ? trialEnd(now, this.#deps.billing.config.rules) : null,
     };
     if (this.#store.enqueue(envelope, first, now) === "duplicate") return "duplicate";
     await this.#armNoLaterThan(now);
@@ -155,30 +162,58 @@ export class Agent extends DurableObject<Env> {
     return "queued";
   }
 
-  async billingEvent(e: BillingEvent): Promise<"applied" | "duplicate"> {
+  billingEvent(e: BillingEvent): Promise<"applied" | "duplicate" | "ignored"> {
+    const run = this.#billing.then(() => this.#billingEvent(e));
+    this.#billing = run.catch(() => undefined);
+    return run;
+  }
+
+  async #billingEvent(e: BillingEvent): Promise<"applied" | "duplicate" | "ignored"> {
     if (this.#store.billingEventSeen(e.id)) return "duplicate";
-    const { store } = this.#deps.billing;
-    await store.applySubscription(e.subscription, this.#deps.clock.now());
-    await this.refreshPlan(e.subscription.owner);
-    if (e.subscription.plan === "plus") {
-      for (const member of await store.members(e.subscription.id)) {
-        await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member);
-      }
+    const { config, store, stripe } = this.#deps.billing;
+    if (!config.on || !stripe) throw new Error("a Stripe event reached a DO with billing off");
+    const fetched = await stripe.subscription(e.subscription);
+    if (!fetched.ok) throw new Error(`subscription read failed: ${fetched.detail}`);
+    const read = parseSubscription(fetched.value, config.rules);
+    if (read.kind === "invalid") throw new Error(`subscription read failed: ${read.reason}`);
+    if (read.kind === "not_ours" || read.subscription.owner !== e.owner) {
+      console.warn("stripe event ignored", e.id, read.kind === "not_ours" ? read.reason : "owner differs from the event's");
+      this.#store.billingEventDone(e.id, this.#deps.clock.now());
+      return "ignored";
     }
+    const sub = read.subscription;
+    await store.applySubscription(sub, this.#deps.clock.now());
+    await this.refreshPlan(sub.owner);
+    for (const member of await store.members(sub.id)) {
+      await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member);
+    }
+    await this.#flagDuplicate(sub.owner);
     this.#store.billingEventDone(e.id, this.#deps.clock.now());
     return "applied";
   }
 
+  /** Two paying subscriptions need a person to decide which to refund, so nothing is cancelled here. */
+  async #flagDuplicate(owner: AgentKey): Promise<void> {
+    const { store } = this.#deps.billing;
+    const now = this.#deps.clock.now();
+    const owned = await store.owned(owner, now);
+    if (owned.length < 2) return;
+    console.error("person owns more than one paying subscription", owner, owned.join(" "));
+    await store.recordDuplicate(owner, owned, now);
+    this.#store.notifyOnce(`duplicate:${owned.join(" ")}`, eventKey.billing("duplicate"), { texts: [DUPLICATE], note: DUPLICATE }, now);
+    await this.#armNoLaterThan(now);
+    this.ctx.waitUntil(this.alarm());
+  }
+
   async refreshPlan(agent: AgentKey): Promise<void> {
     const { config, store } = this.#deps.billing;
-    const standing = await store.standing(agent);
     const now = this.#deps.clock.now();
+    const standing = await store.standing(agent, now);
     const before = this.#plan(now);
-    const trialEndsAt = this.#store.plan()?.trialEndsAt ?? trialEnd(now, config.rules);
-    const after = planOf({ trialEndsAt, ...standing }, now, config.on, config.rules);
+    const after = planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, config.on, config.rules);
     const text = config.on ? planChanged(before, after, now) : null;
     const message = text ? { key: eventKey.billing("plan"), message: { texts: [text] as const, note: text } } : null;
-    this.#store.applyStanding(standing, trialEndsAt, message, now);
+    this.#store.applyStanding(standing, message, now);
     if (message) {
       await this.#armNoLaterThan(now);
       this.ctx.waitUntil(this.alarm());
@@ -188,6 +223,20 @@ export class Agent extends DurableObject<Env> {
   #plan(now: EpochMs): Plan {
     const { config } = this.#deps.billing;
     return planOf(this.#store.plan(), now, config.on, config.rules);
+  }
+
+  /** D1 is the truth; the projection a refresh keeps stands in only while D1 can't be read. */
+  async #planNow(agent: AgentKey, now: EpochMs): Promise<Plan> {
+    const { config, store } = this.#deps.billing;
+    if (!config.on) return this.#plan(now);
+    let standing: Standing;
+    try {
+      standing = await store.standing(agent, now);
+    } catch (err) {
+      console.warn("standing unreadable, using the last refreshed plan", err);
+      return this.#plan(now);
+    }
+    return planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, true, config.rules);
   }
 
   /** Cloudflare may invoke it more than once; joining the in-flight drain makes that harmless. */
@@ -292,7 +341,7 @@ export class Agent extends DurableObject<Env> {
     if (bypass) return this.#commit(planWithoutModel(view, bypass), view, a.key, { kind: "none" }, null);
     const command = commandOf(batch.items[0].event);
     if (command) return this.#command(command, view, a.key);
-    const plan = this.#plan(view.now);
+    const plan = await this.#planNow(a.key, view.now);
     if (plan.kind === "lapsed") {
       const alreadyToldToday = this.#store.toldToday("lapsed", startOfLocalDay(view.now, view.tz));
       return this.#commit(planWithoutModel(view, { kind: "lapsed", alreadyToldToday }), view, a.key, { kind: "none" }, null);
@@ -366,12 +415,12 @@ export class Agent extends DurableObject<Env> {
     this.#commit(planWithoutModel(view, { kind: "command", text, note }), view, agent, { kind: "none" }, null);
   }
 
-  async #standingNow(agent: AgentKey): Promise<Plan> {
+  async #standingNow(agent: AgentKey): Promise<{ readonly plan: Plan; readonly standing: Standing }> {
     const { config, store } = this.#deps.billing;
-    const standing = config.on ? await store.standing(agent) : NO_STANDING;
     const now = this.#deps.clock.now();
-    this.#store.applyStanding(standing, trialEnd(now, config.rules), null, now);
-    return this.#plan(now);
+    const standing = config.on ? await store.standing(agent, now) : NO_STANDING;
+    this.#store.applyStanding(standing, null, now);
+    return { plan: this.#plan(now), standing };
   }
 
   async #billingCommand(
@@ -384,9 +433,10 @@ export class Agent extends DurableObject<Env> {
     const say = (text: string) => ({ text, note: text });
     switch (command.kind) {
       case "plan": {
-        const plan = await this.#standingNow(agent);
-        const places = plan.kind === "plus" && plan.role === "owner" ? await store.places(agent) : null;
+        const { plan, standing } = await this.#standingNow(agent);
+        const places = plan.kind === "plus" && plan.role === "owner" ? await store.places(agent, now) : null;
         const status = planStatus(plan, now, places);
+        if (config.on && standing.own) return this.#manageLink(status, standing.own.id);
         if (!config.on || (plan.kind !== "trial" && plan.kind !== "lapsed")) return say(status);
         const links = await this.#checkoutLinks(agent, view.batch.items[0].key);
         if (!links) return say(`${status}\n${NO_LINKS}`);
@@ -405,8 +455,9 @@ export class Agent extends DurableObject<Env> {
         return say(JOIN[r]);
       }
       case "leave": {
-        if (!(await store.leave(agent, now))) return say(NOT_SEATED);
-        const plan = await this.#standingNow(agent);
+        const closed = await store.leave(agent, now);
+        if (!closed && !this.#store.plan()?.seat) return say(NOT_SEATED);
+        const { plan } = await this.#standingNow(agent);
         return say(`${LEFT}\n${plan.kind === "lapsed" ? NOTICE.lapsed : planStatus(plan, now, null)}`);
       }
       default:
@@ -414,21 +465,50 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
+  async #manageLink(status: string, id: SubscriptionId): Promise<{ readonly text: string; readonly note: string }> {
+    const { store, stripe } = this.#deps.billing;
+    const customer = await store.customer(id);
+    const portal = stripe && customer ? await stripe.portal(customer) : null;
+    if (!portal?.ok) {
+      console.warn("portal link failed", id, portal ? portal.detail : "no customer");
+      return { text: `${status}\n${NO_PORTAL}`, note: `${status}\n${NO_PORTAL}` };
+    }
+    return { text: `${status}\n${manage(portal.value.url)}`, note: `${status}\n${manage(MANAGE_NOTE)}` };
+  }
+
+  /**
+   * Sessions an earlier /plan handed out are expired first, so at most one set can be paid. A retried turn
+   * gets its own sessions back from the idempotency key, so those are left open.
+   */
   async #checkoutLinks(agent: AgentKey, key: EventKey): Promise<Links | null> {
     const stripe = this.#deps.billing.stripe;
     if (!stripe) return null;
+    const stale = this.#store.openCheckouts().filter((c) => c.eventKey !== key);
+    const expiries = await Promise.all(stale.map(async (c) => ({ id: c.id, result: await stripe.expireCheckout(c.id) })));
+    let expired = true;
+    for (const { id, result } of expiries) {
+      if (result.ok) this.#store.checkoutClosed(id);
+      else {
+        console.warn("checkout expiry failed", id, result.detail);
+        expired = false;
+      }
+    }
+    if (!expired) return null;
+
     const results = await Promise.all(
       PAID_PLANS.map(async (plan) => ({ plan, result: await stripe.checkout({ agent, plan, idempotencyKey: `${agent}|${key}|${plan}` }) })),
     );
+    const now = this.#deps.clock.now();
     const links: Partial<Record<PaidPlan, string>> = {};
     for (const { plan, result } of results) {
       if (!result.ok) {
         console.warn("checkout failed", plan, result.detail);
-        return null;
+        continue;
       }
-      links[plan] = result.url;
+      this.#store.checkoutOpened(result.value.id, key, now);
+      links[plan] = result.value.url;
     }
-    return links as Links;
+    return PAID_PLANS.every((p) => links[p]) ? (links as Links) : null;
   }
 
   async #boxCommand(view: TurnView, agent: AgentKey): Promise<void> {

@@ -65,17 +65,20 @@ those events. The side panel shows each delivery's intent and status and the pen
    FLY_API_TOKEN=... FLY_ORG=... BOX_IMAGE=... BOX_SECRET=... node scripts/fly-verify.ts --yes
    ```
    Plans and payments (`/plan`, `/invite`, `/join <code>`, `/leave`, see `docs/design/BOX.md`) follow `BILLING`:
-   - `BILLING=off` (the default): nobody pays and nobody lapses. `/plan` says it is the free beta.
+   - `BILLING=off` (the default): nobody pays, nobody lapses and no trial clock runs. `/plan` says it is
+     the free beta.
    - `BILLING=on` needs the secrets `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`, and the vars
-     `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`, `STRIPE_PRICE_AI` and `PUBLIC_URL`
-     (the Worker's https URL; Checkout sends people back to `PUBLIC_URL/billing/done`). Optional vars:
-     `TRIAL_DAYS` (default 14, counted from a person's first message), `PLUS_SEATS` (default 3 people,
+     `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`, `STRIPE_PRICE_AI`,
+     `STRIPE_PORTAL_CONFIGURATION` and `PUBLIC_URL` (the Worker's https URL; Checkout and the billing
+     portal send people back to `PUBLIC_URL/billing/done`). Optional vars: `TRIAL_DAYS` (default 14,
+     counted from a person's first message with billing on, so people from the beta get a full trial
+     too), `PLUS_SEATS` (default 3 people,
      the owner included), `PLUS_MAX_SEATS` (default 6) and `AI_CAP_USD` (the AI plan's monthly model
      cost cap, default 1).
 
-   Create the Stripe side with a test key first. It makes the products, THB monthly prices and the
-   webhook endpoint for `PUBLIC_URL/webhook/stripe`, and prints the values above. Run it again and it
-   creates nothing. Amounts are satang flags (`--standard 29900 --plus 69900 --seat 19900 --ai 17900`
+   Create the Stripe side with a test key first. It makes the products, THB monthly prices, the customer
+   portal configuration and the webhook endpoint for `PUBLIC_URL/webhook/stripe`, and prints the values
+   above. Run it again and it creates nothing. Amounts are satang flags (`--standard 29900 --plus 69900 --seat 19900 --ai 17900`
    are the defaults), and a live key also needs `--live`:
    ```sh
    STRIPE_SECRET_KEY=sk_test_... PUBLIC_URL=https://<worker> node scripts/stripe-setup.ts --yes
@@ -123,6 +126,19 @@ npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW gate_weekl
 npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
 npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO turn_log SELECT * FROM turn_log_old; DROP TABLE turn_log_old"
 ```
+
+A ledger that ran the schema file from before the billing fixes has a `billing_subscription` without
+`customer_id` and `past_due_since`, and with the `period_end` and `event_at` columns the Worker no
+longer writes. While `BILLING=off` the Worker answers Stripe with 404, so the table is empty. Recreate it,
+and add the `billing_duplicate` table, before turning billing on:
+
+```sh
+npx wrangler d1 execute giraffes-ledger --remote --command "SELECT COUNT(*) FROM billing_subscription"
+npx wrangler d1 execute giraffes-ledger --remote --command "DROP INDEX billing_subscription_owner; DROP TABLE billing_subscription"
+npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
+```
+
+Run the drop only when the count is 0.
 
 The box path adds the `boxes` table, which re-running the schema file creates, and a `backend` column on
 `model_call`, which it can't add to an existing table. Add the column once, before deploying code that

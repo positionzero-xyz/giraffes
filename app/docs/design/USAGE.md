@@ -95,12 +95,12 @@ A box still `signed_out` 48 hours after its first link, never signed in, is recl
 
 ## Call site 5: a person pays
 
-With `BILLING=on` (`BOX.md`, "Plans and billing", has the contract), the person's first message started a 14-day trial. They send `/plan`.
+With `BILLING=on` (`BOX.md`, "Plans and billing", has the contract), the person's first message with billing on started a 14-day trial. They send `/plan`.
 
-1. The command runs without the model. It reads the person's standing from D1, says the plan and the days left, and adds one Stripe Checkout link per plan, created with the idempotency key `<agent key>|<message key>|<plan>`.
-2. The person pays. Stripe posts `checkout.session.completed` and `customer.subscription.created` to `/webhook/stripe`, in either order. The Worker checks the signature, turns each into one subscription snapshot, and calls the owner's `Agent.billingEvent`.
-3. The DO skips an event id it has handled. Otherwise D1 keeps the snapshot if it is newer than the stored one, the owner's projection is refreshed, every Plus seat holder's DO is refreshed, and the event id is recorded last. A person whose plan moved gets one message, such as "Thanks. Your Standard plan is active."
-4. From the next turn on, `planAllowsBox` and the plan's API cap decide the turn's path.
+1. The command runs without the model. It reads the person's standing from D1, says the plan and the days left, expires the Checkout sessions an earlier `/plan` handed out, and adds one new Stripe Checkout link per plan, created with the idempotency key `<agent key>|<message key>|<plan>`. A person who already pays gets a customer portal link instead.
+2. The person pays. Stripe posts `checkout.session.completed` and `customer.subscription.created` to `/webhook/stripe`, in either order. The Worker checks the signature, reads only the subscription id and the owner from each, and calls the owner's `Agent.billingEvent`.
+3. The DO handles its events one at a time and skips an event id it has handled. Otherwise it reads the subscription from Stripe, stores that state in D1, refreshes the owner's projection and every seat holder's DO, checks for a second paying subscription, and records the event id last. A person whose plan moved gets one message, such as "Thanks. Your Standard plan is active."
+4. Every model turn from then on reads the plan from D1, and `planAllowsBox` and the plan's API cap decide the turn's path.
 
 ```ts
 test("a payment after the trial lapsed is announced and the model answers again", async () => {
@@ -108,11 +108,14 @@ test("a payment after the trial lapsed is announced and the model answers again"
 	const c = await devChat("eve", { model: scripted([chat("Welcome back.")]), at: "2099-11-04T10:00", billing: kit.deps });
 	await c.say("/plan");
 
-	await postStripe(checkoutEvent({ user: "eve", sub: "sub_eve", plan: "standard", created: "2099-11-04T10:01" }));
+	kit.stripe.subscriptions.set("sub_eve", stripeSubscription({ user: "eve", sub: "sub_eve", plan: "standard", status: "active" }));
+	await postStripe(checkoutEvent({ user: "eve", sub: "sub_eve", plan: "standard" }));
 	await c.settle();
 	expect(await c.received()).toEqual(["Thanks. Your Standard plan is active."]);
 });
 ```
+
+The fake Stripe in `billingOn` holds what each subscription looks like now, so a test sets that state and posts the event that names it. `stripeChange(kit, …)` does both.
 
 A Plus owner sends `/invite` for a one-time code, another person sends `/join <code>` to take a seat, and `/leave` gives it up. Seats are D1 rows, so a join checks and claims a place in one batch.
 
@@ -158,4 +161,5 @@ npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM unaske
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT reason, COUNT(*) FROM action_rejection GROUP BY reason"
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT backend, status, COUNT(*) FROM model_call GROUP BY backend, status"
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT plan, status, COUNT(*) FROM billing_subscription GROUP BY plan, status"
+npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM billing_duplicate"
 ```

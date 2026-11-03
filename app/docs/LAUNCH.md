@@ -40,3 +40,11 @@ People who don't send `/claude` stay on the API key, with the usual monthly cap.
 - `BOX_VOLUME_GB` (default 5) sizes each person's disk.
 - Plans and Stripe: see `docs/design/BOX.md`, "Plans and billing". `BILLING=off` until you are ready to charge.
 - To remove a person's box and data: `fly apps destroy <name>`. Their name is in the D1 table `boxes`.
+
+## Before you turn billing on
+
+In the Stripe dashboard, under **Billing** > **Revenue recovery** > **Retries**, keep the retry window at 2 weeks (the default for new accounts) and set what happens after the retries fail to **Cancel the subscription**. A failed renewal leaves the subscription `past_due` while Stripe retries. The Worker keeps the plan for 14 days from the first `past_due` it sees and then treats the person as lapsed, but the subscription stays open in Stripe until it is cancelled. Cancelling after the retries ends it there too, so the person isn't billed again for a plan they no longer get, and a later `/plan` offers them Checkout cleanly.
+
+Run `scripts/stripe-setup.ts` (see the README) and set `STRIPE_PORTAL_CONFIGURATION` with the other values it prints. People who already pay get a portal link from `/plan` to change or cancel, and the portal needs that configuration.
+
+If someone pays twice, nothing is refunded automatically. Check `SELECT * FROM billing_duplicate` in the ledger, and cancel and refund the extra subscription in the Stripe dashboard.

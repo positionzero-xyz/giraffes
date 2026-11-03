@@ -1,10 +1,10 @@
 import { env } from "cloudflare:test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { NOTICE } from "../src/agent/turn";
-import { planAllowsBox, planOf, type PlanRules, type Subscription, type SubscriptionId } from "../src/billing/plan";
-import { BILLING_OFF, inviteFull, JOIN, LEFT, NO_LINKS, NOT_SEATED } from "../src/billing/say";
+import { planAllowsBox, planOf, type CustomerId, type PlanRules, type Subscription, type SubscriptionId } from "../src/billing/plan";
+import { BILLING_BUSY, BILLING_OFF, DUPLICATE, inviteFull, JOIN, LEFT, NO_LINKS, NO_PORTAL, NOT_SEATED } from "../src/billing/say";
 import { d1Billing, type BillingStore } from "../src/billing/store";
-import { checkoutForm, parseEvent, stripeApi, verifySignature } from "../src/billing/stripe";
+import { checkoutForm, parseEvent, parseSubscription, stripeApi, verifySignature, type CheckoutId } from "../src/billing/stripe";
 import { DEFAULT_AMOUNTS, stripeSetup } from "../src/billing/setup";
 import { formBody, STRIPE_EVENT_TYPES } from "../src/billing/wire";
 import { boxMessage } from "../src/box/machine";
@@ -24,8 +24,11 @@ import {
   scripted,
   signStripe,
   STRIPE_VARS,
+  stripeChange,
+  stripeSubscription,
   subscriptionEvent,
   turn,
+  type BillingKit,
   type DevChat,
 } from "./testkit";
 
@@ -34,14 +37,11 @@ const agent = (user: string) => `p:dev:${user}` as AgentKey;
 const codeIn = (text: string) => text.match(/\/join ([A-Z0-9]{6})$/)?.[1] ?? "";
 
 async function row(sub: string) {
-  return env.LEDGER.prepare("SELECT plan, status, period_end, seats FROM billing_subscription WHERE id = ?").bind(sub).first();
+  return env.LEDGER.prepare("SELECT plan, status, seats, customer_id FROM billing_subscription WHERE id = ?").bind(sub).first();
 }
 
-async function pay(c: DevChat, user: string, plan: "standard" | "plus" | "ai", o: { created?: string; extraSeats?: number } = {}) {
-  const created = o.created ?? "2099-11-04T10:00";
-  const res = await postStripe(
-    subscriptionEvent({ user, sub: `sub_${user}`, plan, status: "active", periodEnd: "2099-12-04T10:00", created, type: "customer.subscription.created", extraSeats: o.extraSeats }),
-  );
+async function pay(kit: BillingKit, c: DevChat, user: string, plan: "standard" | "plus" | "ai", o: { extraSeats?: number } = {}) {
+  const res = await stripeChange(kit, { user, sub: `sub_${user}`, plan, status: "active", type: "customer.subscription.created", extraSeats: o.extraSeats });
   expect(res.status).toBe(200);
   await c.settle();
 }
@@ -79,7 +79,7 @@ describe("configuration", () => {
     expect(load({})).toEqual({ on: false, rules: { trialDays: 14, plusSeats: 3, plusMaxSeats: 6, aiCapMicro: 1_000_000 } });
   });
 
-  test.each(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_STANDARD", "STRIPE_PRICE_PLUS", "STRIPE_PRICE_SEAT", "STRIPE_PRICE_AI", "PUBLIC_URL"])(
+  test.each(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_STANDARD", "STRIPE_PRICE_PLUS", "STRIPE_PRICE_SEAT", "STRIPE_PRICE_AI", "STRIPE_PORTAL_CONFIGURATION", "PUBLIC_URL"])(
     "BILLING=on without %s fails at load",
     (name) => {
       const vars: Record<string, string> = { ...STRIPE_VARS };
@@ -119,10 +119,10 @@ describe("stripe boundary", () => {
     const sent: { url: string; headers: Headers; body: string }[] = [];
     const api = stripeApi(cfg, rules, async (url, init) => {
       sent.push({ url, headers: new Headers(init?.headers), body: String(init?.body) });
-      return Response.json({ url: "https://checkout.stripe.com/c/pay/cs_test_1" });
+      return Response.json({ id: "cs_test_1", url: "https://checkout.stripe.com/c/pay/cs_test_1" });
     });
 
-    expect(await api.checkout({ agent: agent("ann"), plan: "plus", idempotencyKey: "k1" })).toEqual({ ok: true, url: "https://checkout.stripe.com/c/pay/cs_test_1" });
+    expect(await api.checkout({ agent: agent("ann"), plan: "plus", idempotencyKey: "k1" })).toEqual({ ok: true, value: { id: "cs_test_1", url: "https://checkout.stripe.com/c/pay/cs_test_1" } });
 
     expect(sent[0].url).toBe("https://api.stripe.com/v1/checkout/sessions");
     expect(sent[0].headers.get("authorization")).toBe("Bearer sk_test_fake");
@@ -149,12 +149,44 @@ describe("stripe boundary", () => {
     expect(Object.keys(checkoutForm(cfg, rules, { agent: agent("ann"), plan: "standard", idempotencyKey: "k" }))).not.toContain("optional_items[0][price]");
   });
 
+  test("the subscription read, session expiry and portal session call Stripe as documented", async () => {
+    const sent: { method: string; url: string; body: string }[] = [];
+    let status = 200;
+    const api = stripeApi(cfg, rules, async (url, init) => {
+      sent.push({ method: init?.method ?? "GET", url, body: String(init?.body ?? "") });
+      return Response.json({ id: "x", url: "https://billing.stripe.com/p/session_1" }, { status });
+    });
+
+    expect(await api.subscription("sub_1" as SubscriptionId)).toEqual({ ok: true, value: { id: "x", url: "https://billing.stripe.com/p/session_1" } });
+    expect(await api.expireCheckout("cs_1" as CheckoutId)).toEqual({ ok: true, value: "expired" });
+    expect(await api.portal("cus_1" as CustomerId)).toEqual({ ok: true, value: { url: "https://billing.stripe.com/p/session_1" } });
+    expect(sent.map((s) => `${s.method} ${s.url}`)).toEqual([
+      "GET https://api.stripe.com/v1/subscriptions/sub_1",
+      "POST https://api.stripe.com/v1/checkout/sessions/cs_1/expire",
+      "POST https://api.stripe.com/v1/billing_portal/sessions",
+    ]);
+    expect(Object.fromEntries(new URLSearchParams(sent[2].body))).toEqual({
+      customer: "cus_1",
+      configuration: "bpc_fake",
+      return_url: "https://giraffes.test/billing/done",
+    });
+
+    status = 404;
+    expect(await api.subscription("sub_gone" as SubscriptionId)).toEqual({ ok: true, value: null });
+    expect(await api.expireCheckout("cs_gone" as CheckoutId)).toEqual({ ok: true, value: "gone" });
+    status = 400;
+    expect(await api.expireCheckout("cs_paid" as CheckoutId)).toEqual({ ok: true, value: "gone" });
+    status = 503;
+    expect(await api.expireCheckout("cs_1" as CheckoutId)).toMatchObject({ ok: false, status: 503 });
+    expect(await api.subscription("sub_1" as SubscriptionId)).toMatchObject({ ok: false, status: 503 });
+  });
+
   test("a Stripe error or a network failure is a failed checkout whose detail carries no key", async () => {
     const refused = stripeApi(cfg, rules, async () =>
       Response.json({ error: { type: "invalid_request_error", code: "api_key_invalid", message: "Invalid API Key provided: sk_test_****fake" } }, { status: 401 }),
     );
     const r = await refused.checkout({ agent: agent("ann"), plan: "ai", idempotencyKey: "k" });
-    expect(r).toEqual({ ok: false, detail: "checkout 401 invalid_request_error api_key_invalid" });
+    expect(r).toEqual({ ok: false, status: 401, detail: "checkout 401 invalid_request_error api_key_invalid" });
     const down = stripeApi(cfg, rules, async () => {
       throw new TypeError("fetch failed");
     });
@@ -162,14 +194,38 @@ describe("stripe boundary", () => {
     expect(JSON.stringify(r)).not.toContain("sk_test");
   });
 
-  test("a subscription's period end is read from the subscription or its items, and Plus places are capped", () => {
-    const e = subscriptionEvent({ user: "ann", sub: "sub_1", plan: "plus", status: "active", periodEnd: "2099-12-04T10:00", created: "2099-11-04T10:00", extraSeats: 10 });
-    const parsed = parseEvent(e, cfg, rules);
-    expect(parsed).toMatchObject({ kind: "event", event: { subscription: { plan: "plus", seats: 6, periodEnd: local("2099-12-04T10:00"), owner: "p:dev:ann" } } });
-    const top = structuredClone(e) as { data: { object: Record<string, unknown> } };
-    top.data.object.current_period_end = Math.floor(local("2099-12-05T10:00") / 1000);
-    top.data.object.items = { data: [{ price: { id: "price_plus" }, quantity: 1 }] };
-    expect(parseEvent(top, cfg, rules)).toMatchObject({ kind: "event", event: { subscription: { periodEnd: local("2099-12-05T10:00"), seats: 3 } } });
+  test("a subscription read from Stripe gives its owner, customer, plan and capped Plus places", () => {
+    const plus = stripeSubscription({ user: "ann", sub: "sub_1", plan: "plus", status: "past_due", extraSeats: 10, customer: "cus_ann" });
+    expect(parseSubscription(plus, rules)).toEqual({
+      kind: "ours",
+      subscription: { id: "sub_1", owner: "p:dev:ann", customer: "cus_ann", plan: "plus", status: "past_due", seats: 6 },
+    });
+    const byMetadata = { ...stripeSubscription({ user: "ann", sub: "sub_2", plan: "ai", status: "active" }), items: { data: [] } };
+    expect(parseSubscription(byMetadata, rules)).toMatchObject({ kind: "ours", subscription: { plan: "ai", seats: 1 } });
+    expect(parseSubscription({ ...plus, metadata: {} }, rules)).toMatchObject({ kind: "not_ours" });
+    expect(parseSubscription(null, rules)).toMatchObject({ kind: "not_ours" });
+    expect(parseSubscription({ id: "sub_3" }, rules)).toMatchObject({ kind: "invalid" });
+  });
+
+  test("our prices are known by product or lookup key, so a replaced price still counts the places people pay for", () => {
+    const replaced = (name: string, quantity: number) => ({ price: { id: `price_${name}_2025`, product: `giraffes_${name}`, lookup_key: null }, quantity });
+    const plus = { ...stripeSubscription({ user: "ann", sub: "sub_1", plan: "plus", status: "active" }), items: { data: [replaced("plus", 1), replaced("seat", 2)] } };
+    expect(parseSubscription(plus, rules)).toMatchObject({ kind: "ours", subscription: { plan: "plus", seats: 5 } });
+
+    const keyed = (name: string) => ({ price: { id: `price_${name}_manual`, product: { id: "prod_manual" }, lookup_key: `giraffes_${name}` }, quantity: 1 });
+    const switched = { ...stripeSubscription({ user: "ann", sub: "sub_2", plan: "plus", status: "active" }), items: { data: [keyed("standard")] } };
+    expect(parseSubscription(switched, rules)).toMatchObject({ kind: "ours", subscription: { plan: "standard", seats: 1 } });
+  });
+
+  test("an event names the subscription and the owner's agent key, and carries no state", () => {
+    expect(parseEvent(checkoutEvent({ user: "ann", sub: "sub_1", plan: "plus", id: "evt_c" }))).toEqual({
+      kind: "event",
+      event: { id: "evt_c", subscription: "sub_1", owner: "p:dev:ann" },
+    });
+    expect(parseEvent(subscriptionEvent({ user: "ann", sub: "sub_1", plan: "plus", status: "canceled", id: "evt_s" }))).toEqual({
+      kind: "event",
+      event: { id: "evt_s", subscription: "sub_1", owner: "p:dev:ann" },
+    });
   });
 });
 
@@ -189,8 +245,21 @@ describe("billing off", () => {
 
     expect(await c.received()).toEqual(["Hi!"]);
     expect((await c.snapshot()).plan).toEqual({ kind: "trial", endsAt: null });
-    const res = await postStripe(checkoutEvent({ user: "bea", sub: "sub_x", plan: "standard", created: "2099-11-04T10:00" }), { vars: { BILLING: "off" } });
+    const res = await postStripe(checkoutEvent({ user: "bea", sub: "sub_x", plan: "standard" }), { vars: { BILLING: "off" } });
     expect(res.status).toBe(404);
+  });
+
+  test("a person from the beta starts the full trial on their first message after billing turns on", async () => {
+    const beta = await devChat("ben", { model: scripted([chat("Hi!"), chat("Still here.")]), at: "2099-11-04T10:00" });
+    await beta.say("hello");
+    await beta.received();
+
+    const kit = billingOn();
+    const c = await devChat("ben", { model: beta.model, at: "2099-12-30T10:00", billing: kit.deps });
+    await c.say("hello again");
+
+    expect(await c.received()).toEqual(["Still here."]);
+    expect((await c.snapshot()).plan).toEqual({ kind: "trial", endsAt: local("2100-01-13T10:00") });
   });
 });
 
@@ -259,7 +328,8 @@ describe("trial and lapse", () => {
     await c.say("/plan");
     expect((await c.received())[0]).toMatch(/^You have no active plan, so I can't answer messages for now\.\nPick a plan:/);
 
-    const res = await postStripe(checkoutEvent({ user: "eve", sub: "sub_eve", plan: "standard", created: "2099-11-04T10:01" }));
+    kit.stripe.subscriptions.set("sub_eve", stripeSubscription({ user: "eve", sub: "sub_eve", plan: "standard", status: "active" }));
+    const res = await postStripe(checkoutEvent({ user: "eve", sub: "sub_eve", plan: "standard" }));
     expect([res.status, await res.text()]).toEqual([200, "applied"]);
     await c.settle();
     expect(await c.received()).toEqual(["Thanks. Your Standard plan is active."]);
@@ -267,7 +337,76 @@ describe("trial and lapse", () => {
     await c.say("hello");
     expect(await c.received()).toEqual(["Welcome back."]);
     await c.say("/plan");
-    expect(await c.received()).toEqual(["You're on the Standard plan."]);
+    expect(await c.received()).toEqual(["You're on the Standard plan.\nTo change or cancel your plan: https://billing.stripe.test/p/cus_eve"]);
+  });
+});
+
+describe("checkout and the portal", () => {
+  test("a new /plan expires the Checkout sessions an earlier one handed out before making new ones", async () => {
+    const kit = billingOn();
+    const c = await devChat("fin", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("/plan", { id: "plan-a" });
+    const first = [...kit.stripe.sessions.keys()];
+    kit.stripe.sessions.set(first[1], "complete");
+
+    await c.say("/plan", { id: "plan-b" });
+
+    expect(first.map((id) => kit.stripe.sessions.get(id))).toEqual(["expired", "complete", "expired"]);
+    expect([...kit.stripe.sessions.values()].filter((s) => s === "open")).toHaveLength(3);
+    const [, second] = await c.received();
+    expect(second).toContain("Pick a plan:");
+  });
+
+  test("when an earlier session can't be expired, no new links go out, and the next /plan tries again", async () => {
+    const kit = billingOn();
+    const c = await devChat("gus", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("/plan");
+    kit.stripe.expiresFailing = true;
+    await c.say("/plan");
+    expect(kit.stripe.checkouts).toHaveLength(3);
+
+    kit.stripe.expiresFailing = false;
+    await c.say("/plan");
+
+    expect((await c.received())[1]).toBe(`You're on the free trial, with 14 days left.\n${NO_LINKS}`);
+    expect([...kit.stripe.sessions.values()]).toEqual(["expired", "expired", "expired", "open", "open", "open"]);
+  });
+
+  test("a person who pays gets a link to manage the plan instead of Checkout links, kept out of the history", async () => {
+    const kit = billingOn();
+    const c = await devChat("hal", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await pay(kit, c, "hal", "standard");
+    await c.received();
+
+    await c.say("/plan");
+
+    expect(await c.received()).toEqual(["You're on the Standard plan.\nTo change or cancel your plan: https://billing.stripe.test/p/cus_hal"]);
+    expect(kit.stripe.portals).toEqual(["cus_hal"]);
+    expect(kit.stripe.checkouts).toEqual([]);
+    expect(JSON.stringify((await c.snapshot()).turns)).not.toContain("billing.stripe.test");
+
+    kit.stripe.failing = true;
+    await c.say("/plan");
+    expect(await c.received()).toEqual([`You're on the Standard plan.\n${NO_PORTAL}`]);
+  });
+
+  test("a second paying subscription is logged and recorded, nothing is cancelled, and the person is told once", async () => {
+    const kit = billingOn();
+    const c = await devChat("ike", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("/plan");
+    await c.received();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    await stripeChange(kit, { user: "ike", sub: "sub_ike_1", plan: "standard", status: "active" });
+    await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "ai", status: "active" });
+    await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "ai", status: "active" });
+    await c.settle();
+
+    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", DUPLICATE]);
+    expect(errors.mock.calls.flat().join(" ")).toContain("sub_ike_1 sub_ike_2");
+    errors.mockRestore();
+    const found = await env.LEDGER.prepare("SELECT owner_key, subscription_ids FROM billing_duplicate").all();
+    expect(found.results).toEqual([{ owner_key: "p:dev:ike", subscription_ids: "sub_ike_1 sub_ike_2" }]);
+    expect([(await row("sub_ike_1"))?.status, (await row("sub_ike_2"))?.status]).toEqual(["active", "active"]);
   });
 });
 
@@ -275,7 +414,8 @@ describe("stripe webhook", () => {
   test("a bad, stale or missing signature is refused and changes nothing", async () => {
     const kit = billingOn({ TRIAL_DAYS: "0" });
     const c = await devChat("fay", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
-    const e = checkoutEvent({ user: "fay", sub: "sub_fay", plan: "standard", created: "2099-11-04T10:00" });
+    kit.stripe.subscriptions.set("sub_fay", stripeSubscription({ user: "fay", sub: "sub_fay", plan: "standard", status: "active" }));
+    const e = checkoutEvent({ user: "fay", sub: "sub_fay", plan: "standard" });
     const body = JSON.stringify(e);
 
     for (const signature of [signStripe(body, Date.now(), "whsec_other"), signStripe(body, Date.now() - 6 * 60_000), ""]) {
@@ -291,7 +431,8 @@ describe("stripe webhook", () => {
     const c = await devChat("gil", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
     await c.say("/plan");
     await c.received();
-    const e = checkoutEvent({ user: "gil", sub: "sub_gil", plan: "ai", created: "2099-11-04T10:00" });
+    kit.stripe.subscriptions.set("sub_gil", stripeSubscription({ user: "gil", sub: "sub_gil", plan: "ai", status: "active" }));
+    const e = checkoutEvent({ user: "gil", sub: "sub_gil", plan: "ai" });
 
     expect(await (await postStripe(e)).text()).toBe("applied");
     expect(await (await postStripe(e)).text()).toBe("duplicate");
@@ -300,46 +441,80 @@ describe("stripe webhook", () => {
     expect(await c.received()).toEqual(["Thanks. Your AI plan is active."]);
   });
 
-  test("late events never move a subscription back, and a cancelled one stays cancelled", async () => {
+  test("every event stores what Stripe holds now, whatever its own payload says, and a cancelled one stays cancelled", async () => {
     const kit = billingOn({ TRIAL_DAYS: "0" });
     const c = await devChat("hu", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
     await c.say("/plan");
     await c.received();
-    const ev = (status: string, periodEnd: string, created: string, type?: "customer.subscription.deleted") =>
-      postStripe(subscriptionEvent({ user: "hu", sub: "sub_hu", plan: "standard", status, periodEnd, created, type }));
+    const hu = { user: "hu", sub: "sub_hu", plan: "standard" } as const;
 
-    await ev("active", "2100-01-04T10:00", "2099-12-04T10:00");
-    await ev("past_due", "2099-12-04T10:00", "2099-11-20T10:00");
-    await ev("incomplete", "2100-01-04T10:00", "2099-12-04T10:00");
-    expect(await row("sub_hu")).toEqual({ plan: "standard", status: "active", period_end: local("2100-01-04T10:00"), seats: 1 });
+    await stripeChange(kit, { ...hu, status: "active" });
+    await stripeChange(kit, { ...hu, status: "past_due" });
+    await stripeChange(kit, { ...hu, status: "unpaid" });
+    expect(await row("sub_hu")).toEqual({ plan: "standard", status: "unpaid", seats: 1, customer_id: "cus_hu" });
 
-    await ev("canceled", "2100-01-04T10:00", "2099-12-10T10:00", "customer.subscription.deleted");
-    await ev("active", "2100-02-04T10:00", "2100-01-04T10:00");
-    await postStripe(checkoutEvent({ user: "hu", sub: "sub_hu", plan: "standard", created: "2100-01-05T10:00" }));
+    kit.stripe.subscriptions.set("sub_hu", stripeSubscription({ ...hu, status: "active" }));
+    await postStripe(subscriptionEvent({ ...hu, status: "incomplete" }));
+    expect(await row("sub_hu")).toMatchObject({ status: "active" });
+
+    await stripeChange(kit, { ...hu, status: "canceled", type: "customer.subscription.deleted" });
+    kit.stripe.subscriptions.set("sub_hu", stripeSubscription({ ...hu, status: "active" }));
+    await postStripe(checkoutEvent(hu));
     await c.settle();
 
     expect(await row("sub_hu")).toMatchObject({ status: "canceled" });
-    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", NOTICE.lapsed]);
+    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", NOTICE.lapsed, "Thanks. Your Standard plan is active.", NOTICE.lapsed]);
   });
 
-  test("same-second events in reverse order end active, and a checkout seen after its subscription changes nothing", async () => {
-    const kit = billingOn({ TRIAL_DAYS: "0" });
+  test("a checkout seen after its Plus subscription keeps the extra places Stripe holds", async () => {
+    const kit = billingOn();
     const c = await devChat("ida", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
-    await c.say("/plan");
-    await c.received();
-    const at = "2099-11-04T10:05";
-
-    await postStripe(subscriptionEvent({ user: "ida", sub: "sub_ida", plan: "standard", status: "active", periodEnd: "2099-12-04T10:05", created: at }));
-    await postStripe(subscriptionEvent({ user: "ida", sub: "sub_ida", plan: "standard", status: "incomplete", periodEnd: "2099-12-04T10:05", created: at, type: "customer.subscription.created" }));
-    await postStripe(checkoutEvent({ user: "ida", sub: "sub_ida", plan: "standard", created: at }));
+    await stripeChange(kit, { user: "ida", sub: "sub_ida", plan: "plus", status: "active", extraSeats: 2, type: "customer.subscription.created" });
+    await postStripe(checkoutEvent({ user: "ida", sub: "sub_ida", plan: "plus" }));
     await c.settle();
 
-    expect(await row("sub_ida")).toMatchObject({ status: "active", period_end: local("2099-12-04T10:05") });
-    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active."]);
+    expect(await row("sub_ida")).toMatchObject({ plan: "plus", status: "active", seats: 5 });
+  });
+
+  test("a slow read of an older state can't land after a newer one", async () => {
+    const kit = billingOn({ TRIAL_DAYS: "0" });
+    const c = await devChat("ivy", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const ivy = { user: "ivy", sub: "sub_ivy", plan: "standard" } as const;
+    kit.stripe.subscriptions.set("sub_ivy", stripeSubscription({ ...ivy, status: "incomplete" }));
+    const release = kit.stripe.holdNextRead();
+    const first = postStripe(checkoutEvent(ivy));
+    await new Promise((r) => setTimeout(r, 50));
+
+    kit.stripe.subscriptions.set("sub_ivy", stripeSubscription({ ...ivy, status: "active" }));
+    const second = postStripe(subscriptionEvent({ ...ivy, status: "active" }));
+    await new Promise((r) => setTimeout(r, 50));
+    release();
+    await Promise.all([first, second]);
+    await c.settle();
+
+    expect(await row("sub_ivy")).toMatchObject({ status: "active" });
+    expect((await c.snapshot()).plan).toEqual({ kind: "standard" });
+  });
+
+  test("a failed read from Stripe fails the event, and the redelivery applies it", async () => {
+    const kit = billingOn({ TRIAL_DAYS: "0" });
+    const c = await devChat("jan", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("/plan");
+    await c.received();
+    kit.stripe.readsFailing = true;
+    const e = subscriptionEvent({ user: "jan", sub: "sub_jan", plan: "ai", status: "active" });
+    kit.stripe.subscriptions.set("sub_jan", e.data.object);
+
+    await expect(postStripe(e)).rejects.toThrow();
+    expect(await row("sub_jan")).toBeNull();
+    kit.stripe.readsFailing = false;
+    expect(await (await postStripe(e)).text()).toBe("applied");
+    await c.settle();
+    expect(await c.received()).toEqual(["Thanks. Your AI plan is active."]);
   });
 
   test("events that aren't ours are acknowledged and ignored", async () => {
-    const foreign = subscriptionEvent({ user: "joe", sub: "sub_joe", plan: "standard", status: "active", periodEnd: "2099-12-04T10:00", created: "2099-11-04T10:00" });
+    const foreign = subscriptionEvent({ user: "joe", sub: "sub_joe", plan: "standard", status: "active" });
     (foreign.data.object.metadata as Record<string, string>) = {};
     const other = { id: "evt_inv", type: "invoice.paid", created: 1, data: { object: {} } };
     for (const e of [foreign, other]) {
@@ -352,41 +527,76 @@ describe("stripe webhook", () => {
 });
 
 describe("the subscription store", () => {
-  test("a terminal state is final; otherwise the later period, then the later event, then anything over incomplete wins", async () => {
+  test("a stored terminal state is final, and any other state is replaced by the one read from Stripe", async () => {
     const store = d1Billing(env.LEDGER);
-    const id = "sub_order" as SubscriptionId;
-    const s = (status: Subscription["status"], periodEnd: number, eventAt: number): Subscription => ({
-      id,
+    const s = (status: Subscription["status"]): Subscription => ({
+      id: "sub_order" as SubscriptionId,
       owner: agent("o"),
+      customer: null,
       plan: "standard",
       status,
-      periodEnd: periodEnd as EpochMs,
-      eventAt: eventAt as EpochMs,
       seats: 1,
     });
     const after = async (sub: Subscription) => {
       await store.applySubscription(sub, 0 as EpochMs);
       return (await row("sub_order"))?.status;
     };
-    expect(await after(s("active", 2, 4))).toBe("active");
-    expect(await after(s("past_due", 1, 5))).toBe("active");
-    expect(await after(s("incomplete", 2, 4))).toBe("active");
-    expect(await after(s("past_due", 2, 5))).toBe("past_due");
-    expect(await after(s("unpaid", 2, 5))).toBe("past_due");
-    expect(await after(s("active", 3, 1))).toBe("active");
-    expect(await after(s("canceled", 1, 1))).toBe("canceled");
-    expect(await after(s("active", 9, 9))).toBe("canceled");
-    await env.LEDGER.prepare("DELETE FROM billing_subscription").run();
-    expect(await after(s("incomplete", 2, 4))).toBe("incomplete");
-    expect(await after(s("active", 2, 4))).toBe("active");
+    expect(await after(s("active"))).toBe("active");
+    expect(await after(s("past_due"))).toBe("past_due");
+    expect(await after(s("unpaid"))).toBe("unpaid");
+    expect(await after(s("incomplete"))).toBe("incomplete");
+    expect(await after(s("incomplete_expired"))).toBe("incomplete_expired");
+    expect(await after(s("active"))).toBe("incomplete_expired");
+  });
+
+  test("past_due keeps paying for 14 days from when it was first seen, then counts as lapsed", async () => {
+    const store = d1Billing(env.LEDGER);
+    const day = (d: number) => (local("2099-11-04T10:00") + d * 86_400_000) as EpochMs;
+    const due: Subscription = { id: "sub_due" as SubscriptionId, owner: agent("due"), customer: null, plan: "standard", status: "past_due", seats: 1 };
+    const own = async (at: EpochMs) => (await store.standing(agent("due"), at)).own;
+
+    await store.applySubscription(due, day(0));
+    await store.applySubscription(due, day(10));
+    expect(await own(day(13.9))).toEqual({ id: "sub_due", plan: "standard" });
+    expect(await own(day(14))).toBeNull();
+
+    await store.applySubscription({ ...due, status: "active" }, day(15));
+    await store.applySubscription(due, day(16));
+    expect(await own(day(29.9))).toEqual({ id: "sub_due", plan: "standard" });
+    expect(await own(day(30))).toBeNull();
+
+    const plus: Subscription = { ...due, id: "sub_due_plus" as SubscriptionId, plan: "plus", seats: 3 };
+    await store.applySubscription(plus, day(0));
+    expect(await store.invite(agent("due"), "DUEDUE", day(1), day(30))).toEqual({ kind: "created" });
+    expect(await store.join("DUEDUE", agent("late"), day(14))).toBe("ended");
   });
 });
 
 describe("plus seats", () => {
+  test("a member pushed out when places are cut holds no seat, so they can join another Plus plan", async () => {
+    const store = d1Billing(env.LEDGER);
+    const t = (m: number) => (local("2099-11-04T10:00") + m * 60_000) as EpochMs;
+    const plus = (owner: string, seats: number): Subscription => ({ id: `sub_${owner}` as SubscriptionId, owner: agent(owner), customer: null, plan: "plus", status: "active", seats });
+    await store.applySubscription(plus("big", 4), t(0));
+    for (const [i, m] of ["amy", "bob", "cy"].entries()) {
+      await store.invite(agent("big"), `BIG00${i}`, t(i), t(999));
+      expect(await store.join(`BIG00${i}`, agent(m), t(i))).toBe("joined");
+    }
+
+    await store.applySubscription(plus("big", 3), t(10));
+    expect((await store.standing(agent("cy"), t(11))).seat).toBeNull();
+    await store.applySubscription(plus("other", 3), t(11));
+    await store.invite(agent("other"), "OTHER0", t(11), t(999));
+
+    expect(await store.join("OTHER0", agent("cy"), t(12))).toBe("joined");
+    expect((await store.standing(agent("cy"), t(13))).seat).toEqual({ id: "sub_other", owner: "p:dev:other" });
+    expect(await store.members("sub_big" as SubscriptionId)).toEqual(["p:dev:amy", "p:dev:bob"]);
+  });
+
   test("a join repeated by the person who joined is still joined, and an expired code doesn't work", async () => {
     const store = d1Billing(env.LEDGER);
     const now = local("2099-11-04T10:00");
-    const sub = { id: "sub_z" as SubscriptionId, owner: agent("zed"), plan: "plus" as const, status: "active" as const, periodEnd: now, eventAt: now, seats: 3 };
+    const sub: Subscription = { id: "sub_z" as SubscriptionId, owner: agent("zed"), customer: null, plan: "plus", status: "active", seats: 3 };
     await store.applySubscription(sub, now);
     await store.invite(agent("zed"), "AAAAAA", now, (now + 1000) as EpochMs);
     await store.invite(agent("zed"), "BBBBBB", now, (now + 1000) as EpochMs);
@@ -404,7 +614,7 @@ describe("plus seats", () => {
     const [mia, noa, ola] = await Promise.all(["mia", "noa", "ola"].map((u) => devChat(u, { model: scripted([]), at, billing: kit.deps })));
     await owner.say("/invite");
     expect(await owner.received()).toEqual(["Only the owner of a Plus plan can invite people. Send /plan to see the plans."]);
-    await pay(owner, "kit", "plus");
+    await pay(kit, owner, "kit", "plus");
     expect(await owner.received()).toEqual(["Thanks. Your Plus plan is active. Send /invite to add someone."]);
 
     const codes: string[] = [];
@@ -424,9 +634,9 @@ describe("plus seats", () => {
     expect((await mia.snapshot()).plan).toEqual({ kind: "plus", role: "member" });
     await owner.say("/plan");
     await owner.say("/invite");
-    expect(await owner.received()).toEqual(["You're on the Plus plan, with 3 of 3 places taken. Send /invite to add someone.", inviteFull(3)]);
+    expect(await owner.received()).toEqual(["You're on the Plus plan, with 3 of 3 places taken. Send /invite to add someone.\nTo change or cancel your plan: https://billing.stripe.test/p/cus_kit", inviteFull(3)]);
 
-    await pay(owner, "kit", "plus", { created: "2099-11-05T10:00", extraSeats: 1 });
+    await pay(kit, owner, "kit", "plus", { extraSeats: 1 });
     await ola.say(`/join ${codes[2]}`);
     expect(await ola.received()).toEqual([JOIN.joined]);
     expect(await row("sub_kit")).toMatchObject({ seats: 4 });
@@ -437,7 +647,7 @@ describe("plus seats", () => {
     const at = "2099-11-04T10:00";
     const owner = await devChat("pam", { model: scripted([]), at, billing: kit.deps });
     const member = await devChat("quin", { model: scripted([]), at, billing: kit.deps });
-    await pay(owner, "pam", "plus");
+    await pay(kit, owner, "pam", "plus");
     await owner.received();
     await owner.say("/invite");
     const code = codeIn((await owner.received())[0]);
@@ -459,14 +669,12 @@ describe("plus seats", () => {
     const at = "2099-11-04T10:00";
     const owner = await devChat("rae", { model: scripted([]), at, billing: kit.deps });
     const member = await devChat("sol", { model: scripted([]), at, billing: kit.deps });
-    await pay(owner, "rae", "plus");
+    await pay(kit, owner, "rae", "plus");
     await owner.say("/invite");
     await member.say(`/join ${codeIn((await owner.received()).at(-1) ?? "")}`);
     await member.received();
 
-    const res = await postStripe(
-      subscriptionEvent({ user: "rae", sub: "sub_rae", plan: "plus", status: "canceled", periodEnd: "2099-12-04T10:00", created: "2099-11-20T10:00", type: "customer.subscription.deleted" }),
-    );
+    const res = await stripeChange(kit, { user: "rae", sub: "sub_rae", plan: "plus", status: "canceled", type: "customer.subscription.deleted" });
     expect(res.status).toBe(200);
     await owner.settle();
     await member.settle();
@@ -481,9 +689,9 @@ describe("plus seats", () => {
     let failures = 1;
     const flaky: BillingStore = {
       ...real,
-      async standing(a) {
+      async standing(a, now) {
         if (failures-- > 0) throw new Error("D1 unavailable");
-        return real.standing(a);
+        return real.standing(a, now);
       },
     };
     const kit = billingOn({ TRIAL_DAYS: "0" });
@@ -491,13 +699,14 @@ describe("plus seats", () => {
     const owner = await devChat("tia", { model: scripted([]), at, billing: kit.deps });
     const member = await devChat("uma", { model: scripted([]), at, billing: { ...kit.deps, store: flaky } });
     failures = 0;
-    await pay(owner, "tia", "plus");
+    await pay(kit, owner, "tia", "plus");
     await owner.say("/invite");
     await member.say(`/join ${codeIn((await owner.received()).at(-1) ?? "")}`);
     await member.received();
     failures = 1;
 
-    const ended = subscriptionEvent({ user: "tia", sub: "sub_tia", plan: "plus", status: "canceled", periodEnd: "2099-12-04T10:00", created: "2099-11-20T10:00", type: "customer.subscription.deleted" });
+    const ended = subscriptionEvent({ user: "tia", sub: "sub_tia", plan: "plus", status: "canceled", type: "customer.subscription.deleted" });
+    kit.stripe.subscriptions.set("sub_tia", ended.data.object);
     await expect(postStripe(ended)).rejects.toThrow();
     expect(await (await postStripe(ended)).text()).toBe("applied");
     await owner.settle();
@@ -505,6 +714,92 @@ describe("plus seats", () => {
 
     expect(await owner.received()).toEqual([NOTICE.lapsed]);
     expect(await member.received()).toEqual([NOTICE.lapsed]);
+  });
+
+  test("a Plus owner who moves to Standard takes every member off the plan", async () => {
+    const kit = billingOn({ TRIAL_DAYS: "0" });
+    const at = "2099-11-04T10:00";
+    const owner = await devChat("wren", { model: scripted([]), at, billing: kit.deps });
+    const member = await devChat("xia", { model: scripted([]), at, billing: kit.deps });
+    await pay(kit, owner, "wren", "plus");
+    await owner.say("/invite");
+    await member.say(`/join ${codeIn((await owner.received()).at(-1) ?? "")}`);
+    await member.received();
+
+    await stripeChange(kit, { user: "wren", sub: "sub_wren", plan: "standard", status: "active" });
+    await owner.settle();
+    await member.settle();
+
+    expect(await owner.received()).toEqual(["Thanks. Your Standard plan is active."]);
+    expect(await member.received()).toEqual([NOTICE.lapsed]);
+    expect((await member.snapshot()).plan.kind).toBe("lapsed");
+  });
+
+  test("a /leave repeated after its refresh failed answers as if it had just left", async () => {
+    const real = d1Billing(env.LEDGER);
+    let failures = 0;
+    const flaky: BillingStore = {
+      ...real,
+      async standing(a, now) {
+        if (failures-- > 0) throw new Error("D1 unavailable");
+        return real.standing(a, now);
+      },
+    };
+    const kit = billingOn();
+    const at = "2099-11-04T10:00";
+    const owner = await devChat("yan", { model: scripted([]), at, billing: kit.deps });
+    const member = await devChat("zoe", { model: scripted([]), at, billing: { ...kit.deps, store: flaky } });
+    await pay(kit, owner, "yan", "plus");
+    await owner.say("/invite");
+    await member.say(`/join ${codeIn((await owner.received()).at(-1) ?? "")}`);
+    await member.received();
+
+    failures = 1;
+    await member.say("/leave");
+    await member.say("/leave");
+    await member.say("/leave");
+
+    expect(await member.received()).toEqual([BILLING_BUSY, `${LEFT}\nYou're on the free trial, with 14 days left.`, NOT_SEATED]);
+    expect(await real.members("sub_yan" as SubscriptionId)).toEqual([]);
+  });
+});
+
+describe("each turn's plan", () => {
+  test("a turn reads the plan from D1, so a payment whose refresh was lost still counts", async () => {
+    const kit = billingOn({ TRIAL_DAYS: "0" });
+    const c = await devChat("abe", { model: scripted([chat("Hello again.")]), at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("/plan");
+    await c.received();
+
+    await kit.deps.store.applySubscription({ id: "sub_abe" as SubscriptionId, owner: agent("abe"), customer: null, plan: "standard", status: "active", seats: 1 }, c.clock.now());
+    await c.say("hello");
+
+    expect(await c.received()).toEqual(["Hello again."]);
+  });
+
+  test("with D1 unreachable a turn uses the plan last refreshed, paid or lapsed", async () => {
+    const real = d1Billing(env.LEDGER);
+    let down = false;
+    const flaky: BillingStore = {
+      ...real,
+      async standing(a, now) {
+        if (down) throw new Error("D1 unavailable");
+        return real.standing(a, now);
+      },
+    };
+    const kit = billingOn({ TRIAL_DAYS: "0" }, flaky);
+    const paid = await devChat("bo", { model: scripted([chat("Still answering.")]), at: "2099-11-04T10:00", billing: kit.deps });
+    const unpaid = await devChat("cal", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await paid.say("/plan");
+    await pay(kit, paid, "bo", "standard");
+    await paid.received();
+
+    down = true;
+    await paid.say("hello");
+    await unpaid.say("hello");
+
+    expect(await paid.received()).toEqual(["Still answering."]);
+    expect(await unpaid.received()).toEqual([NOTICE.lapsed]);
   });
 });
 
@@ -516,7 +811,7 @@ describe("the ai plan", () => {
     const c = await devChat("val", { model, at: "2099-11-04T10:00", billing: kit.deps, box: box.deps });
     await c.say("/claude");
     await c.received();
-    await pay(c, "val", "ai");
+    await pay(kit, c, "val", "ai");
     expect(await c.received()).toEqual(["Thanks. Your AI plan is active."]);
 
     await c.say("hello");
@@ -531,7 +826,7 @@ describe("the ai plan", () => {
     const spendsTheCap = Math.ceil((1_000_000 * 1_000_000) / priceOf(routeOf("turn").model).inputPerM);
     const model = scripted([turn({ actions: [{ type: "send", text: "Sure." }], task: ["chat", "chat", "none"], usage: { inputTokens: spendsTheCap } })]);
     const c = await devChat("wes", { model, at: "2099-11-04T10:00", billing: kit.deps });
-    await pay(c, "wes", "ai");
+    await pay(kit, c, "wes", "ai");
     await c.received();
 
     await c.say("hello");
@@ -548,6 +843,7 @@ describe("stripe setup", () => {
     const products = new Set<string>();
     const prices: { id: string; product: string; unit_amount: number; currency: string; recurring: { interval: string }; lookup_key: string | null; active: boolean }[] = [];
     const endpoints: { id: string; url: string; events: string[] }[] = [];
+    const portals: { id: string; form: Record<string, string> }[] = [];
     const posts: string[] = [];
     let n = 0;
     const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
@@ -577,6 +873,18 @@ describe("stripe setup", () => {
         endpoints.push({ id: `we_${++n}`, url: form.get("url")!, events: events() });
         return Response.json({ ...endpoints.at(-1), secret: "whsec_made" });
       }
+      if (path === "/billing_portal/configurations" && init?.method !== "POST") {
+        return Response.json({ data: portals.map((c) => ({ id: c.id, active: true, metadata: { giraffes: c.form["metadata[giraffes]"] } })) });
+      }
+      if (path === "/billing_portal/configurations") {
+        portals.push({ id: `bpc_${++n}`, form: Object.fromEntries(form) });
+        return Response.json({ id: portals.at(-1)?.id });
+      }
+      const portal = portals.find((c) => path === `/billing_portal/configurations/${c.id}`);
+      if (portal) {
+        portal.form = Object.fromEntries(form);
+        return Response.json({ id: portal.id });
+      }
       const endpoint = endpoints.find((e) => path === `/webhook_endpoints/${e.id}`);
       if (endpoint) {
         endpoint.events = events();
@@ -584,7 +892,7 @@ describe("stripe setup", () => {
       }
       return Response.json({ error: { message: "no route" } }, { status: 400 });
     };
-    return { fetch, products, prices, endpoints, posts };
+    return { fetch, products, prices, endpoints, portals, posts };
   }
   const opts = (fetch: ReturnType<typeof fakeAccount>["fetch"], amounts = DEFAULT_AMOUNTS) => ({ secretKey: "sk_test_fake", publicUrl: "https://giraffes.test/", amounts, fetch });
 
@@ -610,12 +918,39 @@ describe("stripe setup", () => {
     const posts = account.posts.length;
 
     const again = await stripeSetup(opts(account.fetch));
-    expect(account.posts.slice(posts)).toEqual([`/webhook_endpoints/${first.webhook.id}`]);
-    expect(again).toMatchObject({ prices: first.prices, webhook: { id: first.webhook.id, secret: null } });
+    expect(account.posts.slice(posts)).toEqual([`/billing_portal/configurations/${first.portal}`, `/webhook_endpoints/${first.webhook.id}`]);
+    expect(again).toMatchObject({ prices: first.prices, portal: first.portal, webhook: { id: first.webhook.id, secret: null } });
 
     const raised = await stripeSetup(opts(account.fetch, { ...DEFAULT_AMOUNTS, ai: 19900 }));
     expect(raised.prices.ai).not.toBe(first.prices.ai);
     expect({ ...raised.prices, ai: first.prices.ai }).toEqual(first.prices);
     expect(account.prices.filter((p) => p.lookup_key === "giraffes_ai").map((p) => p.unit_amount)).toEqual([19900]);
+    expect(account.portals).toHaveLength(1);
+    expect(account.portals[0].form["features[subscription_update][products][2][prices][0]"]).toBe(raised.prices.ai);
+  });
+
+  test("the portal configuration lets a person update their card, see invoices, cancel at period end and switch plans", async () => {
+    const account = fakeAccount();
+    const r = await stripeSetup(opts(account.fetch));
+
+    expect(account.portals.map((c) => c.id)).toEqual([r.portal]);
+    expect(account.portals[0].form).toEqual({
+      "metadata[giraffes]": "portal",
+      default_return_url: "https://giraffes.test/billing/done",
+      "features[payment_method_update][enabled]": "true",
+      "features[invoice_history][enabled]": "true",
+      "features[subscription_cancel][enabled]": "true",
+      "features[subscription_cancel][mode]": "at_period_end",
+      "features[subscription_update][enabled]": "true",
+      "features[subscription_update][default_allowed_updates][0]": "price",
+      "features[subscription_update][proration_behavior]": "create_prorations",
+      "features[subscription_update][products][0][product]": "giraffes_standard",
+      "features[subscription_update][products][0][prices][0]": r.prices.standard,
+      "features[subscription_update][products][1][product]": "giraffes_plus",
+      "features[subscription_update][products][1][prices][0]": r.prices.plus,
+      "features[subscription_update][products][2][product]": "giraffes_ai",
+      "features[subscription_update][products][2][prices][0]": r.prices.ai,
+    });
+    expect(r.log).toContain(`portal configuration ${r.portal}: created`);
   });
 });

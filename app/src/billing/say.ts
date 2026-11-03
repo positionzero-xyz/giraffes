@@ -46,6 +46,11 @@ export function planChoices(rules: PlanRules, links: Links | null): { readonly t
 
 export const NO_LINKS = "I couldn't make the payment links just now. Send /plan again in a minute.";
 
+export const MANAGE_NOTE = "<billing link>";
+export const manage = (link: string) => `To change or cancel your plan: ${link}`;
+export const NO_PORTAL = "I couldn't make the link to manage your plan just now. Send /plan again in a minute.";
+export const DUPLICATE = "It looks like you're paying for more than one plan at once. We'll sort out the duplicate for you.";
+
 export function inviteText(code: string): string {
   return `Ask the person you want to add to send me this within 7 days. It works once.\n/join ${code}`;
 }

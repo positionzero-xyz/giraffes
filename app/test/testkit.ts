@@ -6,7 +6,7 @@ import { createHmac } from "node:crypto";
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import worker from "../src/worker";
 import { d1Billing, type BillingStore } from "../src/billing/store";
-import type { CheckoutRequest, CheckoutResult, StripeApi } from "../src/billing/stripe";
+import type { CheckoutId, CheckoutRequest, StripeApi, StripeReply } from "../src/billing/stripe";
 import { loadConfig, type BillingConfig, type Env } from "../src/config";
 import type { Agent, AgentSnapshot, BillingDeps, BoxDeps } from "../src/agent/agent";
 import { boxClient } from "../src/box/client";
@@ -318,19 +318,64 @@ export const STRIPE_VARS = {
   STRIPE_PRICE_PLUS: "price_plus",
   STRIPE_PRICE_SEAT: "price_seat",
   STRIPE_PRICE_AI: "price_ai",
+  STRIPE_PORTAL_CONFIGURATION: "bpc_fake",
   PUBLIC_URL: "https://giraffes.test",
 } as const;
 
-export type FakeStripe = StripeApi & { readonly checkouts: CheckoutRequest[]; failing: boolean };
+export type FakeStripe = StripeApi & {
+  readonly checkouts: CheckoutRequest[];
+  /** Checkout sessions by id, as Stripe holds them; a repeated idempotency key gets its session back. */
+  readonly sessions: Map<string, "open" | "complete" | "expired">;
+  readonly portals: string[];
+  failing: boolean;
+  expiresFailing: boolean;
+  /** What Stripe holds now, by subscription id; each event's handler reads it from here. */
+  readonly subscriptions: Map<string, unknown>;
+  readsFailing: boolean;
+  /** Holds the next read after it has copied the state, until the returned function is called. */
+  holdNextRead(): () => void;
+};
 
 export function fakeStripe(): FakeStripe {
-  const stripe = {
-    checkouts: [] as CheckoutRequest[],
+  let hold: Promise<void> | null = null;
+  const stripe: FakeStripe = {
+    checkouts: [],
+    sessions: new Map(),
+    portals: [],
     failing: false,
-    async checkout(req: CheckoutRequest): Promise<CheckoutResult> {
+    expiresFailing: false,
+    subscriptions: new Map(),
+    readsFailing: false,
+    holdNextRead() {
+      let release = () => {};
+      hold = new Promise((r) => (release = r));
+      return release;
+    },
+    async checkout(req) {
       stripe.checkouts.push(req);
-      if (stripe.failing) return { ok: false, detail: "checkout 500" };
-      return { ok: true, url: `https://checkout.stripe.test/${req.plan}/${encodeURIComponent(req.idempotencyKey)}` };
+      if (stripe.failing) return { ok: false, status: 500, detail: "checkout 500" };
+      const id = `cs_${createHmac("sha256", "cs").update(req.idempotencyKey).digest("hex").slice(0, 12)}` as CheckoutId;
+      if (!stripe.sessions.has(id)) stripe.sessions.set(id, "open");
+      return { ok: true, value: { id, url: `https://checkout.stripe.test/${req.plan}/${encodeURIComponent(req.idempotencyKey)}` } };
+    },
+    async expireCheckout(id) {
+      if (stripe.expiresFailing) return { ok: false, status: 500, detail: "expire 500" };
+      if (stripe.sessions.get(id) !== "open") return { ok: true, value: "gone" };
+      stripe.sessions.set(id, "expired");
+      return { ok: true, value: "expired" };
+    },
+    async portal(customer) {
+      if (stripe.failing) return { ok: false, status: 500, detail: "portal 500" };
+      stripe.portals.push(customer);
+      return { ok: true, value: { url: `https://billing.stripe.test/p/${customer}` } };
+    },
+    async subscription(id): Promise<StripeReply<unknown>> {
+      if (stripe.readsFailing) return { ok: false, status: null, detail: "TypeError: fetch failed" };
+      const state = structuredClone(stripe.subscriptions.get(id) ?? null);
+      const held = hold;
+      hold = null;
+      if (held) await held;
+      return { ok: true, value: state };
     },
   };
   return stripe;
@@ -363,43 +408,48 @@ export async function postStripe(event: unknown, opts: { readonly signature?: st
 }
 
 let stripeEvents = 0;
-const seconds = (t: EpochMs | string) => Math.floor((typeof t === "string" ? local(t) : t) / 1000);
 
-export function subscriptionEvent(o: {
+export type StripeSubscriptionOpts = {
   readonly user: string;
   readonly sub: string;
   readonly plan: "standard" | "plus" | "ai";
   readonly status: string;
-  readonly periodEnd: string;
-  readonly created: string;
-  readonly type?: "customer.subscription.created" | "customer.subscription.updated" | "customer.subscription.deleted";
   readonly extraSeats?: number;
-  readonly id?: string;
-}) {
-  const items = [{ price: { id: `price_${o.plan}` }, quantity: 1, current_period_end: seconds(o.periodEnd) }];
-  if (o.extraSeats) items.push({ price: { id: "price_seat" }, quantity: o.extraSeats, current_period_end: seconds(o.periodEnd) });
+  readonly customer?: string;
+};
+
+/** A subscription object as `GET /v1/subscriptions/{id}` returns it, on the prices `stripe-setup.ts` makes. */
+export function stripeSubscription(o: StripeSubscriptionOpts) {
+  const price = (name: string) => ({ id: `price_${name}`, object: "price", product: `giraffes_${name}`, lookup_key: `giraffes_${name}` });
+  const items = [{ price: price(o.plan), quantity: 1 }];
+  if (o.extraSeats) items.push({ price: price("seat"), quantity: o.extraSeats });
   return {
-    id: o.id ?? `evt_${++stripeEvents}`,
-    type: o.type ?? "customer.subscription.updated",
-    created: seconds(o.created),
-    data: {
-      object: {
-        id: o.sub,
-        object: "subscription",
-        status: o.status,
-        metadata: { agent_key: personAgentKey({ channel: "dev", channelUserId: o.user }), plan: o.plan },
-        items: { object: "list", data: items },
-      },
-    },
+    id: o.sub,
+    object: "subscription",
+    status: o.status,
+    customer: o.customer ?? `cus_${o.user}`,
+    metadata: { agent_key: personAgentKey({ channel: "dev", channelUserId: o.user }), plan: o.plan },
+    items: { object: "list", data: items },
   };
 }
 
-export function checkoutEvent(o: { readonly user: string; readonly sub: string; readonly plan: "standard" | "plus" | "ai"; readonly created: string; readonly id?: string }) {
+type SubscriptionEventType = "customer.subscription.created" | "customer.subscription.updated" | "customer.subscription.deleted";
+
+export function subscriptionEvent(o: StripeSubscriptionOpts & { readonly type?: SubscriptionEventType; readonly id?: string }) {
+  return {
+    id: o.id ?? `evt_${++stripeEvents}`,
+    type: o.type ?? "customer.subscription.updated",
+    created: Math.floor(Date.now() / 1000),
+    data: { object: stripeSubscription(o) },
+  };
+}
+
+export function checkoutEvent(o: { readonly user: string; readonly sub: string; readonly plan: "standard" | "plus" | "ai"; readonly id?: string }) {
   const agent = personAgentKey({ channel: "dev", channelUserId: o.user });
   return {
     id: o.id ?? `evt_${++stripeEvents}`,
     type: "checkout.session.completed",
-    created: seconds(o.created),
+    created: Math.floor(Date.now() / 1000),
     data: {
       object: {
         id: `cs_${stripeEvents}`,
@@ -412,4 +462,10 @@ export function checkoutEvent(o: { readonly user: string; readonly sub: string; 
       },
     },
   };
+}
+
+/** Stripe's state becomes `o`, and Stripe posts the subscription event that says so. */
+export function stripeChange(kit: BillingKit, o: StripeSubscriptionOpts & { readonly type?: SubscriptionEventType; readonly id?: string }): Promise<Response> {
+  kit.stripe.subscriptions.set(o.sub, stripeSubscription(o));
+  return postStripe(subscriptionEvent(o));
 }

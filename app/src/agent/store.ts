@@ -3,6 +3,7 @@
  * atomic with respect to other requests.
  */
 import type { PaidPlan, PlanRow, Standing, SubscriptionId } from "../billing/plan";
+import type { CheckoutId } from "../billing/stripe";
 import type { BoxHostKind } from "../box/host";
 import { dueAt, type Box, type BoxState } from "../box/machine";
 import { commandOf } from "./commands";
@@ -112,7 +113,7 @@ type BoxCols = {
 };
 
 type PlanCols = {
-  trial_ends_at: EpochMs;
+  trial_ends_at: EpochMs | null;
   own_subscription: SubscriptionId | null;
   own_plan: PaidPlan | null;
   seat_subscription: SubscriptionId | null;
@@ -203,12 +204,17 @@ export class AgentStore {
 
   enqueue(
     envelope: InboundEnvelope,
-    first: { readonly tz: TimeZone; readonly checkinLocal: TimeOfDay; readonly checkin: NewWakeup; readonly trialEndsAt: EpochMs },
+    first: { readonly tz: TimeZone; readonly checkinLocal: TimeOfDay; readonly checkin: NewWakeup; readonly trialEndsAt: EpochMs | null },
     now: EpochMs,
   ): "inserted" | "duplicate" {
     return this.tx(() => {
       if (envelope.event.kind === "message") {
-        this.sql.exec("INSERT OR IGNORE INTO plan (one, trial_ends_at, updated_at) VALUES (1, ?, ?)", first.trialEndsAt, now);
+        this.sql.exec(
+          `INSERT INTO plan (one, trial_ends_at, updated_at) VALUES (1, ?, ?)
+           ON CONFLICT (one) DO UPDATE SET trial_ends_at = COALESCE(plan.trial_ends_at, excluded.trial_ends_at)`,
+          first.trialEndsAt,
+          now,
+        );
       }
       const created = this.sql.exec(
         `INSERT OR IGNORE INTO agent (one, agent_key, channel, channel_user_id, tz, checkin_local, created_at)
@@ -470,14 +476,13 @@ export class AgentStore {
     };
   }
 
-  applyStanding(s: Standing, trialEndsAt: EpochMs, message: { readonly key: EventKey; readonly message: NoteMessage } | null, now: EpochMs): void {
+  applyStanding(s: Standing, message: { readonly key: EventKey; readonly message: NoteMessage } | null, now: EpochMs): void {
     this.tx(() => {
       this.sql.exec(
-        `INSERT INTO plan (one, trial_ends_at, own_subscription, own_plan, seat_subscription, seat_owner, updated_at)
-         VALUES (1, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO plan (one, own_subscription, own_plan, seat_subscription, seat_owner, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?)
          ON CONFLICT (one) DO UPDATE SET own_subscription = excluded.own_subscription, own_plan = excluded.own_plan,
            seat_subscription = excluded.seat_subscription, seat_owner = excluded.seat_owner, updated_at = excluded.updated_at`,
-        trialEndsAt,
         s.own?.id ?? null,
         s.own?.plan ?? null,
         s.seat?.id ?? null,
@@ -486,6 +491,30 @@ export class AgentStore {
       );
       if (message && this.agent()) this.insertMessage(message.key, message.message, now);
     });
+  }
+
+  /** Tells the person `message` unless `once` was already told, marking it like a handled Stripe event. */
+  notifyOnce(once: string, key: EventKey, message: NoteMessage, now: EpochMs): void {
+    this.tx(() => {
+      if (this.billingEventSeen(once)) return;
+      if (this.agent()) this.insertMessage(key, message, now);
+      this.billingEventDone(once, now);
+    });
+  }
+
+  openCheckouts(): readonly { readonly id: CheckoutId; readonly eventKey: EventKey }[] {
+    return this.sql
+      .exec<{ id: CheckoutId; event_key: EventKey }>("SELECT id, event_key FROM checkout_session ORDER BY created_at, id")
+      .toArray()
+      .map((r) => ({ id: r.id, eventKey: r.event_key }));
+  }
+
+  checkoutOpened(id: CheckoutId, key: EventKey, now: EpochMs): void {
+    this.sql.exec("INSERT OR IGNORE INTO checkout_session (id, event_key, created_at) VALUES (?, ?, ?)", id, key, now);
+  }
+
+  checkoutClosed(id: CheckoutId): void {
+    this.sql.exec("DELETE FROM checkout_session WHERE id = ?", id);
   }
 
   billingEventSeen(id: string): boolean {

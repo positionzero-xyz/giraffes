@@ -91,7 +91,7 @@ Prices live in Stripe, never in code. `app/src/billing/` holds the plan rules (`
 
 | Plan | Box | API path | Who |
 |---|---|---|---|
-| `trial` | yes | `SPEND.userCapMicro` a month, as before billing | everyone for `TRIAL_DAYS` (default 14) from their first message after billing shipped |
+| `trial` | yes | `SPEND.userCapMicro` a month, as before billing | everyone for `TRIAL_DAYS` (default 14) from their first message with `BILLING=on`, people from the beta included |
 | `standard` | yes | as trial, when the box is out | a person with their own Standard subscription |
 | `plus` | yes | as trial | the owner of a Plus subscription, and each person holding one of its seats |
 | `ai` | no | `AI_CAP_USD` (default 1) a month | a person with their own AI subscription |
@@ -99,7 +99,7 @@ Prices live in Stripe, never in code. `app/src/billing/` holds the plan rules (`
 
 A person with more than one picks in that order: their own Plus or Standard, then a seat, then their own AI, then the trial. A paid plan applies from the moment Stripe says it is paying, even mid-trial.
 
-- `BILLING=off` (the default): nobody lapses, the trial has no end, no payment text goes out, and `/webhook/stripe` answers 404. The only change from before billing is that the plan row exists. `/plan` says the free beta has nothing to pay, and `/invite`, `/join` and `/leave` say plans aren't available yet.
+- `BILLING=off` (the default): nobody lapses, no trial clock runs, no payment text goes out, and `/webhook/stripe` answers 404. The plan row exists with no trial end. `/plan` says the free beta has nothing to pay, and `/invite`, `/join` and `/leave` say plans aren't available yet.
 - Lapsed: a message gets one notice a local day, "You have no active plan, so I can't answer messages for now. Send /plan to pick one." Later messages that day get nothing. A reminder the person asked for still goes out as the code-written `Reminder: <note>`. Check-ins and the agent's own wake-ups send nothing. The turn's outcome is `lapsed`.
 
 ### Data
@@ -107,23 +107,30 @@ A person with more than one picks in that order: their own Plus or Standard, the
 D1 is the truth, because a Plus seat crosses Durable Objects:
 
 ```
-billing_subscription: { id (Stripe sub_…), owner_key, plan: standard|plus|ai, status, period_end, event_at, seats }
+billing_subscription: { id (Stripe sub_…), owner_key, customer_id (cus_…), plan: standard|plus|ai, status, seats, past_due_since }
 billing_seat:         { agent_key (one seat per person), subscription_id, joined_at, left_at }
 billing_invite:       { code, subscription_id, created_at, expires_at, used_by, used_at }
+billing_duplicate:    { owner_key, subscription_ids (space-separated), found_at }
 ```
 
-`seats` counts the owner: `PLUS_SEATS` (default 3) plus the quantity of the seat price, at most `PLUS_MAX_SEATS` (default 6). Non-Plus subscriptions have 1. Paying statuses are `active`, `trialing` and `past_due`. A seat counts while its subscription is a paying Plus and fewer than `seats - 1` active seats joined before it.
+`seats` counts the owner: `PLUS_SEATS` (default 3) plus the quantity of the seat price, at most `PLUS_MAX_SEATS` (default 6). Non-Plus subscriptions have 1.
 
-Each person's DO keeps a projection, `plan: { trialEndsAt, own: {subscription, plan} | null, seat: {subscription, owner} | null }`, and computes the plan from it at use time (`planOf`), so the trial ending needs no timer. A person's first message creates the row with `trialEndsAt`.
+A subscription is paying while it is `active` or `trialing`, or `past_due` for less than 14 days from `past_due_since`. The store sets `past_due_since` the first time it reads `past_due` and clears it when the status moves on, so a card that never pays stops the plan two weeks in even if Stripe keeps the subscription open.
+
+A seat holds a place while its subscription is a paying Plus and fewer than `seats - 1` open seats joined before it. One SQL test (`countingSeat` in `store.ts`) decides it both for the standing and for `/join`'s "already seated" check, so a member pushed out when an owner cuts places holds no seat and can join another Plus plan.
+
+Each person's DO keeps a projection, `plan: { trialEndsAt | null, own: {subscription, plan} | null, seat: {subscription, owner} | null }`. With `BILLING=on`, every model turn reads the person's standing from D1 in one query and computes the plan from it (`planOf`), so a lost refresh or a past_due running out changes the next turn. The projection stands in only when D1 can't be read, and drives the box decision, compaction and the snapshot. The trial ending needs no timer either way.
+
+`trialEndsAt` is written on the person's first message with `BILLING=on`, and never while billing is off. The DO migration that made it nullable cleared every trial end the beta wrote, so people from the beta start a full trial when billing turns on.
 
 ### Commands
 
 All exact text and without the model, each claimed as a batch of its own:
 
-- `/plan` reads the person's standing from D1 first, so the reply is current even if a refresh was lost. It says the plan: days left on the trial, places taken for a Plus owner. With no plan to keep (trial or lapsed) and `BILLING=on`, it adds three Checkout links, one per plan. If any Checkout call fails, it says so and to try again.
+- `/plan` reads the person's standing from D1 first and refreshes the projection. It says the plan: days left on the trial, places taken for a Plus owner. A person who owns a paying subscription also gets a Stripe customer portal link to change or cancel it, and no Checkout links. With no plan to keep (trial or lapsed) and `BILLING=on`, it adds three Checkout links, one per plan, after expiring the ones an earlier `/plan` handed out. If an expiry or a Checkout or portal call fails, it says so and to try again.
 - `/invite` (Plus owner): a 6-character one-time code from an alphabet without 0, O, 1 or I, valid for 7 days, as `/join <code>` on its own line. Refused when every place is taken or the person owns no paying Plus.
 - `/join <code>` takes a seat if the code is unused and unexpired, the subscription is a paying Plus with a free place, the person isn't its owner and holds no counting seat elsewhere. One D1 batch checks and claims, so two people can't take the last place. Repeated by the person who joined, it answers joined again.
-- `/leave` ends the person's seat. They go back to their trial if it is still running, else to lapsed.
+- `/leave` ends the person's seat. They go back to their trial if it is still running, else to lapsed. When D1 has no open seat but the projection still holds one, the first `/leave` committed and its refresh failed, so the repeat refreshes and answers as if it had just left.
 
 ### Checkout
 
@@ -137,24 +144,32 @@ success_url = cancel_url = PUBLIC_URL/billing/done      a page saying to go back
 Plus only: optional_items[0] = STRIPE_PRICE_SEAT, quantity 1, adjustable 1 to PLUS_MAX_SEATS - PLUS_SEATS
 ```
 
-Extra Plus places are an optional item the buyer adds at checkout. Changing them later isn't in the chat yet. The links stay out of the conversation history, which keeps `<payment link>` instead.
+The DO keeps each session id it hands out in `checkout_session { id, event_key, created_at }`. Before making new sessions, `/plan` sends `POST /v1/checkout/sessions/{id}/expire` for every stored session from another message, so only one set can be paid at a time. A 200 or a 400 or 404 (paid, already expired, unknown) removes the row; any other failure keeps it and sends no new links. Sessions from the same message key are left open, since a retried turn gets them back from the idempotency key.
+
+A payer's portal link is `POST /v1/billing_portal/sessions` with `customer` (the subscription's `customer_id`), `configuration=STRIPE_PORTAL_CONFIGURATION` and `return_url=PUBLIC_URL/billing/done`.
+
+Extra Plus places are an optional item the buyer adds at checkout. Stripe's portal can't switch a subscription with more than one product, so a Plus owner with extra places can cancel there but not change plan. The links stay out of the conversation history, which keeps `<payment link>` or `<billing link>` instead.
 
 ### Webhook
 
 `POST /webhook/stripe`:
 
 1. Verify `Stripe-Signature`: `t=<unix seconds>,v1=<hex>`, where some `v1` is HMAC-SHA256 with `STRIPE_WEBHOOK_SECRET` over `` `${t}.${payload}` ``, compared in constant time, and `t` is within 5 minutes of now. Otherwise 400.
-2. Parse. `checkout.session.completed` in subscription mode, and `customer.subscription.created`, `.updated` and `.deleted`, become one subscription snapshot. The owner is `client_reference_id` or `metadata.agent_key`; the plan is the item whose price is one of ours, else `metadata.plan`; the period end is `current_period_end` on the subscription or, in newer API versions, its items. A checkout carries no status or period, so it counts as `active` (when paid) with period 0, which any subscription event supersedes. Other types, and events without our agent key or prices, get 200 and are ignored. An unreadable event gets 400.
-3. The owner's DO handles it. A Stripe event id it has handled answers `duplicate`. Otherwise it upserts the snapshot into D1 only if it supersedes the stored one, refreshes the owner's projection, refreshes every seat holder's DO, and only then records the event id. Any failure is a 500, and Stripe's redelivery redoes each step, all of which are done when repeated.
+2. Parse only who and what: `checkout.session.completed` in subscription mode, and `customer.subscription.created`, `.updated` and `.deleted`, each name a subscription id and an owner (`client_reference_id` or `metadata.agent_key`). Nothing else in the payload is used. Other types, and events without our agent key, get 200 and are ignored. An unreadable event gets 400.
+3. The owner's DO handles its events one at a time. A Stripe event id it has handled answers `duplicate`. Otherwise it reads `GET /v1/subscriptions/{id}` and stores that state in D1, unless the stored row is `canceled` or `incomplete_expired`, which are final. It then refreshes the owner's projection, refreshes the DO of every open seat on the subscription whatever its plan, checks for a duplicate, and only then records the event id. A failed read or step is a 500, and Stripe's redelivery redoes each step, all of which are done when repeated. A subscription Stripe doesn't have, or whose owner differs from the event's, is ignored.
 
-Supersedes: a stored `canceled` or `incomplete_expired` never changes; an incoming terminal status always wins; otherwise the later `period_end` wins, then the later event `created`, then, within the same second, anything over `incomplete`. A late event never moves a subscription back.
+Reading the state instead of trusting the payload means no ordering rule: an `unpaid` after `past_due`, a shortened period or a checkout arriving after its Plus subscription all store what Stripe holds now. Handling one event at a time per owner keeps a slow read of an older state from landing after a newer one.
+
+The plan is the item whose price's product, or else lookup key, is `giraffes_standard`, `giraffes_plus` or `giraffes_ai`, else `metadata.plan`; extra places are the quantity on `giraffes_seat`. Price ids don't matter, so a price that `stripe-setup.ts` replaced still counts for the people on it.
 
 A refresh re-reads the person's standing. When it moves their plan, the person is told once: "Thanks. Your Standard plan is active.", "The Plus plan you joined is active.", their trial days left, or the lapsed notice.
 
-`scripts/stripe-setup.ts --yes` creates the products, the THB monthly prices (lookup keys `giraffes_standard`, `giraffes_plus`, `giraffes_seat`, `giraffes_ai`, amounts in satang as flags) and the webhook endpoint for those four event types, and prints the values to set. A second run creates nothing. A live key also needs `--live`.
+If the owner ends up with more than one paying subscription, nothing is cancelled or refunded automatically. The event logs an error naming the ids, inserts a `billing_duplicate` row, and tells the person once, "It looks like you're paying for more than one plan at once. We'll sort out the duplicate for you." An operator finds them with `SELECT * FROM billing_duplicate`.
+
+`scripts/stripe-setup.ts --yes` creates the products (ids `giraffes_standard`, `giraffes_plus`, `giraffes_seat`, `giraffes_ai`), the THB monthly prices with the same lookup keys (amounts in satang as flags), a customer portal configuration tagged `metadata[giraffes]=portal` (card updates, invoices, cancel at period end, switching between the Standard, Plus and AI prices), and the webhook endpoint for those four event types, then prints the values to set. A second run creates nothing and brings the portal configuration up to date. A live key also needs `--live`.
 
 ## Configuration
 
 Box: `BOX_HOST` (`none` | `fly` | `static`), `BOX_SECRET`, `BOX_APP_PREFIX`, `BOX_IMAGE`, `BOX_REGION` (default `sin`), `BOX_VOLUME_GB` (default 5), `MAX_BOXES`, `BOX_STATIC_URL`, `FLY_API_TOKEN`, `FLY_ORG`.
 
-Billing: `BILLING` (`off` | `on`), `TRIAL_DAYS` (default 14), `PLUS_SEATS` (default 3), `PLUS_MAX_SEATS` (default 6), `AI_CAP_USD` (default 1). `BILLING=on` also needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`, `STRIPE_PRICE_AI` and `PUBLIC_URL`.
+Billing: `BILLING` (`off` | `on`), `TRIAL_DAYS` (default 14), `PLUS_SEATS` (default 3), `PLUS_MAX_SEATS` (default 6), `AI_CAP_USD` (default 1). `BILLING=on` also needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`, `STRIPE_PRICE_AI`, `STRIPE_PORTAL_CONFIGURATION` and `PUBLIC_URL`.

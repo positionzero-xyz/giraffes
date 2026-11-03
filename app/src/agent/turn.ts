@@ -45,7 +45,10 @@ export const TURN = {
   maxLateNoticeChars: 200,
   maxActions: 6,
   maxClaimAttempts: 3,
+  // With the agent's 30 s doubling backoff, a chat message gives the model about 90 s to come back and a
+  // requested reminder about 7.5 minutes, before code answers without it.
   maxModelAttempts: 3,
+  maxRequestedModelAttempts: 5,
 } as const;
 
 const Slug = z.string().regex(WAKEUP_KEY_PATTERN);
@@ -193,6 +196,7 @@ export const NOTICE = {
   lateFallback: (dueLocal: string) => `Sorry, this is late. It was due at ${dueLocal}.`,
   monthlyLimit: "I've reached my usage limit for this month, so I can't help until it resets on the 1st.",
   failed: "Sorry, I couldn't process that. Could you say it again?",
+  reminder: (note: string) => `Reminder: ${note}`,
 } as const;
 
 const REJECTION_NOTICE: Readonly<Record<ReminderRejection, string | null>> = {
@@ -388,8 +392,16 @@ export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "blo
   return e.change === "block" ? { kind: "block" } : null;
 }
 
+/** What code says without the model: `notice` to a person who wrote in, or the reminder they asked for. */
+function fixedText(view: TurnView, notice: string | null): string | null {
+  const e = trigger(view);
+  if (e.kind === "message") return notice;
+  if (e.kind !== "wakeup" || e.origin !== "person") return null;
+  const late = isLate(e) ? `${NOTICE.lateFallback(human(e.dueAt, view.tz))}\n` : "";
+  return `${late}${NOTICE.reminder(e.note)}`;
+}
+
 export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit {
-  const answersPerson = trigger(view).kind === "message";
   let outcome: TurnOutcome;
   let text: string | null = null;
   switch (why.kind) {
@@ -401,12 +413,12 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
       break;
     case "refused_budget":
       outcome = "refused_budget";
-      if (answersPerson && !why.alreadyToldToday) text = NOTICE.monthlyLimit;
+      text = fixedText(view, why.alreadyToldToday ? null : NOTICE.monthlyLimit);
       break;
     case "model_failed":
     case "poison":
       outcome = why.kind;
-      if (answersPerson) text = NOTICE.failed;
+      text = fixedText(view, NOTICE.failed);
       break;
     default:
       return assertNever(why);
@@ -417,7 +429,7 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     batchKeys: batchKeys(view),
     outcome,
     turns,
-    outbound: outbound(text === null ? [] : [text], "reply", view),
+    outbound: outbound(text === null ? [] : [text], intentOf(trigger(view)), view),
     wakeupsCancel: [],
     wakeupsAdd: [],
     notes: [],

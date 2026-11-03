@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { z } from "zod";
 import { makeChannels, type ChannelRegistry } from "../channels/channel";
 import { loadConfig, type Env } from "../config";
-import { assertNever, type AgentKey, type EpochMs, type EventKey, type InboundEnvelope, type MicroUsd, type PersonStatus, type TimeZone } from "../domain";
+import { assertNever, intentOf, type AgentKey, type EpochMs, type EventKey, type InboundEnvelope, type MicroUsd, type PersonStatus, type TimeZone } from "../domain";
 import { d1Ledger, modelCallRow, type LeaseAnswer, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
 import { makeModelClient, routeOf, type ModelClient, type ModelId, type ModelResult, type Purpose, type Usage } from "../model/model";
 import { admitUnasked, OUTREACH } from "../policy/outreach";
@@ -232,7 +232,8 @@ export class Agent extends DurableObject<Env> {
     const now = this.#deps.clock.now();
     const { settle, logs } = closeUnavailable(call, agent, now);
     const attempts = Math.max(...view.batch.items.map((i) => i.attempts));
-    if (attempts >= TURN.maxModelAttempts) {
+    const requested = intentOf(view.batch.items[0].event) === "requested";
+    if (attempts >= (requested ? TURN.maxRequestedModelAttempts : TURN.maxModelAttempts)) {
       return this.#commit(planWithoutModel(view, { kind: "model_failed" }), view, agent, { kind: "none" }, settle, logs);
     }
     const keys = view.batch.items.map((i) => i.key);

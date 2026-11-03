@@ -23,6 +23,11 @@ const members = (sub: string) => `(SELECT COUNT(*) FROM billing_seat WHERE subsc
 const paying = (b: string, now: string) =>
   `(${b}.status IN ('active', 'trialing') OR (${b}.status = 'past_due' AND ${b}.past_due_since > ${now} - ${PAST_DUE_GRACE_MS}))`;
 const payingPlus = (b: string, now: string) => `${b}.plan = 'plus' AND ${paying(b, now)}`;
+/** The one test of whether seat row `s` holds a place: a paying Plus with fewer than `seats - 1` open seats joined before it. */
+const countingSeat = (s: string, now: string) =>
+  `${s}.left_at IS NULL AND EXISTS (SELECT 1 FROM billing_subscription cb WHERE cb.id = ${s}.subscription_id AND ${payingPlus("cb", now)}
+     AND (SELECT COUNT(*) FROM billing_seat o WHERE o.subscription_id = ${s}.subscription_id AND o.left_at IS NULL
+          AND (o.joined_at < ${s}.joined_at OR (o.joined_at = ${s}.joined_at AND o.agent_key < ${s}.agent_key))) < cb.seats - 1)`;
 
 type JoinRow = {
   used_by: AgentKey | null;
@@ -73,9 +78,7 @@ export function d1Billing(db: D1Database): BillingStore {
         db
           .prepare(
             `SELECT s.subscription_id AS id, b.owner_key AS owner FROM billing_seat s JOIN billing_subscription b ON b.id = s.subscription_id
-             WHERE s.agent_key = ?1 AND s.left_at IS NULL AND ${payingPlus("b", "?2")}
-               AND (SELECT COUNT(*) FROM billing_seat o WHERE o.subscription_id = s.subscription_id AND o.left_at IS NULL
-                    AND (o.joined_at < s.joined_at OR (o.joined_at = s.joined_at AND o.agent_key < s.agent_key))) < b.seats - 1`,
+             WHERE s.agent_key = ?1 AND ${countingSeat("s", "?2")}`,
           )
           .bind(agent, now),
       ]);
@@ -116,8 +119,7 @@ export function d1Billing(db: D1Database): BillingStore {
     },
 
     async join(code, member, now) {
-      const seatedOnPaying = `SELECT s.subscription_id FROM billing_seat s JOIN billing_subscription b ON b.id = s.subscription_id
-                              WHERE s.agent_key = ?2 AND s.left_at IS NULL AND ${payingPlus("b", "?3")}`;
+      const seatedOn = `SELECT s.subscription_id FROM billing_seat s WHERE s.agent_key = ?2 AND ${countingSeat("s", "?3")}`;
       const [, , found] = await db.batch<Record<string, unknown>>([
         db
           .prepare(
@@ -125,7 +127,7 @@ export function d1Billing(db: D1Database): BillingStore {
              WHERE code = ?1 AND used_by IS NULL AND expires_at > ?3
                AND subscription_id IN (SELECT b.id FROM billing_subscription b
                                        WHERE ${payingPlus("b", "?3")} AND b.owner_key != ?2 AND ${members("b.id")} < b.seats - 1)
-               AND NOT EXISTS (${seatedOnPaying})`,
+               AND NOT EXISTS (${seatedOn})`,
           )
           .bind(code, member, now),
         db
@@ -138,7 +140,7 @@ export function d1Billing(db: D1Database): BillingStore {
         db
           .prepare(
             `SELECT i.used_by, i.expires_at, i.subscription_id, b.owner_key, b.status, b.past_due_since, b.seats,
-                    ${members("i.subscription_id")} AS members, (${seatedOnPaying}) AS seated_on
+                    ${members("i.subscription_id")} AS members, (${seatedOn}) AS seated_on
              FROM billing_invite i JOIN billing_subscription b ON b.id = i.subscription_id WHERE i.code = ?1`,
           )
           .bind(code, member, now),

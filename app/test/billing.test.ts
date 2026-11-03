@@ -472,6 +472,26 @@ describe("the subscription store", () => {
 });
 
 describe("plus seats", () => {
+  test("a member pushed out when places are cut holds no seat, so they can join another Plus plan", async () => {
+    const store = d1Billing(env.LEDGER);
+    const t = (m: number) => (local("2099-11-04T10:00") + m * 60_000) as EpochMs;
+    const plus = (owner: string, seats: number): Subscription => ({ id: `sub_${owner}` as SubscriptionId, owner: agent(owner), customer: null, plan: "plus", status: "active", seats });
+    await store.applySubscription(plus("big", 4), t(0));
+    for (const [i, m] of ["amy", "bob", "cy"].entries()) {
+      await store.invite(agent("big"), `BIG00${i}`, t(i), t(999));
+      expect(await store.join(`BIG00${i}`, agent(m), t(i))).toBe("joined");
+    }
+
+    await store.applySubscription(plus("big", 3), t(10));
+    expect((await store.standing(agent("cy"), t(11))).seat).toBeNull();
+    await store.applySubscription(plus("other", 3), t(11));
+    await store.invite(agent("other"), "OTHER0", t(11), t(999));
+
+    expect(await store.join("OTHER0", agent("cy"), t(12))).toBe("joined");
+    expect((await store.standing(agent("cy"), t(13))).seat).toEqual({ id: "sub_other", owner: "p:dev:other" });
+    expect(await store.members("sub_big" as SubscriptionId)).toEqual(["p:dev:amy", "p:dev:bob"]);
+  });
+
   test("a join repeated by the person who joined is still joined, and an expired code doesn't work", async () => {
     const store = d1Billing(env.LEDGER);
     const now = local("2099-11-04T10:00");

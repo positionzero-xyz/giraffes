@@ -3,7 +3,6 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-/** The command that runs the CLI: its binary, then any arguments that come before the CLI's own. */
 export type Cli = readonly [string, ...string[]];
 
 export type ParseRequest = { readonly model: string; readonly system: string; readonly user: string; readonly jsonSchema: Record<string, unknown> };
@@ -111,7 +110,6 @@ export async function parseTurn(cli: Cli, req: ParseRequest): Promise<TurnReply>
   const run = await runClaude(cli, args, req.user, TURN_TIMEOUT_MS);
   const result = run.code === 0 ? parseJson(run.stdout) : undefined;
   if (!isObject(result) || result.is_error !== false) {
-    // stdout can hold the person's conversation, so only its error subtype is logged.
     const failed = parseJson(run.stdout);
     const subtype = isObject(failed) && typeof failed.subtype === "string" ? failed.subtype : "none";
     console.error(`claude -p failed (exit ${run.code}, subtype ${subtype}): ${run.stderr.slice(0, 300)}`);

@@ -32,7 +32,6 @@ async function waitUntil(done: () => boolean, ms: number): Promise<void> {
   while (!done() && Date.now() < deadline) await sleep(50);
 }
 
-/** The first complete sign-in link in the CLI's output. A link counts once whitespace follows it, so a half-written one never does. */
 function signinUrl(output: string): string | undefined {
   for (const [link] of output.matchAll(/https:\/\/[^\s"'<>\x1b]+(?=\s)/g)) {
     if (URL.canParse(link) && SIGNIN_HOSTS.has(new URL(link).hostname)) return link;

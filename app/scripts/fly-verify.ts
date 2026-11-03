@@ -1,11 +1,3 @@
-/**
- * Provisions one throwaway box on Fly through the Worker's own fly host, waits for /health, asks the box
- * for a sign-in URL, then deletes the app. It creates billable resources, so it runs only with --yes.
- *
- *   FLY_API_TOKEN=... FLY_ORG=... BOX_IMAGE=... BOX_SECRET=... node scripts/fly-verify.ts --yes
- *
- * Optional: BOX_REGION (default sin), BOX_VOLUME_GB (default 1), BOX_APP_PREFIX (default gbox-).
- */
 import { flyHost, type FlyConfig } from "../src/box/fly.ts";
 import { boxToken, signinTicket, type BoxName } from "../src/box/names.ts";
 import type { EpochMs } from "../src/domain.ts";

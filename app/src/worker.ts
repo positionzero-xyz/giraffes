@@ -45,7 +45,6 @@ export function agentStub(env: Env, key: AgentKey) {
   return env.AGENT.get(env.AGENT.idFromName(key));
 }
 
-/** 400 for anything Stripe should see failing; 200 for events that aren't ours, so Stripe stops resending them. */
 async function stripeWebhook(req: Request, env: Env, billing: Extract<Config["billing"], { on: true }>): Promise<Response> {
   const payload = await req.text();
   if (!(await verifySignature(payload, req.headers.get("stripe-signature"), billing.stripe.webhookSecret, Date.now() as EpochMs))) {

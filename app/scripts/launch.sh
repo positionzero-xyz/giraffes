@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# usage: app/scripts/launch.sh [--dry-run]
-# Deploys the Worker with per-person boxes on Fly. Run it from Git Bash or any POSIX shell, logged in to
-# nothing in particular: it opens the Cloudflare and Fly logins when they are needed. Secrets are read
-# without echo or generated here, and go straight to `wrangler secret put` on stdin, never to a file.
-# Re-running it is safe: every step checks what already exists.
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 

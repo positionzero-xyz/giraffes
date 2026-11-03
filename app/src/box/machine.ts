@@ -23,7 +23,6 @@ export type BoxStatus =
       readonly linkSentAt: EpochMs | null;
       readonly pollAt: EpochMs | null;
       readonly pollUntil: EpochMs | null;
-      /** Null once the box has ever been signed in: such a box is never removed on its own. */
       readonly reclaimAt: EpochMs | null;
     }
   | { readonly state: "signed_in" }
@@ -32,7 +31,6 @@ export type BoxStatus =
 
 export type Box = { readonly name: BoxName; readonly host: BoxHostKind; readonly url: string; readonly stateAt: EpochMs } & BoxStatus;
 
-/** What the drain saw: the host's `ensure` and the box's `/health`, folded into one answer. */
 export type Probe = { readonly kind: "up"; readonly signedIn: boolean } | { readonly kind: "down"; readonly retryable: boolean; readonly detail: string };
 
 export const BOX_SAYS = [
@@ -78,7 +76,6 @@ const SAY: Readonly<Record<BoxSay, (link: string) => string>> = {
 
 export const needsLink = (say: BoxSay): boolean => say === "link" || say === "signed_out_link";
 
-/** `note` is what the conversation history keeps: the text without the ticket, which stays out of every prompt. */
 export function boxMessage(say: BoxSay, link: string | null): { readonly text: string; readonly note: string } {
   return { text: SAY[say](link ?? LINK_NOTE), note: SAY[say](LINK_NOTE) };
 }
@@ -122,10 +119,6 @@ export function dueAt(b: Box): EpochMs | null {
   }
 }
 
-/**
- * The probe's box is committed before any network call, so the next attempt's time is durable even if
- * this one dies: a step that kills the instance every time still runs out of attempts.
- */
 export function beginStep(b: Box, now: EpochMs): Step | null {
   const due = dueAt(b);
   if (due === null || due > now) return null;

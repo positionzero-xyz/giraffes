@@ -1,6 +1,5 @@
 import type { AgentEvent } from "../domain";
 
-/** Texts that run without the model. Each is claimed as a batch of its own, so the model never sees one. */
 export type Command =
   | { readonly kind: "claude" }
   | { readonly kind: "plan" }

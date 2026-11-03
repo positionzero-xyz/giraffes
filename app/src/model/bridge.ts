@@ -20,7 +20,6 @@ export function bridgeBody<T>(req: ModelRequest<T>): string {
   return JSON.stringify({ model: routeOf(req.purpose).model, system: req.system, user: req.user, jsonSchema: z.toJSONSchema(req.schema) });
 }
 
-/** The `/parse` reply of the dev bridge and of a person's box. */
 export function readBridgeReply<T>(raw: unknown, schema: z.ZodType<T>): ModelResult<T> {
   const reply = BridgeReply.safeParse(raw);
   if (!reply.success) return { ok: false, failure: "invalid_output", usage: null };

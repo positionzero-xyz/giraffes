@@ -90,7 +90,6 @@ export type AgentDeps = {
   readonly ledger: Ledger;
   readonly channels: ChannelRegistry;
   readonly clock: Clock;
-  /** Null when BOX_HOST=none. */
   readonly box: BoxDeps | null;
   readonly billing: BillingDeps;
 };
@@ -98,7 +97,6 @@ export type AgentDeps = {
 export type BillingDeps = {
   readonly config: BillingConfig;
   readonly store: BillingStore;
-  /** Null when BILLING=off. */
   readonly stripe: StripeApi | null;
 };
 
@@ -157,11 +155,6 @@ export class Agent extends DurableObject<Env> {
     return "queued";
   }
 
-  /**
-   * One Stripe event for this person's subscription. It is recorded as handled only after every seat
-   * holder has been refreshed, so a failure anywhere makes Stripe deliver it again, and the redelivery
-   * redoes each step, all of which are done when repeated.
-   */
   async billingEvent(e: BillingEvent): Promise<"applied" | "duplicate"> {
     if (this.#store.billingEventSeen(e.id)) return "duplicate";
     const { store } = this.#deps.billing;
@@ -176,7 +169,6 @@ export class Agent extends DurableObject<Env> {
     return "applied";
   }
 
-  /** Re-reads the person's standing from D1 and tells them when it moved their plan. */
   async refreshPlan(agent: AgentKey): Promise<void> {
     const { config, store } = this.#deps.billing;
     const standing = await store.standing(agent);
@@ -374,7 +366,6 @@ export class Agent extends DurableObject<Env> {
     this.#commit(planWithoutModel(view, { kind: "command", text, note }), view, agent, { kind: "none" }, null);
   }
 
-  /** Reads D1 before answering, so the reply is current even if a refresh from an event never arrived. */
   async #standingNow(agent: AgentKey): Promise<Plan> {
     const { config, store } = this.#deps.billing;
     const standing = config.on ? await store.standing(agent) : NO_STANDING;
@@ -423,7 +414,6 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
-  /** Keyed by the person and the message, so a retried turn gets the same Checkout Sessions back. */
   async #checkoutLinks(agent: AgentKey, key: EventKey): Promise<Links | null> {
     const stripe = this.#deps.billing.stripe;
     if (!stripe) return null;
@@ -497,10 +487,6 @@ export class Agent extends DurableObject<Env> {
     this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [], this.#deps.clock.now());
   }
 
-  /**
-   * Host first, then the inventory, then the row: each step is done when repeated, and the row with its
-   * `reclaiming` state and retry time is the last thing to go, so a crash anywhere resumes from the top.
-   */
   async #reclaim(deps: BoxDeps, box: Box): Promise<void> {
     const destroyed = await deps.host.destroy(box.name);
     if (!destroyed.ok) {
@@ -521,7 +507,6 @@ export class Agent extends DurableObject<Env> {
     return health.kind === "up" ? health : { kind: "down", retryable: true, detail: health.detail };
   }
 
-  /** A turn goes to the person's own signed-in box first; null means the API path takes it. */
   async #callBox<T>(system: string, user: string, schema: z.ZodType<T>, agent: AgentKey): Promise<BoxCall<T> | null> {
     const deps = this.#deps.box;
     const box = this.#store.box();

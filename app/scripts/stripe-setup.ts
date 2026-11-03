@@ -1,13 +1,3 @@
-/**
- * Sets up the Stripe account for BILLING=on: products, THB monthly prices (lookup keys giraffes_standard,
- * giraffes_plus, giraffes_seat, giraffes_ai) and the webhook endpoint, then prints the values to set on the
- * Worker. A second run creates nothing. A changed amount creates a new price and moves the lookup key to it.
- *
- *   STRIPE_SECRET_KEY=sk_test_... PUBLIC_URL=https://<worker> node scripts/stripe-setup.ts --yes
- *
- * Amounts are satang a month: --standard 29900 --plus 69900 --seat 19900 --ai 17900 (the defaults).
- * A live key also needs --live.
- */
 import { DEFAULT_AMOUNTS, PRICE_NAMES, stripeSetup, type PriceName } from "../src/billing/setup.ts";
 
 const args = process.argv.slice(2);

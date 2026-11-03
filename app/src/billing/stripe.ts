@@ -1,4 +1,3 @@
-/** Stripe over plain fetch: form-encoded API calls out, signed webhook events in. No SDK. */
 import { z } from "zod";
 import type { Fetch } from "../box/host";
 import type { StripeConfig } from "../config";
@@ -104,7 +103,6 @@ export async function verifySignature(payload: string, header: string | null, se
 }
 
 
-/** A Stripe event as the person's Durable Object takes it: one subscription, as of that event. */
 export type BillingEvent = { readonly id: string; readonly subscription: Subscription };
 
 type ParsedEvent =
@@ -136,8 +134,6 @@ const paidPlan = (raw: string | null | undefined): PaidPlan | null => PAID_PLANS
 
 /**
  * Newer API versions moved `current_period_end` from the subscription onto its items, so either is read.
- * A checkout event carries no subscription status or period: it counts as period 0, which every
- * subscription event for the same subscription replaces.
  */
 export function parseEvent(raw: unknown, cfg: StripeConfig, rules: PlanRules): ParsedEvent {
   const env = Envelope.safeParse(raw);

@@ -1,8 +1,5 @@
-/** What the Worker and `scripts/stripe-setup.ts` share about Stripe's wire format. No imports, so Node can load it directly. */
-
 export const STRIPE_API = "https://api.stripe.com/v1";
 
-/** The events the webhook route acts on, and the ones the setup script subscribes the endpoint to. */
 export const STRIPE_EVENT_TYPES = [
   "checkout.session.completed",
   "customer.subscription.created",

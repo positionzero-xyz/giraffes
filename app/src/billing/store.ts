@@ -1,7 +1,3 @@
-/**
- * Subscriptions, seats and invite codes live in D1 because a Plus seat crosses Durable Objects. Each
- * person's DO keeps only a projection of its own `Standing`, refreshed when something changes it.
- */
 import type { AgentKey, EpochMs } from "../domain";
 import { PAYING, TERMINAL, type PaidPlan, type Standing, type Subscription, type SubscriptionId, type SubscriptionStatus } from "./plan";
 
@@ -17,14 +13,10 @@ export interface BillingStore {
    */
   applySubscription(s: Subscription, now: EpochMs): Promise<void>;
   standing(agent: AgentKey): Promise<Standing>;
-  /** Everyone holding a seat on the subscription, counted or not. */
   members(id: SubscriptionId): Promise<readonly AgentKey[]>;
-  /** The owner's paying Plus, if any: places taken, the owner included, and places in all. */
   places(owner: AgentKey): Promise<Places | null>;
   invite(owner: AgentKey, code: string, now: EpochMs, expiresAt: EpochMs): Promise<InviteResult>;
-  /** Done when repeated by the person who joined with the code. */
   join(code: string, member: AgentKey, now: EpochMs): Promise<JoinResult>;
-  /** False when the person held no seat. */
   leave(member: AgentKey, now: EpochMs): Promise<boolean>;
 }
 

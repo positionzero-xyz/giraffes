@@ -7,7 +7,6 @@ export function verifyBearer(header: string | undefined, token: string): boolean
   return header !== undefined && safeEqual(header, `Bearer ${token}`);
 }
 
-/** A ticket is `exp + "." + base64url(HMAC-SHA256(boxToken, "signin:" + exp))`, good while `now < exp`. */
 export function verifyTicket(ticket: unknown, token: string, now: number): boolean {
   if (typeof ticket !== "string") return false;
   const m = /^(\d{1,16})\.([A-Za-z0-9_-]{43})$/.exec(ticket);

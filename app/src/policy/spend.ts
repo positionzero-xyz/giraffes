@@ -43,7 +43,6 @@ export type ReserveDecision =
   | { readonly kind: "need_lease"; readonly chunk: MicroUsd }
   | { readonly kind: "refuse"; readonly scope: "user_cap" };
 
-/** `cap` is the person's monthly cap, which their plan sets. */
 export function decideReservation(month: MonthSpend, est: MicroUsd, cap: MicroUsd): ReserveDecision {
   const committed = month.spent + month.reserved + est;
   if (committed > cap) return { kind: "refuse", scope: "user_cap" };

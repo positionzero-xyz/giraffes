@@ -2,7 +2,6 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
-/** The parsed body, or undefined when it is not JSON or is too large. */
 export function readJson(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];

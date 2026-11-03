@@ -201,7 +201,6 @@ export class AgentStore {
     };
   }
 
-  /** A person's first message also starts their trial, which ends at `trialEndsAt`. */
   enqueue(
     envelope: InboundEnvelope,
     first: { readonly tz: TimeZone; readonly checkinLocal: TimeOfDay; readonly checkin: NewWakeup; readonly trialEndsAt: EpochMs },
@@ -320,7 +319,6 @@ export class AgentStore {
     });
   }
 
-  /** Whether a message turn today already ended this way, which is when its one notice a day went out. */
   toldToday(outcome: "refused_budget" | "lapsed", dayStart: EpochMs): boolean {
     return (
       this.sql.exec("SELECT 1 FROM inbox WHERE outcome = ? AND finished_at >= ? AND kind = 'message' LIMIT 1", outcome, dayStart).toArray()
@@ -440,7 +438,6 @@ export class AgentStore {
     );
   }
 
-  /** A box change and the message it owes the person land together, so a crash can't send one without the other. */
   applyBox(b: Box, message: NoteMessage | null, logs: readonly LogRow[], now: EpochMs): void {
     this.tx(() => {
       this.writeBox(b);
@@ -473,7 +470,6 @@ export class AgentStore {
     };
   }
 
-  /** `trialEndsAt` applies only when the row doesn't exist yet. */
   applyStanding(s: Standing, trialEndsAt: EpochMs, message: { readonly key: EventKey; readonly message: NoteMessage } | null, now: EpochMs): void {
     this.tx(() => {
       this.sql.exec(

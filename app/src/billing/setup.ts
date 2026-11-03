@@ -1,15 +1,8 @@
-/**
- * Creates what BILLING=on needs in a Stripe account: one product and one THB monthly price per plan, found
- * again by lookup key, and the webhook endpoint for the Worker. Each step finds what is there first, so a
- * second run creates nothing. `scripts/stripe-setup.ts` is the command; this file imports only `wire.ts`,
- * so Node runs it as is.
- */
 import { formBody, STRIPE_API, STRIPE_EVENT_TYPES, type Form } from "./wire.ts";
 
 export const PRICE_NAMES = ["standard", "plus", "seat", "ai"] as const;
 export type PriceName = (typeof PRICE_NAMES)[number];
 
-/** Satang a month. */
 export const DEFAULT_AMOUNTS: Readonly<Record<PriceName, number>> = { standard: 29900, plus: 69900, seat: 19900, ai: 17900 };
 
 const PRODUCT_NAMES: Readonly<Record<PriceName, string>> = {

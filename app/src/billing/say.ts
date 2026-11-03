@@ -33,7 +33,6 @@ export function planStatus(plan: Plan, now: EpochMs, places: Places | null): str
 
 export type Links = Readonly<Record<PaidPlan, string>>;
 
-/** `note` is what the conversation history keeps: the text without the payment links. */
 export function planChoices(rules: PlanRules, links: Links | null): { readonly text: string; readonly note: string } {
   const lines = (link: (p: PaidPlan) => string) =>
     [
@@ -66,7 +65,6 @@ export const JOIN: Readonly<Record<JoinResult, string>> = {
 export const NOT_SEATED = "You're not on someone else's Plus plan.";
 export const LEFT = "You've left the Plus plan.";
 
-/** What a person is told when a change outside the chat, such as a payment or a cancellation, moves their plan. */
 export function planChanged(before: Plan, after: Plan, now: EpochMs): string | null {
   if (before.kind === after.kind && (before.kind !== "plus" || after.kind !== "plus" || before.role === after.role)) return null;
   switch (after.kind) {

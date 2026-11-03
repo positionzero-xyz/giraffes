@@ -157,9 +157,7 @@ export type BoxClaim = {
 export interface Ledger {
   append(rows: readonly LogRow[]): Promise<void>;
   requestLease(req: LeaseRequest): Promise<LeaseAnswer>;
-  /** Records the box in the inventory unless MAX_BOXES are live. A retry for a box already recorded is granted. */
   claimBox(req: BoxClaim): Promise<"granted" | "full">;
-  /** Marks the person's box deleted, which frees its slot. Done when it already is. */
   releaseBox(agent: AgentKey, at: EpochMs): Promise<void>;
 }
 

@@ -192,6 +192,19 @@ describe("billing off", () => {
     const res = await postStripe(checkoutEvent({ user: "bea", sub: "sub_x", plan: "standard", created: "2099-11-04T10:00" }), { vars: { BILLING: "off" } });
     expect(res.status).toBe(404);
   });
+
+  test("a person from the beta starts the full trial on their first message after billing turns on", async () => {
+    const beta = await devChat("ben", { model: scripted([chat("Hi!"), chat("Still here.")]), at: "2099-11-04T10:00" });
+    await beta.say("hello");
+    await beta.received();
+
+    const kit = billingOn();
+    const c = await devChat("ben", { model: beta.model, at: "2099-12-30T10:00", billing: kit.deps });
+    await c.say("hello again");
+
+    expect(await c.received()).toEqual(["Still here."]);
+    expect((await c.snapshot()).plan).toEqual({ kind: "trial", endsAt: local("2100-01-13T10:00") });
+  });
 });
 
 describe("trial and lapse", () => {

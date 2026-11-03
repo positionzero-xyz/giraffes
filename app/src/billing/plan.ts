@@ -39,7 +39,8 @@ export type Standing = {
 
 export const NO_STANDING: Standing = { own: null, seat: null };
 
-export type PlanRow = Standing & { readonly trialEndsAt: EpochMs };
+/** `trialEndsAt` is null until the person's first message with billing on. */
+export type PlanRow = Standing & { readonly trialEndsAt: EpochMs | null };
 
 export type Plan =
   | { readonly kind: "trial"; readonly endsAt: EpochMs | null }

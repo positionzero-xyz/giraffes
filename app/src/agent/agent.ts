@@ -147,7 +147,7 @@ export class Agent extends DurableObject<Env> {
       tz: DEFAULT_TIME_ZONE,
       checkinLocal: SCHEDULE.defaultCheckinLocal,
       checkin: checkinWakeup(now, DEFAULT_TIME_ZONE, SCHEDULE.defaultCheckinLocal),
-      trialEndsAt: trialEnd(now, this.#deps.billing.config.rules),
+      trialEndsAt: this.#deps.billing.config.on ? trialEnd(now, this.#deps.billing.config.rules) : null,
     };
     if (this.#store.enqueue(envelope, first, now) === "duplicate") return "duplicate";
     await this.#armNoLaterThan(now);
@@ -174,11 +174,10 @@ export class Agent extends DurableObject<Env> {
     const standing = await store.standing(agent);
     const now = this.#deps.clock.now();
     const before = this.#plan(now);
-    const trialEndsAt = this.#store.plan()?.trialEndsAt ?? trialEnd(now, config.rules);
-    const after = planOf({ trialEndsAt, ...standing }, now, config.on, config.rules);
+    const after = planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, config.on, config.rules);
     const text = config.on ? planChanged(before, after, now) : null;
     const message = text ? { key: eventKey.billing("plan"), message: { texts: [text] as const, note: text } } : null;
-    this.#store.applyStanding(standing, trialEndsAt, message, now);
+    this.#store.applyStanding(standing, message, now);
     if (message) {
       await this.#armNoLaterThan(now);
       this.ctx.waitUntil(this.alarm());
@@ -370,7 +369,7 @@ export class Agent extends DurableObject<Env> {
     const { config, store } = this.#deps.billing;
     const standing = config.on ? await store.standing(agent) : NO_STANDING;
     const now = this.#deps.clock.now();
-    this.#store.applyStanding(standing, trialEnd(now, config.rules), null, now);
+    this.#store.applyStanding(standing, null, now);
     return this.#plan(now);
   }
 

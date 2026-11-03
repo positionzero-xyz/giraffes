@@ -112,7 +112,7 @@ type BoxCols = {
 };
 
 type PlanCols = {
-  trial_ends_at: EpochMs;
+  trial_ends_at: EpochMs | null;
   own_subscription: SubscriptionId | null;
   own_plan: PaidPlan | null;
   seat_subscription: SubscriptionId | null;
@@ -203,12 +203,17 @@ export class AgentStore {
 
   enqueue(
     envelope: InboundEnvelope,
-    first: { readonly tz: TimeZone; readonly checkinLocal: TimeOfDay; readonly checkin: NewWakeup; readonly trialEndsAt: EpochMs },
+    first: { readonly tz: TimeZone; readonly checkinLocal: TimeOfDay; readonly checkin: NewWakeup; readonly trialEndsAt: EpochMs | null },
     now: EpochMs,
   ): "inserted" | "duplicate" {
     return this.tx(() => {
       if (envelope.event.kind === "message") {
-        this.sql.exec("INSERT OR IGNORE INTO plan (one, trial_ends_at, updated_at) VALUES (1, ?, ?)", first.trialEndsAt, now);
+        this.sql.exec(
+          `INSERT INTO plan (one, trial_ends_at, updated_at) VALUES (1, ?, ?)
+           ON CONFLICT (one) DO UPDATE SET trial_ends_at = COALESCE(plan.trial_ends_at, excluded.trial_ends_at)`,
+          first.trialEndsAt,
+          now,
+        );
       }
       const created = this.sql.exec(
         `INSERT OR IGNORE INTO agent (one, agent_key, channel, channel_user_id, tz, checkin_local, created_at)
@@ -470,14 +475,13 @@ export class AgentStore {
     };
   }
 
-  applyStanding(s: Standing, trialEndsAt: EpochMs, message: { readonly key: EventKey; readonly message: NoteMessage } | null, now: EpochMs): void {
+  applyStanding(s: Standing, message: { readonly key: EventKey; readonly message: NoteMessage } | null, now: EpochMs): void {
     this.tx(() => {
       this.sql.exec(
-        `INSERT INTO plan (one, trial_ends_at, own_subscription, own_plan, seat_subscription, seat_owner, updated_at)
-         VALUES (1, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO plan (one, own_subscription, own_plan, seat_subscription, seat_owner, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?)
          ON CONFLICT (one) DO UPDATE SET own_subscription = excluded.own_subscription, own_plan = excluded.own_plan,
            seat_subscription = excluded.seat_subscription, seat_owner = excluded.seat_owner, updated_at = excluded.updated_at`,
-        trialEndsAt,
         s.own?.id ?? null,
         s.own?.plan ?? null,
         s.seat?.id ?? null,

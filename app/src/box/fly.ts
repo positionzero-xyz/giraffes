@@ -17,13 +17,13 @@ export type FlyConfig = {
 };
 
 export type FlyStep = "app" | "ip shared_v4" | "ip v6" | "volume" | "machine";
-export type StepLog = (step: FlyStep, outcome: "created" | "exists") => void;
+export type StepLog = (step: FlyStep, outcome: "created" | "exists" | "updated") => void;
 
 const AppReply = z.object({ organization: z.object({ slug: z.string() }).nullish() });
 const IpsReply = z.object({ ips: z.array(z.object({ ip: z.string(), shared: z.boolean().nullish(), egress: z.boolean().nullish() })).nullable() });
 const VolumesReply = z.array(z.object({ id: z.string(), name: z.string(), state: z.string() }));
 const VolumeReply = z.object({ id: z.string() });
-const MachinesReply = z.array(z.object({ id: z.string() }));
+const MachinesReply = z.array(z.object({ id: z.string(), config: z.unknown() }));
 
 const GONE_VOLUME = new Set(["destroyed", "destroying", "pending_destroy"]);
 
@@ -36,6 +36,16 @@ export function flyAuthorization(apiToken: string): string {
 const fail = (retryable: boolean, detail: string): HostFailure => ({ ok: false, retryable, detail });
 const exists = (status: number) => status === 409 || status === 422;
 const success = (status: number) => status >= 200 && status < 300;
+
+/** True when `have` holds every value `want` sets. Fly adds fields of its own to a machine's config, so extra ones don't count. */
+function covers(want: unknown, have: unknown): boolean {
+  if (Array.isArray(want)) return Array.isArray(have) && have.length === want.length && want.every((w, i) => covers(w, have[i]));
+  if (typeof want === "object" && want !== null) {
+    if (typeof have !== "object" || have === null) return false;
+    return Object.entries(want).every(([key, w]) => covers(w, (have as Record<string, unknown>)[key]));
+  }
+  return want === have;
+}
 
 export function machineConfig(cfg: FlyConfig, token: BoxToken, volumeId: string) {
   return {
@@ -162,11 +172,20 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
     if (!listed.ok) return listed;
     const machines = read(listed, MachinesReply, `GET /apps/${name}/machines`);
     if (failed(machines)) return machines;
-    if (machines.length > 0) {
+    const wanted = machineConfig(cfg, token, volumeId);
+    const current = machines[0];
+    if (current && covers(wanted.config, current.config)) {
       log("machine", "exists");
       return HOST_OK;
     }
-    const r = await call("POST", `/apps/${name}/machines`, machineConfig(cfg, token, volumeId));
+    if (current) {
+      const r = await call("POST", `/apps/${name}/machines/${current.id}`, { config: wanted.config });
+      if (!r.ok) return r;
+      if (!success(r.status)) return fail(false, `POST /apps/${name}/machines/${current.id}: ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+      log("machine", "updated");
+      return HOST_OK;
+    }
+    const r = await call("POST", `/apps/${name}/machines`, wanted);
     if (!r.ok) return r;
     if (!success(r.status)) return fail(false, `POST /apps/${name}/machines: ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
     log("machine", "created");
@@ -175,6 +194,7 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
 
   return {
     kind: "fly",
+    image: cfg.image,
     nameFor: (agent) => boxName(cfg.secret, cfg.appPrefix, agent),
     urlOf: (name) => `https://${name}.fly.dev`,
     async ensure(name, token) {

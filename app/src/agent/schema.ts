@@ -195,6 +195,8 @@ export const MIGRATIONS: readonly string[] = [
     reclaim_at         INTEGER,
     reclaim_reason     TEXT CHECK (reclaim_reason IN ('unused', 'failed', 'retired')),
     retire_at          INTEGER,
+    image              TEXT,
+    ensure_at          INTEGER,
     CHECK ((state = 'reclaiming') = (reclaim_reason IS NOT NULL))
   );
   INSERT INTO box_next (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at,

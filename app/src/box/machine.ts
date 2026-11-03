@@ -15,6 +15,7 @@ export const BOX = {
   lastLookRetryMs: 5 * 60_000,
   reclaimRetryMaxMs: 60 * 60_000,
   retireAfterMs: 14 * 24 * 60 * 60_000,
+  ensureRetryMs: 5 * 60_000,
 } as const;
 
 export const BOX_STATES = ["provisioning", "signed_out", "signed_in", "reclaiming"] as const;
@@ -42,12 +43,20 @@ export type Box = {
   readonly stateAt: EpochMs;
   /** Set while the person's plan doesn't allow a box; the box is reclaimed then unless the plan allows one again. */
   readonly retireAt: EpochMs | null;
+  /** The image the host last put on the box's machine. */
+  readonly image: string | null;
+  /** When a live box is next ensured on the host, after the image changed or the box refused its token. */
+  readonly ensureAt: EpochMs | null;
 } & BoxStatus;
 type Provisioning = Extract<Box, { state: "provisioning" }>;
 type SignedOut = Extract<Box, { state: "signed_out" }>;
+type Live = Extract<Box, { state: "signed_out" | "signed_in" }>;
 type Reclaiming = Extract<Box, { state: "reclaiming" }>;
 
-export type Probe = { readonly kind: "up"; readonly signedIn: boolean } | { readonly kind: "down"; readonly retryable: boolean; readonly detail: string };
+export type Probe =
+  | { readonly kind: "up"; readonly signedIn: boolean }
+  | { readonly kind: "unauthorized" }
+  | { readonly kind: "down"; readonly retryable: boolean; readonly detail: string };
 
 export const BOX_SAYS = [
   "unavailable",
@@ -70,12 +79,17 @@ export type BoxSay = (typeof BOX_SAYS)[number];
 export type Transition = { readonly box: Box; readonly say: BoxSay | null };
 export type Reply = { readonly box: Box; readonly say: BoxSay };
 
-/** What one drain does with a box: `provision` ensures it on the host and probes it, `poll` and `last_look` probe it, `reclaim` removes it. */
+/**
+ * What one drain does with a box: `provision` ensures it on the host and probes it, `poll` and `last_look` probe it,
+ * `ensure` brings a live box's machine up to date without the person noticing, and `reclaim` removes it.
+ */
 export type Step =
   | { readonly kind: "provision"; readonly box: Provisioning }
+  | { readonly kind: "ensure"; readonly box: Live }
   | { readonly kind: "poll" | "last_look"; readonly box: SignedOut }
   | { readonly kind: "reclaim"; readonly box: Reclaiming };
-export type ProbeStep = Exclude<Step, { kind: "reclaim" }>;
+export type ProbeStep = Exclude<Step, { kind: "reclaim" | "ensure" }>;
+export type EnsureStep = Extract<Step, { kind: "ensure" }>;
 
 const LINK_NOTE = "<sign-in link>";
 
@@ -109,7 +123,8 @@ const GONE: Readonly<Record<ReclaimReason, BoxSay>> = { unused: "reclaimed", fai
 export const goneMessage = (b: Reclaiming) => boxMessage(GONE[b.reason], null);
 
 function to(b: Box, status: BoxStatus, now: EpochMs): Box {
-  return { name: b.name, host: b.host, url: b.url, stateAt: status.state === b.state ? b.stateAt : now, retireAt: b.retireAt, ...status };
+  const { name, host, url, retireAt, image, ensureAt } = b;
+  return { name, host, url, stateAt: status.state === b.state ? b.stateAt : now, retireAt, image, ensureAt, ...status };
 }
 
 const provisioning = (attempts: number, retryAt: EpochMs): BoxStatus => ({ state: "provisioning", attempts, retryAt });
@@ -131,14 +146,24 @@ function reclaimAfterLink(reclaimAt: EpochMs, now: EpochMs): EpochMs {
   return Math.max(reclaimAt, now + BOX.ticketForMs + BOX.signinGraceMs) as EpochMs;
 }
 
-export function newBox(name: BoxName, host: BoxHostKind, url: string, now: EpochMs): Box {
-  return { name, host, url, stateAt: now, retireAt: null, ...provisioning(0, now) };
+/** `image` is what provisioning will ensure the box with. */
+export function newBox(name: BoxName, host: BoxHostKind, url: string, image: string | null, now: EpochMs): Box {
+  return { name, host, url, stateAt: now, retireAt: null, image, ensureAt: null, ...provisioning(0, now) };
+}
+
+const isLive = (b: Box): b is Live => b.state === "signed_out" || b.state === "signed_in";
+
+export function needsEnsure(b: Box, now: EpochMs): Box {
+  return isLive(b) && b.ensureAt === null ? { ...b, ensureAt: now } : b;
+}
+
+export function afterEnsure(step: EnsureStep, image: string | null): Box {
+  return { ...step.box, image, ensureAt: null };
 }
 
 export function dueAt(b: Box): EpochMs | null {
-  const own = stateDueAt(b);
-  if (b.state === "reclaiming" || b.retireAt === null) return own;
-  return own === null ? b.retireAt : (Math.min(own, b.retireAt) as EpochMs);
+  const times = [stateDueAt(b), b.state === "reclaiming" ? null : b.retireAt, isLive(b) ? b.ensureAt : null].filter((t): t is EpochMs => t !== null);
+  return times.length > 0 ? (Math.min(...times) as EpochMs) : null;
 }
 
 function stateDueAt(b: Box): EpochMs | null {
@@ -160,6 +185,7 @@ export function beginStep(b: Box, now: EpochMs): Step | null {
   const due = dueAt(b);
   if (due === null || due > now) return null;
   if (b.state !== "reclaiming" && b.retireAt !== null && b.retireAt <= now) return beginStep(reclaimNow(b, "retired", now), now);
+  if (isLive(b) && b.ensureAt !== null && b.ensureAt <= now) return { kind: "ensure", box: { ...b, ensureAt: (now + BOX.ensureRetryMs) as EpochMs } };
   switch (b.state) {
     case "provisioning":
       if (b.attempts >= BOX.maxProvisionAttempts) return beginStep(reclaimNow(b, "failed", now), now);
@@ -181,10 +207,11 @@ export function beginStep(b: Box, now: EpochMs): Step | null {
 export function afterProbe(step: ProbeStep, probe: Probe, now: EpochMs): Transition {
   const b = step.box;
   if (probe.kind === "up" && probe.signedIn) return { box: to(b, { state: "signed_in" }, now), say: "connected" };
+  if (probe.kind === "unauthorized" && step.kind !== "provision") return { box: needsEnsure(b, now), say: null };
   switch (step.kind) {
     case "provision":
       if (probe.kind === "up") return { box: linkSent(b, (now + BOX.reclaimAfterMs) as EpochMs, now), say: "link" };
-      if (probe.retryable && step.box.attempts < BOX.maxProvisionAttempts) return { box: b, say: null };
+      if ((probe.kind === "unauthorized" || probe.retryable) && step.box.attempts < BOX.maxProvisionAttempts) return { box: b, say: null };
       return { box: reclaimNow(b, "failed", now), say: null };
     case "last_look":
       return probe.kind === "up" ? { box: reclaimNow(b, "unused", now), say: null } : { box: b, say: null };

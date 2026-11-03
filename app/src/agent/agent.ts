@@ -23,11 +23,13 @@ import { boxClient, type BoxClient } from "../box/client";
 import { flyHost } from "../box/fly";
 import { staticHost, type BoxHost, type BoxHostKind, type Fetch } from "../box/host";
 import {
+  afterEnsure,
   afterProbe,
   beginStep,
   BOX,
   boxMessage,
   goneMessage,
+  needsEnsure,
   needsLink,
   newBox,
   onCommand,
@@ -36,6 +38,7 @@ import {
   type Box,
   type BoxSay,
   type BoxState,
+  type EnsureStep,
   type Probe,
   type ProbeStep,
   type Step,
@@ -457,7 +460,7 @@ export class Agent extends DurableObject<Env> {
       return this.#modelUnavailable(view, agent, { kind: "unavailable", reservation: null, failure: "unavailable" });
     }
     if (claim === "full") return this.#boxReply(view, agent, deps, { box: null, say: "full" });
-    return this.#boxReply(view, agent, deps, { box: newBox(name, deps.host.kind, deps.host.urlOf(name), now), say: "setting_up" });
+    return this.#boxReply(view, agent, deps, { box: newBox(name, deps.host.kind, deps.host.urlOf(name), deps.host.image, now), say: "setting_up" });
   }
 
   async #boxReply(view: TurnView, agent: AgentKey, deps: BoxDeps | null, t: { readonly box: Box | null; readonly say: BoxSay }): Promise<void> {
@@ -486,14 +489,19 @@ export class Agent extends DurableObject<Env> {
     if (!deps || !box) return;
     const now = this.#deps.clock.now();
     const planned = onPlan(box, !this.#deps.billing.config.on || planAllowsBox(this.#plan(now).kind), now);
-    if (planned.box !== box) this.#store.applyBox(planned.box, await this.#outboxMessage(deps, planned.box, planned.say), [], now);
+    const current = deps.host.image !== null && planned.box.image !== deps.host.image ? needsEnsure(planned.box, now) : planned.box;
+    if (current !== box) this.#store.applyBox(current, await this.#outboxMessage(deps, current, planned.say), [], now);
     for (let i = 0; i < BOX_STEPS_PER_DRAIN; i++) {
-      const current = this.#store.box();
-      const step = current && beginStep(current, this.#deps.clock.now());
+      const stored = this.#store.box();
+      const step = stored && beginStep(stored, this.#deps.clock.now());
       if (!step) return;
       this.#store.applyBox(step.box, null, [], this.#deps.clock.now());
       if (step.kind === "reclaim") {
         await this.#reclaim(deps, step);
+        continue;
+      }
+      if (step.kind === "ensure") {
+        await this.#ensure(deps, step);
         continue;
       }
       const probe = await this.#probe(deps, step);
@@ -513,6 +521,12 @@ export class Agent extends DurableObject<Env> {
     this.#store.removeBox(step.box.name, { texts: [m.text], note: m.note }, this.#deps.clock.now());
   }
 
+  async #ensure(deps: BoxDeps, step: EnsureStep): Promise<void> {
+    const ensured = await deps.host.ensure(step.box.name, await boxToken(deps.secret, step.box.name));
+    if (!ensured.ok) return console.warn("box ensure failed", step.box.name, ensured.detail);
+    this.#store.applyBox(afterEnsure(step, deps.host.image), null, [], this.#deps.clock.now());
+  }
+
   async #probe(deps: BoxDeps, step: ProbeStep): Promise<Probe> {
     const token = await boxToken(deps.secret, step.box.name);
     if (step.kind === "provision") {
@@ -520,7 +534,7 @@ export class Agent extends DurableObject<Env> {
       if (!ensured.ok) return { kind: "down", retryable: ensured.retryable, detail: ensured.detail };
     }
     const health = await deps.client.health(step.box.url, token);
-    return health.kind === "up" ? health : { kind: "down", retryable: true, detail: health.detail };
+    return health.kind === "unavailable" ? { kind: "down", retryable: true, detail: health.detail } : health;
   }
 
   async #callBox<T>(system: string, user: string, schema: z.ZodType<T>, agent: AgentKey): Promise<BoxCall<T> | null> {
@@ -543,6 +557,9 @@ export class Agent extends DurableObject<Env> {
         this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [missed("rejected")], now);
         return null;
       }
+      case "unauthorized":
+        this.#store.applyBox(needsEnsure(box, now), null, [missed("rejected")], now);
+        return null;
       case "unavailable":
         console.warn("box unavailable", res.detail);
         this.#store.appendLogs([missed("unavailable")], now);

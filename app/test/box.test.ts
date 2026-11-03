@@ -2,7 +2,7 @@ import { env as testEnv, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import { boxClient } from "../src/box/client";
-import { flyHost, type FlyConfig } from "../src/box/fly";
+import { flyHost, machineConfig, type FlyConfig } from "../src/box/fly";
 import type { Fetch } from "../src/box/host";
 import { BOX, boxMessage, type BoxSay } from "../src/box/machine";
 import { boxName, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
@@ -70,13 +70,19 @@ describe("configuration", () => {
   });
 });
 
+/** Fly answers with fields of its own in a machine's config, which a comparison must not count as a difference. */
+function withFlyDefaults(config: Record<string, unknown>): Record<string, unknown> {
+  const mounts = (config.mounts as { volume: string; path: string }[]).map((m) => ({ ...m, name: "data", size_gb: 5, encrypted: true }));
+  return { ...config, mounts, init: {}, metadata: { fly_platform_version: "v2" }, env: { ...(config.env as object), FLY_PROCESS_GROUP: "app" } };
+}
+
 type FlyRequest = { readonly method: string; readonly path: string; readonly body: unknown; readonly authorization: string | null };
 
 function fakeFly(org = "giraffes") {
   const apps = new Map<string, string>();
   const ips = new Map<string, { ip: string; shared: boolean }[]>();
   const volumes = new Map<string, { id: string; name: string; state: string }[]>();
-  const machines = new Map<string, { id: string }[]>();
+  const machines = new Map<string, { id: string; config: Record<string, unknown> }[]>();
   const requests: FlyRequest[] = [];
   const failures: { method: string; path: string; status: number }[] = [];
   let n = 0;
@@ -88,7 +94,7 @@ function fakeFly(org = "giraffes") {
     requests.push({ method, path, body, authorization: new Headers(init?.headers).get("authorization") });
     const failure = failures.findIndex((f) => f.method === method && f.path === path);
     if (failure >= 0) return new Response("boom", { status: failures.splice(failure, 1)[0].status });
-    const [, app, sub] = url.pathname.match(/^\/v1\/apps(?:\/([^/]+))?(?:\/(\w+))?$/) ?? [];
+    const [, app, sub, id] = url.pathname.match(/^\/v1\/apps(?:\/([^/]+))?(?:\/(\w+))?(?:\/([^/]+))?$/) ?? [];
     if (!app && method === "POST") {
       if (apps.has(body.app_name)) return Response.json({ error: "Validation failed: Name has already been taken" }, { status: 422 });
       apps.set(body.app_name, body.org_slug);
@@ -114,9 +120,16 @@ function fakeFly(org = "giraffes") {
       return Response.json(v);
     }
     if (sub === "machines" && method === "GET") return Response.json(list(machines));
+    if (sub === "machines" && id) {
+      const m = list(machines).find((x) => x.id === id);
+      if (!m) return Response.json({ error: "machine not found" }, { status: 404 });
+      m.config = withFlyDefaults(body.config);
+      return Response.json(m);
+    }
     if (sub === "machines") {
-      list(machines).push({ id: `m${++n}` });
-      return Response.json({ id: `m${n}` });
+      const m = { id: `m${++n}`, config: withFlyDefaults(body.config) };
+      list(machines).push(m);
+      return Response.json(m);
     }
     return Response.json({ error: "no route" }, { status: 404 });
   };
@@ -222,6 +235,27 @@ describe("fly host", () => {
     expect(posts(fly.requests.slice(before)).map(([path]) => path)).toEqual(["/apps"]);
   });
 
+  test("an existing machine whose image or token differs is updated in place with the full config on the same volume", async () => {
+    const fly = fakeFly();
+    await flyHost(flyConfig, fly.fetch).ensure(app, token);
+    const [machine] = fly.machines.get(app)!;
+    const volume = fly.volumes.get(app)![0].id;
+    const before = fly.requests.length;
+
+    const v2 = flyHost({ ...flyConfig, image: "registry.fly.io/giraffes-box:2" }, fly.fetch);
+    expect(await v2.ensure(app, "box-token-2" as BoxToken)).toEqual({ ok: true });
+
+    const updates = posts(fly.requests.slice(before));
+    expect(updates.map(([path]) => path)).toEqual(["/apps", `/apps/${app}/machines/${machine.id}`]);
+    expect(updates[1][1]).toEqual({ config: machineConfig({ ...flyConfig, image: "registry.fly.io/giraffes-box:2" }, "box-token-2" as BoxToken, volume).config });
+    expect(fly.machines.get(app)).toHaveLength(1);
+    expect(fly.volumes.get(app)).toHaveLength(1);
+
+    const settled = fly.requests.length;
+    expect(await v2.ensure(app, "box-token-2" as BoxToken)).toEqual({ ok: true });
+    expect(posts(fly.requests.slice(settled)).map(([path]) => path)).toEqual(["/apps"]);
+  });
+
   test("429 and 5xx are retryable, another 4xx is not, and a name owned elsewhere fails", async () => {
     const fly = fakeFly();
     const host = flyHost(flyConfig, fly.fetch);
@@ -272,9 +306,11 @@ describe("box client", () => {
   const req = { purpose: "turn" as const, system: "s", user: "u", schema: z.object({ a: z.string() }) };
   const answering = (status: number, body: unknown): Fetch => async () => Response.json(body, { status });
 
-  test("a 409 is signed out; 5xx, 401, a network error and a timeout are unavailable", async () => {
+  test("a 409 is signed out, a 401 is unauthorized; 5xx, a network error and a timeout are unavailable", async () => {
     expect(await boxClient(answering(409, { error: "signed_out" })).parse("https://b", token, req)).toEqual({ kind: "signed_out" });
-    for (const status of [502, 503, 401]) {
+    expect(await boxClient(answering(401, { error: "unauthorized" })).parse("https://b", token, req)).toEqual({ kind: "unauthorized" });
+    expect(await boxClient(answering(401, { error: "unauthorized" })).health("https://b", token)).toEqual({ kind: "unauthorized" });
+    for (const status of [502, 503]) {
       expect(await boxClient(answering(status, {})).parse("https://b", token, req)).toMatchObject({ kind: "unavailable" });
     }
     const down: Fetch = async () => {
@@ -508,6 +544,58 @@ describe("connecting a Claude plan", () => {
       ["box", "settled"],
     ]);
     model.assertDone();
+  });
+
+  test("a new BOX_IMAGE brings a live box up to date on its next drain, once and without a word to the person", async () => {
+    const box = fakeBox({ signedIn: true });
+    const c = await devChat("ida", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up"), say("connected")]);
+    expect(box.ensuredWith).toEqual(["registry.test/box:1"]);
+
+    box.image = "registry.test/box:2";
+    box.replies.push({ kind: "reply", step: chat("On your plan.") }, { kind: "reply", step: chat("Still on it.") });
+    await c.say("hello");
+    await c.say("again");
+
+    expect(await c.received()).toEqual(["On your plan.", "Still on it."]);
+    expect(box.ensuredWith).toEqual(["registry.test/box:1", "registry.test/box:2"]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+  });
+
+  test("a box that refuses its token is ensured again, silently, and the turn runs on the API", async () => {
+    const box = fakeBox({ signedIn: true });
+    const model = scripted([chat("From the API.")]);
+    const c = await devChat("jo", { model, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    box.replies.push({ kind: "status", status: 401 }, { kind: "reply", step: chat("Back on your plan.") });
+    await c.say("hello");
+    expect(await c.received()).toEqual(["From the API."]);
+    expect(box.ensureCalls).toHaveLength(2);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+
+    await c.say("again");
+    expect(await c.received()).toEqual(["Back on your plan."]);
+    expect(box.ensureCalls).toHaveLength(2);
+  });
+
+  test("an ensure of a live box that fails every time retries every few minutes and never touches its state", async () => {
+    const box = fakeBox({ signedIn: true, host: ["ok", ...Array(100).fill({ retryable: true, detail: "GET /apps: 503" })] });
+    const c = await devChat("kai", { model: scripted([quietCheckin()]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    box.image = "registry.test/box:2";
+    box.replies.push({ kind: "reply", step: chat("On your plan.") });
+    await c.say("hello");
+    await c.advanceTo("2099-11-04T11:00");
+
+    expect(await c.received()).toEqual(["On your plan."]);
+    expect(box.ensureCalls.length).toBeGreaterThan(10);
+    expect(box.ensureCalls.length).toBeLessThan(15);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
   });
 
   test("MAX_BOXES refuses a box past the cap, and the refused person has none", async () => {

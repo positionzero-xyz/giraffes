@@ -231,6 +231,10 @@ export type FakeBox = {
   /** Apps the host has created; a step that died after creating one leaves it here, as a real crash would. */
   readonly created: Set<string>;
   readonly ensureCalls: string[];
+  /** The image each `ensure` put on its machine. */
+  readonly ensuredWith: string[];
+  /** BOX_IMAGE as the host sees it; changing it stands for a deploy with a new image. */
+  image: string;
   readonly destroyCalls: string[];
   readonly healthCalls: string[];
   readonly parses: { readonly authorization: string | null; readonly user: string }[];
@@ -256,6 +260,8 @@ export function fakeBox(
   const box = {
     created: new Set<string>(),
     ensureCalls: [] as string[],
+    ensuredWith: [] as string[],
+    image: "registry.test/box:1",
     destroyCalls: [] as string[],
     healthCalls: [] as string[],
     parses: [] as { authorization: string | null; user: string }[],
@@ -266,6 +272,9 @@ export function fakeBox(
   };
   const host: BoxHost = {
     kind: "fly",
+    get image() {
+      return box.image;
+    },
     nameFor: (agent) => boxName(BOX_SECRET, "gbox-", agent),
     urlOf: (name) => `https://${name}.box.test`,
     async ensure(name): Promise<HostResult> {
@@ -277,6 +286,7 @@ export function fakeBox(
       }
       if (step !== "ok") return { ok: false, ...step };
       box.created.add(name);
+      box.ensuredWith.push(box.image);
       return { ok: true };
     },
     async destroy(name): Promise<HostResult> {

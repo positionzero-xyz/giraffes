@@ -21,7 +21,7 @@ The LINE reply token is single-use and lives for about a minute. Pushes are bill
 
 - `enqueue` runs one transaction. It does `INSERT OR IGNORE` into `inbox`, and on first contact it also creates the `agent` row and the first daily check-in. It arms the alarm no later than now, then starts a drain with `ctx.waitUntil(this.alarm())`, so a reply never waits on alarm scheduling. The alarm is the durable backstop if that drain dies.
 - `alarm` is the only code that calls a model, changes memory or sends a message. A drain runs isolated phases in order: turns, delivery, log flush, compaction, prune. The turns phase recovers what a dead instance left, fires due wake-ups, then loops over batches (claim, turn, deliver, fire due wake-ups) for at most 60 s. A phase that throws is logged and the next phase still runs, so a failing compaction can't hold back delivery or log shipping.
-- The alarm time is computed, never stored. It is the earliest of the inbox `ready_at`, the fire time of the earliest pending wake-up, the outbox `ready_at` and the log retry time, so no "next alarm" field can drift from the tables.
+- The alarm time is computed, never stored. It is the earliest of the inbox `ready_at`, the fire time of the earliest pending wake-up, the outbox `ready_at`, the log retry time, and the compaction retry time while a due compaction is backing off, so no "next alarm" field can drift from the tables.
 - A second `alarm()` while a drain runs joins the in-flight promise. The guard is in memory on purpose. A DO has one live instance, so the guard can't outlive the work it protects, and `recover()` treats whatever a dead instance left as crashed.
 
 While a turn awaits the model, the only operations that can interleave are an inbox insert and a read.
@@ -34,7 +34,7 @@ While a turn awaits the model, the only operations that can interleave are an in
 | `turn` | verbatim recent conversation | a turn prompt reads the newest 30 |
 | `memory` (1 row) + `memory_note` | compacted summary, model notes | compaction is compare-and-set on `through_turn_seq`; a turn prompt reads the newest 50 notes |
 | `wakeup` | reminders and the check-in | partial `UNIQUE(key) WHERE status = 'pending'`; `origin` is `person`, `agent` or `system` |
-| `outbox` | everything leaving | one row per turn with all its texts; `id` is a UUID and the LINE retry key; `intent` is set by code; `admitted_day` charges the budget once; `in_doubt` bars the reply token |
+| `outbox` | everything leaving | one row per turn with all its texts; `id` is a UUID and the LINE retry key; `intent` is set by code; `admitted_day` charges the budget once per local day; `in_doubt` bars the reply token |
 | `spend_month` + `reservation` | per-person spend and global leases | reserved spend is `SUM(reservation)`, never stored |
 | `log_outbox` + `log_flush` | log rows not yet in D1, and their backoff | written in the same transaction as the fact they record |
 
@@ -53,7 +53,7 @@ D1 (`app/src/ledger/d1-schema.sql`) holds the cross-user facts: append-only `age
 
 ### Where validation lives
 
-Channel adapters authenticate and parse: the HMAC over the raw body for LINE, a constant-time header compare for Telegram, and identity extraction. Wire types never leave `channels/<name>.ts`. `loadConfig` validates env once. The zod schema checks the shape of model output in the backend, and `planTurn` checks its meaning (times, limits, keys). Inside the agent, data is trusted and typed.
+Channel adapters authenticate and parse: the HMAC over the raw body for LINE, a constant-time header compare for Telegram, and identity extraction. Wire types never leave `channels/<name>.ts`. `loadConfig` validates env once. The zod schema checks the shape of model output in the backend, and `planTurn` checks its meaning (times, limits, keys) and its lengths, which the API doesn't enforce. Inside the agent, data is trusted and typed.
 
 ### Module map
 
@@ -82,16 +82,18 @@ Tracing a flow takes three files: `worker.ts`, `agent.ts`, and one pure module.
 **Who asked decides budget and quiet hours.** A wake-up is `person` only when the turn was started by the person's own message and the model sets `asked: true`. Every wake-up scheduled during a proactive turn is `agent`. The daily check-in (09:00 local) is `system`.
 
 - A `person` wake-up fires at its due time, even between 22:00 and 08:00. Its message is `requested`, so it skips the unasked budget and quiet hours.
-- An `agent` or `system` wake-up due in quiet hours fires at 08:00. Its message is `unasked`. Every delivery attempt checks quiet hours and defers to 08:00. The first attempt admitted charges the daily budget of 3 and records `admitted_day`, and later attempts are not charged again. Past the budget, the row is dropped and logged as `dropped_budget`.
+- An `agent` or `system` wake-up due in quiet hours fires at 08:00. Its message is `unasked`. Every delivery attempt checks quiet hours and defers to 08:00. The first attempt admitted on a local day charges that day's budget of 3 and records `admitted_day`, and later attempts that day are not charged again. A row that a retry carries past midnight is admitted again against the new day's budget, so the cap holds for every day a message goes out on. Past the budget, the row is dropped and logged as `dropped_budget`.
 - A reply to a message or a follow is `reply` and is never limited.
 
-**Requested reminders have a floor.** When a `person` wake-up's turn gets no usable model answer, code sends `Reminder: <note>` from the stored row, led by the fixed late notice when it is more than an hour late. That covers invalid output, a refusal, a poisoned batch, a budget refusal, and five unavailable attempts (about 7.5 minutes). A chat message gets three model attempts (about 90 s) before the fixed "say it again" reply. Agent wake-ups and check-ins send nothing on failure.
+**Requested reminders have a floor.** When a `person` wake-up's turn would send nothing, code sends `Reminder: <note>` from the stored row, led by the fixed late notice when it is more than an hour late. That covers a valid answer with no send, invalid output, a refusal, a poisoned batch, a budget refusal, and five unavailable attempts (about 7.5 minutes). A chat message gets three model attempts (about 90 s) before the fixed "say it again" reply. Agent wake-ups and check-ins send nothing on failure.
 
-**Code corrects what it rejects.** `planTurn` rejects a reminder that is before the current minute, more than 366 days ahead, the 21st pending, a key already pending, an unreadable time, or the check-in key. It also rejects a cancel with nothing pending. In a reply turn, a code-written correction goes out in the same delivery, so a model confirmation can't go out alone. A correction displaces the third send when the turn already has three. Every rejection, in any turn, is logged to `action_rejection`. A reminder for the current minute is accepted and fires on the next alarm.
+**Code corrects what it rejects.** `planTurn` applies every cancel before any schedule, so a move or a swap gives the same result in any action order, and replacing one of 20 reminders frees its slot first. It rejects a reminder that is before the current minute, more than 366 days ahead, the 21st pending, a key already pending, an unreadable time, or the check-in key. It also rejects a cancel with nothing pending. When the replacement for a key cancelled in the same turn is rejected, the cancel doesn't commit, the original reminder stays, and the correction says so. In any turn that sends model text, whatever its intent, a code-written correction goes out in the same delivery, so a model confirmation can't go out alone. A rejected wake-up the agent set for itself (`asked: false`) gets no correction, because the person never heard of it, and a turn that sends nothing shows none. A correction displaces the third send when the turn already has three. Every rejection, in any turn, is logged to `action_rejection`.
+
+A reminder the person asked for may be for the current minute, and it fires on the next alarm. The agent's own wake-ups need a minute's lead, or a wake-up turn could re-arm itself and fire again in the same drain.
 
 **Lateness.** A wake-up that fires more than an hour after its due time tells the model so. Code prepends the model's `lateNotice`, or a fixed one when the model left it out.
 
-**Send caps.** A turn sends at most 3 texts of 600 characters each, in at most 6 actions. Notes are capped at 300 characters and the late notice at 200. The output budgets (`maxTokens` 12,000 for turns and 12,500 for compaction) fit the largest output each schema accepts, even in Thai, and `policy.test.ts` pins that.
+**Send caps.** A turn sends at most 3 texts of 600 characters each, in at most 6 actions. Notes are capped at 300 characters and the late notice at 200. The API doesn't enforce these, because the SDK's `zodOutputFormat` moves length and count limits into the schema's descriptions. So the schema only states them, and `planTurn` cuts a longer text to its cap and drops actions past the sixth, logging each as `too_long` or `too_many_actions`. One long text no longer fails the turn. The output budgets (`maxTokens` 12,000 for turns and 12,500 for compaction) fit the largest output code keeps whole, even in Thai, and `policy.test.ts` pins that.
 
 **Reachability.** Follow and block events carry the platform's timestamp. One older than the last recorded change is logged as `stale` and changes nothing. A block skips the model. A message from a blocked person, written at or after that block, sets them active and re-creates a missing check-in, so the reply is delivered. A send that fails because the person is gone (Telegram 403) marks them blocked but leaves the timestamp alone, because our clock isn't comparable with the platform's. While a person is blocked, their wake-ups are skipped (the check-in gets no successor) and their outbox rows are dropped.
 
@@ -109,8 +111,9 @@ Settlement follows what is known about the bill:
 |---|---|---|
 | a response, valid or not | its usage | `settled` |
 | 429 or 529, or the dev bridge is down | $0 | `unavailable` |
+| another 4xx, rejected before it ran | $0 | `rejected` |
 | no response, a 408, or another 5xx | the estimate | `in_doubt` |
-| the call threw in process | the estimate | `in_doubt` |
+| the call threw anything else in process | the estimate | `in_doubt` |
 | the instance died mid-call | the estimate, charged by `recover()` | `recovered_after_crash` |
 
 The Anthropic client runs with `maxRetries: 0`, so every billed attempt passes through its own reservation.
@@ -118,15 +121,15 @@ The Anthropic client runs with `maxRetries: 0`, so every billed attempt passes t
 ## Failure cases
 
 - **Crash mid-turn.** The claim committed `processing` and `attempts + 1`, and the reservation is durable. `commitTurn` is one transaction: turns, wake-ups, notes, outbox, inbox done, settlement and logs land together or not at all. `recover()` puts the batch back to `pending` and settles orphaned reservations at their estimate. After 3 claims the batch is poisoned. A message gets a fixed apology, a requested reminder gets its floor, and anything else gets nothing.
-- **Model unavailable.** The batch goes back to `pending` with a 30 s doubling backoff, and attempts are kept. A long outage ends as `model_failed` after 3 attempts, or 5 for a requested reminder. Invalid output or a refusal ends the turn the same way at once.
-- **Crash after commit, before or during a send.** `recover()` turns `sending` back to `pending` with `in_doubt = 1`. A LINE reply that answered 5xx or lost its connection is marked in doubt the same way. An in-doubt row is read without its reply token, so LINE pushes it with `X-Line-Retry-Key = outbox.id`, and a 409 counts as sent. If the lost attempt was a reply that landed, the person sees a duplicate. Telegram sends one `sendMessage` per row, texts joined by blank lines, so a retry repeats the whole row once and never part of it. A crash after a Telegram send that landed also duplicates. Budget admission was recorded before the send, so it is never charged twice.
+- **Model unavailable or the request rejected.** The batch goes back to `pending` with a 30 s doubling backoff, and attempts are kept. A long outage ends as `model_failed` after 3 attempts, or 5 for a requested reminder. Invalid output or a refusal ends the turn the same way at once.
+- **Crash after commit, before or during a send.** `recover()` turns `sending` back to `pending` with `in_doubt = 1`. A LINE reply that answered 5xx or lost its connection is marked in doubt the same way. So is a push that must be retried after LINE refused the reply token, so the retry doesn't present that token again. An in-doubt row is read without its reply token, so LINE pushes it with `X-Line-Retry-Key = outbox.id`, and a 409 counts as sent. If the lost attempt was a reply that landed, the person sees a duplicate. Telegram sends one `sendMessage` per row, texts joined by blank lines, so a retry repeats the whole row once and never part of it. A crash after a Telegram send that landed also duplicates. Budget admission was recorded before the send, so it is never charged twice.
 - **Delivery failure.** A 429 or 5xx retries after 30 s, or after Telegram's `retry_after`. LINE's monthly-quota 429 fails at once. A row is dropped after 5 attempts.
 - **Duplicate webhook.** `inbox.event_key` is `line:<webhookEventId>`, `tg:<update_id>` or `dev:<client id>`, inserted with `INSERT OR IGNORE`. Done rows are kept 14 days for this.
 - **Webhook enqueue fails.** The Worker answers 200 only after every envelope is in its inbox. Otherwise the request fails with 500, and the channel's redelivery is the retry. LINE redelivery is off by default and must be turned on.
 - **Alarm fires twice.** A concurrent call joins the in-flight drain. A sequential call finds nothing due, because a wake-up is closed in the transaction that inserts `wake:<id>`, and check-ins are keyed `checkin:<local date>`.
 - **Message during a model call.** `enqueue` inserts it. The in-flight turn commits as planned, and the next batch's prompt contains the previous reply. Consecutive messages already pending when a batch is claimed (up to 10) become one turn. There is no debounce.
-- **Compaction fails.** Compaction runs when there are more than 60 turns or 40 notes. Each call folds one page: up to the oldest 30 turns, always keeping the newest 30, and up to 40 notes, folding toward 20. Any outcome other than success backs off 5 minutes, doubling to a day. The backoff is stored on the `memory` row and reset on success. A backlog shrinks one page per drain.
-- **D1 down.** Logs wait in `log_outbox` and ship later with deterministic ids, backing off from 10 s, doubling to an hour.
+- **Compaction fails.** Compaction runs when there are more than 60 turns or 40 notes. Each call folds one page: up to the oldest 30 turns, always keeping the newest 30, and up to 40 notes, folding toward 20. Any outcome other than success backs off 5 minutes, doubling to a day. The backoff is stored on the `memory` row, is part of the alarm time, and is reset on success. A backlog shrinks one page per drain.
+- **D1 down.** Logs wait in `log_outbox` and ship later with deterministic ids, backing off from 10 s, doubling to an hour. Only a duplicate id is skipped. A row D1 refuses, such as one an old CHECK doesn't allow, fails the flush the same way until the ledger is migrated.
 
 ### What it does not do
 
@@ -161,7 +164,6 @@ No turn runs inside the webhook request. There are no lock rows, no stored alarm
 - Does structured output on Haiku 5.5 accept the `anyOf` that `zodOutputFormat` makes from the action union? If not, flatten it to one object with a `type` enum, validated in `planTurn`.
 - Does the system prompt clear Haiku 5.5's minimum cacheable prefix? If not, caching silently does nothing.
 - The only guard on the requested bypass of budget and quiet hours is the model's `asked` flag on a message turn, bounded by the 20 pending reminders.
-- Compaction backoff is not part of the alarm time, so compaction resumes only when something else wakes the drain.
 - A drain stops starting batches after 60 s and re-arms for now, which keeps one person well inside the 15-minute alarm limit.
 - LINE quota exhaustion fails every push, and nothing alerts the operator.
 

@@ -46,7 +46,7 @@ The person texts "remind me tomorrow 9am to call the clinic".
        { "type": "send", "text": "Done. I'll remind you tomorrow at 9." } ],
      "task": { "kind": "reminder", "key": "call-clinic", "status": "started" } }
    ```
-6. `planTurn(output, view)` is pure. It converts the local time to an instant, admits or rejects each action, and returns one `TurnCommit`. Because a message started the turn and `asked` is true, the wake-up's origin is `person`. A rejected action adds a code-written correction to the reply and a row to `action_rejection`.
+6. `planTurn(output, view)` is pure. It cuts over-long texts to their caps, applies cancels before schedules, converts the local time to an instant, admits or rejects each action, and returns one `TurnCommit`. Because a message started the turn and `asked` is true, the wake-up's origin is `person`. A rejected action adds a row to `action_rejection`. It also adds a code-written correction to any turn that sends text, unless it is a wake-up the agent set for itself.
 7. One transaction appends the person's text and the agent's text to `turn`, inserts the wake-up, inserts one outbox row (`intent = 'reply'`, both texts, the reply handle), marks the inbox row `done`, settles the reservation at the real cost, and appends log rows to `log_outbox`.
 8. Delivery uses the free LINE reply API while the token is fresh and the row is not in doubt. Otherwise it pushes with `X-Line-Retry-Key = outbox.id`.
 9. After the batches, the drain delivers any deferred rows, flushes `log_outbox` to D1, compacts one page if due, prunes, and re-arms.
@@ -63,7 +63,7 @@ At 09:00 `planFiring` (pure) returns a firing for each due row whose fire time h
 | `agent` | any other `schedule_wakeup` | 08:00 if due in quiet hours | `unasked` | quiet hours on every attempt; budget of 3 a day |
 | `system` | code: the daily check-in at 09:00 | as `agent` | `unasked` | as `agent` |
 
-If the wake-up fires more than an hour late, the prompt says so and code prepends the late notice to the first text. If a `person` wake-up gets no usable model answer, code sends `Reminder: <note>` instead.
+If the wake-up fires more than an hour late, the prompt says so and code prepends the late notice to the first text. If a `person` wake-up's turn would send nothing, because the model failed or answered without a send, code sends `Reminder: <note>` instead.
 
 The check-in has the reserved key `daily-checkin`. Code creates it on first contact, on a newer follow, and when a blocked person writes again, and it inserts the successor in the firing transaction. Its inbox key is `checkin:<local date>`, so it fires at most once per local day. While a person is blocked, due wake-ups are skipped.
 
@@ -92,10 +92,10 @@ test("a reminder the person asked for at 23:00 arrives at 23:00 and isn't counte
 `advanceTo` moves the fake clock from alarm to alarm and runs each drain until idle. Scenarios use 2099 dates so that no stored alarm fires on the real clock. Pure policy is tested without the Durable Object in `app/test/policy.test.ts`:
 
 ```ts
-test("an admitted row is held by quiet hours on every attempt, and sends on its admitted day past the budget", () => {
+test("a row admitted on an earlier day is admitted again against the day it goes out", () => {
 	const admitted = "2026-11-04" as LocalDate;
-	expect(admitUnasked({ ...input, admitted, now: at("2026-11-04T22:01+07:00"), sentToday: 0 })).toEqual({ verdict: "defer", until: at("2026-11-05T08:00+07:00") });
-	expect(admitUnasked({ ...input, admitted, now: at("2026-11-05T08:00+07:00"), sentToday: 3 })).toEqual({ verdict: "send", day: admitted });
+	expect(admitUnasked({ ...input, admitted, now: at("2026-11-05T08:00+07:00"), sentToday: 2 })).toEqual({ verdict: "send", day: "2026-11-05" });
+	expect(admitUnasked({ ...input, admitted, now: at("2026-11-05T08:00+07:00"), sentToday: 3 })).toEqual({ verdict: "drop", reason: "budget" });
 });
 ```
 

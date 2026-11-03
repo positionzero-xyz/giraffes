@@ -64,15 +64,16 @@ npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_w
 Re-running `src/ledger/d1-schema.sql` adds new tables and views, such as `action_rejection`. Do that
 before you deploy code that writes to them, or log shipping backs off until the table exists. Re-running
 the file doesn't change the CHECK constraints of a table that already exists. A row that an old CHECK
-refuses, such as an `in_doubt` model call in a ledger created before `model_call.status` allowed it, fails
-its log flush. The flush backs off and retries, and log shipping stays stuck behind that row until the
-table is migrated. To migrate the CHECK, rebuild the table:
+refuses, such as a `rejected` model call or a `too_long` rejection in a ledger created before those values
+existed, fails its log flush. The flush backs off and retries, and log shipping stays stuck behind that
+row until the table is migrated. `model_call.status` and `action_rejection.reason` have both gained
+values. To migrate their CHECKs, rebuild the two tables:
 
 ```sh
-npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW cost_per_agent_week; DROP INDEX model_call_agent_time; ALTER TABLE model_call RENAME TO model_call_old"
+npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW cost_per_agent_week; DROP INDEX model_call_agent_time; DROP INDEX action_rejection_agent_time; ALTER TABLE model_call RENAME TO model_call_old; ALTER TABLE action_rejection RENAME TO action_rejection_old"
 npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
-npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO model_call SELECT * FROM model_call_old; DROP TABLE model_call_old"
+npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO model_call SELECT * FROM model_call_old; DROP TABLE model_call_old; INSERT INTO action_rejection SELECT * FROM action_rejection_old; DROP TABLE action_rejection_old"
 ```
 
-The second command recreates `model_call` with the current CHECK, its index and the view. Run the same
-commands with `--local` to migrate the dev ledger.
+The second command recreates both tables with the current CHECKs, their indexes and the view. Run the
+same commands with `--local` to migrate the dev ledger.

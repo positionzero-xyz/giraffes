@@ -457,8 +457,6 @@ describe("spend", () => {
 });
 
 describe("output budgets", () => {
-  // Every token is at least one UTF-8 byte, and Thai takes 3 bytes a character, so the byte length of the
-  // largest output the schema accepts, written in Thai, is the most tokens a valid output can need.
   const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
   const thai = (n: number) => "ก".repeat(n);
   const longest = <T extends string>(xs: readonly T[]) => xs.reduce((a, b) => (b.length > a.length ? b : a));

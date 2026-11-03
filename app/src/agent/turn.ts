@@ -44,16 +44,14 @@ export const TURN = {
   maxLateNoticeChars: 200,
   maxActions: 6,
   maxClaimAttempts: 3,
-  // With the agent's 30 s doubling backoff, a chat message gives the model about 90 s to come back and a
-  // requested reminder about 7.5 minutes, before code answers without it.
   maxModelAttempts: 3,
   maxRequestedModelAttempts: 5,
 } as const;
 
 const Slug = z.string().regex(WAKEUP_KEY_PATTERN);
 
-// The API doesn't enforce length limits (the SDK moves them into descriptions), so a limit here would fail
-// the whole turn for one long text. Limits are stated for the model and enforced in planTurn.
+// The API doesn't enforce string length limits (the SDK moves them into descriptions), so a .max() here
+// would fail the whole turn on one long text.
 const atMost = (n: number) => `At most ${n} characters.`;
 
 const ActionSchema = z.discriminatedUnion("type", [
@@ -210,7 +208,6 @@ export const NOTICE = {
   reminder: (note: string) => `Reminder: ${note}`,
 } as const;
 
-/** A rejected reminder or cancel is corrected in code, so the model can't confirm what didn't happen. */
 const REJECTION_NOTICE: Readonly<Record<ActionRejection, string | null>> = {
   limit: NOTICE.reminderLimit,
   past: NOTICE.reminderPast,
@@ -225,7 +222,6 @@ const REJECTION_NOTICE: Readonly<Record<ActionRejection, string | null>> = {
   too_long: null,
 };
 
-/** Cut to `max` UTF-16 units, the unit the limits are stated in, ending in an ellipsis and never mid-pair. */
 function clip(text: string, max: number): string {
   const cut = text.slice(0, max - 1);
   return `${/[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut}…`;
@@ -284,7 +280,6 @@ function lifecycleEffects(view: TurnView): Pick<TurnCommit, "reachability" | "en
   });
   switch (e.kind) {
     case "message": {
-      // A person who writes in can be reached, unless the platform has since told us they blocked.
       const at = Math.max(...view.batch.items.map((i) => i.receivedAt)) as EpochMs;
       return view.status === "blocked" && at >= view.statusAt ? reachable(at) : none;
     }
@@ -343,7 +338,6 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   for (const a of out.actions.slice(TURN.maxActions)) {
     reject(actionLabel(a), "too_many_actions", a.type === "cancel_wakeup" || (a.type === "schedule_wakeup" && a.asked));
   }
-  // Cancels apply first, so moving a reminder or freeing a slot works whatever order the model wrote it in.
   const ordered = [...actions.filter((a) => a.type === "cancel_wakeup"), ...actions.filter((a) => a.type !== "cancel_wakeup")];
   for (const a of ordered) {
     switch (a.type) {
@@ -359,9 +353,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
           adds.set(admission.wakeup.key, admission.wakeup);
           pending.set(admission.wakeup.key, admission.wakeup);
         } else {
-          // The person never hears of the agent's own wake-ups, so a rejected one is only logged.
           reject(actionLabel(a), admission.reason, a.asked);
-          // A move whose new time is rejected keeps the reminder it was moving.
           const key = parseWakeupKey(a.key);
           const original = key === null ? undefined : cancelled.get(key);
           if (key !== null && original !== undefined && !adds.has(key)) {
@@ -400,15 +392,12 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
     const notice = given ? fit(given, TURN.maxLateNoticeChars, "late_notice") : NOTICE.lateFallback(human(late.dueAt, view.tz));
     agentTexts[0] = `${notice}\n${agentTexts[0]}`;
   }
-  // A correction goes out with any model text, so it can't confirm what code rejected, and on its own to a
-  // person who wrote in. A wake-up or check-in that sends nothing stays silent.
   const noticeText = (agentTexts.length > 0 || intent === "reply") && notices.size > 0 ? [...notices].join("\n") : null;
   if (noticeText !== null && agentTexts.length >= TURN.maxSendsPerTurn) {
     agentTexts.pop();
     rejected.push({ action: "send", reason: "too_many_sends" });
   }
   const planned = noticeText === null ? agentTexts : [...agentTexts, noticeText];
-  // A reminder the person asked for goes out even when the model answered its firing without a send.
   const floor = planned.length === 0 ? fixedText(view, null) : null;
   const texts = floor === null ? planned : [floor];
 
@@ -449,7 +438,6 @@ export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "blo
   return e.change === "block" ? { kind: "block" } : null;
 }
 
-/** What code says without the model: `notice` to a person who wrote in, or the reminder they asked for. */
 function fixedText(view: TurnView, notice: string | null): string | null {
   const e = trigger(view);
   if (e.kind === "message") return notice;

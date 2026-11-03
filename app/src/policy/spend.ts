@@ -7,7 +7,6 @@ export const SPEND = {
   leaseChunkMicro: 500_000 as MicroUsd,
 } as const;
 
-/** Room for the request framing and the output schema the API adds to the prompt. */
 export const SCHEMA_ALLOWANCE_TOKENS = 4_000;
 
 export type MonthSpend = {
@@ -26,10 +25,6 @@ function priced(model: ModelId, usage: Usage): MicroUsd {
   return Math.ceil(microTimesMillion / 1_000_000) as MicroUsd;
 }
 
-/**
- * An upper bound on the bill. No token is shorter than one UTF-8 byte in any script, cache writes are
- * the dearest way to pay for input, and the output can't pass `maxTokens`.
- */
 export function estimate(model: ModelId, promptBytes: number, maxTokens: number): MicroUsd {
   return priced(model, {
     inputTokens: 0,

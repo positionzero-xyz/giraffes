@@ -406,8 +406,6 @@ export class AgentStore {
           admittedDay: r.admitted_day,
           attempts: r.attempts,
         };
-        // A row in doubt (cut off mid-send, or a channel that couldn't tell) may have spent its token,
-        // so it is read without one.
         return r.in_doubt === 0 && r.reply_token !== null && r.reply_expires !== null
           ? { ...base, reply: { token: r.reply_token, expiresAt: r.reply_expires } }
           : base;
@@ -453,7 +451,6 @@ export class AgentStore {
   recipientGone(id: OutboxId, now: EpochMs, logs: readonly LogRow[]): void {
     this.tx(() => {
       this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'gone', closed_at = ? WHERE id = ?", now, id);
-      // status_at orders the platform's own events; our clock isn't comparable with their timestamps.
       this.sql.exec("UPDATE agent SET status = 'blocked'");
       this.insertLogs(logs, now);
     });
@@ -647,8 +644,6 @@ export class AgentStore {
         .map((r) => ({ origin: r.origin, dueAt: r.due_at })),
       outboxReadyAt: min("SELECT MIN(ready_at) AS t FROM outbox WHERE status IN ('pending', 'sending')"),
       logsReadyAt: min("SELECT CASE WHEN EXISTS (SELECT 1 FROM log_outbox) THEN retry_at END AS t FROM log_flush"),
-      // Only while backing off: a retry time already passed means the drain just ran compaction, so re-arming
-      // for it could loop if compaction failed without recording a backoff.
       compactionRetryAt: compaction.retry_at > now && compactionDue(compaction.turns, compaction.notes) ? compaction.retry_at : null,
     };
   }

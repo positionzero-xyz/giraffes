@@ -34,7 +34,6 @@ function toEvent(u: Update): { readonly chatId: number; readonly at: EpochMs; re
 
 const SendError = z.object({ parameters: z.object({ retry_after: z.number() }).optional() });
 
-/** sendMessage's text limit. The turn caps keep a whole outbox row under it; channels.test.ts pins that. */
 export const MAX_TEXT = 4096;
 
 export function telegramChannel(secrets: { botToken: string; webhookSecret: string } | null): ChannelAdapter {
@@ -60,9 +59,8 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
     },
 
     /**
-     * One sendMessage per row, so a retry never repeats part of it. Telegram has no idempotency key: a
-     * crash after sendMessage succeeded but before the outbox row was marked sent re-sends on recovery,
-     * and the person may see a duplicate.
+     * Telegram's sendMessage has no idempotency key, so a crash after a send succeeds but before the row is
+     * marked sent re-sends it on recovery.
      */
     async deliver(msg: OutboundMessage): Promise<Delivery> {
       try {

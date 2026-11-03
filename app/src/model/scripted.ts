@@ -15,7 +15,6 @@ export type ScriptedModel = ModelClient & {
 const DEFAULT_USAGE: Usage = { inputTokens: 1000, outputTokens: 100, cacheWriteTokens: 0, cacheReadTokens: 0 };
 const NO_RESPONSE: ReadonlySet<ModelFailure> = new Set(["unavailable", "rejected", "in_doubt"]);
 
-/** Compaction calls play `opts.compaction` when given, so a test can script them apart from turns. */
 export function scripted(steps: readonly ScriptStep[], opts: { readonly compaction?: readonly ScriptStep[] } = {}): ScriptedModel {
   const queue = [...steps];
   const compaction = opts.compaction ? [...opts.compaction] : queue;

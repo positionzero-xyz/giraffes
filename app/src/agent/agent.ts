@@ -131,8 +131,6 @@ export class Agent extends DurableObject<Env> {
           this.#fireDueWakeups();
         }
       });
-      // Each phase fails alone, and the cheap ones go first, so a failing compaction can't hold back
-      // delivery or log shipping.
       await this.#phase("delivery", () => this.#deliverReady());
       await this.#phase("log flush", () => this.#flushLogs());
       await this.#phase("compaction", () => this.#compactIfDue());
@@ -276,8 +274,6 @@ export class Agent extends DurableObject<Env> {
     try {
       res = await this.#deps.model.parse({ purpose, system, user, schema });
     } catch (err) {
-      // The instance is alive, so close the reservation here rather than leave it for recover(). The client
-      // classifies every answer the API gave, so a throw is something else, and it may have been billed.
       const at = this.#deps.clock.now();
       this.#store.settle({ reservation, cost: reservation.estimate }, [callRow(agent, reservation, "in_doubt", reservation.estimate, null, at)], at);
       throw err;
@@ -431,7 +427,6 @@ export class Agent extends DurableObject<Env> {
 
 type Unavailable = Extract<ModelCall<unknown>, { kind: "unavailable" }>;
 
-/** A call the API turned away or rejected costs nothing; one whose response was lost may have been billed in full. */
 function closeUnavailable(call: Unavailable, agent: AgentKey, now: EpochMs): { settle: Settlement | null; logs: LogRow[] } {
   const r = call.reservation;
   if (!r) return { settle: null, logs: [] };

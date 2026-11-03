@@ -66,7 +66,6 @@ export type Delivered = { readonly at: EpochMs; readonly text: string; readonly 
 
 export type ScriptedChannel = ChannelAdapter & { readonly delivered: readonly Delivered[] };
 
-/** Plays one step per delivery attempt, then delivers everything once the script runs out. */
 export function scriptedChannel(steps: readonly DeliveryStep[] = []): ScriptedChannel {
   const queue = [...steps];
   const delivered: Delivered[] = [];

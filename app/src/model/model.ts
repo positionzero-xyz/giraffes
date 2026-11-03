@@ -11,7 +11,6 @@ export type Purpose = (typeof PURPOSES)[number];
 
 export type Route = { readonly model: ModelId; readonly maxTokens: number; readonly effort: Effort };
 
-/** Turn and compaction budgets fit the largest output their schemas accept; policy.test.ts pins that. */
 export const ROUTES: Readonly<Record<Purpose, Route>> = {
   turn: { model: "claude-haiku-5-5", maxTokens: 12_000, effort: "low" },
   compaction: { model: "claude-haiku-5-5", maxTokens: 12_500, effort: "low" },
@@ -39,7 +38,6 @@ const PRICES: Readonly<Record<ModelId, RateCard>> = {
   },
 };
 
-/** The prompt's size picks the rate card; input, cache-write and cache-read tokens all count toward it. */
 export function priceOf(m: ModelId, promptTokens = 0): Price {
   const { base, longPrompt } = PRICES[m];
   return longPrompt && promptTokens > longPrompt.aboveTokens ? longPrompt.price : base;

@@ -18,7 +18,6 @@ export type UnaskedVerdict =
   | { readonly verdict: "defer"; readonly until: EpochMs }
   | { readonly verdict: "drop"; readonly reason: "budget" | "blocked" };
 
-/** Quiet hours apply to every attempt; the budget is charged once per local day a row goes out on. */
 export function admitUnasked(input: {
   readonly now: EpochMs;
   readonly tz: TimeZone;

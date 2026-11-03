@@ -16,10 +16,8 @@ export type CompactionInput = {
   readonly summary: string;
   readonly throughSeq: number;
   readonly turnCount: number;
-  /** The oldest turns, at most `COMPACTION.foldTurns`. */
   readonly oldestTurns: readonly (TurnRow & { readonly seq: number })[];
   readonly noteCount: number;
-  /** The oldest notes, at most `COMPACTION.foldNotes`. */
   readonly oldestNotes: readonly { readonly id: number; readonly text: string }[];
 };
 
@@ -40,7 +38,6 @@ export function planCompaction(input: CompactionInput): CompactionPlan | null {
   const overTurns = input.turnCount > COMPACTION.triggerTurns;
   const overNotes = input.noteCount > COMPACTION.maxNotes;
 
-  // One page per call keeps the prompt bounded; a backlog is worked off over the following drains.
   const folded = overTurns ? input.oldestTurns.slice(0, COMPACTION.foldTurns) : [];
   const foldedNotes = overNotes
     ? input.oldestNotes.slice(0, Math.min(COMPACTION.foldNotes, input.noteCount - COMPACTION.maxNotes / 2))

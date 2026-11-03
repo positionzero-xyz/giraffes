@@ -60,9 +60,6 @@ export function admitReminder(
   const at = parseLocalDateTime(req.at);
   if (at === null) return { ok: false, reason: "bad_time" };
   const dueAt = fromLocal(at, ctx.tz);
-  // Model times name a minute, so the current minute still counts for a reminder the person asked for, and
-  // fires on the next alarm. The agent's own needs a lead, or a wake-up turn could re-arm itself and fire
-  // again in the same drain.
   const earliest = req.origin === "person" ? ctx.now - (ctx.now % MINUTE_MS) : ctx.now + SCHEDULE.agentMinLeadMs;
   if (dueAt < earliest) return { ok: false, reason: "past" };
   if (dueAt > ctx.now + SCHEDULE.maxHorizonMs) return { ok: false, reason: "too_far" };

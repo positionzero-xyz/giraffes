@@ -236,6 +236,76 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE agent ADD COLUMN language TEXT NOT NULL DEFAULT 'en' CHECK (language IN ('th', 'en'));
   UPDATE agent SET language = 'th' WHERE channel = 'line';
   `,
+  `
+  CREATE TABLE task (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref         TEXT NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('plan', 'booking', 'site', 'group', 'other')),
+    title       TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'completed', 'closed', 'expired')),
+    opened_at   INTEGER NOT NULL,
+    cause_key   TEXT NOT NULL,
+    touched_at  INTEGER NOT NULL,
+    closed_at   INTEGER,
+    CHECK ((status = 'open') = (closed_at IS NULL))
+  );
+  CREATE UNIQUE INDEX task_open_ref ON task (ref) WHERE status = 'open';
+
+  CREATE TABLE task_fact (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id          INTEGER NOT NULL REFERENCES task (id),
+    kind             TEXT NOT NULL,
+    ref              TEXT NOT NULL DEFAULT '',
+    detail           TEXT NOT NULL DEFAULT '{}',
+    completes        INTEGER NOT NULL DEFAULT 0 CHECK (completes IN (0, 1)),
+    person_decision  INTEGER NOT NULL DEFAULT 0 CHECK (person_decision IN (0, 1)),
+    cause_key        TEXT NOT NULL,
+    cause_kind       TEXT NOT NULL,
+    cause_at         INTEGER NOT NULL,
+    at               INTEGER NOT NULL,
+    UNIQUE (task_id, kind, ref)
+  );
+  CREATE INDEX task_fact_task ON task_fact (task_id, at);
+
+  CREATE TABLE proposal (
+    id          TEXT PRIMARY KEY,
+    task_id     INTEGER NOT NULL REFERENCES task (id),
+    version     INTEGER NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('plan', 'approval')),
+    text        TEXT NOT NULL,
+    outbox_id   TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'accepted', 'superseded', 'closed')),
+    created_at  INTEGER NOT NULL,
+    decided_at  INTEGER,
+    UNIQUE (task_id, version)
+  );
+  CREATE UNIQUE INDEX proposal_open ON proposal (task_id) WHERE status = 'open';
+  CREATE INDEX proposal_outbox ON proposal (outbox_id);
+
+  CREATE TABLE admission (
+    one       INTEGER PRIMARY KEY CHECK (one = 1),
+    state     TEXT NOT NULL CHECK (state IN ('waitlisted', 'consenting', 'admitted', 'removed')),
+    reason    TEXT CHECK (reason IN ('no_code', 'bad_code', 'used', 'full')),
+    cohort    TEXT CHECK (cohort IN ('recruit', 'joiner', 'staff')),
+    half      TEXT CHECK (half IN ('th_line', 'intl_telegram')),
+    code      TEXT,
+    inviter   TEXT,
+    state_at  INTEGER NOT NULL,
+    told_on   TEXT,
+    CHECK ((state = 'waitlisted') = (reason IS NOT NULL)),
+    CHECK ((state = 'admitted') = (cohort IS NOT NULL)),
+    CHECK (state != 'consenting' OR code IS NOT NULL)
+  );
+  INSERT INTO admission (one, state, cohort, state_at) SELECT 1, 'admitted', 'staff', created_at FROM agent;
+
+  ALTER TABLE wakeup ADD COLUMN task_id INTEGER;
+  ALTER TABLE wakeup ADD COLUMN bookkeeping INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE outbox ADD COLUMN task_id INTEGER;
+  ALTER TABLE outbox ADD COLUMN purpose TEXT CHECK (purpose IN ('task_followup', 'bookkeeping', 'unlinked'));
+  ALTER TABLE outbox ADD COLUMN choice TEXT;
+  ALTER TABLE outbox ADD COLUMN reply_only INTEGER NOT NULL DEFAULT 0;
+  UPDATE outbox SET purpose = 'unlinked' WHERE intent = 'unasked';
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

@@ -233,13 +233,11 @@ export async function devChat(
 export function turn(o: {
   readonly actions: unknown[];
   readonly lateNotice?: string;
-  readonly task?: readonly [kind: string, key: string, status: string];
   readonly tasks?: unknown[];
   readonly about?: string;
   readonly usage?: Extract<ScriptStep, { kind: "output" }>["usage"];
 }): ScriptStep {
-  const [kind, key, status] = o.task ?? ["chat", "chat", "none"];
-  const base = { actions: o.actions, task: { kind, key, status }, tasks: o.tasks ?? [], about: o.about ?? "" };
+  const base = { actions: o.actions, tasks: o.tasks ?? [], about: o.about ?? "" };
   const value = o.lateNotice === undefined ? base : { ...base, lateNotice: o.lateNotice };
   return o.usage ? { kind: "output", value, usage: o.usage } : { kind: "output", value };
 }
@@ -251,7 +249,7 @@ export const propose = (ref: string, title: string, plan: string, kind = "plan")
 export const openTask = (ref: string, title: string, kind = "other") => ({ op: "open", ref, kind, title, plan: "" });
 export const throws = (): ScriptStep => ({ kind: "throw" });
 export const hold = (then: ScriptStep): ScriptStep => ({ kind: "hold", then });
-export const chat = (text: string): ScriptStep => turn({ actions: [send(text)], task: ["chat", "chat", "none"] });
+export const chat = (text: string): ScriptStep => turn({ actions: [send(text)] });
 
 export const BOX_SECRET = "test-secret-0123456789abcdef";
 

@@ -52,7 +52,6 @@ describe("reminders", () => {
     const model = scripted([
       turn({
         actions: [schedule("dentist", "tomorrow at 9", "Dentist at 9"), cancel("gym"), send("Done! Dentist reminder set, gym one cancelled.")],
-        task: ["reminder", "dentist", "started"],
       }),
     ]);
     const c = await devChat("zed", { model, at: "2099-11-04T10:00" });
@@ -74,8 +73,8 @@ describe("reminders", () => {
 
   test("a move whose new time code rejects keeps the original reminder, and the person is told", async () => {
     const model = scripted([
-      turn({ actions: [schedule("dentist", "2099-11-05T09:00", "Dentist"), send("Set for 9.")], task: ["reminder", "dentist", "started"] }),
-      turn({ actions: [schedule("dentist", "tomorrow at 10", "Dentist"), cancel("dentist"), send("Moved to 10!")], task: ["reminder", "dentist", "progressed"] }),
+      turn({ actions: [schedule("dentist", "2099-11-05T09:00", "Dentist"), send("Set for 9.")] }),
+      turn({ actions: [schedule("dentist", "tomorrow at 10", "Dentist"), cancel("dentist"), send("Moved to 10!")] }),
     ]);
     const c = await devChat("mo", { model, at: "2099-11-04T10:00" });
     await c.say("remind me about the dentist tomorrow at 9");
@@ -94,7 +93,6 @@ describe("reminders", () => {
     const five = (from: number) =>
       turn({
         actions: [...Array.from({ length: 5 }, (_, i) => schedule(`r${from + i}`, "2099-11-06T09:00", `Reminder ${from + i}`)), send("Set.")],
-        task: ["reminder", "batch", "started"],
       });
     const model = scripted([
       five(0),
@@ -103,7 +101,6 @@ describe("reminders", () => {
       five(15),
       turn({
         actions: [cancel("r0"), schedule("rent", "2099-11-07T09:00", "Pay rent"), schedule("r0", "2099-11-08T09:00", "Reminder 0"), send("Moved it and added rent.")],
-        task: ["reminder", "rent", "started"],
       }),
     ]);
     const c = await devChat("ida", { model, at: "2099-11-04T10:00" });
@@ -122,7 +119,7 @@ describe("reminders", () => {
 
   test("a send past the length cap is cut to fit and logged, and the reminder in the same answer is set", async () => {
     const model = scripted([
-      turn({ actions: [schedule("call-mom", "2099-11-04T18:00", "Call mom"), send("x".repeat(TURN.maxTextChars + 1))], task: ["reminder", "call-mom", "started"] }),
+      turn({ actions: [schedule("call-mom", "2099-11-04T18:00", "Call mom"), send("x".repeat(TURN.maxTextChars + 1))] }),
     ]);
     const c = await devChat("kyo", { model, at: "2099-11-04T10:00" });
 
@@ -136,8 +133,8 @@ describe("reminders", () => {
 
   test("'remind me at 18:00' fires through the alarm and is delivered", async () => {
     const model = scripted([
-      turn({ actions: [schedule("call-clinic", "2099-11-04T18:00", "Remind: call the clinic"), send("Done.")], task: ["reminder", "call-clinic", "started"] }),
-      turn({ actions: [send("Time to call the clinic.")], task: ["reminder", "call-clinic", "completed"] }),
+      turn({ actions: [schedule("call-clinic", "2099-11-04T18:00", "Remind: call the clinic"), send("Done.")] }),
+      turn({ actions: [send("Time to call the clinic.")] }),
     ]);
     const c = await devChat("cat", { model, at: "2099-11-04T10:00" });
 
@@ -150,13 +147,12 @@ describe("reminders", () => {
     await c.advanceTo("2099-11-04T18:00");
     expect(await c.received()).toEqual(["Time to call the clinic."]);
     expect(model.calls[1].user).toContain('Your wake-up "call-clinic" fired: Remind: call the clinic.');
-    expect(c.logs("turn").map((l) => l.taskStatus)).toEqual(["started", "completed"]);
     model.assertDone();
   });
 
   test("a reminder for the current or next minute is accepted, and one already reached fires at once", async () => {
     const model = scripted([
-      turn({ actions: [schedule("stretch", "2099-11-04T14:01", "Stretch"), schedule("water", "2099-11-04T14:00", "Drink water"), send("OK.")], task: ["reminder", "breaks", "started"] }),
+      turn({ actions: [schedule("stretch", "2099-11-04T14:01", "Stretch"), schedule("water", "2099-11-04T14:00", "Drink water"), send("OK.")] }),
       chat("Drink some water."),
       chat("Time to stretch."),
     ]);
@@ -176,8 +172,8 @@ describe("reminders", () => {
 
   test("a reminder the person asked for at 23:00 arrives at 23:00 and isn't counted as unasked", async () => {
     const model = scripted([
-      turn({ actions: [schedule("bins", "2099-11-04T23:00", "Take the bins out"), send("Will do.")], task: ["reminder", "bins", "started"] }),
-      turn({ actions: [send("Take the bins out!")], task: ["reminder", "bins", "completed"] }),
+      turn({ actions: [schedule("bins", "2099-11-04T23:00", "Take the bins out"), send("Will do.")] }),
+      turn({ actions: [send("Take the bins out!")] }),
     ]);
     const c = await devChat("dan", { model, at: "2099-11-04T21:30" });
 
@@ -191,9 +187,9 @@ describe("reminders", () => {
   });
 
   test("the agent's own wake-up can't re-arm itself for the minute it fires in", async () => {
-    const again = turn({ actions: [schedule("check", "2099-11-04T10:01", "Check again", false)], task: ["other", "check", "progressed"] });
+    const again = turn({ actions: [schedule("check", "2099-11-04T10:01", "Check again", false)] });
     const model = scripted([
-      turn({ actions: [schedule("check", "2099-11-04T10:01", "Check the thing", false), send("OK.")], task: ["other", "check", "started"] }),
+      turn({ actions: [schedule("check", "2099-11-04T10:01", "Check the thing", false), send("OK.")] }),
       again,
     ]);
     const c = await devChat("lou", { model, at: "2099-11-04T10:00" });
@@ -208,8 +204,8 @@ describe("reminders", () => {
 
   test("the agent's own wake-up at 23:00 waits for 08:00 and says it is late", async () => {
     const model = scripted([
-      turn({ actions: [schedule("bins", "2099-11-04T23:00", "Ask about the bins", false), send("OK.")], task: ["chat", "bins", "started"] }),
-      turn({ actions: [send("Did the bins go out?")], lateNotice: "Sorry, this was due at 23:00 last night.", task: ["chat", "bins", "completed"] }),
+      turn({ actions: [schedule("bins", "2099-11-04T23:00", "Ask about the bins", false), send("OK.")] }),
+      turn({ actions: [send("Did the bins go out?")], lateNotice: "Sorry, this was due at 23:00 last night." }),
     ]);
     const c = await devChat("eve", { model, at: "2099-11-04T21:30" });
 
@@ -228,7 +224,7 @@ describe("reminders", () => {
     const model = scripted([
       chat("Hi!"),
       chat("Morning! Anything on today?"),
-      turn({ actions: [quiet()], task: ["chat", "checkin", "none"] }),
+      turn({ actions: [quiet()] }),
       chat("Morning! How did the interview go?"),
     ]);
     const c = await devChat("fay", { model, at: "2099-11-04T10:00" });
@@ -248,7 +244,7 @@ describe("reminders", () => {
   test("the fourth unasked message of a local day is dropped and logged", async () => {
     const own = (key: string, at: string) => schedule(key, at, `Follow up ${key}`, false);
     const model = scripted([
-      turn({ actions: [own("a", "2099-11-04T11:00"), own("b", "2099-11-04T12:00"), own("c", "2099-11-04T13:00"), own("d", "2099-11-04T14:00"), send("Noted.")], task: ["plan", "trip", "started"] }),
+      turn({ actions: [own("a", "2099-11-04T11:00"), own("b", "2099-11-04T12:00"), own("c", "2099-11-04T13:00"), own("d", "2099-11-04T14:00"), send("Noted.")] }),
       chat("Update a."),
       chat("Update b."),
       chat("Update c."),
@@ -272,7 +268,7 @@ describe("reminders", () => {
 
 describe("requested reminders without a model", () => {
   const setClinic = (usage?: { inputTokens: number }) =>
-    turn({ actions: [schedule("clinic", "2099-11-04T18:00", "call the clinic"), send("Done.")], task: ["reminder", "clinic", "started"], usage });
+    turn({ actions: [schedule("clinic", "2099-11-04T18:00", "call the clinic"), send("Done.")], usage });
   const unavailable: ScriptStep = { kind: "fail", failure: "unavailable" };
 
   test.each([
@@ -280,8 +276,8 @@ describe("requested reminders without a model", () => {
     ["the model refuses", "wim", [{ kind: "fail", failure: "refused_by_model" }]],
     ["the model call crashes three times", "wyn", [throws(), throws(), throws()]],
     ["the model is unavailable for minutes", "wyatt", Array.from({ length: 5 }, () => unavailable)],
-    ["the model answers with quiet", "wren", [turn({ actions: [quiet()], task: ["reminder", "clinic", "completed"] })]],
-    ["the model answers with only a note", "wade", [turn({ actions: [{ type: "remember", note: "Calls the clinic" }], task: ["reminder", "clinic", "completed"] })]],
+    ["the model answers with quiet", "wren", [turn({ actions: [quiet()] })]],
+    ["the model answers with only a note", "wade", [turn({ actions: [{ type: "remember", note: "Calls the clinic" }] })]],
   ] satisfies [string, string, ScriptStep[]][])("a reminder still arrives, written by code, when %s", async (_, user, atFiring) => {
     const model = scripted([setClinic(), ...atFiring]);
     const c = await devChat(user, { model, at: "2099-11-04T10:00" });
@@ -327,7 +323,7 @@ describe("order across retries", () => {
   const unavailable: ScriptStep = { kind: "fail", failure: "unavailable" };
 
   test("a message sent while an earlier one waits out a model outage is answered after it, in one turn that sees both", async () => {
-    const model = scripted([unavailable, turn({ actions: [send("OK, no reminder then.")], task: ["reminder", "clinic", "none"] })]);
+    const model = scripted([unavailable, turn({ actions: [send("OK, no reminder then.")] })]);
     const c = await devChat("ola", { model, at: "2099-11-04T10:00" });
 
     await c.say("remind me at 6pm to call the clinic");
@@ -344,9 +340,9 @@ describe("order across retries", () => {
 
   test("a cancel that waits out a model outage still stops the reminder that falls due meanwhile", async () => {
     const model = scripted([
-      turn({ actions: [schedule("clinic", "2099-11-04T18:00", "call the clinic"), send("Done.")], task: ["reminder", "clinic", "started"] }),
+      turn({ actions: [schedule("clinic", "2099-11-04T18:00", "call the clinic"), send("Done.")] }),
       unavailable,
-      turn({ actions: [cancel("clinic"), send("Cancelled.")], task: ["reminder", "clinic", "failed"] }),
+      turn({ actions: [cancel("clinic"), send("Cancelled.")] }),
     ]);
     const c = await devChat("oto", { model, at: "2099-11-04T10:00" });
     await c.say("remind me at 6pm to call the clinic");
@@ -370,13 +366,12 @@ describe("time zone and language", () => {
 
   test("a person in London gets the check-in at 09:00, quiet hours and reminders on London time", async () => {
     const model = scripted([
-      turn({ actions: [schedule("dentist", "2099-11-05T15:00", "Dentist"), send("Set for 3pm.")], task: ["reminder", "dentist", "started"] }),
+      turn({ actions: [schedule("dentist", "2099-11-05T15:00", "Dentist"), send("Set for 3pm.")] }),
       turn({
         actions: [locale("Europe/London", "en"), schedule("follow-up", "2099-11-04T23:00", "Ask about the flat", false), send("Got it, London time.")],
-        task: ["chat", "zone", "completed"],
       }),
       chat("Morning!"),
-      turn({ actions: [send("Did you hear back about the flat?")], lateNotice: "This was due last night.", task: ["chat", "flat", "progressed"] }),
+      turn({ actions: [send("Did you hear back about the flat?")], lateNotice: "This was due last night." }),
       chat("Morning again!"),
     ]);
     const c = await devChat("lyn", { model, at: "2099-11-04T10:00" });
@@ -406,7 +401,7 @@ describe("time zone and language", () => {
   });
 
   test("a time zone code can't read is rejected, logged and corrected, and the zone stays", async () => {
-    const model = scripted([turn({ actions: [locale("Mars/Olympus", "en"), send("Switched to Mars time.")], task: ["chat", "zone", "completed"] })]);
+    const model = scripted([turn({ actions: [locale("Mars/Olympus", "en"), send("Switched to Mars time.")] })]);
     const c = await devChat("mae", { model, at: "2099-11-04T10:00" });
 
     await c.say("I live on Mars now");
@@ -418,7 +413,7 @@ describe("time zone and language", () => {
 
   test("a person who asks for Thai gets code-written corrections in Thai from that turn on", async () => {
     const model = scripted([
-      turn({ actions: [locale("Asia/Bangkok", "th"), schedule("dentist", "tomorrow at 9", "Dentist"), send("ตั้งให้แล้วค่ะ")], task: ["reminder", "dentist", "started"] }),
+      turn({ actions: [locale("Asia/Bangkok", "th"), schedule("dentist", "tomorrow at 9", "Dentist"), send("ตั้งให้แล้วค่ะ")] }),
     ]);
     const c = await devChat("pim", { model, at: "2099-11-04T10:00" });
 
@@ -456,8 +451,8 @@ describe("failure and duplicate safety", () => {
 
   test("running the alarm twice, even concurrently, fires a wake-up once", async () => {
     const model = scripted([
-      turn({ actions: [schedule("stretch", "2099-11-04T10:05", "Stretch"), send("Sure.")], task: ["reminder", "stretch", "started"] }),
-      turn({ actions: [send("Time to stretch.")], task: ["reminder", "stretch", "completed"] }),
+      turn({ actions: [schedule("stretch", "2099-11-04T10:05", "Stretch"), send("Sure.")] }),
+      turn({ actions: [send("Time to stretch.")] }),
     ]);
     const c = await devChat("ivy", { model, at: "2099-11-04T10:00" });
     await c.say("remind me to stretch in 5 minutes");
@@ -504,7 +499,7 @@ describe("failure and duplicate safety", () => {
 describe("delivery", () => {
   test("an unasked message admitted at 21:59 whose send fails waits for 08:00 on retry", async () => {
     const model = scripted([
-      turn({ actions: [schedule("bins", "2099-11-04T21:59", "Ask about the bins", false), send("OK.")], task: ["chat", "bins", "started"] }),
+      turn({ actions: [schedule("bins", "2099-11-04T21:59", "Ask about the bins", false), send("OK.")] }),
       chat("Did the bins go out?"),
     ]);
     const c = await devChat("uma", { model, at: "2099-11-04T21:00", deliveries: [{ kind: "sent" }, { kind: "retry", afterMs: 120_000 }] });
@@ -525,7 +520,6 @@ describe("delivery", () => {
     const model = scripted([
       turn({
         actions: [own("a", "2099-11-04T21:59"), own("b", "2099-11-05T08:10"), own("c", "2099-11-05T08:20"), own("d", "2099-11-05T08:30"), send("Noted.")],
-        task: ["plan", "trip", "started"],
       }),
       chat("Update a."),
       chat("Update b."),
@@ -557,7 +551,6 @@ describe("delivery", () => {
     const model = scripted([
       turn({
         actions: [schedule("nudge", "2099-11-04T11:00", "Ask about the trip", false), schedule("pills", "2099-11-04T11:30", "Take your pills"), send("OK.")],
-        task: ["reminder", "pills", "started"],
       }),
       chat("How is the trip planning going?"),
       chat("Time for your pills."),
@@ -576,7 +569,7 @@ describe("delivery", () => {
 
   test("a reading from last month doesn't hold back this month's unasked messages", async () => {
     const model = scripted([
-      turn({ actions: [schedule("nudge", "2099-11-01T11:00", "Ask about the trip", false), send("OK.")], task: ["chat", "trip", "started"] }),
+      turn({ actions: [schedule("nudge", "2099-11-01T11:00", "Ask about the trip", false), send("OK.")] }),
       chat("How is the trip planning going?"),
     ]);
     const ledger = memoryLedger();
@@ -651,7 +644,7 @@ describe("spend", () => {
 
   test("an over-cap person is refused without a model call, told once a day, and logged", async () => {
     const inputThatSpendsTheCap = (SPEND.userCapMicro * 1_000_000) / priceOf(routeOf("turn").model).inputPerM;
-    const model = scripted([turn({ actions: [send("Here's a long answer.")], task: ["chat", "x", "none"], usage: { inputTokens: inputThatSpendsTheCap } })]);
+    const model = scripted([turn({ actions: [send("Here's a long answer.")], usage: { inputTokens: inputThatSpendsTheCap } })]);
     const c = await devChat("lea", { model, at: "2099-11-04T10:00" });
     await c.say("tell me everything");
     await c.received();
@@ -828,7 +821,7 @@ describe("compaction", () => {
 
   test("while compaction is backing off, a turn's prompt carries at most the newest 50 notes", async () => {
     const facts = (from: number) => Array.from({ length: 6 }, (_, i) => ({ type: "remember", note: `fact ${from + i}` }));
-    const replies = Array.from({ length: 11 }, (_, i) => turn({ actions: facts(i * 6), task: ["chat", "facts", "none"] }));
+    const replies = Array.from({ length: 11 }, (_, i) => turn({ actions: facts(i * 6) }));
     const model = scripted(replies, { compaction: [throws()] });
     const c = await devChat("quinn", { model, at: "2099-11-04T10:00" });
     for (let i = 0; i < 11; i++) await c.say(`fact batch ${i}`);
@@ -843,7 +836,7 @@ describe("compaction", () => {
 
 describe("dev runs", () => {
   test("a scripted dev run answers from the outputs posted to /dev/script", async () => {
-    const output = { actions: [{ type: "send", text: "Scripted hello." }], task: { kind: "chat", key: "hi", status: "none" } };
+    const output = { actions: [{ type: "send", text: "Scripted hello." }], tasks: [], about: "" };
     expect((await SELF.fetch("https://agent.test/dev/script", { method: "POST", body: JSON.stringify({ user: "sia", turns: [output] }) })).status).toBe(200);
 
     await SELF.fetch("https://agent.test/webhook/dev", { method: "POST", body: JSON.stringify({ user: "sia", text: "hello", id: "sia-1" }) });

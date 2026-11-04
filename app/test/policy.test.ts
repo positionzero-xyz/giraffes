@@ -1,11 +1,11 @@
 import { describe, expect, test } from "vitest";
 import { CompactionOutputSchema, planCompaction } from "../src/agent/compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "../src/agent/prompt";
+import { TASKS } from "../src/agent/tasks";
 import { planTurn, planWithoutModel, TURN, TurnOutputSchema, type Batch, type InboxItem, type TurnOutput, type TurnView } from "../src/agent/turn";
 import {
   CHECKIN_KEY,
-  LABEL_KINDS,
-  LABEL_STATUSES,
+  TASK_KINDS,
   eventKey,
   intentOf,
   type AgentEvent,
@@ -142,17 +142,19 @@ function view(over: Partial<TurnView> & { readonly batch?: Batch } = {}): TurnVi
     pending: [],
     batch: { items: [item(message("hi"))] },
     unaskedLeftToday: 3,
+    openTasks: [],
+    acceptable: null,
+    tapped: [],
     ...over,
   };
 }
 
 function output(actions: TurnOutput["actions"], lateNotice?: string): TurnOutput {
-  const task = { kind: "reminder" as const, key: "t", status: "started" as const };
-  return lateNotice === undefined ? { actions, task } : { actions, lateNotice, task };
+  return lateNotice === undefined ? { actions, tasks: [], about: "" } : { actions, lateNotice, tasks: [], about: "" };
 }
 
 const schedule = (key: string, when: string, asked = true) =>
-  ({ type: "schedule_wakeup", key, at: when, note: `note ${key}`, asked }) as const;
+  ({ type: "schedule_wakeup", key, at: when, note: `note ${key}`, asked, task: "" }) as const;
 const send = (text: string) => ({ type: "send", text }) as const;
 
 let nextId = 1;
@@ -170,7 +172,7 @@ describe("reminders", () => {
   test("a reminder is admitted in the person's zone", () => {
     const commit = planTurn(output([schedule("bins", "2026-11-04T23:00"), send("Will do.")]), view());
     expect(commit.wakeupsAdd).toEqual([
-      { key: "bins", kind: "reminder", origin: "person", note: "note bins", dueAt: at("2026-11-04T23:00+07:00"), bookkeeping: false },
+      { key: "bins", kind: "reminder", origin: "person", note: "note bins", dueAt: at("2026-11-04T23:00+07:00"), bookkeeping: false, task: null },
     ]);
     expect(commit.outbound?.texts).toEqual(["Will do."]);
   });
@@ -330,7 +332,7 @@ describe("caps", () => {
     const commit = planTurn(
       output([
         send(over(TURN.maxTextChars)),
-        { type: "schedule_wakeup", key: "bins", at: "2026-11-04T23:00", note: over(TURN.maxNoteChars), asked: true },
+        { type: "schedule_wakeup", key: "bins", at: "2026-11-04T23:00", note: over(TURN.maxNoteChars), asked: true, task: "" },
         { type: "remember", note: over(TURN.maxNoteChars) },
       ]),
       view(),
@@ -513,7 +515,7 @@ describe("output budgets", () => {
     const key = "k".repeat(40);
     const actions = [
       { type: "send", text: mostBytes(TURN.maxTextChars) },
-      { type: "schedule_wakeup", key, at: "2099-11-04T10:00", note: mostBytes(TURN.maxNoteChars), asked: false },
+      { type: "schedule_wakeup", key, at: "2099-11-04T10:00", note: mostBytes(TURN.maxNoteChars), asked: false, task: key },
       { type: "cancel_wakeup", key },
       { type: "remember", note: mostBytes(TURN.maxNoteChars) },
     ];
@@ -521,7 +523,11 @@ describe("output budgets", () => {
     const output = {
       actions: Array.from({ length: TURN.maxActions }, () => biggest),
       lateNotice: mostBytes(TURN.maxLateNoticeChars),
-      task: { kind: longest(LABEL_KINDS), key, status: longest(LABEL_STATUSES) },
+      tasks: [
+        { op: "propose", ref: key, kind: longest(TASK_KINDS), title: mostBytes(TASKS.maxTitleChars), plan: mostBytes(TASKS.maxPlanChars) },
+        ...Array.from({ length: TASKS.maxOps - 1 }, () => ({ op: "open", ref: key, kind: longest(TASK_KINDS), title: mostBytes(TASKS.maxTitleChars), plan: "" })),
+      ],
+      about: key,
     };
 
     expect(TurnOutputSchema.safeParse(output).success).toBe(true);

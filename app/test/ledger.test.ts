@@ -1,10 +1,11 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
-import { LABEL_KINDS, LABEL_STATUSES, type AgentKey, type EpochMs, type MicroUsd, type UtcMonth } from "../src/domain";
+import { TASK_KINDS, type TaskRef, type AgentKey, type EpochMs, type MicroUsd, type UtcMonth } from "../src/domain";
 import type { BoxName } from "../src/box/names";
 import { BOX_HOST_KINDS } from "../src/box/host";
 import { ACTION_REJECTIONS, BACKENDS, d1Ledger, MODEL_CALL_STATUSES, TURN_OUTCOMES, UNASKED_STATUSES, type LogRow } from "../src/ledger/ledger";
 import { PURPOSES } from "../src/model/model";
+import { UNASKED_PURPOSES } from "../src/agent/tasks";
 import { PAID_PLANS, SUBSCRIPTION_STATUSES } from "../src/billing/plan";
 
 const month = "2099-11" as UtcMonth;
@@ -86,9 +87,6 @@ describe("log shipping", () => {
         agent: agent("a"),
         eventKind: "message",
         batchSize: 1,
-        taskKind: "plan",
-        taskKey: "trip",
-        taskStatus: "completed",
         outcome: "acted",
         refusedForBudget: false,
         costMicro: micro(700),
@@ -96,7 +94,22 @@ describe("log shipping", () => {
         startedAt: at,
         finishedAt: at,
       },
-      { stream: "unasked", id: "o-1", agent: agent("a"), triggerKind: "checkin", text: "Morning!", status: "sent", day: null, at },
+      { stream: "unasked", id: "o-1", agent: agent("a"), triggerKind: "checkin", text: "Morning!", status: "sent", day: null, at, taskId: "p:dev:a|t1", purpose: "task_followup" },
+      { stream: "task", id: "p:dev:a|t1", agent: agent("a"), ref: "trip" as TaskRef, kind: "plan", title: "A trip", causeKind: "checkin", openedAt: at },
+      {
+        stream: "task_fact",
+        id: "p:dev:a|f1",
+        agent: agent("a"),
+        taskId: "p:dev:a|t1",
+        kind: "plan_accepted",
+        ref: "1.1",
+        detail: '{"via":"tap","version":1}',
+        completes: true,
+        personDecision: true,
+        causeKind: "choice",
+        causeAt: at,
+        at,
+      },
       { stream: "lifecycle", id: "dev:2", agent: agent("a"), change: "block", source: "channel", at },
       {
         stream: "model_call",
@@ -123,11 +136,10 @@ describe("log shipping", () => {
     const counts = await env.LEDGER.prepare(
       `SELECT (SELECT COUNT(*) FROM agent) AS agents, (SELECT COUNT(*) FROM turn_log) AS turns,
               (SELECT COUNT(*) FROM unasked_message) AS unasked, (SELECT COUNT(*) FROM lifecycle) AS lifecycle,
-              (SELECT COUNT(*) FROM model_call) AS calls, (SELECT COUNT(*) FROM action_rejection) AS rejections`,
+              (SELECT COUNT(*) FROM model_call) AS calls, (SELECT COUNT(*) FROM action_rejection) AS rejections,
+              (SELECT COUNT(*) FROM task) AS tasks, (SELECT COUNT(*) FROM task_fact WHERE completes = 1) AS completions`,
     ).first();
-    expect(counts).toEqual({ agents: 1, turns: 1, unasked: 1, lifecycle: 1, calls: 1, rejections: 1 });
-    const followed = await env.LEDGER.prepare("SELECT followed FROM unasked_with_followup WHERE id = 'o-1'").first<{ followed: number }>();
-    expect(followed?.followed).toBe(0);
+    expect(counts).toEqual({ agents: 1, turns: 1, unasked: 1, lifecycle: 1, calls: 1, rejections: 1, tasks: 1, completions: 1 });
   });
 
   test("a row the ledger refuses fails the flush instead of vanishing", async () => {
@@ -162,8 +174,8 @@ describe("schema", () => {
       ),
     );
     const expected: Record<string, readonly string[]> = {
-      "turn_log.task_kind": LABEL_KINDS,
-      "turn_log.task_status": LABEL_STATUSES,
+      "task.kind": TASK_KINDS,
+      "unasked_message.purpose": UNASKED_PURPOSES,
       "turn_log.outcome": TURN_OUTCOMES,
       "model_call.purpose": PURPOSES,
       "model_call.status": MODEL_CALL_STATUSES,

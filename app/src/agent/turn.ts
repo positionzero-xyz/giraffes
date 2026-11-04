@@ -2,8 +2,7 @@ import { z } from "zod";
 import {
   CHECKIN_KEY,
   LANGUAGES,
-  LABEL_KINDS,
-  LABEL_STATUSES,
+  TASK_KINDS,
   WAKEUP_KEY_PATTERN,
   assertNever,
   clip,
@@ -14,12 +13,12 @@ import {
   type AgentKey,
   type EpochMs,
   type EventKey,
+  type FactCause,
   type Intent,
   type Language,
   type MicroUsd,
   type PersonStatus,
   type ReplyHandle,
-  type TaskLabel,
   type TimeOfDay,
   type TimeZone,
   type WakeupKey,
@@ -39,6 +38,19 @@ import {
   type PendingWakeup,
 } from "../policy/schedule";
 import { parseTimeZone, toLocal, weekday } from "../policy/time";
+import {
+  TASKS,
+  linkOf,
+  planTasks,
+  purposeOf,
+  taskEffects,
+  taskOf,
+  type AcceptReply,
+  type TaskCommit,
+  type TaskTarget,
+  type TaskView,
+  type UnaskedPurpose,
+} from "./tasks";
 
 export const TURN = {
   recentNotes: 50,
@@ -67,6 +79,7 @@ const ActionSchema = z.discriminatedUnion("type", [
     at: z.string().describe("Local wall time, YYYY-MM-DDTHH:mm"),
     note: z.string().min(1).describe(`What your future self should do. ${atMost(TURN.maxNoteChars)}`),
     asked: z.boolean().describe("True only when the person explicitly asked you to remind them"),
+    task: z.string().describe('The ref of the open task this wake-up follows up, or ""'),
   }),
   z.object({ type: z.literal("cancel_wakeup"), key: Slug }),
   z.object({ type: z.literal("remember"), note: z.string().min(1).describe(atMost(TURN.maxNoteChars)) }),
@@ -78,14 +91,19 @@ const ActionSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
+const TaskOpSchema = z.object({
+  op: z.enum(["open", "propose", "close"]),
+  ref: Slug,
+  kind: z.enum(TASK_KINDS),
+  title: z.string().min(1).describe(atMost(TASKS.maxTitleChars)),
+  plan: z.string().describe(`The whole plan, one step or time per line, when op is propose; otherwise "". ${atMost(TASKS.maxPlanChars)}`),
+});
+
 export const TurnOutputSchema = z.object({
   actions: z.array(ActionSchema).describe(`At most ${TURN.maxActions} actions.`),
   lateNotice: z.string().describe(atMost(TURN.maxLateNoticeChars)).optional(),
-  task: z.object({
-    kind: z.enum(LABEL_KINDS),
-    key: Slug,
-    status: z.enum(LABEL_STATUSES),
-  }),
+  tasks: z.array(TaskOpSchema).describe(`At most ${TASKS.maxOps}. Use [] when the turn is chat or a reminder.`),
+  about: z.string().describe('The ref of the open task your messages this turn are about, or "".'),
 });
 export type TurnOutput = z.infer<typeof TurnOutputSchema>;
 
@@ -100,8 +118,7 @@ export type Batch = { readonly items: readonly [InboxItem, ...InboxItem[]] };
 
 export type TurnRow = { readonly role: "person" | "agent" | "note"; readonly text: string; readonly at: EpochMs };
 
-export type TurnView = {
-  readonly now: EpochMs;
+export type TurnView = TaskView & {
   readonly tz: TimeZone;
   readonly language: Language;
   readonly status: PersonStatus;
@@ -111,7 +128,6 @@ export type TurnView = {
   readonly notes: readonly string[];
   readonly recent: readonly TurnRow[];
   readonly pending: readonly PendingWakeup[];
-  readonly batch: Batch;
   readonly unaskedLeftToday: number;
 };
 
@@ -165,7 +181,12 @@ function renderPending(w: PendingWakeup, tz: TimeZone): string {
 
 const SPEAKER: Readonly<Record<TurnRow["role"], string>> = { person: "Person:", agent: "You:", note: "(note)" };
 
+function renderTask(t: TurnView["openTasks"][number]): string {
+  return `- ${t.ref} (${t.kind}): ${t.title}.${t.proposal ? ` Plan ${t.proposal} offered.` : ""}`;
+}
+
 export function renderUser(view: TurnView): string {
+  const tasks = view.openTasks.length ? view.openTasks.map(renderTask).join("\n") : "(none)";
   const memory = [view.summary || "(nothing yet)", ...view.notes.map((n) => `- ${n}`)].join("\n");
   const pending = view.pending.length ? view.pending.map((w) => renderPending(w, view.tz)).join("\n") : "(none)";
   const conversation = view.recent.length
@@ -175,6 +196,7 @@ export function renderUser(view: TurnView): string {
     `## Now\n${human(view.now, view.tz)} (${weekday(view.now, view.tz)}), ${view.tz}\nLanguage for notices: ${view.language}`,
     `## Memory\n${memory}`,
     `## Pending wake-ups\n${pending}`,
+    `## Open tasks\n${tasks}`,
     `## Unasked messages left today: ${view.unaskedLeftToday}`,
     `## Conversation\n${conversation}`,
     `## New\n${view.batch.items.map((i) => renderEvent(i.event, view.tz)).join("\n")}`,
@@ -188,7 +210,16 @@ export type Outbound = {
   readonly intent: Intent;
   readonly triggerKind: AgentEventKind;
   readonly reply?: ReplyHandle;
+  readonly link: TaskTarget | null;
+  /** Non-null exactly when intent is unasked. */
+  readonly purpose: UnaskedPurpose | null;
+  /** The store binds an accept to the proposal it creates in the same transaction. */
+  readonly choice: "accept_pending" | "consent" | null;
+  readonly replyOnly: boolean;
 };
+
+/** A reminder the turn adds, with the task it follows up, which may be one opened in the same turn. */
+export type ReminderAdd = NewReminder & { readonly task: TaskTarget | null };
 
 export type Reachability = { readonly status: PersonStatus; readonly at: EpochMs };
 
@@ -198,11 +229,13 @@ export type TurnCommit = {
   readonly turns: readonly NewTurn[];
   readonly outbound: Outbound | null;
   readonly wakeupsCancel: readonly WakeupKey[];
-  readonly wakeupsAdd: readonly NewReminder[];
+  readonly wakeupsAdd: readonly ReminderAdd[];
   readonly wakeupsRetime: readonly { readonly key: WakeupKey; readonly dueAt: EpochMs }[];
   readonly locale: { readonly tz: TimeZone; readonly language: Language } | null;
   readonly notes: readonly string[];
-  readonly task: TaskLabel | null;
+  readonly tasks: TaskCommit;
+  /** The event that caused this turn, which the store records as the cause of the facts it adds. */
+  readonly trigger: FactCause;
   readonly reachability: Reachability | null;
   readonly ensureCheckin: NewWakeup | null;
   readonly rejected: readonly { readonly action: string; readonly reason: ActionRejection }[];
@@ -221,6 +254,13 @@ const REJECTION_NOTICE: Readonly<Record<ActionRejection, FixedNotice | null>> = 
   too_many_sends: null,
   too_many_actions: "tooManyActions",
   too_long: null,
+  task_limit: null,
+  task_unknown: null,
+  task_done: null,
+  plan_empty: null,
+  plan_too_thin: null,
+  too_many_proposals: null,
+  too_many_task_ops: null,
 };
 
 function actionLabel(a: TurnOutput["actions"][number]): string {
@@ -244,24 +284,38 @@ const NO_COST = 0 as MicroUsd;
 function newestReply(view: TurnView): ReplyHandle | undefined {
   let reply: ReplyHandle | undefined;
   for (const item of view.batch.items) {
-    if ((item.event.kind === "message" || item.event.kind === "lifecycle") && item.event.reply) reply = item.event.reply;
+    const e = item.event;
+    if ((e.kind === "message" || e.kind === "lifecycle" || e.kind === "choice") && e.reply) reply = e.reply;
   }
   return reply;
 }
 
-function outbound(texts: readonly string[], intent: Intent, view: TurnView): Outbound | null {
+type OutboundTask = Pick<Outbound, "link" | "purpose" | "choice">;
+
+function outbound(texts: readonly string[], intent: Intent, view: TurnView, task: OutboundTask): Outbound | null {
   const ts = nonEmpty(texts);
   if (ts === null) return null;
-  const triggerKind = trigger(view).kind;
+  const base = { texts: ts, intent, triggerKind: trigger(view).kind, ...task, replyOnly: false };
   const reply = intent === "reply" ? newestReply(view) : undefined;
-  return reply ? { texts: ts, intent, triggerKind, reply } : { texts: ts, intent, triggerKind };
+  return reply ? { ...base, reply } : base;
+}
+
+function causeOf(view: TurnView): FactCause {
+  return { key: view.batch.items[0].key, kind: trigger(view).kind, at: view.now };
+}
+
+function acceptNotice(t: Notices, r: AcceptReply): string {
+  return r.kind === "accepted" ? t.planAccepted(r.title) : t.planChanged;
 }
 
 function personTurns(view: TurnView): NewTurn[] {
   const turns: NewTurn[] = [];
   for (const item of view.batch.items) {
-    if (item.event.kind === "message") {
-      turns.push({ role: "person", text: item.event.text, at: item.receivedAt, eventKey: item.key });
+    const e = item.event;
+    if (e.kind === "message") turns.push({ role: "person", text: e.text, at: item.receivedAt, eventKey: item.key });
+    if (e.kind === "choice") {
+      const text = e.choice.kind === "accept" ? `[tapped Accept on plan ${e.choice.proposal}]` : "[agreed to the privacy notice]";
+      turns.push({ role: "person", text, at: item.receivedAt, eventKey: item.key });
     }
   }
   return turns;
@@ -324,7 +378,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   const sends: string[] = [];
   const notes: string[] = [];
   const cancelled = new Map<WakeupKey, NewWakeup>();
-  const adds = new Map<WakeupKey, NewReminder>();
+  const adds = new Map<WakeupKey, ReminderAdd>();
   const askedFor = new Set<WakeupKey>();
   const rejected: { action: string; reason: ActionRejection }[] = [];
   const notices = new Set<string>();
@@ -339,6 +393,13 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
     return clip(text, max);
   };
 
+  const fx = taskEffects(view);
+  for (const r of fx.replies) notices.add(acceptNotice(t, r));
+  const planned = planTasks(out.tasks, view, causeOf(view), fx.commit);
+  const tasks = planned.commit;
+  for (const r of planned.rejected) reject(r.action, r.reason, false);
+  const sendCap = TURN.maxSendsPerTurn - (tasks.propose ? 1 : 0);
+
   for (const a of out.actions.slice(TURN.maxActions)) {
     reject(actionLabel(a), "too_many_actions", a.type === "cancel_wakeup" || a.type === "set_locale" || (a.type === "schedule_wakeup" && a.asked));
   }
@@ -347,7 +408,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   for (const a of cancelsFirst) {
     switch (a.type) {
       case "send":
-        if (sends.length < TURN.maxSendsPerTurn) sends.push(fit(a.text, TURN.maxTextChars, "send"));
+        if (sends.length < sendCap) sends.push(fit(a.text, TURN.maxTextChars, "send"));
         else reject("send", "too_many_sends", false);
         break;
       case "schedule_wakeup": {
@@ -355,7 +416,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
         const note = fit(a.note, TURN.maxNoteChars, actionLabel(a));
         const admission = admitReminder({ key: a.key, at: a.at, note, origin }, { now: view.now, tz: view.tz, pending });
         if (admission.ok) {
-          adds.set(admission.wakeup.key, admission.wakeup);
+          adds.set(admission.wakeup.key, { ...admission.wakeup, task: taskOf(view, tasks, a.task) });
           pending.set(admission.wakeup.key, admission.wakeup);
           if (a.asked) askedFor.add(admission.wakeup.key);
         } else {
@@ -412,36 +473,41 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
     agentTexts[0] = `${notice}\n${agentTexts[0]}`;
   }
   const noticeText = (agentTexts.length > 0 || intent === "reply") && notices.size > 0 ? [...notices].join("\n") : null;
-  if (noticeText !== null && agentTexts.length >= TURN.maxSendsPerTurn) {
+  if (noticeText !== null && agentTexts.length >= sendCap) {
     agentTexts.pop();
     rejected.push({ action: "send", reason: "too_many_sends" });
   }
-  const planned = noticeText === null ? agentTexts : [...agentTexts, noticeText];
-  const requestedReminder = planned.length === 0 ? textWithoutModel(view, null) : null;
-  const texts = requestedReminder === null ? planned : [requestedReminder];
+  const plan = tasks.propose?.text ?? null;
+  const said = [...agentTexts, ...(noticeText === null ? [] : [noticeText]), ...(plan === null ? [] : [plan])];
+  const requestedReminder = said.length === 0 ? textWithoutModel(view, null) : null;
+  const texts = requestedReminder === null ? said : [requestedReminder];
 
   const effects = lifecycleEffects(view);
   const turns = personTurns(view);
-  const note = planned.length > 0 ? triggerNote(first, view.tz) : null;
+  const note = said.length > 0 ? triggerNote(first, view.tz) : null;
   if (note !== null) turns.push({ role: "note", text: note, at: view.now, eventKey: view.batch.items[0].key });
   for (const text of agentTexts) turns.push({ role: "agent", text, at: view.now, eventKey: view.batch.items[0].key });
   if (noticeText !== null) turns.push({ role: "note", text: noticeText, at: view.now, eventKey: view.batch.items[0].key });
+  if (plan !== null) turns.push({ role: "agent", text: plan, at: view.now, eventKey: view.batch.items[0].key });
   if (requestedReminder !== null) turns.push({ role: "note", text: requestedReminder, at: view.now, eventKey: view.batch.items[0].key });
 
   const locale = setLocale ? { tz: view.tz, language } : null;
+  const changedTasks = tasks.open.length > 0 || tasks.facts.length > 0;
   const acted =
-    texts.length > 0 || adds.size > 0 || cancelled.size > 0 || notes.length > 0 || effects.reachability !== null || locale !== null;
+    texts.length > 0 || adds.size > 0 || cancelled.size > 0 || notes.length > 0 || effects.reachability !== null || locale !== null || changedTasks;
+  const link = linkOf(view, tasks, out.about);
   return {
     batchKeys: batchKeys(view),
     outcome: acted ? "acted" : "quiet",
     turns,
-    outbound: outbound(texts, intent, view),
+    outbound: outbound(texts, intent, view, { link, purpose: purposeOf(view, tasks, link), choice: plan === null ? null : "accept_pending" }),
     wakeupsCancel: [...cancelled.keys()],
     wakeupsAdd: [...adds.values()],
     wakeupsRetime,
     locale,
     notes,
-    task: out.task,
+    tasks,
+    trigger: causeOf(view),
     ...effects,
     rejected,
   };
@@ -472,8 +538,13 @@ function textWithoutModel(view: TurnView, notice: string | null): string | null 
   return `${late}${t.reminder(e.note)}`;
 }
 
+/**
+ * A turn the model doesn't answer. An accept the person tapped or typed still commits and is confirmed,
+ * because the evidence is theirs, not the model's.
+ */
 export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit {
   const t: Notices = NOTICES[view.language];
+  const fx = taskEffects(view);
   let outcome: TurnOutcome;
   let text: string | null = null;
   let note: string | null = null;
@@ -505,20 +576,28 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     default:
       return assertNever(why);
   }
+  const confirmed = fx.replies.map((r) => acceptNotice(t, r));
+  const joined = (lead: string | null) => [lead, ...confirmed].filter((x) => x !== null).join("\n") || null;
+  const said = joined(text);
   const turns = personTurns(view);
-  const kept = note ?? text;
+  const kept = joined(note ?? text);
   if (kept !== null) turns.push({ role: "note", text: kept, at: view.now, eventKey: view.batch.items[0].key });
   return {
     batchKeys: batchKeys(view),
     outcome,
     turns,
-    outbound: outbound(text === null ? [] : [text], intentOf(trigger(view)), view),
+    outbound: outbound(said === null ? [] : [said], intentOf(trigger(view)), view, {
+      link: null,
+      purpose: purposeOf(view, fx.commit, null),
+      choice: null,
+    }),
     wakeupsCancel: [],
     wakeupsAdd: [],
     wakeupsRetime: [],
     locale: null,
     notes: [],
-    task: null,
+    tasks: fx.commit,
+    trigger: causeOf(view),
     ...lifecycleEffects(view),
     rejected: [],
   };
@@ -554,9 +633,6 @@ export function logsForTurn(input: {
       agent,
       eventKind: trigger(view).kind,
       batchSize: view.batch.items.length,
-      taskKind: commit.task?.kind ?? null,
-      taskKey: commit.task?.key ?? null,
-      taskStatus: commit.task?.status ?? "none",
       outcome: commit.outcome,
       refusedForBudget: commit.outcome === "refused_budget",
       costMicro: call.kind === "settled" ? call.cost : NO_COST,

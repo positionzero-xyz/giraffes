@@ -21,7 +21,7 @@ describe("a task completes only on evidence", () => {
     await c.say("hello");
     await c.received();
 
-    await c.advanceTo("2099-11-05T09:00");
+    await c.advanceTo("2099-11-04T09:00");
     expect(c.channel.delivered.at(-1)).toMatchObject({
       text: `Morning! The long weekend is close, so I sketched a trip.\n${PLAN}`,
       button: { label: NOTICE.acceptButton, data: "a:1.1" },
@@ -79,6 +79,7 @@ describe("a task completes only on evidence", () => {
       turn({ actions: [send("Moved it to Saturday.")], tasks: [trip(PLAN_2)] }),
       chat("That one's older."),
       chat("Done."),
+      chat("Already on it."),
     ]);
     const c = await devChat("vik", { model, at: "2099-11-04T10:00" });
     await c.say("plan me a weekend in Chiang Mai");
@@ -91,11 +92,13 @@ describe("a task completes only on evidence", () => {
     expect((await c.snapshot()).tasks[0].status).toBe("open");
 
     await c.tap("a:1.2");
+    await c.received();
     await c.tap("a:1.2");
+    expect(await c.received()).toEqual(["Already on it."]);
     const [task] = (await c.snapshot()).tasks;
     expect(task.status).toBe("completed");
     expect(task.facts.filter((f) => f.kind === "plan_accepted").map((f) => f.ref)).toEqual(["1.2"]);
-    expect(model.calls).toHaveLength(4);
+    model.assertDone();
   });
 
   test("the prompt lists open tasks, and a closed task can't be completed by a later tap", async () => {

@@ -45,7 +45,17 @@ import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../poli
 import { COMPACTION, compactionCommit, CompactionOutputSchema, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import { migrate } from "./schema";
-import { AgentStore, type AgentRow, type NoteMessage, type OutboxRow, type OutboxView, type Reservation, type Settlement } from "./store";
+import {
+  AgentStore,
+  globalTaskId,
+  type AgentRow,
+  type NoteMessage,
+  type OutboxRow,
+  type OutboxView,
+  type Reservation,
+  type Settlement,
+  type TaskSnapshot,
+} from "./store";
 import {
   bypassModel,
   logsForTurn,
@@ -124,6 +134,7 @@ export type AgentSnapshot = {
   readonly spendThisMonthMicro: MicroUsd;
   readonly box: { readonly host: BoxHostKind; readonly state: BoxState } | null;
   readonly plan: Plan;
+  readonly tasks: readonly TaskSnapshot[];
 };
 
 export class Agent extends DurableObject<Env> {
@@ -262,6 +273,7 @@ export class Agent extends DurableObject<Env> {
       spendThisMonthMicro: this.#store.monthSpend(utcMonth(now)).spent,
       box: box ? { host: box.host, state: box.state } : null,
       plan: this.#plan(now),
+      tasks: this.#store.tasks(),
     };
   }
 
@@ -337,7 +349,7 @@ export class Agent extends DurableObject<Env> {
       statusAt: a.statusAt,
       checkinLocal: a.checkinLocal,
       batch,
-      ...this.#store.turnContext(COMPACTION.promptTurns, TURN.recentNotes),
+      ...this.#store.turnContext(COMPACTION.promptTurns, TURN.recentNotes, batch),
       unaskedLeftToday: Math.max(0, OUTREACH.dailyUnaskedBudget - admitted),
     };
   }
@@ -739,7 +751,20 @@ export class Agent extends DurableObject<Env> {
     const a = this.#agent();
     const unaskedLog = (status: UnaskedStatus, day: OutboxRow["admittedDay"]): LogRow[] =>
       row.intent === "unasked"
-        ? [{ stream: "unasked", id: row.id, agent: a.key, triggerKind: row.triggerKind, text: row.texts.join("\n"), status, day, at: now }]
+        ? [
+            {
+              stream: "unasked",
+              id: row.id,
+              agent: a.key,
+              triggerKind: row.triggerKind,
+              text: row.texts.join("\n"),
+              status,
+              day,
+              at: now,
+              taskId: row.taskId === null ? null : globalTaskId(a.key, row.taskId),
+              purpose: row.purpose ?? "unlinked",
+            },
+          ]
         : [];
 
     if (row.attempts >= MAX_DELIVERY_ATTEMPTS) return this.#store.drop(row.id, "failed", now, unaskedLog("failed", row.admittedDay));

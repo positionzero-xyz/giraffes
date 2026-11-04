@@ -10,13 +10,19 @@ import { commandOf } from "./commands";
 import type { BoxName } from "../box/names";
 import {
   assertNever,
+  choiceToken,
   eventKey,
+  parseChoice,
+  personDecision,
+  proposalId,
   type AgentEvent,
   type AgentEventKind,
   type AgentKey,
   type ChannelId,
   type EpochMs,
   type EventKey,
+  type FactCause,
+  type FactKind,
   type Identity,
   type InboundEnvelope,
   type Intent,
@@ -26,6 +32,12 @@ import {
   type OutboundMessage,
   type OutboxId,
   type PersonStatus,
+  type ProposalId,
+  type TaskFact,
+  type TaskId,
+  type TaskKind,
+  type TaskRef,
+  type TaskStatus,
   type TimeOfDay,
   type TimeZone,
   type UtcMonth,
@@ -34,10 +46,21 @@ import {
   type WakeupOrigin,
 } from "../domain";
 import { modelCallRow, type LogRow } from "../ledger/ledger";
+import { NOTICES } from "../notices";
 import type { ModelId, Purpose } from "../model/model";
 import { SCHEDULE, type Firing, type NewWakeup, type PendingWakeup } from "../policy/schedule";
 import type { MonthSpend } from "../policy/spend";
 import { COMPACTION, compactionDue, type CompactionCommit, type CompactionInput } from "./compaction";
+import {
+  nextStatus,
+  type AcceptableProposal,
+  type OpenTask,
+  type ProposalStatus,
+  type TappedProposal,
+  type TaskCommit,
+  type TaskTarget,
+  type UnaskedPurpose,
+} from "./tasks";
 import { TURN, type Batch, type InboxItem, type Outbound, type TurnCommit, type TurnRow } from "./turn";
 
 export type AgentRow = {
@@ -55,6 +78,8 @@ export type OutboxRow = OutboundMessage & {
   readonly triggerKind: AgentEventKind;
   readonly admittedDay: LocalDate | null;
   readonly attempts: number;
+  readonly taskId: TaskId | null;
+  readonly purpose: UnaskedPurpose | null;
 };
 
 export type Reservation = {
@@ -73,6 +98,26 @@ export type OutboxView = {
   readonly texts: readonly string[];
   readonly status: "pending" | "sending" | "sent" | "dropped";
   readonly via: "reply" | "push" | null;
+  readonly taskId: TaskId | null;
+  readonly purpose: UnaskedPurpose | null;
+  /** The button's data, such as "a:1.1". */
+  readonly choice: string | null;
+};
+
+export type TaskSnapshot = {
+  readonly id: TaskId;
+  readonly ref: TaskRef;
+  readonly kind: TaskKind;
+  readonly title: string;
+  readonly status: TaskStatus;
+  readonly facts: readonly {
+    readonly kind: FactKind;
+    readonly ref: string;
+    readonly detail: Readonly<Record<string, string | number | boolean>>;
+    readonly completes: boolean;
+    readonly personDecision: boolean;
+    readonly causeKind: FactCause["kind"];
+  }[];
 };
 
 type AgentCols = {
@@ -86,7 +131,17 @@ type AgentCols = {
   status_at: EpochMs;
 };
 type InboxCols = { event_key: EventKey; payload: string; attempts: number; received_at: EpochMs };
-type WakeupCols = { id: WakeupId; key: WakeupKey; kind: PendingWakeup["kind"]; origin: WakeupOrigin; note: string; due_at: EpochMs };
+type WakeupCols = {
+  id: WakeupId;
+  key: WakeupKey;
+  kind: PendingWakeup["kind"];
+  origin: WakeupOrigin;
+  note: string;
+  due_at: EpochMs;
+  task_id: TaskId | null;
+  bookkeeping: number;
+};
+const WAKEUP_COLS = "id, key, kind, origin, note, due_at, task_id, bookkeeping";
 type OutboxCols = {
   id: OutboxId;
   event_key: EventKey;
@@ -98,6 +153,10 @@ type OutboxCols = {
   admitted_day: LocalDate | null;
   in_doubt: number;
   attempts: number;
+  task_id: TaskId | null;
+  purpose: UnaskedPurpose | null;
+  choice: string | null;
+  reply_only: number;
 };
 type ReservationCols = { id: string; month: UtcMonth; purpose: Purpose; model: ModelId; estimate_micro: MicroUsd };
 type BoxCols = {
@@ -135,22 +194,28 @@ const LOG_RETRY_BASE_MS = 10_000;
 const LOG_RETRY_MAX_MS = 60 * 60 * 1000;
 const COMPACTION_RETRY_BASE_MS = 5 * 60 * 1000;
 const COMPACTION_RETRY_MAX_MS = DAY_MS;
+const TASK_IDLE_MS = 30 * DAY_MS;
 
 function fromJson<T>(text: string): T {
   return JSON.parse(text);
 }
 
-/** Rows queued before the box path have no backend; all of them were API calls. */
+/** Rows queued before a field existed: model calls before the box path were API calls, and unasked messages before tasks had none. */
 function queuedLog(row: LogRow): LogRow {
-  return row.stream === "model_call" && row.backend === undefined ? { ...row, backend: "api" } : row;
+  if (row.stream === "model_call" && row.backend === undefined) return { ...row, backend: "api" };
+  if (row.stream === "unasked" && (row as { purpose?: unknown }).purpose === undefined) return { ...row, taskId: null, purpose: "unlinked" };
+  return row;
 }
+
+/** The id D1 knows a task by, unique across people. */
+export const globalTaskId = (agent: AgentKey, task: TaskId): string => `${agent}|t${task}`;
 
 const placeholders = (n: number) => Array.from({ length: n }, () => "?").join(", ");
 
 function toWakeup(r: WakeupCols): PendingWakeup {
   const base = { id: r.id, key: r.key, note: r.note, dueAt: r.due_at };
   if (r.kind === "checkin") return { ...base, kind: "checkin", origin: "system" };
-  return { ...base, kind: "reminder", origin: r.origin === "person" ? "person" : "agent", task: null, bookkeeping: false };
+  return { ...base, kind: "reminder", origin: r.origin === "person" ? "person" : "agent", task: r.task_id, bookkeeping: r.bookkeeping === 1 };
 }
 
 function toInboxItem(r: InboxCols): InboxItem {
@@ -178,6 +243,14 @@ function toBox(r: BoxCols): Box {
     default:
       return assertNever(r.state);
   }
+}
+
+/** The button an outbox row carries, labelled in the person's language. */
+function button(choice: string | null, language: Language): Pick<OutboundMessage, "button"> {
+  const c = choice === null ? null : parseChoice(choice);
+  if (c === null || choice === null) return {};
+  const t = NOTICES[language];
+  return { button: { label: c.kind === "accept" ? t.acceptButton : t.consentButton, data: choice } };
 }
 
 function toBatch(items: readonly InboxItem[]): Batch | null {
@@ -342,11 +415,18 @@ export class AgentStore {
     );
   }
 
-  turnContext(limitTurns: number, limitNotes: number): {
+  turnContext(
+    limitTurns: number,
+    limitNotes: number,
+    batch: Batch,
+  ): {
     readonly summary: string;
     readonly notes: readonly string[];
     readonly recent: readonly TurnRow[];
     readonly pending: readonly PendingWakeup[];
+    readonly openTasks: readonly OpenTask[];
+    readonly acceptable: AcceptableProposal | null;
+    readonly tapped: readonly TappedProposal[];
   } {
     const summary = this.sql.exec<{ summary: string }>("SELECT summary FROM memory").one().summary;
     const notes = this.sql
@@ -354,7 +434,75 @@ export class AgentStore {
       .toArray()
       .reverse()
       .map((n) => n.text);
-    return { summary, notes, recent: this.recentTurns(limitTurns), pending: this.pendingWakeups() };
+    return {
+      summary,
+      notes,
+      recent: this.recentTurns(limitTurns),
+      pending: this.pendingWakeups(),
+      openTasks: this.openTasks(),
+      acceptable: this.acceptable(),
+      tapped: this.tapped(batch),
+    };
+  }
+
+  private openTasks(): readonly OpenTask[] {
+    return this.sql
+      .exec<{ id: TaskId; ref: TaskRef; kind: TaskKind; title: string; proposal: ProposalId | null }>(
+        `SELECT t.id, t.ref, t.kind, t.title, p.id AS proposal FROM task t
+         LEFT JOIN proposal p ON p.task_id = t.id AND p.status = 'open'
+         WHERE t.status = 'open' ORDER BY t.id`,
+      )
+      .toArray();
+  }
+
+  /** The open proposal on the newest agent message that was delivered, if that message carried one. */
+  private acceptable(): AcceptableProposal | null {
+    const r = this.sql
+      .exec<{ id: ProposalId; task_id: TaskId; version: number; sent_at: EpochMs }>(
+        `SELECT p.id, p.task_id, p.version, o.closed_at AS sent_at FROM proposal p
+         JOIN outbox o ON o.id = p.outbox_id
+         WHERE p.status = 'open'
+           AND o.id = (SELECT id FROM outbox WHERE status = 'sent' ORDER BY closed_at DESC, rowid DESC LIMIT 1)`,
+      )
+      .toArray()[0];
+    return r ? { id: r.id, task: r.task_id, version: r.version, sentAt: r.sent_at } : null;
+  }
+
+  private tapped(batch: Batch): readonly TappedProposal[] {
+    const ids = batch.items.flatMap((i) => (i.event.kind === "choice" && i.event.choice.kind === "accept" ? [i.event.choice.proposal] : []));
+    if (ids.length === 0) return [];
+    return this.sql
+      .exec<{ id: ProposalId; task_id: TaskId; version: number; status: ProposalStatus; task_status: TaskStatus }>(
+        `SELECT p.id, p.task_id, p.version, p.status, t.status AS task_status FROM proposal p JOIN task t ON t.id = p.task_id
+         WHERE p.id IN (${placeholders(ids.length)})`,
+        ...ids,
+      )
+      .toArray()
+      .map((r) => ({ id: r.id, task: r.task_id, version: r.version, status: r.status, taskStatus: r.task_status }));
+  }
+
+  tasks(): readonly TaskSnapshot[] {
+    const facts = this.sql
+      .exec<{ task_id: TaskId; kind: FactKind; ref: string; detail: string; completes: number; person_decision: number; cause_kind: FactCause["kind"] }>(
+        "SELECT task_id, kind, ref, detail, completes, person_decision, cause_kind FROM task_fact ORDER BY id",
+      )
+      .toArray();
+    return this.sql
+      .exec<{ id: TaskId; ref: TaskRef; kind: TaskKind; title: string; status: TaskStatus }>("SELECT id, ref, kind, title, status FROM task ORDER BY id")
+      .toArray()
+      .map((t) => ({
+        ...t,
+        facts: facts
+          .filter((f) => f.task_id === t.id)
+          .map((f) => ({
+            kind: f.kind,
+            ref: f.ref,
+            detail: fromJson<Record<string, string | number | boolean>>(f.detail),
+            completes: f.completes === 1,
+            personDecision: f.person_decision === 1,
+            causeKind: f.cause_kind,
+          })),
+      }));
   }
 
   recentTurns(limit: number): readonly TurnRow[] {
@@ -366,7 +514,7 @@ export class AgentStore {
 
   pendingWakeups(): readonly PendingWakeup[] {
     return this.sql
-      .exec<WakeupCols>("SELECT id, key, kind, origin, note, due_at FROM wakeup WHERE status = 'pending' ORDER BY due_at, id")
+      .exec<WakeupCols>(`SELECT ${WAKEUP_COLS} FROM wakeup WHERE status = 'pending' ORDER BY due_at, id`)
       .toArray()
       .map(toWakeup);
   }
@@ -375,6 +523,8 @@ export class AgentStore {
     const [firstKey] = commit.batchKeys;
     this.tx(() => {
       if (box) this.writeBox(box);
+      const outboxId = crypto.randomUUID() as OutboxId;
+      const tasks = this.applyTasks(commit.tasks, commit.trigger, commit.outbound ? outboxId : null, now);
       for (const t of commit.turns) {
         this.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES (?, ?, ?, ?)", t.role, t.text, t.at, t.eventKey);
       }
@@ -392,7 +542,7 @@ export class AgentStore {
       if (commit.wakeupsAdd.length > 0 && this.pendingReminders() + commit.wakeupsAdd.length > SCHEDULE.maxPendingReminders) {
         throw new Error("a turn would leave more pending reminders than the cap");
       }
-      for (const w of commit.wakeupsAdd) this.insertWakeup(w, firstKey, now);
+      for (const w of commit.wakeupsAdd) this.insertWakeup(w, firstKey, now, w.task && tasks.resolve(w.task));
       if (commit.ensureCheckin) this.insertWakeup(commit.ensureCheckin, "system", now);
       for (const text of commit.notes) {
         this.sql.exec("INSERT INTO memory_note (text, created_at, event_key) VALUES (?, ?, ?)", text, now, firstKey);
@@ -400,7 +550,11 @@ export class AgentStore {
       if (commit.reachability) {
         this.sql.exec("UPDATE agent SET status = ?, status_at = ?", commit.reachability.status, commit.reachability.at);
       }
-      if (commit.outbound) this.insertOutbox(firstKey, commit.outbound, now);
+      if (commit.outbound) {
+        const o = commit.outbound;
+        const choice = o.choice === "accept_pending" ? tasks.proposal : o.choice === "consent" ? choiceToken({ kind: "consent" }) : null;
+        this.insertOutbox(outboxId, firstKey, { ...o, taskId: o.link && tasks.resolve(o.link), choice }, now);
+      }
       this.sql.exec(
         `UPDATE inbox SET status = 'done', outcome = ?, finished_at = ? WHERE event_key IN (${placeholders(commit.batchKeys.length)})`,
         commit.outcome,
@@ -412,11 +566,131 @@ export class AgentStore {
     });
   }
 
-  private insertOutbox(key: EventKey, out: Outbound, now: EpochMs): void {
+  /**
+   * Applies a turn's task changes in the caller's transaction: opens first, then facts, then the proposal, which is bound
+   * to the outbox row the turn is about to insert. Returns how to resolve a task the turn named by ref, and the
+   * accept button's data when a plan was proposed.
+   */
+  private applyTasks(
+    c: TaskCommit,
+    cause: FactCause,
+    outboxId: OutboxId | null,
+    now: EpochMs,
+  ): { readonly resolve: (t: TaskTarget) => TaskId | null; readonly proposal: string | null } {
+    const open = new Map(this.sql.exec<{ id: TaskId; ref: TaskRef }>("SELECT id, ref FROM task WHERE status = 'open'").toArray().map((r) => [r.ref, r.id]));
+    const resolve = (t: TaskTarget): TaskId | null => ("id" in t ? t.id : (open.get(t.ref) ?? null));
+    const agent = c.open.length + c.facts.length > 0 || c.propose ? this.agent()?.key : undefined;
+    for (const t of c.open) {
+      if (open.has(t.ref) || !agent) continue;
+      const { id } = this.sql
+        .exec<{ id: TaskId }>(
+          "INSERT INTO task (ref, kind, title, opened_at, cause_key, touched_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+          t.ref,
+          t.kind,
+          t.title,
+          now,
+          cause.key,
+          now,
+        )
+        .one();
+      open.set(t.ref, id);
+      this.insertLogs([{ stream: "task", id: globalTaskId(agent, id), agent, ref: t.ref, kind: t.kind, title: t.title, causeKind: cause.kind, openedAt: now }], now);
+      this.recordFact(agent, id, { kind: "opened", ref: "", detail: {}, cause }, now);
+    }
+    for (const { target, fact } of c.facts) {
+      const id = resolve(target);
+      if (id !== null && agent) this.recordFact(agent, id, fact, now);
+    }
+    const proposed = c.propose && outboxId && agent ? this.propose(agent, resolve({ ref: c.propose.ref }), c.propose.text, outboxId, cause, now) : null;
+    return { resolve, proposal: proposed && choiceToken({ kind: "accept", proposal: proposed }) };
+  }
+
+  private propose(agent: AgentKey, task: TaskId | null, text: string, outboxId: OutboxId, cause: FactCause, now: EpochMs): ProposalId | null {
+    if (task === null) return null;
+    const { version } = this.sql.exec<{ version: number }>("SELECT COALESCE(MAX(version), 0) + 1 AS version FROM proposal WHERE task_id = ?", task).one();
+    const id = proposalId(task, version);
+    this.sql.exec("UPDATE proposal SET status = 'superseded', decided_at = ? WHERE task_id = ? AND status = 'open'", now, task);
     this.sql.exec(
-      `INSERT INTO outbox (id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, ready_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      crypto.randomUUID(),
+      "INSERT INTO proposal (id, task_id, version, kind, text, outbox_id, created_at) VALUES (?, ?, ?, 'plan', ?, ?, ?)",
+      id,
+      task,
+      version,
+      text,
+      outboxId,
+      now,
+    );
+    this.recordFact(agent, task, { kind: "proposed", ref: id, detail: { version }, cause }, now);
+    return id;
+  }
+
+  /**
+   * The only writer of task status. The same evidence twice is one fact. A fact that moves an open task to completed
+   * is the one with completes = 1; on a task already final it is recorded and changes nothing.
+   */
+  private recordFact(agent: AgentKey, task: TaskId, fact: TaskFact, now: EpochMs): void {
+    const current = this.sql.exec<{ status: TaskStatus }>("SELECT status FROM task WHERE id = ?", task).toArray()[0]?.status;
+    if (current === undefined) return;
+    const next = nextStatus(current, fact.kind);
+    const completes = current === "open" && next === "completed";
+    const decision = personDecision(fact);
+    const inserted = this.sql
+      .exec<{ id: number }>(
+        `INSERT INTO task_fact (task_id, kind, ref, detail, completes, person_decision, cause_key, cause_kind, cause_at, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (task_id, kind, ref) DO NOTHING RETURNING id`,
+        task,
+        fact.kind,
+        fact.ref,
+        JSON.stringify(fact.detail),
+        completes ? 1 : 0,
+        decision ? 1 : 0,
+        fact.cause.key,
+        fact.cause.kind,
+        fact.cause.at,
+        now,
+      )
+      .toArray()[0];
+    if (!inserted) return;
+    if (next !== current) {
+      this.sql.exec("UPDATE task SET status = ?, closed_at = ?, touched_at = ? WHERE id = ?", next, now, now, task);
+      if (fact.kind === "plan_accepted") {
+        this.sql.exec("UPDATE proposal SET status = 'accepted', decided_at = ? WHERE id = ? AND status = 'open'", now, fact.ref);
+      }
+      this.sql.exec("UPDATE proposal SET status = 'closed', decided_at = ? WHERE task_id = ? AND status = 'open'", now, task);
+    } else {
+      this.sql.exec("UPDATE task SET touched_at = ? WHERE id = ?", now, task);
+    }
+    this.insertLogs(
+      [
+        {
+          stream: "task_fact",
+          id: `${agent}|f${inserted.id}`,
+          agent,
+          taskId: globalTaskId(agent, task),
+          kind: fact.kind,
+          ref: fact.ref,
+          detail: JSON.stringify(fact.detail),
+          completes,
+          personDecision: decision,
+          causeKind: fact.cause.kind,
+          causeAt: fact.cause.at,
+          at: now,
+        },
+      ],
+      now,
+    );
+  }
+
+  private insertOutbox(
+    id: OutboxId,
+    key: EventKey,
+    out: Pick<Outbound, "texts" | "intent" | "triggerKind" | "reply" | "purpose" | "replyOnly"> & { readonly taskId: TaskId | null; readonly choice: string | null },
+    now: EpochMs,
+  ): void {
+    this.sql.exec(
+      `INSERT INTO outbox (id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, ready_at, created_at, task_id, purpose, choice, reply_only)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id,
       key,
       out.triggerKind,
       out.intent,
@@ -425,6 +699,10 @@ export class AgentStore {
       out.reply?.expiresAt ?? null,
       now,
       now,
+      out.taskId,
+      out.purpose,
+      out.choice,
+      out.replyOnly ? 1 : 0,
     );
   }
 
@@ -482,7 +760,12 @@ export class AgentStore {
 
   private insertMessage(key: EventKey, message: NoteMessage, now: EpochMs): void {
     this.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES ('note', ?, ?, ?)", message.note, now, key);
-    this.insertOutbox(key, { texts: message.texts, intent: "requested", triggerKind: "message" }, now);
+    this.insertOutbox(
+      crypto.randomUUID() as OutboxId,
+      key,
+      { texts: message.texts, intent: "requested", triggerKind: "message", purpose: null, replyOnly: false, taskId: null, choice: null },
+      now,
+    );
   }
 
   plan(): PlanRow | null {
@@ -550,9 +833,9 @@ export class AgentStore {
     this.tx(() => this.insertLogs(logs, now));
   }
 
-  private insertWakeup(w: NewWakeup, createdBy: string, now: EpochMs): void {
+  private insertWakeup(w: NewWakeup, createdBy: string, now: EpochMs, task: TaskId | null = null): void {
     this.sql.exec(
-      `INSERT OR IGNORE INTO wakeup (key, kind, origin, note, due_at, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO wakeup (key, kind, origin, note, due_at, created_at, created_by, task_id, bookkeeping) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       w.key,
       w.kind,
       w.origin,
@@ -560,6 +843,8 @@ export class AgentStore {
       w.dueAt,
       now,
       createdBy,
+      task,
+      w.kind === "reminder" && w.bookkeeping ? 1 : 0,
     );
   }
 
@@ -578,7 +863,7 @@ export class AgentStore {
   dueWakeups(now: EpochMs): readonly PendingWakeup[] {
     return this.sql
       .exec<WakeupCols>(
-        "SELECT id, key, kind, origin, note, due_at FROM wakeup WHERE status = 'pending' AND due_at <= ? ORDER BY due_at, id",
+        `SELECT ${WAKEUP_COLS} FROM wakeup WHERE status = 'pending' AND due_at <= ? ORDER BY due_at, id`,
         now,
       )
       .toArray()
@@ -607,7 +892,7 @@ export class AgentStore {
     if (!agent) return [];
     return this.sql
       .exec<OutboxCols>(
-        `SELECT id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, admitted_day, in_doubt, attempts
+        `SELECT id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, admitted_day, in_doubt, attempts, task_id, purpose, choice, reply_only
          FROM outbox WHERE status = 'pending' AND ready_at <= ? ORDER BY created_at, rowid LIMIT ?`,
         now,
         limit,
@@ -623,6 +908,10 @@ export class AgentStore {
           triggerKind: r.trigger_kind,
           admittedDay: r.admitted_day,
           attempts: r.attempts,
+          taskId: r.task_id,
+          purpose: r.purpose,
+          replyOnly: r.reply_only === 1,
+          ...button(r.choice, agent.language),
         };
         return r.in_doubt === 0 && r.reply_token !== null && r.reply_expires !== null
           ? { ...base, reply: { token: r.reply_token, expiresAt: r.reply_expires } }
@@ -676,13 +965,19 @@ export class AgentStore {
 
   recentOutbox(limit: number): readonly OutboxView[] {
     return this.sql
-      .exec<{ id: OutboxId; intent: Intent; texts: string; status: OutboxView["status"]; via: OutboxView["via"] }>(
-        "SELECT id, intent, texts, status, via FROM outbox ORDER BY rowid DESC LIMIT ?",
-        limit,
-      )
+      .exec<{
+        id: OutboxId;
+        intent: Intent;
+        texts: string;
+        status: OutboxView["status"];
+        via: OutboxView["via"];
+        task_id: TaskId | null;
+        purpose: UnaskedPurpose | null;
+        choice: string | null;
+      }>("SELECT id, intent, texts, status, via, task_id, purpose, choice FROM outbox ORDER BY rowid DESC LIMIT ?", limit)
       .toArray()
       .reverse()
-      .map((r) => ({ ...r, texts: fromJson<string[]>(r.texts) }));
+      .map(({ task_id, ...r }) => ({ ...r, taskId: task_id, texts: fromJson<string[]>(r.texts) }));
   }
 
   monthSpend(month: UtcMonth): MonthSpend {
@@ -871,6 +1166,14 @@ export class AgentStore {
   }
 
   prune(now: EpochMs): void {
+    this.tx(() => {
+      const agent = this.agent()?.key;
+      if (!agent) return;
+      const idle = this.sql.exec<{ id: TaskId }>("SELECT id FROM task WHERE status = 'open' AND touched_at < ?", now - TASK_IDLE_MS).toArray();
+      for (const { id } of idle) {
+        this.recordFact(agent, id, { kind: "expired", ref: "", detail: {}, cause: { key: eventKey.prune(now), kind: "prune", at: now } }, now);
+      }
+    });
     this.sql.exec("DELETE FROM inbox WHERE status IN ('done', 'failed') AND finished_at < ?", now - DEDUPE_WINDOW_MS);
     this.sql.exec("DELETE FROM outbox WHERE status IN ('sent', 'dropped') AND closed_at < ?", now - OUTBOX_KEEP_MS);
     this.sql.exec("DELETE FROM billing_event WHERE at < ?", now - DEDUPE_WINDOW_MS);

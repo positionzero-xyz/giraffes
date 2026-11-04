@@ -76,7 +76,7 @@ describe("anthropic", () => {
 
   test("a turn past the length caps still parses, because the API doesn't enforce them and code does", async () => {
     const send = { type: "send", text: "x".repeat(TURN.maxTextChars + 1) };
-    const out = { actions: Array.from({ length: TURN.maxActions + 1 }, () => send), task: { kind: "chat", key: "chat", status: "none" } };
+    const out = { actions: Array.from({ length: TURN.maxActions + 1 }, () => send), tasks: [], about: "" };
     stubFetch(() => Response.json(message(JSON.stringify(out))));
     expect(await anthropicModel("sk-test").parse({ ...request, schema: TurnOutputSchema })).toMatchObject({ ok: true, value: out });
   });

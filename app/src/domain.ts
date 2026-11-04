@@ -40,6 +40,7 @@ export const eventKey = {
   checkin: (day: LocalDate): EventKey => `checkin:${day}` as EventKey,
   box: (name: string): EventKey => `box:${name}` as EventKey,
   billing: (what: string): EventKey => `billing:${what}` as EventKey,
+  prune: (at: EpochMs): EventKey => `prune:${at}` as EventKey,
 } as const;
 
 export type WakeupId = Brand<number, "WakeupId">;
@@ -130,12 +131,6 @@ export type OutboundMessage = {
   readonly replyOnly?: boolean;
 };
 
-export const LABEL_KINDS = ["chat", "reminder", "plan", "booking", "site", "group", "other"] as const;
-export type LabelKind = (typeof LABEL_KINDS)[number];
-export const LABEL_STATUSES = ["none", "started", "progressed", "completed", "failed"] as const;
-export type LabelStatus = (typeof LABEL_STATUSES)[number];
-export type TaskLabel = { readonly kind: LabelKind; readonly key: string; readonly status: LabelStatus };
-
 export type TaskId = Brand<number, "TaskId">;
 /** The model's name for a task, reused across turns; the same slug grammar as wake-up keys. */
 export type TaskRef = Brand<string, "TaskRef">;
@@ -161,7 +156,8 @@ export const FACTS = {
 } as const satisfies Record<string, FactRule>;
 export type FactKind = keyof typeof FACTS;
 
-export type FactCause = { readonly key: EventKey; readonly kind: AgentEventKind; readonly at: EpochMs };
+/** The event that caused a fact, or the drain's prune for a task code expired. */
+export type FactCause = { readonly key: EventKey; readonly kind: AgentEventKind | "prune"; readonly at: EpochMs };
 export type TaskFact = {
   readonly kind: FactKind;
   /** A proposal id, job id or outbox id; "" when the fact has none, so UNIQUE(task_id, kind, ref) dedupes. */
@@ -169,7 +165,7 @@ export type TaskFact = {
   readonly detail: Readonly<Record<string, string | number | boolean>>;
   readonly cause: FactCause;
 };
-const isPersonEvent = (k: AgentEventKind): boolean => k === "message" || k === "choice";
+const isPersonEvent = (k: FactCause["kind"]): boolean => k === "message" || k === "choice";
 export const personDecision = (f: TaskFact): boolean => FACTS[f.kind].decision && isPersonEvent(f.cause.kind);
 
 /** `<task id>.<version>`, such as "7.1". */

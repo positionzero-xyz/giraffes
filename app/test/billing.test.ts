@@ -33,7 +33,7 @@ import {
 
 const NOTICE = NOTICES.en;
 
-const quietCheckin = () => turn({ actions: [quiet()], task: ["chat", "checkin", "none"] });
+const quietCheckin = () => turn({ actions: [quiet()] });
 const agent = (user: string) => `p:dev:${user}` as AgentKey;
 const codeIn = (text: string) => text.match(/\/join ([A-Z0-9]{6})$/)?.[1] ?? "";
 
@@ -289,7 +289,7 @@ describe("trial and lapse", () => {
 
   test("a reminder the person asked for still arrives after the trial ends, written by code, with no model call", async () => {
     const kit = billingOn({ TRIAL_DAYS: "1" });
-    const model = scripted([turn({ actions: [schedule("vet", "2099-11-06T09:30", "Call the vet"), { type: "send", text: "Will do." }], task: ["reminder", "vet", "started"] })]);
+    const model = scripted([turn({ actions: [schedule("vet", "2099-11-06T09:30", "Call the vet"), { type: "send", text: "Will do." }] })]);
     const c = await devChat("dot", { model, at: "2099-11-04T10:00", billing: kit.deps });
     await c.say("remind me on the 6th at 9:30 to call the vet");
     expect(await c.received()).toEqual(["Will do."]);
@@ -825,7 +825,7 @@ describe("the ai plan", () => {
   test("AI_CAP_USD is the person's monthly API cap", async () => {
     const kit = billingOn({ AI_CAP_USD: "1" });
     const spendsTheCap = Math.ceil((1_000_000 * 1_000_000) / priceOf(routeOf("turn").model).inputPerM);
-    const model = scripted([turn({ actions: [{ type: "send", text: "Sure." }], task: ["chat", "chat", "none"], usage: { inputTokens: spendsTheCap } })]);
+    const model = scripted([turn({ actions: [{ type: "send", text: "Sure." }], usage: { inputTokens: spendsTheCap } })]);
     const c = await devChat("wes", { model, at: "2099-11-04T10:00", billing: kit.deps });
     await pay(kit, c, "wes", "ai");
     await c.received();

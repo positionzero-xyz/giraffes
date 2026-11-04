@@ -144,7 +144,7 @@ export function taskEffects(view: TaskView): TaskEffects {
     rest.length === 0 &&
     only.event.kind === "message" &&
     !decided.has(a.id) &&
-    a.sentAt < only.receivedAt &&
+    a.sentAt <= only.receivedAt &&
     only.receivedAt - a.sentAt <= TASKS.typedAcceptWithinMs &&
     isPlainAccept(only.event.text)
   ) {
@@ -252,6 +252,15 @@ export function linkOf(view: TaskView, tasks: TaskCommit, about: string): TaskTa
   const known = view.openTasks.find((t) => t.ref === ref);
   if (!known) return null;
   return isFinished(finished, known) ? { id: known.id } : { ref };
+}
+
+/** The task a ref the model named stands for: one opened this turn, or one still open after it. */
+export function taskOf(view: TaskView, tasks: TaskCommit, raw: string): TaskTarget | null {
+  const ref = parseTaskRef(raw);
+  if (ref === null) return null;
+  if (tasks.open.some((t) => t.ref === ref)) return { ref };
+  const known = view.openTasks.find((t) => t.ref === ref);
+  return known && !isFinished(finishedBy(tasks), known) ? { id: known.id } : null;
 }
 
 /**

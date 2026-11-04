@@ -4,12 +4,15 @@ import {
   type AgentKey,
   type ChannelId,
   type EpochMs,
+  type FactCause,
+  type FactKind,
   type LocalDate,
   type MicroUsd,
-  type LabelKind,
-  type LabelStatus,
+  type TaskKind,
+  type TaskRef,
   type UtcMonth,
 } from "../domain";
+import { TASK_REJECTIONS, type UnaskedPurpose } from "../agent/tasks";
 import type { BoxHostKind } from "../box/host";
 import type { BoxName } from "../box/names";
 import type { ModelId, Purpose, Usage } from "../model/model";
@@ -30,9 +33,6 @@ export type LogRow =
       readonly agent: AgentKey;
       readonly eventKind: AgentEventKind;
       readonly batchSize: number;
-      readonly taskKind: LabelKind | null;
-      readonly taskKey: string | null;
-      readonly taskStatus: LabelStatus;
       readonly outcome: TurnOutcome;
       readonly refusedForBudget: boolean;
       readonly costMicro: MicroUsd;
@@ -64,6 +64,37 @@ export type LogRow =
       readonly text: string;
       readonly status: UnaskedStatus;
       readonly day: LocalDate | null;
+      readonly at: EpochMs;
+      /** `<agent>|t<task id>`; null when the message is about no task. */
+      readonly taskId: string | null;
+      readonly purpose: UnaskedPurpose;
+    }
+  | {
+      readonly stream: "task";
+      /** `<agent>|t<task id>`, deterministic so a re-flush is a no-op. */
+      readonly id: string;
+      readonly agent: AgentKey;
+      readonly ref: TaskRef;
+      readonly kind: TaskKind;
+      readonly title: string;
+      readonly causeKind: FactCause["kind"];
+      readonly openedAt: EpochMs;
+    }
+  | {
+      readonly stream: "task_fact";
+      /** `<agent>|f<fact id>`. */
+      readonly id: string;
+      readonly agent: AgentKey;
+      readonly taskId: string;
+      readonly kind: FactKind;
+      readonly ref: string;
+      /** JSON. */
+      readonly detail: string;
+      /** This fact moved the task to completed. At most one fact per task has it. */
+      readonly completes: boolean;
+      readonly personDecision: boolean;
+      readonly causeKind: FactCause["kind"];
+      readonly causeAt: EpochMs;
       readonly at: EpochMs;
     }
   | {
@@ -101,7 +132,15 @@ export type Backend = (typeof BACKENDS)[number];
 export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "lapsed", "model_failed", "poison", "no_model", "stale"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 
-export const ACTION_REJECTIONS = [...REMINDER_REJECTIONS, "not_pending", "bad_zone", "too_many_sends", "too_many_actions", "too_long"] as const;
+export const ACTION_REJECTIONS = [
+  ...REMINDER_REJECTIONS,
+  ...TASK_REJECTIONS,
+  "not_pending",
+  "bad_zone",
+  "too_many_sends",
+  "too_many_actions",
+  "too_long",
+] as const;
 export type ActionRejection = (typeof ACTION_REJECTIONS)[number];
 
 export const UNASKED_STATUSES = ["sent", "dropped_budget", "dropped_blocked", "dropped_quota", "failed"] as const;
@@ -177,9 +216,8 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
     case "turn":
       return db
         .prepare(
-          `INSERT INTO turn_log (id, agent_key, event_kind, batch_size, task_kind, task_key, task_status,
-             outcome, refused_for_budget, cost_micro, attempts, started_at, finished_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO turn_log (id, agent_key, event_kind, batch_size, outcome, refused_for_budget, cost_micro, attempts, started_at, finished_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         )
         .bind(
@@ -187,9 +225,6 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
           row.agent,
           row.eventKind,
           row.batchSize,
-          row.taskKind,
-          row.taskKey,
-          row.taskStatus,
           row.outcome,
           row.refusedForBudget ? 1 : 0,
           row.costMicro,
@@ -223,11 +258,38 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
     case "unasked":
       return db
         .prepare(
-          `INSERT INTO unasked_message (id, agent_key, trigger_kind, text, status, day, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO unasked_message (id, agent_key, trigger_kind, text, status, day, at, task_id, purpose)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         )
-        .bind(row.id, row.agent, row.triggerKind, row.text, row.status, row.day, row.at);
+        .bind(row.id, row.agent, row.triggerKind, row.text, row.status, row.day, row.at, row.taskId, row.purpose);
+    case "task":
+      return db
+        .prepare(
+          `INSERT INTO task (id, agent_key, ref, kind, title, cause_kind, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO NOTHING`,
+        )
+        .bind(row.id, row.agent, row.ref, row.kind, row.title, row.causeKind, row.openedAt);
+    case "task_fact":
+      return db
+        .prepare(
+          `INSERT INTO task_fact (id, agent_key, task_id, kind, ref, detail, completes, person_decision, cause_kind, cause_at, at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO NOTHING`,
+        )
+        .bind(
+          row.id,
+          row.agent,
+          row.taskId,
+          row.kind,
+          row.ref,
+          row.detail,
+          row.completes ? 1 : 0,
+          row.personDecision ? 1 : 0,
+          row.causeKind,
+          row.causeAt,
+          row.at,
+        );
     case "lifecycle":
       return db
         .prepare("INSERT INTO lifecycle (id, agent_key, change, source, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")

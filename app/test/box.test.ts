@@ -788,7 +788,7 @@ describe("log rows queued by the code before the box path", () => {
   });
 });
 
-const quietCheckin = () => turn({ actions: [quiet()], task: ["chat", "checkin", "none"] });
+const quietCheckin = () => turn({ actions: [quiet()] });
 
 describe("reclaiming a box nobody signed in to", () => {
   test("48 hours after the first link the box is destroyed, its slot freed, its row forgotten, and /claude starts over", async () => {

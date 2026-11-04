@@ -270,8 +270,35 @@ describe("a key pasted into the chat", () => {
     ["task-management-system-for-the-team-2026", false],
     ["พรุ่งนี้เตือนให้โทรหาคลินิกตอนเก้าโมงนะคะ", false],
     ["sk-learning is fun", false],
+    ["key:AbcDef12345678901234567890123456", true],
+    ["KEY=AbcDef12345678901234567890123456", true],
+    ["my deepinfra key 3f9a2c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a393f9a2c1e8b7d6a5f4e3d2c1b", true],
+    ["sk-ant-abcdefghijklmnopqrstuvwx", true],
+    ["https://api.example.com/v1/chat?api_key=sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", true],
+    ["https://openrouter.ai/sk-or-v1-0123456789abcdef0123456789abcdef/x", true],
+    ["https://example.com/cb?token=aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE&x=1", true],
+    ["ANTHROPIC_API_KEY=sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", true],
+    ["commit 3f9a2c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39 and 1f9a2c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39", false],
+    ["https://github.com/org/repo/commit/3f9a2c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39", false],
   ])("%s is %s", (text, found) => {
     expect(redactSecrets(text).found).toBe(found);
+  });
+
+  test("a key inside a link is removed and the rest of the link is kept", () => {
+    const r = redactSecrets("try https://api.example.com/v1?api_key=sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789&model=x please");
+    expect(r.text).toBe(`try https://api.example.com/v1?api_key=${KEY_REMOVED}&model=x please`);
+  });
+
+  test("a key pasted inside a link never reaches the store or a model", async () => {
+    const model = scripted([chat("Next turn.")]);
+    const c = await devChat("nia", { model, at: "2099-11-04T10:00" });
+    const pasted = "sk-or-v1-0123456789abcdef0123456789abcdef";
+
+    await c.say(`https://openrouter.ai/api/v1/models?key=${pasted}`);
+    await c.say("ok");
+
+    expect(await doDump(c.agent)).not.toContain(pasted);
+    expect(model.calls.map((x) => x.user).join("")).not.toContain(pasted);
   });
 });
 

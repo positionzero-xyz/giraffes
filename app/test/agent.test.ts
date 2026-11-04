@@ -318,6 +318,46 @@ describe("requested reminders without a model", () => {
   });
 });
 
+describe("order across retries", () => {
+  const unavailable: ScriptStep = { kind: "fail", failure: "unavailable" };
+
+  test("a message sent while an earlier one waits out a model outage is answered after it, in one turn that sees both", async () => {
+    const model = scripted([unavailable, turn({ actions: [send("OK, no reminder then.")], task: ["reminder", "clinic", "none"] })]);
+    const c = await devChat("ola", { model, at: "2099-11-04T10:00" });
+
+    await c.say("remind me at 6pm to call the clinic");
+    c.clock.set((local("2099-11-04T10:00") + 5_000) as EpochMs);
+    await c.say("actually, cancel that");
+    expect(model.calls).toHaveLength(1);
+
+    await c.advanceTo("2099-11-04T10:05");
+
+    expect(await c.received()).toEqual(["OK, no reminder then."]);
+    expect(model.calls[1].user).toContain("## New\nPerson: remind me at 6pm to call the clinic\nPerson: actually, cancel that");
+    model.assertDone();
+  });
+
+  test("a cancel that waits out a model outage still stops the reminder that falls due meanwhile", async () => {
+    const model = scripted([
+      turn({ actions: [schedule("clinic", "2099-11-04T18:00", "call the clinic"), send("Done.")], task: ["reminder", "clinic", "started"] }),
+      unavailable,
+      turn({ actions: [cancel("clinic"), send("Cancelled.")], task: ["reminder", "clinic", "failed"] }),
+    ]);
+    const c = await devChat("oto", { model, at: "2099-11-04T10:00" });
+    await c.say("remind me at 6pm to call the clinic");
+    await c.received();
+
+    c.clock.set((local("2099-11-04T17:59") + 50_000) as EpochMs);
+    await c.say("cancel the clinic reminder");
+    await c.advanceTo("2099-11-04T18:30");
+
+    expect(await c.received()).toEqual(["Cancelled."]);
+    expect((await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder")).toEqual([]);
+    expect(c.logs("rejection")).toEqual([]);
+    model.assertDone();
+  });
+});
+
 describe("failure and duplicate safety", () => {
   test("a redelivered webhook is processed once", async () => {
     const model = scripted([chat("Got it.")]);

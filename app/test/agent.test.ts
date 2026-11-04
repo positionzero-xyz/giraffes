@@ -552,6 +552,42 @@ describe("delivery", () => {
     model.assertDone();
   });
 
+  test("at the LINE reserve, unasked messages are dropped and logged, while replies and requested reminders still go", async () => {
+    const model = scripted([
+      turn({
+        actions: [schedule("nudge", "2099-11-04T11:00", "Ask about the trip", false), schedule("pills", "2099-11-04T11:30", "Take your pills"), send("OK.")],
+        task: ["reminder", "pills", "started"],
+      }),
+      chat("How is the trip planning going?"),
+      chat("Time for your pills."),
+    ]);
+    const ledger = memoryLedger();
+    ledger.lineQuotaReading = { at: local("2099-11-04T09:00"), month: "2099-11", limit: 1000, used: 950 };
+    const c = await devChat("U00000000000000000000000000000001", { model, at: "2099-11-04T10:00", ledger, line: true });
+
+    await c.say("remind me at 11:30 to take my pills");
+    await c.advanceTo("2099-11-04T12:00");
+
+    expect(await c.received()).toEqual(["OK.", "Time for your pills."]);
+    expect(c.logs("unasked").map((l) => [l.text, l.status])).toEqual([["How is the trip planning going?", "dropped_quota"]]);
+    model.assertDone();
+  });
+
+  test("a reading from last month doesn't hold back this month's unasked messages", async () => {
+    const model = scripted([
+      turn({ actions: [schedule("nudge", "2099-11-01T11:00", "Ask about the trip", false), send("OK.")], task: ["chat", "trip", "started"] }),
+      chat("How is the trip planning going?"),
+    ]);
+    const ledger = memoryLedger();
+    ledger.lineQuotaReading = { at: local("2099-10-31T23:00"), month: "2099-10", limit: 1000, used: 990 };
+    const c = await devChat("U00000000000000000000000000000002", { model, at: "2099-11-01T10:00", ledger, line: true });
+
+    await c.say("I'm planning a trip");
+    await c.advanceTo("2099-11-01T12:00");
+
+    expect(await c.received()).toEqual(["OK.", "How is the trip planning going?"]);
+  });
+
   test.each([
     ["the channel can't tell whether it was delivered", { kind: "in_doubt", afterMs: 1000 } as const],
     ["the send was cut off by a crash", { kind: "throw" } as const],

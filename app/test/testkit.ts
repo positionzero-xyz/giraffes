@@ -37,6 +37,8 @@ export function fakeClock(start: EpochMs): FakeClock {
 }
 
 export type MemoryLedger = Ledger & {
+  /** The latest LINE quota reading, as the hourly check would have recorded it. */
+  lineQuotaReading: { readonly at: EpochMs; readonly month: string; readonly limit: number | null; readonly used: number } | null;
   readonly rows: readonly LogRow[];
   readonly boxes: ReadonlyMap<string, { readonly name: string; readonly host: string }>;
 };
@@ -48,6 +50,7 @@ export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): Mem
   const leases = new Map<string, { month: string; micro: MicroUsd }>();
   const boxes = new Map<string, { name: string; host: string }>();
   return {
+    lineQuotaReading: null,
     rows,
     boxes,
     async claimBox(req) {

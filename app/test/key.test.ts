@@ -237,6 +237,80 @@ describe("a key alongside a Claude plan", () => {
   });
 });
 
+describe("no consent, no key: a person who has or had a Claude plan box", () => {
+  const BOX = NOTICES.en.box;
+
+  test("while the plan's box is still being set up, the key isn't used without a yes, and the person is asked", async () => {
+    const retry = { retryable: true, detail: "503" };
+    const box = fakeBox({ host: [retry, retry, retry, retry] });
+    const provider = fakeProvider();
+    const c = await devChat("uma", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    expect((await c.snapshot()).box?.state).toBe("provisioning");
+    await giveKey(c.agent);
+    await c.received();
+
+    await c.say("hello");
+
+    expect(provider.seen).toHaveLength(0);
+    const got = await c.received();
+    expect(got).toContain(NOTICE.boxNotReady);
+    expect(got).toContain(NOTICE.backupAsk("OpenCode Go"));
+    expect((await c.snapshot()).access.lanes).toEqual([]);
+  });
+
+  test("a box removed by reclaim doesn't make the key primary: the backup question is asked again then", async () => {
+    const box = fakeBox();
+    const provider = fakeProvider();
+    const c = await devChat("vic", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await giveKey(c.agent);
+    await c.advanceTo("2099-11-04T10:05");
+    expect(await c.received()).toContain(NOTICE.backupAsk("OpenCode Go"));
+
+    await c.advanceTo("2099-11-06T10:30");
+    expect((await c.snapshot()).box).toBeNull();
+    expect(await c.received()).toEqual([BOX.reclaimed("", ""), NOTICE.backupAsk("OpenCode Go")]);
+
+    await c.say("hello");
+    expect(provider.seen).toHaveLength(0);
+    expect(await c.received()).toEqual([NOTICE.boxNotReady]);
+  });
+
+  test("/claude remove removes the plan's box, asks nothing, and from then on the key answers", async () => {
+    const box = fakeBox({ signedIn: true });
+    const provider = fakeProvider([reply("From your key.")]);
+    const c = await devChat("wyn", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await giveKey(c.agent);
+    await c.say("/claude");
+    await c.received();
+
+    await c.say("/claude remove");
+    expect(await c.received()).toEqual([BOX.removing("", ""), BOX.removed("", "")]);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(box.created.size).toBe(0);
+
+    await c.say("hello");
+    expect(await c.received()).toEqual(["From your key."]);
+  });
+
+  test("/claude remove with no box left forgets the plan, so the key answers", async () => {
+    const box = fakeBox();
+    const provider = fakeProvider([reply("From your key.")]);
+    const c = await devChat("xan", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await giveKey(c.agent);
+    await c.advanceTo("2099-11-06T10:30");
+    await c.received();
+
+    await c.say("/claude remove");
+    await c.say("hello");
+
+    expect(await c.received()).toEqual([BOX.removed("", ""), "From your key."]);
+  });
+});
+
 describe("a key pasted into the chat", () => {
   test("is removed before the message is stored, no model sees it, and the person is told to revoke it with a fresh link", async () => {
     const model = scripted([chat("Next turn.")]);

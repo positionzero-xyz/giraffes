@@ -95,8 +95,32 @@ describe("accepting a plan", () => {
     const stale = { ...acceptable, sentAt: (NOW - TASKS.typedAcceptWithinMs - 1) as EpochMs };
     expect(taskEffects(view({ event: message("ok"), acceptable: stale })).commit).toEqual(NO_TASKS);
     expect(taskEffects(view({ event: message("ok but Saturday"), acceptable })).commit).toEqual(NO_TASKS);
-    const two = [item(message("ok")), item(message("and book it"), NOW, "dev:2")];
-    expect(taskEffects(view({ items: two, acceptable })).commit).toEqual(NO_TASKS);
+    const amended = [item(message("ok")), item(message("but make it Sunday"), NOW, "dev:2")];
+    expect(taskEffects(view({ items: amended, acceptable })).commit).toEqual(NO_TASKS);
+  });
+
+  test("a typed accept compares times at whole-second precision, since Telegram stamps whole seconds", () => {
+    const acceptable = { id: pid("7.1"), task: id(7), version: 1, sentAt: (NOW + 700) as EpochMs };
+    const typed = taskEffects(view({ event: message("ok"), acceptable }));
+    expect(typed.commit.facts.map((f) => f.fact.kind)).toEqual(["plan_accepted"]);
+    const before = { ...acceptable, sentAt: (NOW + 1_000) as EpochMs };
+    expect(taskEffects(view({ event: message("ok"), acceptable: before })).commit).toEqual(NO_TASKS);
+  });
+
+  test("a batch accepts when its first message is a plain accept and nothing after it rejects or amends", () => {
+    const acceptable = { id: pid("7.1"), task: id(7), version: 1, sentAt: (NOW - HOUR) as EpochMs };
+    const batch = (...texts: string[]) => texts.map((t, i) => item(message(t), NOW, `dev:${i + 1}`));
+    const accepts = (...texts: string[]) => taskEffects(view({ items: batch(...texts), acceptable })).commit.facts.length === 1;
+
+    expect(accepts("ok", "thanks")).toBe(true);
+    expect(accepts("โอเค", "ขอบคุณค่ะ")).toBe(true);
+    expect(accepts("ok", "but Saturday")).toBe(false);
+    expect(accepts("ok", "no wait")).toBe(false);
+    expect(accepts("ok", "can we change the hotel")).toBe(false);
+    expect(accepts("ได้เลย", "แต่ขอเป็นวันเสาร์")).toBe(false);
+    expect(accepts("ได้เลย", "ขอเปลี่ยนโรงแรม")).toBe(false);
+    expect(accepts("ได้เลย", "ไม่เอาแล้ว")).toBe(false);
+    expect(accepts("thanks", "ok")).toBe(false);
   });
 
   test("the accept vocabulary is closed, in English and Thai, polite particles and punctuation aside", () => {

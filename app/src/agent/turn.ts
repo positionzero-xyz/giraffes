@@ -492,7 +492,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
     }
   }
   const fresh = [...adds.keys()].filter((key) => !cancelled.has(key));
-  for (const key of fresh.slice(fresh.length - remindersOverCap(pending.values()))) {
+  for (const key of fresh.slice(Math.max(0, fresh.length - remindersOverCap(pending.values())))) {
     adds.delete(key);
     pending.delete(key);
     reject(`schedule_wakeup:${key}`, "limit", askedFor.has(key));

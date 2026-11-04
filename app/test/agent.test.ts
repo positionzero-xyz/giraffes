@@ -844,7 +844,7 @@ describe("dev runs", () => {
 
 describe("legacy data over the reminder cap", () => {
   test("a turn that adds reminders to 21 already pending commits, refusing the fresh ones, and is not poisoned", async () => {
-    const model = scripted([turn({ actions: [schedule("one-more", "2099-11-04T20:00", "x"), schedule("and-another", "2099-11-04T21:00", "y"), send("Done.")] })]);
+    const model = scripted([chat("Hi."), turn({ actions: [schedule("one-more", "2099-11-04T20:00", "x"), schedule("and-another", "2099-11-04T21:00", "y"), send("Done.")] })]);
     const c = await devChat("cap21", { model, at: "2099-11-04T10:00" });
     await c.say("hi first");
     await c.received();

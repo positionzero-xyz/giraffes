@@ -7,6 +7,7 @@ import { TURN_SYSTEM } from "../src/agent/prompt";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, MicroUsd, UtcMonth } from "../src/domain";
 import { bytesOf } from "../src/model/prompt";
+import { modelOf, PROVIDERS } from "../src/model/providers";
 import { routeFor } from "../src/model/routes";
 import { NOTICES } from "../src/notices";
 import { chat, devChat, fakeProvider, giveKey, local, schedule, scripted, send, TEST_KEY_SECRET, TEST_KEYS, type ProviderStep } from "./testkit";
@@ -275,5 +276,112 @@ describe("the dev lane", () => {
     const model = scripted([{ kind: "output", value: { actions: "none" } }]);
     const route = routeFor({ kind: "dev", model: "claude-haiku-5-5" }, "turn");
     await expect(model.send({ route, mode: "strict", system: "s", user: "u", schema: {}, repair: null })).rejects.toThrow(/doesn't match the schema/);
+  });
+});
+
+describe("money a provider may have billed", () => {
+  const turnBody = (text: string) => JSON.stringify({ actions: [send(text)], tasks: [], about: "" });
+  const custom = { provider: "openai-compatible", baseUrl: "https://llm.example.com/v1", model: "custom-model", key: "abcd1234abcd1234" } as const;
+
+  test("an OpenAI-compatible reply with no usage is charged at its reservation's estimate and logged as usage_missing", async () => {
+    const provider = fakeProvider([{ kind: "raw", body: { choices: [{ message: { content: turnBody("Hi.") }, finish_reason: "stop" }] } }]);
+    const c = await devChat("mo", { model: null, provider, at: "2099-11-04T10:00" });
+    await giveKey(c.agent, custom);
+
+    await c.say("hello");
+
+    expect(await c.received()).toEqual(["Hi."]);
+    const calls = c.logs("model_call");
+    expect(calls.map((l) => l.status)).toEqual(["usage_missing"]);
+    expect(calls[0].costMicro).toBeGreaterThan(0);
+    expect(calls[0].costMicro).toBe(calls[0].estimateMicro);
+    expect((await c.snapshot()).access.spentMicro.byok).toBe(calls[0].estimateMicro);
+  });
+
+  test("an Anthropic 200 whose body doesn't parse is charged at the estimate, not $0", async () => {
+    const provider = fakeProvider([{ kind: "raw", body: "<html>gateway</html>" }]);
+    const c = await devChat("mu", { model: null, provider, at: "2099-11-04T10:00" });
+    await giveKey(c.agent);
+
+    await c.say("hello");
+
+    expect(await c.received()).toEqual([NOTICE.failed]);
+    const calls = c.logs("model_call");
+    expect(calls.map((l) => l.status)).toEqual(["usage_missing"]);
+    expect(calls[0].costMicro).toBe(calls[0].estimateMicro);
+    expect((await c.snapshot()).access.spentMicro.byok).toBe(calls[0].estimateMicro);
+  });
+
+  test("replies with no usage stop at the cap like any other", async () => {
+    const steps = Array.from({ length: 10 }, (): ProviderStep => ({ kind: "raw", body: { choices: [{ message: { content: turnBody("Hi.") }, finish_reason: "stop" }] } }));
+    const provider = fakeProvider(steps);
+    const c = await devChat("my", { model: null, provider, at: "2099-11-04T10:00" });
+    await giveKey(c.agent, { ...custom, capMicro: 20_000 });
+
+    for (let i = 0; i < 6; i++) await c.say(`hello ${i}`);
+
+    const statuses = c.logs("model_call").map((l) => l.status);
+    expect(statuses).toContain("refused_user_cap");
+    expect((await c.snapshot()).access.spentMicro.byok).toBeLessThanOrEqual(20_000);
+  });
+
+  test("a provider that never answers times out as in_doubt, is charged at the estimate, and the next message is still answered", async () => {
+    const provider = fakeProvider([{ kind: "hang" }, reply("Back.")]);
+    const c = await devChat("nan", { model: null, provider, at: "2099-11-04T10:00", timeouts: { turn: 30, compaction: 30, probe: 30 } });
+    await giveKey(c.agent);
+
+    await c.say("hello");
+    c.clock.set(local("2099-11-04T10:01"));
+    await c.say("still there?");
+
+    expect(await c.received()).toEqual(["Back."]);
+    const calls = c.logs("model_call");
+    expect(calls.map((l) => l.status)).toEqual(["in_doubt", "settled"]);
+    expect(calls[0].costMicro).toBe(calls[0].estimateMicro);
+    expect(provider.seen.at(-1)!.body.messages).toEqual(expect.arrayContaining([expect.objectContaining({ content: expect.stringContaining("still there?") })]));
+  });
+
+  test("a body that stalls after the headers also times out as in_doubt", async () => {
+    const stalled = Object.assign(
+      async (_input: string, init?: RequestInit) =>
+        new Response(
+          new ReadableStream({
+            start(ctrl) {
+              ctrl.enqueue(new TextEncoder().encode('{"content": ['));
+              init?.signal?.addEventListener("abort", () => ctrl.error(init.signal!.reason), { once: true });
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      { steps: [], seen: [] },
+    );
+    const c = await devChat("ned", { model: null, provider: stalled, at: "2099-11-04T10:00", timeouts: { turn: 30, compaction: 30, probe: 30 } });
+    await giveKey(c.agent);
+
+    await c.say("hello");
+
+    expect(c.logs("model_call").map((l) => l.status)).toEqual(["in_doubt"]);
+  });
+});
+
+describe("pricing a model no preset lists", () => {
+  test("an unlisted model is priced at the dearest card its protocol's presets publish, and marked approximate", () => {
+    const dear = { ...PROVIDERS.anthropic.models["claude-haiku-5-5"].card, inputPerM: 3_000_000, outputPerM: 15_000_000 };
+    const table = { ...PROVIDERS, deepinfra: { ...PROVIDERS.deepinfra, models: { ...PROVIDERS.deepinfra.models, "big-model": { card: { ...dear, longPrompt: null }, effort: false } } } };
+
+    const openai = modelOf("openai-compatible", "whatever", table);
+    expect(openai.priced).toBe(false);
+    expect(openai.model.card.outputPerM).toBe(15_000_000);
+    expect(modelOf("anthropic-compatible", "whatever", table).model.card.outputPerM).toBe(PROVIDERS.anthropic.models["claude-haiku-5-5"].card.outputPerM);
+    expect(modelOf("deepinfra", "big-model", table).priced).toBe(true);
+  });
+
+  test("with today's presets no listed model of a protocol is dearer than an unlisted one", () => {
+    for (const [unlisted, protocol] of [["anthropic-compatible", "anthropic"], ["openai-compatible", "openai"]] as const) {
+      const card = modelOf(unlisted, "whatever").model.card;
+      for (const p of Object.values(PROVIDERS).filter((p) => p.protocol === protocol)) {
+        for (const m of Object.values(p.models)) expect(card.inputPerM + card.outputPerM).toBeGreaterThanOrEqual(m.card.inputPerM + m.card.outputPerM);
+      }
+    }
   });
 });

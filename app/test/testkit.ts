@@ -22,7 +22,7 @@ import { DEFAULT_TIME_ZONE, fromLocal, toLocal } from "../src/policy/time";
 import { devLane, DEV_URL_SCRIPTED, type IncludedConfig, type KeysConfig } from "../src/access/access";
 import { seal } from "../src/access/key";
 import { AgentStore } from "../src/agent/store";
-import { connect, SecretKey, type Fetch, type SchemaMode } from "../src/model/client";
+import { connect, SecretKey, type Fetch, type ProviderTimeouts, type SchemaMode } from "../src/model/client";
 import { PROVIDERS, type ProviderId } from "../src/model/providers";
 
 export { scripted };
@@ -105,6 +105,10 @@ export type ProviderStep =
   | { readonly kind: "output"; readonly value: unknown; readonly usage?: { readonly input?: number; readonly output?: number } }
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "status"; readonly status: number; readonly retryAfter?: string; readonly body?: unknown }
+  /** A 200 whose body is exactly `body`, such as a reply with no usage. */
+  | { readonly kind: "raw"; readonly body: unknown }
+  /** Never answers; only the request's abort signal ends it, as a real stalled endpoint would. */
+  | { readonly kind: "hang" }
   | { readonly kind: "network" };
 
 export type FakeProvider = Fetch & {
@@ -122,6 +126,13 @@ export function fakeProvider(steps: readonly ProviderStep[] = []): FakeProvider 
     const step = queue.shift();
     if (!step) throw new Error(`the provider got a request the test didn't script: ${input}`);
     if (step.kind === "network") throw new TypeError("fetch failed");
+    if (step.kind === "raw") return new Response(typeof step.body === "string" ? step.body : JSON.stringify(step.body), { headers: { "content-type": "application/json" } });
+    if (step.kind === "hang") {
+      return new Promise<Response>((_, reject) => {
+        const signal = init?.signal;
+        if (signal) signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }
     if (step.kind === "status") {
       return Response.json(step.body ?? { error: "scripted" }, { status: step.status, headers: step.retryAfter ? { "retry-after": step.retryAfter } : {} });
     }
@@ -233,6 +244,8 @@ export async function devChat(
     readonly model: ScriptedModel | null;
     /** Where a person's own key and the included tier send their requests. */
     readonly provider?: Fetch;
+    /** Per-purpose provider timeouts, shortened so a stalled endpoint times out within a test. */
+    readonly timeouts?: ProviderTimeouts;
     readonly keys?: KeysConfig;
     /** Our included tier, served through `provider`; it replaces the dev lane. */
     readonly included?: IncludedConfig;
@@ -256,7 +269,7 @@ export async function devChat(
   const box = opts.box ? { box: opts.box } : {};
   const billing = opts.billing ? { billing: opts.billing } : {};
   const admission = opts.admission ?? "open";
-  const wire = connect(opts.provider ?? fakeProvider());
+  const wire = connect(opts.provider ?? fakeProvider(), opts.timeouts);
   const access = opts.model
     ? { connect: scriptedConnect(opts.model, wire), included: opts.included ?? devLane(DEV_URL_SCRIPTED) }
     : { connect: wire, included: opts.included ?? ({ on: false } as const) };

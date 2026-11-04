@@ -95,14 +95,16 @@ describe("a person's own key", () => {
     expect(model.calls).toHaveLength(0);
   });
 
-  test("a refused key rests, the person is told once, later messages wait quietly, and after an hour it is tried again", async () => {
+  test("a refused key rests, the person is told once, every later message is answered with the problem, and after an hour it is tried again", async () => {
     const provider = fakeProvider([{ kind: "status", status: 401 }, reply("Back again.")]);
     const c = await devChat("cal", { model: null, provider, at: "2099-11-04T10:00" });
     await giveKey(c.agent);
+    const refused = NOTICE.keyRefused("OpenCode Go");
 
     await c.say("hello");
     await c.say("still there?");
-    expect(await c.received()).toEqual([NOTICE.keyRefused("OpenCode Go")]);
+    expect(await c.received()).toEqual([refused, refused]);
+    expect((await c.snapshot()).outbox.map((o) => o.intent)).toEqual(["requested", "reply"]);
     expect(provider.seen).toHaveLength(1);
     expect((await c.snapshot()).access.key?.health).toBe("resting:credential");
 
@@ -114,6 +116,32 @@ describe("a person's own key", () => {
       ["provider_refused", 0],
       ["settled", expect.any(Number)],
     ]);
+  });
+
+  test("a key that keeps failing is announced at most once a local day, and no message goes unanswered", async () => {
+    const refused401: ProviderStep = { kind: "status", status: 401 };
+    const provider = fakeProvider([refused401, refused401, refused401]);
+    const c = await devChat("cam", { model: null, provider, at: "2099-11-04T10:00" });
+    await giveKey(c.agent);
+    const refused = NOTICE.keyRefused("OpenCode Go");
+    const pushes = async () => (await c.snapshot()).outbox.filter((o) => o.intent === "requested").length;
+
+    await c.say("hello");
+    c.clock.set(local("2099-11-04T11:01"));
+    await c.say("again");
+    c.clock.set(local("2099-11-04T11:30"));
+    await c.say("and again");
+    expect(await c.received()).toEqual([refused, refused, refused]);
+    expect(provider.seen).toHaveLength(2);
+    expect(await pushes()).toBe(1);
+
+    c.clock.set(local("2099-11-05T10:00"));
+    await c.say("new day");
+    c.clock.set(local("2099-11-05T10:05"));
+    await c.say("still?");
+    expect(await c.received()).toEqual([refused, refused]);
+    expect(provider.seen).toHaveLength(3);
+    expect(await pushes()).toBe(2);
   });
 
   test("a usage window is waited out: the person is told when, and the message is retried after the backoff", async () => {
@@ -206,7 +234,7 @@ describe("operator transitions", () => {
     expect(await after.received()).toEqual(["Two."]);
   });
 
-  test("KEY_SECRET changed without KEY_SECRET_PREVIOUS: the key can't be opened, the person is told once, and nothing is sent", async () => {
+  test("KEY_SECRET changed without KEY_SECRET_PREVIOUS: the key can't be opened, the person is told, every message names the problem, and nothing is sent", async () => {
     const provider = fakeProvider();
     const c = await devChat("hal", { model: null, provider, at: "2099-11-04T10:00", keys: { ...TEST_KEYS, secrets: { current: "another-key-secret-abcdefghijklmnopqrs", previous: null } } });
     await giveKey(c.agent);
@@ -214,7 +242,7 @@ describe("operator transitions", () => {
     await c.say("hello");
     await c.say("hello?");
 
-    expect(await c.received()).toEqual([NOTICE.keyUnreadable]);
+    expect(await c.received()).toEqual([NOTICE.keyUnreadable, NOTICE.keyUnreadable]);
     expect(provider.seen).toHaveLength(0);
     expect((await c.snapshot()).access.key?.health).toBe("resting:unreadable");
   });

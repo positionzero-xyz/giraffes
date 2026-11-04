@@ -1,0 +1,33 @@
+{
+  "id": "en-chat-greeting-01",
+  "lang": "en",
+  "tags": [
+    "chat"
+  ],
+  "now": "2026-11-05T10:15",
+  "tz": "Asia/Bangkok",
+  "purpose": "turn",
+  "batch": [
+    {
+      "kind": "message",
+      "text": "hey, what can you do?"
+    }
+  ],
+  "expect": [
+    {
+      "check": "sends",
+      "min": 1,
+      "max": 3
+    },
+    {
+      "check": "replies_in",
+      "lang": "en"
+    },
+    {
+      "check": "no_schedule"
+    },
+    {
+      "check": "no_rejections"
+    }
+  ]
+}

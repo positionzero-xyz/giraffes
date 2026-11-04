@@ -1,0 +1,30 @@
+{
+  "id": "th-reminder-set-01",
+  "lang": "th",
+  "tags": [
+    "reminder"
+  ],
+  "now": "2026-11-05T13:00",
+  "tz": "Asia/Bangkok",
+  "purpose": "turn",
+  "batch": [
+    {
+      "kind": "message",
+      "text": "เตือนให้กินยาตอนสองทุ่มคืนนี้หน่อยนะ"
+    }
+  ],
+  "expect": [
+    {
+      "check": "schedules",
+      "at": "2026-11-05T20:00",
+      "asked": true
+    },
+    {
+      "check": "replies_in",
+      "lang": "th"
+    },
+    {
+      "check": "no_rejections"
+    }
+  ]
+}

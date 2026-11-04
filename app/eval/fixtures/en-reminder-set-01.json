@@ -1,0 +1,30 @@
+{
+  "id": "en-reminder-set-01",
+  "lang": "en",
+  "tags": [
+    "reminder"
+  ],
+  "now": "2026-11-05T08:10",
+  "tz": "Asia/Bangkok",
+  "purpose": "turn",
+  "batch": [
+    {
+      "kind": "message",
+      "text": "remind me tomorrow at 9am to call the dentist"
+    }
+  ],
+  "expect": [
+    {
+      "check": "schedules",
+      "at": "2026-11-06T09:00",
+      "asked": true
+    },
+    {
+      "check": "sends",
+      "min": 1
+    },
+    {
+      "check": "no_rejections"
+    }
+  ]
+}

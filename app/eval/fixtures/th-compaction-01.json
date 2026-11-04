@@ -1,0 +1,45 @@
+{
+  "id": "th-compaction-01",
+  "lang": "th",
+  "tags": [
+    "compaction"
+  ],
+  "now": "2026-11-05T09:00",
+  "tz": "Asia/Bangkok",
+  "purpose": "compaction",
+  "turns": 61,
+  "memory": {
+    "summary": "ผู้ใช้ชื่อฝน แพ้กุ้ง",
+    "notes": []
+  },
+  "history": [
+    {
+      "role": "person",
+      "at": "2026-11-01T09:00",
+      "text": "เดือนหน้าจะย้ายไปทำงานที่เชียงใหม่นะ"
+    },
+    {
+      "role": "agent",
+      "at": "2026-11-01T09:00",
+      "text": "ยินดีด้วยค่ะ"
+    }
+  ],
+  "expect": [
+    {
+      "check": "keeps",
+      "any": [
+        "กุ้ง"
+      ]
+    },
+    {
+      "check": "keeps",
+      "any": [
+        "เชียงใหม่"
+      ]
+    },
+    {
+      "check": "max_chars",
+      "n": 4000
+    }
+  ]
+}

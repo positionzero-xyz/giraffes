@@ -1,0 +1,28 @@
+{
+  "id": "th-checkin-plan-01",
+  "lang": "th",
+  "tags": [
+    "checkin",
+    "plan"
+  ],
+  "now": "2026-11-05T09:00",
+  "tz": "Asia/Bangkok",
+  "purpose": "turn",
+  "memory": {
+    "summary": "ผู้ใช้ชื่อฝน ทำงานกรุงเทพฯ อยากไปเชียงใหม่ช่วงวันหยุดยาวปลายเดือน",
+    "notes": [
+      "ชอบรถไฟนอน",
+      "ไม่ชอบตื่นเช้ามาก"
+    ]
+  },
+  "batch": [
+    {
+      "kind": "checkin"
+    }
+  ],
+  "expect": [
+    {
+      "check": "no_rejections"
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "id": "en-reminder-cancel-01",
+  "lang": "en",
+  "tags": [
+    "reminder"
+  ],
+  "now": "2026-11-05T11:00",
+  "tz": "Europe/London",
+  "purpose": "turn",
+  "pending": [
+    {
+      "key": "gym",
+      "due": "2026-11-05T18:30",
+      "note": "Go to the gym",
+      "origin": "person"
+    }
+  ],
+  "batch": [
+    {
+      "kind": "message",
+      "text": "cancel the gym reminder, I'm sick"
+    }
+  ],
+  "expect": [
+    {
+      "check": "cancels",
+      "key": "gym"
+    },
+    {
+      "check": "no_rejections"
+    }
+  ]
+}

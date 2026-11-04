@@ -1,0 +1,38 @@
+{
+  "id": "en-reminder-fires-late-01",
+  "lang": "en",
+  "tags": [
+    "reminder"
+  ],
+  "now": "2026-11-05T10:20",
+  "tz": "Asia/Bangkok",
+  "purpose": "turn",
+  "pending": [
+    {
+      "key": "pay-rent",
+      "due": "2026-11-05T08:00",
+      "note": "Pay the rent",
+      "origin": "person"
+    }
+  ],
+  "batch": [
+    {
+      "kind": "wakeup",
+      "key": "pay-rent",
+      "origin": "person",
+      "lateMinutes": 140
+    }
+  ],
+  "expect": [
+    {
+      "check": "sends",
+      "min": 1
+    },
+    {
+      "check": "mentions",
+      "any": [
+        "rent"
+      ]
+    }
+  ]
+}

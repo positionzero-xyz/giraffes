@@ -1,0 +1,50 @@
+{
+  "id": "th-reminder-move-01",
+  "lang": "th",
+  "tags": [
+    "reminder",
+    "correction"
+  ],
+  "now": "2026-11-05T09:30",
+  "tz": "Asia/Bangkok",
+  "purpose": "turn",
+  "pending": [
+    {
+      "key": "call-mom",
+      "due": "2026-11-05T17:00",
+      "note": "โทรหาแม่",
+      "origin": "person"
+    }
+  ],
+  "history": [
+    {
+      "role": "person",
+      "at": "2026-11-05T09:00",
+      "text": "เตือนให้โทรหาแม่ห้าโมงเย็นนะ"
+    },
+    {
+      "role": "agent",
+      "at": "2026-11-05T09:00",
+      "text": "ได้ค่ะ จะเตือนตอน 17:00 นะคะ"
+    }
+  ],
+  "batch": [
+    {
+      "kind": "message",
+      "text": "ขอเลื่อนเป็นหกโมงเย็นแทนได้ไหม"
+    }
+  ],
+  "expect": [
+    {
+      "check": "schedules",
+      "at": "2026-11-05T18:00"
+    },
+    {
+      "check": "replies_in",
+      "lang": "th"
+    },
+    {
+      "check": "no_rejections"
+    }
+  ]
+}

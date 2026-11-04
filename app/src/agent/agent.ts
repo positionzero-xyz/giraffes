@@ -36,9 +36,9 @@ import {
   assertNever,
   CHANNEL_LANGUAGE,
   eventKey,
-  INVITE_ALPHABET,
   intentOf,
   mayspend,
+  newInviteCode,
   type Admission,
   type AgentKey,
   type EpochMs,
@@ -128,10 +128,6 @@ export type BillingDeps = {
   readonly store: BillingStore;
   readonly stripe: StripeApi | null;
 };
-
-function inviteCode(): InviteCode {
-  return Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => INVITE_ALPHABET[b % INVITE_ALPHABET.length]).join("") as InviteCode;
-}
 
 const STAFF: Seat = { cohort: "staff", half: null, code: null, inviter: null };
 
@@ -521,7 +517,7 @@ export class Agent extends DurableObject<Env> {
     const now = this.#deps.clock.now();
     try {
       for (let tries = 0; tries < 3; tries++) {
-        const code = inviteCode();
+        const code = newInviteCode();
         const r = await this.#deps.ledger.issueInvite({ issuer: agent, code, at: now, max: ADMISSION.invitesPerPerson });
         if (r === "issued") return this.#reply(view, agent, t.betaInvite(code), t.betaInvite("<code>"));
         if (r === "limit") return this.#reply(view, agent, t.inviteLimit(ADMISSION.invitesPerPerson));
@@ -568,7 +564,7 @@ export class Agent extends DurableObject<Env> {
         return { text: `${status}\n${choices.text}`, note: `${status}\n${choices.note}` };
       }
       case "invite": {
-        const code = inviteCode();
+        const code = newInviteCode();
         const r = await store.invite(agent, code, now, (now + INVITE_FOR_MS) as EpochMs);
         if (r.kind === "created") return { text: t.invite(code), note: t.invite("<code>") };
         return say(r.kind === "full" ? t.inviteFull(r.seats) : t.inviteNotOwner);

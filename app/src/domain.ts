@@ -189,6 +189,10 @@ export type InviteCode = Brand<string, "InviteCode">;
 export const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const INVITE_CODE = new RegExp(`^[${INVITE_ALPHABET}]{6,8}$`);
 
+export function newInviteCode(): InviteCode {
+  return Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => INVITE_ALPHABET[b % INVITE_ALPHABET.length]).join("") as InviteCode;
+}
+
 export function parseInviteCode(raw: string): InviteCode | null {
   const code = raw.trim().toUpperCase();
   return INVITE_CODE.test(code) ? (code as InviteCode) : null;

@@ -38,7 +38,7 @@ connect one. `POST /dev/script` with `{"user": "<name>", "turns": [<turn output>
 [<summary output>...]}` gives that person a dev lane whose next model calls return these, in order, each
 checked against the real schema. It lasts until the Worker reloads. To try the key page locally, also set
 `KEY_SECRET` (32 or more characters) and `PUBLIC_URL=http://127.0.0.1:8787`; with `DEV_MODE=1` a custom
-provider's base URL may be a loopback `http` stub.
+provider's base URL may be a loopback `http` stub. Only a dev backend may run without `KEY_SECRET`.
 
 ## Evaluate a model
 
@@ -65,9 +65,10 @@ price plus the provider's fee from our price cards, not an invoice.
    ```
 2. Set the secrets with `npx wrangler secret put <NAME>`:
    - `KEY_SECRET` (32 or more random characters) and `PUBLIC_URL` (the Worker's https URL), which turn on
-     `/key` and the key page. Every saved key is sealed under `KEY_SECRET`; to rotate it, set
-     `KEY_SECRET_PREVIOUS` to the old value, and each key is resealed on its next use. Changing it without
-     that makes every key unreadable, and each person is told once to enter theirs again.
+     `/key` and the key page. A live deploy refuses to start without `KEY_SECRET`. Every saved key is sealed
+     under it; to rotate it, see [LAUNCH.md](docs/LAUNCH.md#rotating-key_secret). A key that won't open is
+     marked unreadable and tried again as soon as the configured secret changes, so putting the right
+     secret back repairs it.
      `OWN_KEY_CAP_USD` (default 5) is the monthly limit a new key starts with.
    - `LINE_CHANNEL_SECRET` and `LINE_CHANNEL_ACCESS_TOKEN`
    - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`

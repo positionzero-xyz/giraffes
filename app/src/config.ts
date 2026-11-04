@@ -197,10 +197,12 @@ function dollars(name: string, raw: string | undefined, fallback: number, min: n
   return Math.round(usd * 1_000_000) as MicroUsd;
 }
 
-function keysConfig(env: Env, publicUrl: string | null): KeysConfig {
+/** A live deploy answers on people's own keys, so it needs the secret that seals them; a dev backend may run without. */
+function keysConfig(env: Env, publicUrl: string | null, model: Config["model"]): KeysConfig {
   const defaultCapMicro = dollars("OWN_KEY_CAP_USD", env.OWN_KEY_CAP_USD, KEY_DEFAULTS.ownCapUsd, OWN_CAP_RANGE_USD.min, OWN_CAP_RANGE_USD.max);
   if (!present(env.KEY_SECRET)) {
     if (present(env.KEY_SECRET_PREVIOUS)) throw new Error("KEY_SECRET_PREVIOUS needs KEY_SECRET");
+    if (model.backend === "live") throw new Error(`a live deploy needs KEY_SECRET (${MIN_KEY_SECRET_CHARS} or more characters), which seals the keys people save`);
     return { on: false, defaultCapMicro };
   }
   for (const name of ["KEY_SECRET", "KEY_SECRET_PREVIOUS"] as const) {
@@ -312,7 +314,7 @@ export function loadConfig(env: Env): Config {
   return {
     devMode,
     model,
-    keys: keysConfig(env, publicUrl),
+    keys: keysConfig(env, publicUrl, model),
     included: includedConfig(env, model),
     line,
     telegram,

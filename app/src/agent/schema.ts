@@ -425,6 +425,9 @@ export const MIGRATIONS: readonly string[] = [
   DROP TABLE model_key;
   ALTER TABLE model_key_next RENAME TO model_key;
   `,
+  `
+  ALTER TABLE model_key ADD COLUMN unreadable_under TEXT;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

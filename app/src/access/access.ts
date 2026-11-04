@@ -27,7 +27,7 @@ import { costOf, estimate, fits, type SpendScope } from "../policy/spend";
 import { DEFAULT_TIME_ZONE, localDate, toLocal, utcMonth } from "../policy/time";
 import { z } from "zod";
 import type { KeyPageError } from "../notices";
-import { endpointOf, open, sessionOf, type KeyDraft, type KeySecrets, type StoredKey } from "./key";
+import { endpointOf, open, secretsFingerprint, sessionOf, type KeyDraft, type KeySecrets, type StoredKey } from "./key";
 
 export type KeysConfig =
   | { readonly on: false; readonly defaultCapMicro: MicroUsd }
@@ -298,12 +298,14 @@ export class ModelAccess {
   async #key<P extends Purpose>(k: StoredKey, req: CallRequest<P>): Promise<LaneResult<P>> {
     const { store, clock, keys } = this.deps;
     const now = clock.now();
-    if (k.health.kind === "resting" && (k.health.until === null || k.health.until > now)) {
-      return { kind: "next", notice: this.#faultText(k, k.health.fault, k.health.until), transient: k.health.fault === "rate" };
+    const secrets = await secretsFingerprint(keys.on ? keys.secrets : null);
+    const h = k.health;
+    if (h.kind === "resting" && (h.until === null || h.until > now) && !(h.fault === "unreadable" && h.under !== secrets)) {
+      return { kind: "next", notice: this.#faultText(k, h.fault, h.until), transient: h.fault === "rate" };
     }
     const agent = this.#agent();
     const opened = keys.on ? await open(keys.secrets, agent, k) : ({ kind: "unreadable" } as const);
-    if (opened.kind === "unreadable") return this.#rested(k, "unreadable", null, false);
+    if (opened.kind === "unreadable") return this.#rested(k, "unreadable", null, false, secrets);
     if (opened.kind === "resealed" && !store.reseal(opened.again, k.revision)) return { kind: "next", transient: true };
     const route = routeFor({ kind: "key", provider: k.provider, model: k.model }, req.purpose);
     const user = this.#fit(route, k.mode, req);
@@ -355,7 +357,7 @@ export class ModelAccess {
    * Rests the key and says what the lane did: nothing when the key was replaced or removed while this call ran (the
    * batch retries on the new key), else the notice went out now, or the reply names the problem.
    */
-  #rested(k: StoredKey, fault: KeyFault, retryAfterMs: number | null, transient: boolean): Next {
+  #rested(k: StoredKey, fault: KeyFault, retryAfterMs: number | null, transient: boolean, under: string | null = null): Next {
     const { store, clock } = this.deps;
     const now = clock.now();
     const failures = k.health.kind === "resting" ? k.health.failures : 0;
@@ -363,7 +365,7 @@ export class ModelAccess {
     const until = rest === null ? null : ((now + rest) as EpochMs);
     const text = this.#faultText(k, fault, until);
     const today = localDate(now, store.agent()?.tz ?? DEFAULT_TIME_ZONE);
-    const r = store.restKey(fault, until, { key: eventKey.access(`fault:${now}`), message: { texts: [text], note: text } }, today, now, k.revision);
+    const r = store.restKey(fault, until, { key: eventKey.access(`fault:${now}`), message: { texts: [text], note: text } }, today, now, k.revision, under);
     if (r === "stale") return { kind: "next", transient: true };
     return r === "told" ? { kind: "next", told: true, transient } : { kind: "next", notice: text, transient };
   }

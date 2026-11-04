@@ -23,7 +23,7 @@ bash app/scripts/launch.sh --dry-run
 bash app/scripts/launch.sh
 ```
 
-It logs you in where needed, creates the ledger, builds and pushes the box image to Fly's registry, deploys the Worker, and sets every secret. It generates `BOX_SECRET`, `KEY_SECRET` and the Telegram webhook secret itself and never prints them, and sets `PUBLIC_URL` to the Worker's URL, where the key page lives. Changing `BOX_SECRET` later orphans every box. Changing `KEY_SECRET` makes every saved key unreadable, so each person is told once to enter theirs again; to rotate it without that, set `KEY_SECRET_PREVIOUS` to the old value first, and each key is resealed with the new secret the next time it is used. At the end it offers to provision one throwaway box on Fly and delete it, which proves the Fly path for about a cent.
+It logs you in where needed, creates the ledger, builds and pushes the box image to Fly's registry, deploys the Worker, and sets every secret. It generates `BOX_SECRET`, `KEY_SECRET` and the Telegram webhook secret itself and never prints them, and sets `PUBLIC_URL` to the Worker's URL, where the key page lives. Changing `BOX_SECRET` later orphans every box. The Worker won't start without `KEY_SECRET`. Rotate it as below; changing it any other way makes every saved key unreadable until the old secret is configured again. At the end it offers to provision one throwaway box on Fly and delete it, which proves the Fly path for about a cent.
 
 Run it again whenever you like: it keeps every generated secret, and its dry run prints the same thing twice.
 
@@ -46,6 +46,17 @@ An earlier deploy's `ANTHROPIC_API_KEY` secret is no longer read. Delete it with
 - `BOX_VOLUME_GB` (default 5) sizes each person's disk.
 - Plans and Stripe: see `docs/design/BOX.md`, "Plans and billing". `BILLING=off` until you are ready to charge.
 - To remove a person's box and data: `fly apps destroy <name>`. Their name is in the D1 table `boxes`.
+
+## Rotating KEY_SECRET
+
+Every key people save is sealed under `KEY_SECRET`, and each sealed key records a short fingerprint of the secret that sealed it.
+
+1. `npx wrangler secret put KEY_SECRET_PREVIOUS` with the current value.
+2. `npx wrangler secret put KEY_SECRET` with a new value of 32 or more random characters.
+3. Each key opens with the previous secret on its next use and is resealed with the new one in the same step. Leave `KEY_SECRET_PREVIOUS` set until every person has used their assistant at least once; a key nobody used since is still sealed with the old secret.
+4. `npx wrangler secret delete KEY_SECRET_PREVIOUS`.
+
+If a key won't open (the secret was changed without step 1, or deleted), it is marked unreadable together with the fingerprint of the secrets configured at that moment, and the person is told once a day to enter it again. Configure the right secret again, as `KEY_SECRET` or as `KEY_SECRET_PREVIOUS`, and every such key is tried again on its next use, because the configured fingerprint changed.
 
 ## Before you turn billing on
 

@@ -9,8 +9,18 @@ export type KeySecrets = { readonly current: string; readonly previous: string |
 
 export type KeyHealth =
   | { readonly kind: "ok" }
-  /** `toldOn`: the person's local date of the last notice, so they hear about it at most once a day. */
-  | { readonly kind: "resting"; readonly fault: KeyFault; readonly until: EpochMs | null; readonly failures: number; readonly toldOn: LocalDate | null };
+  /**
+   * `toldOn`: the person's local date of the last notice, so they hear about it at most once a day. `under`: for an
+   * unreadable key, the fingerprint of the secrets configured when it failed to open, so a changed secret retries it.
+   */
+  | {
+      readonly kind: "resting";
+      readonly fault: KeyFault;
+      readonly until: EpochMs | null;
+      readonly failures: number;
+      readonly toldOn: LocalDate | null;
+      readonly under: string | null;
+    };
 
 export type StoredKey = {
   readonly provider: ProviderId;
@@ -48,8 +58,19 @@ async function digest(text: string): Promise<Uint8Array> {
 
 const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 
-/** Names a secret without revealing it, so a row says which secret sealed it. */
-export const kidOf = async (secret: string): Promise<string> => hex(await digest(`kid:${secret}`)).slice(0, 12);
+const FINGERPRINT_LABEL = "giraffes key fingerprint";
+
+/** Names a secret without revealing it, a short HMAC of a fixed label, so a row says which secret sealed it. */
+export async function kidOf(secret: string): Promise<string> {
+  const k = await crypto.subtle.importKey("raw", utf8.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return hex(new Uint8Array(await crypto.subtle.sign("HMAC", k, utf8.encode(FINGERPRINT_LABEL)))).slice(0, 12);
+}
+
+/** The secrets this deploy holds, by fingerprint; "" with keys off. A key that failed to open is tried again once it changes. */
+export async function secretsFingerprint(secrets: KeySecrets | null): Promise<string> {
+  if (secrets === null) return "";
+  return [await kidOf(secrets.current), ...(secrets.previous === null ? [] : [await kidOf(secrets.previous)])].join(",");
+}
 
 async function aesKey(secret: string, agent: AgentKey): Promise<CryptoKey> {
   const base = await crypto.subtle.importKey("raw", utf8.encode(secret), "HKDF", false, ["deriveKey"]);

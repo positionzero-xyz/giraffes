@@ -210,9 +210,10 @@ type KeyCols = {
   failures: number;
   rest_until: EpochMs | null;
   told_on: LocalDate | null;
+  unreadable_under: string | null;
 };
 const KEY_COLS =
-  "provider, base_url, model, auth, mode, kid, iv, ciphertext, hint, cap_micro, backup, backup_asked_at, revision, connected_at, fault, failures, rest_until, told_on";
+  "provider, base_url, model, auth, mode, kid, iv, ciphertext, hint, cap_micro, backup, backup_asked_at, revision, connected_at, fault, failures, rest_until, told_on, unreadable_under";
 
 function toKey(r: KeyCols): StoredKey {
   return {
@@ -228,7 +229,7 @@ function toKey(r: KeyCols): StoredKey {
     backupAskedAt: r.backup_asked_at,
     revision: r.revision,
     connectedAt: r.connected_at,
-    health: r.fault === null ? { kind: "ok" } : { kind: "resting", fault: r.fault, until: r.rest_until, failures: r.failures, toldOn: r.told_on },
+    health: r.fault === null ? { kind: "ok" } : { kind: "resting", fault: r.fault, until: r.rest_until, failures: r.failures, toldOn: r.told_on, under: r.unreadable_under },
   };
 }
 
@@ -1216,7 +1217,7 @@ export class AgentStore {
          ON CONFLICT (one) DO UPDATE SET provider = excluded.provider, base_url = excluded.base_url, model = excluded.model,
            auth = excluded.auth, mode = excluded.mode, kid = excluded.kid, iv = excluded.iv, ciphertext = excluded.ciphertext,
            hint = excluded.hint, revision = excluded.revision, connected_at = excluded.connected_at,
-           fault = NULL, failures = 0, rest_until = NULL, told_on = NULL`,
+           fault = NULL, failures = 0, rest_until = NULL, told_on = NULL, unreadable_under = NULL`,
         k.provider,
         k.baseUrl,
         k.model,
@@ -1319,17 +1320,19 @@ export class AgentStore {
     today: LocalDate,
     now: EpochMs,
     expectRevision: number,
+    under: string | null = null,
   ): "stale" | "rested" | "told" {
     return this.tx(() => {
       const current = this.key();
       if (current === null || current.revision !== expectRevision) return "stale";
       const tell = current.health.kind === "ok" || current.health.toldOn !== today;
       this.sql.exec(
-        "UPDATE model_key SET fault = ?, failures = MIN(failures + 1, ?), rest_until = ?, told_on = ? WHERE revision = ?",
+        "UPDATE model_key SET fault = ?, failures = MIN(failures + 1, ?), rest_until = ?, told_on = ?, unreadable_under = ? WHERE revision = ?",
         fault,
         KEY_MAX_FAILURES,
         until,
         today,
+        under,
         expectRevision,
       );
       if (tell) this.insertMessage(notice.key, notice.message, now);
@@ -1338,7 +1341,10 @@ export class AgentStore {
   }
 
   keyHealthy(expectRevision: number): void {
-    this.sql.exec("UPDATE model_key SET fault = NULL, failures = 0, rest_until = NULL, told_on = NULL WHERE fault IS NOT NULL AND revision = ?", expectRevision);
+    this.sql.exec(
+      "UPDATE model_key SET fault = NULL, failures = 0, rest_until = NULL, told_on = NULL, unreadable_under = NULL WHERE fault IS NOT NULL AND revision = ?",
+      expectRevision,
+    );
   }
 
   recordGroup(group: AgentKey, version: number): void {

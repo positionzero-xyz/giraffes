@@ -1,5 +1,4 @@
-import type { AgentKey, Brand, EpochMs, MicroUsd } from "../domain";
-import { SPEND } from "../policy/spend";
+import type { AgentKey, Brand, EpochMs } from "../domain";
 
 export const PAID_PLANS = ["standard", "plus", "ai"] as const;
 export type PaidPlan = (typeof PAID_PLANS)[number];
@@ -37,7 +36,6 @@ export type PlanRules = {
   readonly trialDays: number;
   readonly plusSeats: number;
   readonly plusMaxSeats: number;
-  readonly aiCapMicro: MicroUsd;
 };
 
 export type Subscription = {
@@ -88,10 +86,6 @@ export function planAllowsBox(plan: PlanKind): boolean {
     case "lapsed":
       return false;
   }
-}
-
-export function apiCapOf(plan: PlanKind, rules: PlanRules): MicroUsd {
-  return plan === "ai" ? rules.aiCapMicro : SPEND.userCapMicro;
 }
 
 export const daysLeft = (endsAt: EpochMs, now: EpochMs): number => Math.max(1, Math.ceil((endsAt - now) / DAY_MS));

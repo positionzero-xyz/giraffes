@@ -51,11 +51,14 @@ import {
   type WakeupKey,
   type WakeupOrigin,
 } from "../domain";
-import { modelCallRow, type LogRow } from "../ledger/ledger";
+import { modelCallRow, type Backend, type LogRow } from "../ledger/ledger";
 import { NOTICES } from "../notices";
-import type { ModelId, Purpose } from "../model/model";
+import type { KeyFault, SchemaMode } from "../model/client";
+import type { Auth, ModelRef, ProviderId } from "../model/providers";
+import type { CallPurpose } from "../model/routes";
 import { SCHEDULE, type Firing, type NewWakeup, type PendingWakeup } from "../policy/schedule";
-import type { MonthSpend } from "../policy/spend";
+import type { MonthSpend, SpendScope } from "../policy/spend";
+import type { Sealed, StoredKey } from "../access/key";
 import { COMPACTION, compactionDue, type CompactionCommit, type CompactionInput } from "./compaction";
 import {
   nextStatus,
@@ -92,12 +95,14 @@ export type OutboxRow = OutboundMessage & {
 export type Reservation = {
   readonly id: string;
   readonly month: UtcMonth;
-  readonly purpose: Purpose;
-  readonly model: ModelId;
+  readonly scope: SpendScope;
+  readonly purpose: CallPurpose;
+  readonly model: ModelRef;
+  readonly backend: Extract<Backend, "api" | "key" | "included">;
   readonly estimate: MicroUsd;
+  /** The DO instance that made it; recovery settles only another instance's. */
+  readonly instance: string;
 };
-
-export type Settlement = { readonly reservation: Reservation; readonly cost: MicroUsd };
 
 export type OutboxView = {
   readonly id: OutboxId;
@@ -176,7 +181,60 @@ type OutboxCols = {
   choice: string | null;
   reply_only: number;
 };
-type ReservationCols = { id: string; month: UtcMonth; purpose: Purpose; model: ModelId; estimate_micro: MicroUsd };
+type ReservationCols = {
+  id: string;
+  month: UtcMonth;
+  scope: SpendScope;
+  purpose: CallPurpose;
+  model: ModelRef;
+  backend: Reservation["backend"];
+  estimate_micro: MicroUsd;
+  instance: string;
+};
+type KeyCols = {
+  provider: ProviderId;
+  base_url: string;
+  model: string;
+  auth: Auth;
+  mode: SchemaMode;
+  kid: string;
+  iv: ArrayBuffer;
+  ciphertext: ArrayBuffer;
+  hint: string;
+  cap_micro: MicroUsd;
+  backup: number;
+  backup_asked_at: EpochMs | null;
+  revision: number;
+  connected_at: EpochMs;
+  fault: KeyFault | null;
+  failures: number;
+  rest_until: EpochMs | null;
+  told_at: EpochMs | null;
+};
+const KEY_COLS =
+  "provider, base_url, model, auth, mode, kid, iv, ciphertext, hint, cap_micro, backup, backup_asked_at, revision, connected_at, fault, failures, rest_until, told_at";
+
+function toKey(r: KeyCols): StoredKey {
+  return {
+    provider: r.provider,
+    baseUrl: r.base_url,
+    model: r.model,
+    auth: r.auth,
+    mode: r.mode,
+    sealed: { kid: r.kid, iv: new Uint8Array(r.iv), ciphertext: new Uint8Array(r.ciphertext) },
+    hint: r.hint,
+    capMicro: r.cap_micro,
+    backup: r.backup === 1,
+    backupAskedAt: r.backup_asked_at,
+    revision: r.revision,
+    connectedAt: r.connected_at,
+    health: r.fault === null ? { kind: "ok" } : { kind: "resting", fault: r.fault, until: r.rest_until, failures: r.failures, toldAt: r.told_at },
+  };
+}
+
+/** A key as the store saves it: sealed, with the schema mode its provider's probe decided. */
+export type NewKey = Omit<StoredKey, "backup" | "backupAskedAt" | "revision" | "health">;
+
 type BoxCols = {
   name: BoxName;
   host: BoxHostKind;
@@ -213,6 +271,18 @@ const LOG_RETRY_MAX_MS = 60 * 60 * 1000;
 const COMPACTION_RETRY_BASE_MS = 5 * 60 * 1000;
 const COMPACTION_RETRY_MAX_MS = DAY_MS;
 const TASK_IDLE_MS = 30 * DAY_MS;
+const KEY_MAX_FAILURES = 20;
+
+const toReservation = (r: ReservationCols): Reservation => ({
+  id: r.id,
+  month: r.month,
+  scope: r.scope,
+  purpose: r.purpose,
+  model: r.model,
+  backend: r.backend,
+  estimate: r.estimate_micro,
+  instance: r.instance,
+});
 
 function fromJson<T>(text: string): T {
   return JSON.parse(text);
@@ -377,7 +447,7 @@ export class AgentStore {
     return written > 0 ? "inserted" : "duplicate";
   }
 
-  recover(now: EpochMs): Batch | null {
+  recover(now: EpochMs, instance: string): Batch | null {
     const agent = this.agent();
     if (!agent) return null;
     return this.tx(() => {
@@ -390,11 +460,14 @@ export class AgentStore {
       if (!poisoned) this.sql.exec("UPDATE inbox SET status = 'pending' WHERE status = 'processing'");
       this.sql.exec("UPDATE outbox SET status = 'pending', in_doubt = 1 WHERE status = 'sending'");
       const open = this.sql
-        .exec<ReservationCols>("SELECT id, month, purpose, model, estimate_micro FROM reservation")
+        .exec<ReservationCols>(
+          "SELECT id, month, scope, purpose, model, backend, estimate_micro, instance FROM reservation WHERE instance != ?",
+          instance,
+        )
         .toArray()
-        .map((r): Reservation => ({ id: r.id, month: r.month, purpose: r.purpose, model: r.model, estimate: r.estimate_micro }));
+        .map(toReservation);
       for (const r of open) {
-        this.settleRow({ reservation: r, cost: r.estimate });
+        this.settleRow(r, r.estimate);
         this.insertLogs(
           [
             modelCallRow({
@@ -402,7 +475,7 @@ export class AgentStore {
               agent: agent.key,
               purpose: r.purpose,
               model: r.model,
-              backend: "api",
+              backend: r.backend,
               status: "recovered_after_crash",
               estimate: r.estimate,
               cost: r.estimate,
@@ -440,19 +513,18 @@ export class AgentStore {
     });
   }
 
-  releaseBatch(keys: readonly EventKey[], readyAt: EpochMs, settle: Settlement | null, logs: readonly LogRow[], now: EpochMs): void {
+  releaseBatch(keys: readonly EventKey[], readyAt: EpochMs, logs: readonly LogRow[], now: EpochMs): void {
     this.tx(() => {
       this.sql.exec(
         `UPDATE inbox SET status = 'pending', ready_at = ? WHERE status = 'processing' AND event_key IN (${placeholders(keys.length)})`,
         readyAt,
         ...keys,
       );
-      if (settle) this.settleRow(settle);
       this.insertLogs(logs, now);
     });
   }
 
-  toldToday(outcome: "refused_budget" | "lapsed", dayStart: EpochMs): boolean {
+  toldToday(outcome: "refused_budget" | "lapsed" | "no_access", dayStart: EpochMs): boolean {
     return (
       this.sql.exec("SELECT 1 FROM inbox WHERE outcome = ? AND finished_at >= ? AND kind = 'message' LIMIT 1", outcome, dayStart).toArray()
         .length > 0
@@ -609,7 +681,7 @@ export class AgentStore {
       .map(toWakeup);
   }
 
-  commitTurn(commit: TurnCommit, settle: Settlement | null, logs: readonly LogRow[], now: EpochMs, box: Box | null = null): void {
+  commitTurn(commit: TurnCommit, logs: readonly LogRow[], now: EpochMs, box: Box | null = null): void {
     const [firstKey] = commit.batchKeys;
     this.tx(() => {
       if (box) this.writeBox(box);
@@ -652,7 +724,6 @@ export class AgentStore {
         now,
         ...commit.batchKeys,
       );
-      if (settle) this.settleRow(settle);
       this.insertLogs(logs, now);
     });
   }
@@ -849,12 +920,12 @@ export class AgentStore {
     });
   }
 
-  private insertMessage(key: EventKey, message: NoteMessage, now: EpochMs): void {
+  private insertMessage(key: EventKey, message: NoteMessage, now: EpochMs, choice: string | null = null): void {
     this.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES ('note', ?, ?, ?)", message.note, now, key);
     this.insertOutbox(
       crypto.randomUUID() as OutboxId,
       key,
-      { texts: message.texts, intent: "requested", triggerKind: "message", purpose: null, replyOnly: false, taskId: null, choice: null },
+      { texts: message.texts, intent: "requested", triggerKind: "message", purpose: null, replyOnly: false, taskId: null, choice },
       now,
     );
   }
@@ -1072,67 +1143,153 @@ export class AgentStore {
       .map(({ task_id, reply_only, ...r }) => ({ ...r, taskId: task_id, replyOnly: reply_only === 1, texts: fromJson<string[]>(r.texts) }));
   }
 
-  monthSpend(month: UtcMonth): MonthSpend {
+  spend(scope: SpendScope, month: UtcMonth): MonthSpend {
     const row = this.sql
-      .exec<{ spent_micro: MicroUsd; leased_micro: MicroUsd }>("SELECT spent_micro, leased_micro FROM spend_month WHERE month = ?", month)
+      .exec<{ spent_micro: MicroUsd }>("SELECT spent_micro FROM spend_month WHERE scope = ? AND month = ?", scope, month)
       .toArray()[0];
     const reserved = this.sql
-      .exec<{ micro: MicroUsd }>("SELECT COALESCE(SUM(estimate_micro), 0) AS micro FROM reservation WHERE month = ?", month)
+      .exec<{ micro: MicroUsd }>("SELECT COALESCE(SUM(estimate_micro), 0) AS micro FROM reservation WHERE scope = ? AND month = ?", scope, month)
       .one().micro;
-    const none = 0 as MicroUsd;
-    return { spent: row?.spent_micro ?? none, leased: row?.leased_micro ?? none, reserved };
+    return { spent: row?.spent_micro ?? (0 as MicroUsd), reserved };
   }
 
-  reserve(r: Reservation, eventKey: EventKey | null, now: EpochMs): void {
+  reserve(r: Reservation, now: EpochMs): void {
     this.sql.exec(
-      "INSERT INTO reservation (id, month, purpose, model, estimate_micro, event_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO reservation (id, month, scope, purpose, model, backend, estimate_micro, instance, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       r.id,
       r.month,
+      r.scope,
       r.purpose,
       r.model,
+      r.backend,
       r.estimate,
-      eventKey,
+      r.instance,
       now,
     );
   }
 
-  settle(s: Settlement, logs: readonly LogRow[], now: EpochMs): void {
+  /** One attempt's charge and its log row, in one transaction, as soon as the attempt returns. */
+  settle(r: Reservation, cost: MicroUsd, logs: readonly LogRow[], now: EpochMs): void {
     this.tx(() => {
-      this.settleRow(s);
+      this.settleRow(r, cost);
       this.insertLogs(logs, now);
     });
   }
 
-  private settleRow(s: Settlement): void {
-    this.ensureMonth(s.reservation.month);
-    this.sql.exec("UPDATE spend_month SET spent_micro = spent_micro + ? WHERE month = ?", s.cost, s.reservation.month);
-    this.sql.exec("DELETE FROM reservation WHERE id = ?", s.reservation.id);
+  private settleRow(r: Reservation, cost: MicroUsd): void {
+    this.sql.exec(
+      `INSERT INTO spend_month (scope, month, spent_micro) VALUES (?, ?, ?)
+       ON CONFLICT (scope, month) DO UPDATE SET spent_micro = spent_micro + excluded.spent_micro`,
+      r.scope,
+      r.month,
+      cost,
+    );
+    this.sql.exec("DELETE FROM reservation WHERE id = ?", r.id);
   }
 
-  private ensureMonth(month: UtcMonth): void {
-    this.sql.exec("INSERT INTO spend_month (month) VALUES (?) ON CONFLICT (month) DO NOTHING", month);
+  key(): StoredKey | null {
+    const r = this.sql.exec<KeyCols>(`SELECT ${KEY_COLS} FROM model_key`).toArray()[0];
+    return r ? toKey(r) : null;
   }
 
-  beginLease(month: UtcMonth): number {
+  /** Bumped by every save and removal, and never reset, so a ticket can tell that access changed after it was issued. */
+  keyRevision(): number {
+    return this.sql.exec<{ revision: number }>("SELECT revision FROM key_revision").one().revision;
+  }
+
+  /**
+   * Saves a key unless the access revision moved since `expectRevision`, so a slow validation can't overwrite a newer
+   * key or a removal. A replacement keeps the cap and the backup answer, and clears any fault.
+   */
+  saveKey(k: NewKey, expectRevision: number, message: { readonly key: EventKey; readonly message: NoteMessage } | null, logs: readonly LogRow[], now: EpochMs): boolean {
     return this.tx(() => {
-      this.ensureMonth(month);
-      this.sql.exec("UPDATE spend_month SET lease_pending = COALESCE(lease_pending, lease_seq + 1) WHERE month = ?", month);
-      return this.sql.exec<{ seq: number }>("SELECT lease_pending AS seq FROM spend_month WHERE month = ?", month).one().seq;
+      if (this.keyRevision() !== expectRevision) return false;
+      const revision = expectRevision + 1;
+      this.sql.exec("UPDATE key_revision SET revision = ?", revision);
+      this.sql.exec(
+        `INSERT INTO model_key (one, provider, base_url, model, auth, mode, kid, iv, ciphertext, hint, cap_micro, revision, connected_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (one) DO UPDATE SET provider = excluded.provider, base_url = excluded.base_url, model = excluded.model,
+           auth = excluded.auth, mode = excluded.mode, kid = excluded.kid, iv = excluded.iv, ciphertext = excluded.ciphertext,
+           hint = excluded.hint, revision = excluded.revision, connected_at = excluded.connected_at,
+           fault = NULL, failures = 0, rest_until = NULL, told_at = NULL`,
+        k.provider,
+        k.baseUrl,
+        k.model,
+        k.auth,
+        k.mode,
+        k.sealed.kid,
+        k.sealed.iv,
+        k.sealed.ciphertext,
+        k.hint,
+        k.capMicro,
+        revision,
+        k.connectedAt,
+      );
+      if (message) this.insertMessage(message.key, message.message, now);
+      this.insertLogs(logs, now);
+      return true;
     });
   }
 
-  grantLease(month: UtcMonth, seq: number, micro: MicroUsd): void {
+  removeKey(): boolean {
+    return this.tx(() => {
+      const removed = this.sql.exec("DELETE FROM model_key").rowsWritten > 0;
+      this.sql.exec("UPDATE key_revision SET revision = revision + 1");
+      return removed;
+    });
+  }
+
+  setKeyCap(micro: MicroUsd): boolean {
+    return this.sql.exec("UPDATE model_key SET cap_micro = ?", micro).rowsWritten > 0;
+  }
+
+  setBackup(on: boolean, now: EpochMs): boolean {
+    return this.sql.exec("UPDATE model_key SET backup = ?, backup_asked_at = COALESCE(backup_asked_at, ?)", on ? 1 : 0, now).rowsWritten > 0;
+  }
+
+  /** Asks the backup question once per key; true when this call is the one that asked. */
+  askBackup(message: NoteMessage, choice: string, key: EventKey, now: EpochMs): boolean {
+    return this.tx(() => {
+      const asked = this.sql.exec("UPDATE model_key SET backup_asked_at = ? WHERE backup_asked_at IS NULL", now).rowsWritten > 0;
+      if (asked) this.insertMessage(key, message, now, choice);
+      return asked;
+    });
+  }
+
+  reseal(again: Sealed): void {
+    this.sql.exec("UPDATE model_key SET kid = ?, iv = ?, ciphertext = ?", again.kid, again.iv, again.ciphertext);
+  }
+
+  /** The key rests after a provider fault. The person hears about it once a streak, so the notice goes out only if none did. */
+  restKey(fault: KeyFault, until: EpochMs | null, notice: { readonly key: EventKey; readonly message: NoteMessage }, now: EpochMs): void {
+    this.tx(() => {
+      const tell = this.sql.exec("SELECT 1 FROM model_key WHERE told_at IS NULL").toArray().length > 0;
+      this.sql.exec(
+        "UPDATE model_key SET fault = ?, failures = MIN(failures + 1, ?), rest_until = ?, told_at = COALESCE(told_at, ?)",
+        fault,
+        KEY_MAX_FAILURES,
+        until,
+        now,
+      );
+      if (tell) this.insertMessage(notice.key, notice.message, now);
+    });
+  }
+
+  keyHealthy(): void {
+    this.sql.exec("UPDATE model_key SET fault = NULL, failures = 0, rest_until = NULL, told_at = NULL WHERE fault IS NOT NULL");
+  }
+
+  recordGroup(group: AgentKey, version: number): void {
     this.sql.exec(
-      "UPDATE spend_month SET leased_micro = leased_micro + ?, lease_seq = ?, lease_pending = NULL WHERE month = ? AND lease_pending = ?",
-      micro,
-      seq,
-      month,
-      seq,
+      "INSERT INTO owned_group (group_key, version) VALUES (?, ?) ON CONFLICT (group_key) DO UPDATE SET version = excluded.version",
+      group,
+      version,
     );
   }
 
-  denyLease(month: UtcMonth, seq: number): void {
-    this.sql.exec("UPDATE spend_month SET lease_pending = NULL WHERE month = ? AND lease_pending = ?", month, seq);
+  ownsGroup(group: AgentKey, version: number): boolean {
+    return this.sql.exec("SELECT 1 FROM owned_group WHERE group_key = ? AND version = ?", group, version).toArray().length > 0;
   }
 
   compactionInput(): CompactionInput {
@@ -1155,10 +1312,8 @@ export class AgentStore {
     };
   }
 
-  commitCompaction(c: CompactionCommit, settle: Settlement, logs: readonly LogRow[], now: EpochMs): boolean {
+  commitCompaction(c: CompactionCommit, now: EpochMs): boolean {
     return this.tx(() => {
-      this.settleRow(settle);
-      this.insertLogs(logs, now);
       const swapped = this.sql.exec(
         `UPDATE memory SET summary = ?, through_turn_seq = ?, updated_at = ?, compaction_failures = 0, compaction_retry_at = 0
          WHERE through_turn_seq = ?`,
@@ -1180,14 +1335,10 @@ export class AgentStore {
     return this.sql.exec<{ t: EpochMs }>("SELECT compaction_retry_at AS t FROM memory").one().t;
   }
 
-  compactionFailed(now: EpochMs, settle: Settlement | null, logs: readonly LogRow[]): void {
-    this.tx(() => {
-      const { failures } = this.sql.exec<{ failures: number }>("SELECT compaction_failures AS failures FROM memory").one();
-      const backoff = Math.min(COMPACTION_RETRY_BASE_MS * 2 ** failures, COMPACTION_RETRY_MAX_MS);
-      this.sql.exec("UPDATE memory SET compaction_failures = compaction_failures + 1, compaction_retry_at = ?", now + backoff);
-      if (settle) this.settleRow(settle);
-      this.insertLogs(logs, now);
-    });
+  compactionFailed(now: EpochMs): void {
+    const { failures } = this.sql.exec<{ failures: number }>("SELECT compaction_failures AS failures FROM memory").one();
+    const backoff = Math.min(COMPACTION_RETRY_BASE_MS * 2 ** failures, COMPACTION_RETRY_MAX_MS);
+    this.sql.exec("UPDATE memory SET compaction_failures = compaction_failures + 1, compaction_retry_at = ?", now + backoff);
   }
 
   private insertLogs(rows: readonly LogRow[], now: EpochMs): void {

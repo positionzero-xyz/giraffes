@@ -8,7 +8,6 @@ import { loadConfig, type Config, type Env, type OperatorChat } from "./config";
 import { CHANNEL_IDS, personAgentKey, type AgentKey, type ChannelId, type EpochMs, type OutboxId } from "./domain";
 import { d1Ledger } from "./ledger/ledger";
 import { alertsDue, quotaAlert } from "./policy/quota";
-import { SPEND } from "./policy/spend";
 import { utcMonth } from "./policy/time";
 
 export { Agent } from "./agent/agent";
@@ -55,7 +54,7 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 async function checkLineQuota(config: Config, accessToken: string, env: Env, now: EpochMs): Promise<void> {
-  const ledger = d1Ledger(env.LEDGER, SPEND.globalCeilingMicro);
+  const ledger = d1Ledger(env.LEDGER);
   const reading = { at: now, month: utcMonth(now), ...(await lineQuota(accessToken)) };
   await ledger.recordLineQuota(reading);
   for (const percent of alertsDue(reading, await ledger.lineQuotaAlerts(reading.month))) {

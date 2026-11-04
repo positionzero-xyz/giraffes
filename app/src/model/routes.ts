@@ -32,7 +32,8 @@ export type BoxProvider = "claude";
 
 export type Source =
   | { readonly kind: "box"; readonly provider: BoxProvider }
-  | { readonly kind: "key" | "included"; readonly provider: ProviderId; readonly model: string }
+  | { readonly kind: "key"; readonly provider: ProviderId; readonly model: string }
+  | { readonly kind: "included"; readonly provider: ProviderId; readonly model: string }
   | { readonly kind: "dev"; readonly model: string };
 
 const BOX_MODEL = "claude-haiku-5-5";

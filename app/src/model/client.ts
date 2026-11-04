@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { MicroUsd } from "../domain";
 import type { Auth, Protocol, ProviderId } from "./providers";
-import type { CallPurpose, Route } from "./routes";
+import type { Route } from "./routes";
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 

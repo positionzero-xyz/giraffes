@@ -19,7 +19,9 @@ import { TASK_REJECTIONS, type UnaskedPurpose } from "../agent/tasks";
 import type { AdmissionChange, InviteCheck, SeatAnswer } from "../agent/admission";
 import type { BoxHostKind } from "../box/host";
 import type { BoxName } from "../box/names";
-import type { ModelId, Purpose, Usage } from "../model/model";
+import type { Usage } from "../model/client";
+import type { ModelRef } from "../model/providers";
+import type { CallPurpose } from "../model/routes";
 import type { QuotaReading } from "../policy/quota";
 import { REMINDER_REJECTIONS } from "../policy/schedule";
 
@@ -48,8 +50,8 @@ export type LogRow =
       readonly stream: "model_call";
       readonly id: string;
       readonly agent: AgentKey;
-      readonly purpose: Purpose;
-      readonly model: ModelId;
+      readonly purpose: CallPurpose;
+      readonly model: ModelRef;
       readonly backend: Backend;
       readonly status: ModelCallStatus;
       readonly estimateMicro: MicroUsd;
@@ -136,13 +138,15 @@ export const MODEL_CALL_STATUSES = [
   "unavailable",
   "rejected",
   "in_doubt",
+  "provider_refused",
 ] as const;
 export type ModelCallStatus = (typeof MODEL_CALL_STATUSES)[number];
 
-export const BACKENDS = ["api", "box"] as const;
+/** `api` is history: calls on our key before each person brought their own access. */
+export const BACKENDS = ["api", "box", "key", "included"] as const;
 export type Backend = (typeof BACKENDS)[number];
 
-export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "lapsed", "model_failed", "poison", "no_model", "stale", "not_admitted"] as const;
+export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "lapsed", "no_access", "model_failed", "poison", "no_model", "stale", "not_admitted"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 
 export const ACTION_REJECTIONS = [
@@ -162,8 +166,8 @@ export type UnaskedStatus = (typeof UNASKED_STATUSES)[number];
 export function modelCallRow(input: {
   readonly id: string;
   readonly agent: AgentKey;
-  readonly purpose: Purpose;
-  readonly model: ModelId;
+  readonly purpose: CallPurpose;
+  readonly model: ModelRef;
   readonly backend: Backend;
   readonly status: ModelCallStatus;
   readonly estimate: MicroUsd;
@@ -189,16 +193,6 @@ export function modelCallRow(input: {
   };
 }
 
-export type LeaseRequest = {
-  readonly agent: AgentKey;
-  readonly month: UtcMonth;
-  readonly seq: number;
-  readonly micro: MicroUsd;
-  readonly at: EpochMs;
-};
-
-export type LeaseAnswer = { readonly kind: "granted"; readonly micro: MicroUsd } | { readonly kind: "ceiling" };
-
 export type BoxClaim = {
   readonly agent: AgentKey;
   readonly name: BoxName;
@@ -216,7 +210,6 @@ export interface Ledger {
   claimSeat(req: { readonly agent: AgentKey; readonly code: InviteCode; readonly channel: ChannelId; readonly at: EpochMs; readonly caps: SeatCaps }): Promise<SeatAnswer>;
   issueInvite(req: { readonly issuer: AgentKey; readonly code: InviteCode; readonly at: EpochMs; readonly max: number }): Promise<"issued" | "taken" | "limit" | "not_enrolled">;
   append(rows: readonly LogRow[]): Promise<void>;
-  requestLease(req: LeaseRequest): Promise<LeaseAnswer>;
   claimBox(req: BoxClaim): Promise<"granted" | "full">;
   releaseBox(agent: AgentKey, at: EpochMs): Promise<void>;
   recordLineQuota(r: QuotaReading): Promise<void>;
@@ -343,7 +336,7 @@ function inviteCheck(r: InviteCols | null, caps: SeatCaps): InviteCheck {
   return { kind: "ok", cohort: r.cohort, half: r.half };
 }
 
-export function d1Ledger(db: D1Database, ceiling: MicroUsd): Ledger {
+export function d1Ledger(db: D1Database): Ledger {
   return {
     async checkInvite(req) {
       return inviteCheck(await db.prepare(INVITE_STATE).bind(req.code, req.agent).first<InviteCols>(), req.caps);
@@ -399,22 +392,6 @@ export function d1Ledger(db: D1Database, ceiling: MicroUsd): Ledger {
       for (let i = 0; i < rows.length; i += APPEND_CHUNK) {
         await db.batch(rows.slice(i, i + APPEND_CHUNK).map((row) => insertFor(db, row)));
       }
-    },
-    async requestLease(req) {
-      // One conditional INSERT: D1 has a single writer, so the ceiling check and the grant are atomic.
-      const [, granted] = await db.batch<{ micro: number }>([
-        db
-          .prepare(
-            `INSERT INTO spend_lease (agent_key, month, seq, micro, granted_at)
-             SELECT ?1, ?2, ?3, ?4, ?5
-             WHERE (SELECT COALESCE(SUM(micro), 0) FROM spend_lease WHERE month = ?2) + ?4 <= ?6
-             ON CONFLICT (agent_key, month, seq) DO NOTHING`,
-          )
-          .bind(req.agent, req.month, req.seq, req.micro, req.at, ceiling),
-        db.prepare("SELECT micro FROM spend_lease WHERE agent_key = ?1 AND month = ?2 AND seq = ?3").bind(req.agent, req.month, req.seq),
-      ]);
-      const row = granted?.results[0];
-      return row ? { kind: "granted", micro: row.micro as MicroUsd } : { kind: "ceiling" };
     },
     async claimBox(req) {
       const [, live] = await db.batch([

@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS turn_log (
   agent_key          TEXT NOT NULL,
   event_kind         TEXT NOT NULL,
   batch_size         INTEGER NOT NULL,
-  outcome            TEXT NOT NULL CHECK (outcome IN ('acted', 'quiet', 'refused_budget', 'lapsed', 'model_failed', 'poison', 'no_model', 'stale', 'not_admitted')),
+  outcome            TEXT NOT NULL CHECK (outcome IN ('acted', 'quiet', 'refused_budget', 'lapsed', 'no_access', 'model_failed', 'poison', 'no_model', 'stale', 'not_admitted')),
   refused_for_budget INTEGER NOT NULL CHECK (refused_for_budget IN (0, 1)),
   cost_micro         INTEGER NOT NULL,
   attempts           INTEGER NOT NULL,
@@ -22,10 +22,10 @@ CREATE INDEX IF NOT EXISTS turn_log_agent_time ON turn_log (agent_key, finished_
 CREATE TABLE IF NOT EXISTS model_call (
   id                 TEXT PRIMARY KEY,
   agent_key          TEXT NOT NULL,
-  purpose            TEXT NOT NULL CHECK (purpose IN ('turn', 'compaction', 'planning')),
+  purpose            TEXT NOT NULL CHECK (purpose IN ('turn', 'compaction', 'probe', 'planning')),
   model              TEXT NOT NULL,
-  backend            TEXT NOT NULL DEFAULT 'api' CHECK (backend IN ('api', 'box')),
-  status             TEXT NOT NULL CHECK (status IN ('settled', 'refused_user_cap', 'refused_global_ceiling', 'recovered_after_crash', 'unavailable', 'rejected', 'in_doubt')),
+  backend            TEXT NOT NULL DEFAULT 'api' CHECK (backend IN ('api', 'box', 'key', 'included')),
+  status             TEXT NOT NULL CHECK (status IN ('settled', 'refused_user_cap', 'refused_global_ceiling', 'recovered_after_crash', 'unavailable', 'rejected', 'in_doubt', 'provider_refused')),
   estimate_micro     INTEGER NOT NULL,
   cost_micro         INTEGER NOT NULL,
   input_tokens       INTEGER NOT NULL,
@@ -155,16 +155,6 @@ CREATE TABLE IF NOT EXISTS line_quota_alert (
   at      INTEGER NOT NULL,
   PRIMARY KEY (month, percent)
 );
-
-CREATE TABLE IF NOT EXISTS spend_lease (
-  agent_key  TEXT NOT NULL,
-  month      TEXT NOT NULL,
-  seq        INTEGER NOT NULL,
-  micro      INTEGER NOT NULL,
-  granted_at INTEGER NOT NULL,
-  PRIMARY KEY (agent_key, month, seq)
-);
-CREATE INDEX IF NOT EXISTS spend_lease_month ON spend_lease (month);
 
 CREATE TABLE IF NOT EXISTS invite_code (
   code       TEXT PRIMARY KEY,

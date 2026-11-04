@@ -64,7 +64,76 @@ export type Notices = {
   readonly betaInvite: (code: string) => string;
   readonly inviteLimit: (max: number) => string;
   readonly inviteNotEnrolled: string;
+
+  readonly noAccess: (offer: { readonly box: boolean; readonly key: boolean; readonly included: boolean }) => string;
+  readonly boxNotReady: string;
+  readonly ownCapReached: (capUsd: string) => string;
+  readonly includedCapReached: string;
+  readonly keyRefused: (provider: string) => string;
+  readonly keyNoCredit: (provider: string) => string;
+  readonly keyNoModel: (provider: string, model: string) => string;
+  readonly keyRateLimited: (provider: string, untilLocal: string) => string;
+  readonly keyUnreadable: string;
+  readonly keysOff: string;
+  readonly keyLink: (link: string) => string;
+  readonly keyStatus: (s: {
+    readonly provider: string;
+    readonly model: string;
+    readonly hint: string;
+    readonly spentUsd: string;
+    readonly capUsd: string;
+    readonly approximate: boolean;
+    readonly backup: boolean | null;
+    readonly link: string;
+  }) => string;
+  readonly keyResting: string;
+  readonly keyConnected: (provider: string, model: string) => string;
+  readonly backupAsk: (provider: string) => string;
+  readonly backupButton: string;
+  readonly backupOn: string;
+  readonly backupOff: string;
+  readonly noKey: string;
+  readonly keyRemoved: string;
+  readonly keyCapSet: (capUsd: string) => string;
+  readonly keyCapRange: (minUsd: string, maxUsd: string) => string;
+  readonly pastedKey: (link: string | null) => string;
+  readonly keyPage: KeyPageText;
 };
+
+/** The key page's words, which the page picks by the language in its link. */
+export type KeyPageText = {
+  readonly title: string;
+  readonly intro: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly baseUrl: string;
+  readonly key: string;
+  readonly connect: string;
+  readonly checking: string;
+  readonly connected: string;
+  readonly getKey: string;
+  readonly errors: Readonly<Record<KeyPageError, string>>;
+};
+
+export const KEY_PAGE_ERRORS = [
+  "bad_form",
+  "unknown_provider",
+  "bad_url",
+  "no_model",
+  "key_shape",
+  "expired",
+  "used",
+  "busy",
+  "superseded",
+  "bad_key",
+  "no_credit",
+  "bad_model",
+  "rate_limited",
+  "unreachable",
+  "no_json",
+  "over_cap",
+] as const;
+export type KeyPageError = (typeof KEY_PAGE_ERRORS)[number];
 
 /** The entries that take no argument, which a rejection reason can name. */
 export type FixedNotice = { readonly [K in keyof Notices]: Notices[K] extends string ? K : never }[keyof Notices];
@@ -168,6 +237,80 @@ const en: Notices = {
 /join ${code}`,
   inviteLimit: (max) => `You've already made all ${max} of your invites.`,
   inviteNotEnrolled: "Only people in the beta can invite someone.",
+
+  noAccess: (o) =>
+    o.box || o.key || o.included
+      ? [
+          "I need an AI to answer you, and you bring your own. Pick one:",
+          ...(o.box ? ["• Have Claude Pro or Max? Send /claude to connect it."] : []),
+          ...(o.key ? ["• Have an API key? Send /key. OpenCode Go ($10 a month, opencode.ai/go) works well."] : []),
+          ...(o.included ? ["• Or get AI included with a plan: send /plan."] : []),
+          "Your reminders still go out either way.",
+        ].join("\n")
+      : "I can't connect an AI for you yet. Your reminders still go out.",
+  boxNotReady: "Your Claude plan isn't signed in right now, so I can't answer yet. Send /claude for a sign-in link.",
+  ownCapReached: (cap) => `You've used the $${cap} monthly limit you set for your key. Send /key cap <dollars> to change it. It resets on the 1st.`,
+  includedCapReached: "Your plan's AI allowance for this month is used up. It resets on the 1st.",
+  keyRefused: (p) => `Your ${p} key was refused. Send /key to enter it again.`,
+  keyNoCredit: (p) => `Your ${p} account is out of credit. I'll try it again in an hour, or send /key to use another key.`,
+  keyNoModel: (p, m) => `${p} no longer serves ${m}. Send /key to pick another model.`,
+  keyRateLimited: (p, until) => (until ? `You've hit your ${p} usage limit. I'll use it again after ${until}.` : `You've hit your ${p} usage limit. I'll try it again later.`),
+  keyUnreadable: "I lost access to your saved key on our side, sorry. Send /key to enter it again.",
+  keysOff: "Connecting your own API key isn't available yet.",
+  keyLink: (link) => `Add your API key on this page. Never send a key in the chat. The link works once, for 15 minutes:\n${link}`,
+  keyStatus: (s) =>
+    [
+      `Your key: ${s.provider}, ${s.model}, ending ${s.hint}.`,
+      `This month: ${s.approximate ? "about " : ""}$${s.spentUsd} of your $${s.capUsd} limit.`,
+      ...(s.backup === null ? [] : [s.backup ? "It backs up your Claude plan." : "It isn't used while your Claude plan is connected. Send /key backup on to change that."]),
+      `To replace it: ${s.link}`,
+      "Send /key cap <dollars> to change the limit, or /key remove to remove it.",
+    ].join("\n"),
+  keyResting: "Your key isn't working right now. I'll try it again later.",
+  keyConnected: (p, m) => `Connected: ${p} (${m}). Your messages now use your own key.`,
+  backupAsk: (p) => `You've connected your Claude plan and a ${p} key. Use your key as a backup when your Claude plan isn't available? It only spends your key's money when your plan can't answer.`,
+  backupButton: "Use my key as backup",
+  backupOn: "OK. Your key backs up your Claude plan. Send /key backup off to stop.",
+  backupOff: "OK. Your key isn't used while your Claude plan is connected.",
+  noKey: "You haven't added an API key.",
+  keyRemoved: "Your key is removed. I've forgotten it.",
+  keyCapSet: (cap) => `Your key's monthly limit is now $${cap}.`,
+  keyCapRange: (min, max) => `The limit must be between $${min} and $${max}, such as /key cap 10.`,
+  pastedKey: (link) =>
+    [
+      "That looked like an API key, so I removed it from our chat history. Chat apps can read messages, so revoke that key at your provider and make a new one.",
+      ...(link ? [`Add the new key on this page instead, never in the chat:\n${link}`] : []),
+    ].join("\n"),
+  keyPage: {
+    title: "Connect your AI",
+    intro: "Your key is encrypted and kept only for your assistant. Send /key remove in the chat to delete it at any time.",
+    provider: "Provider",
+    model: "Model",
+    baseUrl: "Base URL (https)",
+    key: "API key",
+    connect: "Connect",
+    checking: "Checking your key with one tiny request…",
+    connected: "Connected. You can go back to the chat.",
+    getKey: "Get a key",
+    errors: {
+      bad_form: "Something in the form is missing. Check it and try again.",
+      unknown_provider: "Pick a provider from the list.",
+      bad_url: "The base URL must be an https address.",
+      no_model: "Type the model to use.",
+      key_shape: "That doesn't look like a key for this provider. Check you copied all of it.",
+      expired: "This link has expired. Send /key in the chat for a new one.",
+      used: "This link was already used. Send /key in the chat for a new one.",
+      busy: "Still checking the key from your last try. Wait a moment.",
+      superseded: "Your key changed in the meantime, so this one wasn't saved. Send /key for a new link.",
+      bad_key: "The provider refused that key. Send /key in the chat for a new link and try again.",
+      no_credit: "The provider says that account has no credit. Top it up, then send /key for a new link.",
+      bad_model: "The provider doesn't serve that model. Send /key for a new link and pick another.",
+      rate_limited: "The provider is limiting that key right now. Send /key for a new link and try later.",
+      unreachable: "I couldn't reach the provider. Send /key for a new link and try again.",
+      no_json: "That model couldn't answer in the format I need. Send /key for a new link and pick another model.",
+      over_cap: "Your key's monthly limit is used up, so I couldn't check it. Send /key cap <dollars> to raise it.",
+    },
+  },
 };
 
 const th: Notices = {
@@ -267,6 +410,80 @@ const th: Notices = {
 /join ${code}`,
   inviteLimit: (max) => `ใช้สิทธิ์เชิญครบ ${max} คนแล้วค่ะ`,
   inviteNotEnrolled: "เฉพาะคนที่อยู่ในรุ่นทดลองเท่านั้นที่เชิญคนอื่นได้ค่ะ",
+
+  noAccess: (o) =>
+    o.box || o.key || o.included
+      ? [
+          "ต้องมี AI ถึงจะตอบคุณได้ค่ะ และคุณใช้ AI ของคุณเองได้ เลือกได้เลยนะคะ",
+          ...(o.box ? ["• มี Claude Pro หรือ Max ไหมคะ ส่ง /claude เพื่อเชื่อมต่อ"] : []),
+          ...(o.key ? ["• มี API key ไหมคะ ส่ง /key ได้เลย OpenCode Go (เดือนละ $10 ที่ opencode.ai/go) ใช้ได้ดีค่ะ"] : []),
+          ...(o.included ? ["• หรือเลือกแพ็กเกจที่รวม AI ไว้ให้ ส่ง /plan"] : []),
+          "การแจ้งเตือนที่คุณขอไว้ยังส่งถึงคุณตามปกติค่ะ",
+        ].join("\n")
+      : "ตอนนี้ยังเชื่อม AI ให้ไม่ได้ค่ะ แต่การแจ้งเตือนที่คุณขอไว้ยังส่งถึงคุณตามปกตินะคะ",
+  boxNotReady: "ตอนนี้ Claude ของคุณยังไม่ได้ลงชื่อเข้าใช้ เลยยังตอบไม่ได้ค่ะ ส่ง /claude เพื่อรับลิงก์ลงชื่อเข้าใช้นะคะ",
+  ownCapReached: (cap) => `ใช้ key ของคุณครบวงเงิน $${cap} ต่อเดือนที่ตั้งไว้แล้วค่ะ ส่ง /key cap <จำนวนดอลลาร์> เพื่อเปลี่ยน วงเงินจะเริ่มใหม่วันที่ 1 ค่ะ`,
+  includedCapReached: "โควตา AI ในแพ็กเกจของคุณเดือนนี้หมดแล้วค่ะ จะเริ่มใหม่วันที่ 1",
+  keyRefused: (p) => `${p} ไม่รับ key ของคุณค่ะ ส่ง /key เพื่อใส่ใหม่นะคะ`,
+  keyNoCredit: (p) => `บัญชี ${p} ของคุณเครดิตหมดแล้วค่ะ จะลองใหม่อีกครั้งในอีกหนึ่งชั่วโมง หรือส่ง /key เพื่อใช้ key อื่นก็ได้ค่ะ`,
+  keyNoModel: (p, m) => `${p} ไม่มีโมเดล ${m} ให้ใช้แล้วค่ะ ส่ง /key เพื่อเลือกโมเดลอื่นนะคะ`,
+  keyRateLimited: (p, until) => (until ? `ใช้ ${p} ครบโควตาช่วงนี้แล้วค่ะ จะกลับมาใช้อีกครั้งหลัง ${until} นะคะ` : `ใช้ ${p} ครบโควตาช่วงนี้แล้วค่ะ จะลองใหม่ภายหลังนะคะ`),
+  keyUnreadable: "ขอโทษค่ะ ฝั่งเราเปิด key ที่บันทึกไว้ไม่ได้แล้ว ส่ง /key เพื่อใส่ใหม่นะคะ",
+  keysOff: "ตอนนี้ยังเชื่อม API key ของคุณเองไม่ได้ค่ะ",
+  keyLink: (link) => `ใส่ API key ของคุณที่หน้านี้นะคะ อย่าส่ง key ในแชตเด็ดขาด ลิงก์ใช้ได้ครั้งเดียว ภายใน 15 นาทีค่ะ\n${link}`,
+  keyStatus: (s) =>
+    [
+      `key ของคุณ: ${s.provider}, ${s.model}, ลงท้ายด้วย ${s.hint}`,
+      `เดือนนี้ใช้ไป ${s.approximate ? "ประมาณ " : ""}$${s.spentUsd} จากวงเงิน $${s.capUsd}`,
+      ...(s.backup === null ? [] : [s.backup ? "key นี้เป็นตัวสำรองของ Claude ค่ะ" : "ระหว่างที่เชื่อม Claude อยู่ จะไม่ใช้ key นี้ค่ะ ส่ง /key backup on ถ้าอยากให้ใช้เป็นตัวสำรอง"]),
+      `เปลี่ยน key ได้ที่: ${s.link}`,
+      "ส่ง /key cap <จำนวนดอลลาร์> เพื่อเปลี่ยนวงเงิน หรือ /key remove เพื่อลบ key ค่ะ",
+    ].join("\n"),
+  keyResting: "ตอนนี้ key ของคุณยังใช้ไม่ได้ค่ะ จะลองใหม่ภายหลังนะคะ",
+  keyConnected: (p, m) => `เชื่อมต่อแล้วค่ะ: ${p} (${m}) ต่อจากนี้ข้อความของคุณจะใช้ key ของคุณเองนะคะ`,
+  backupAsk: (p) => `คุณเชื่อมทั้ง Claude และ key ของ ${p} ไว้แล้ว ให้ใช้ key เป็นตัวสำรองตอนที่ Claude ใช้ไม่ได้ไหมคะ จะเสียเงินจาก key ก็ต่อเมื่อ Claude ตอบไม่ได้เท่านั้นค่ะ`,
+  backupButton: "ใช้ key เป็นตัวสำรอง",
+  backupOn: "ได้ค่ะ key ของคุณจะเป็นตัวสำรองของ Claude ส่ง /key backup off ถ้าอยากหยุด",
+  backupOff: "ได้ค่ะ ระหว่างที่เชื่อม Claude อยู่ จะไม่ใช้ key ของคุณนะคะ",
+  noKey: "ยังไม่ได้ใส่ API key ไว้ค่ะ",
+  keyRemoved: "ลบ key ของคุณแล้วค่ะ ไม่ได้เก็บไว้อีก",
+  keyCapSet: (cap) => `ตั้งวงเงินต่อเดือนของ key เป็น $${cap} แล้วค่ะ`,
+  keyCapRange: (min, max) => `วงเงินต้องอยู่ระหว่าง $${min} ถึง $${max} ค่ะ เช่น /key cap 10`,
+  pastedKey: (link) =>
+    [
+      "ข้อความนั้นดูเหมือน API key เลยลบออกจากประวัติแชตแล้วค่ะ แอปแชตอ่านข้อความได้ เพราะฉะนั้นช่วยยกเลิก key นั้นที่ผู้ให้บริการ แล้วสร้าง key ใหม่นะคะ",
+      ...(link ? [`แล้วใส่ key ใหม่ที่หน้านี้แทน อย่าส่งในแชตนะคะ\n${link}`] : []),
+    ].join("\n"),
+  keyPage: {
+    title: "เชื่อมต่อ AI ของคุณ",
+    intro: "key ของคุณจะถูกเข้ารหัสและเก็บไว้ใช้กับผู้ช่วยของคุณเท่านั้น ส่ง /key remove ในแชตเพื่อลบได้ทุกเมื่อค่ะ",
+    provider: "ผู้ให้บริการ",
+    model: "โมเดล",
+    baseUrl: "Base URL (https)",
+    key: "API key",
+    connect: "เชื่อมต่อ",
+    checking: "กำลังตรวจ key ด้วยคำขอเล็กๆ หนึ่งครั้งค่ะ…",
+    connected: "เชื่อมต่อแล้วค่ะ กลับไปที่แชตได้เลย",
+    getKey: "สมัครรับ key",
+    errors: {
+      bad_form: "ข้อมูลในฟอร์มยังไม่ครบค่ะ ตรวจแล้วลองใหม่อีกครั้งนะคะ",
+      unknown_provider: "เลือกผู้ให้บริการจากรายการนะคะ",
+      bad_url: "Base URL ต้องเป็นที่อยู่ https ค่ะ",
+      no_model: "พิมพ์ชื่อโมเดลที่จะใช้ด้วยนะคะ",
+      key_shape: "ดูไม่เหมือน key ของผู้ให้บริการนี้ค่ะ ลองตรวจว่าคัดลอกมาครบไหมนะคะ",
+      expired: "ลิงก์นี้หมดอายุแล้วค่ะ ส่ง /key ในแชตเพื่อรับลิงก์ใหม่นะคะ",
+      used: "ลิงก์นี้ใช้ไปแล้วค่ะ ส่ง /key ในแชตเพื่อรับลิงก์ใหม่นะคะ",
+      busy: "ยังตรวจ key จากครั้งก่อนอยู่ค่ะ รอสักครู่นะคะ",
+      superseded: "key ของคุณเปลี่ยนไประหว่างนี้ เลยไม่ได้บันทึก key นี้ค่ะ ส่ง /key เพื่อรับลิงก์ใหม่นะคะ",
+      bad_key: "ผู้ให้บริการไม่รับ key นี้ค่ะ ส่ง /key ในแชตเพื่อรับลิงก์ใหม่แล้วลองอีกครั้งนะคะ",
+      no_credit: "ผู้ให้บริการแจ้งว่าบัญชีนี้ไม่มีเครดิตค่ะ เติมเครดิตแล้วส่ง /key เพื่อรับลิงก์ใหม่นะคะ",
+      bad_model: "ผู้ให้บริการไม่มีโมเดลนั้นค่ะ ส่ง /key เพื่อรับลิงก์ใหม่แล้วเลือกโมเดลอื่นนะคะ",
+      rate_limited: "ตอนนี้ผู้ให้บริการจำกัดการใช้ key นี้อยู่ค่ะ ส่ง /key เพื่อรับลิงก์ใหม่แล้วลองภายหลังนะคะ",
+      unreachable: "ติดต่อผู้ให้บริการไม่ได้ค่ะ ส่ง /key เพื่อรับลิงก์ใหม่แล้วลองอีกครั้งนะคะ",
+      no_json: "โมเดลนี้ตอบในรูปแบบที่ต้องการไม่ได้ค่ะ ส่ง /key เพื่อรับลิงก์ใหม่แล้วเลือกโมเดลอื่นนะคะ",
+      over_cap: "key ของคุณใช้ครบวงเงินเดือนนี้แล้ว เลยยังตรวจไม่ได้ค่ะ ส่ง /key cap <จำนวนดอลลาร์> เพื่อเพิ่มวงเงินนะคะ",
+    },
+  },
 };
 
 export const NOTICES: { readonly [L in Language]: Notices } = { en, th };

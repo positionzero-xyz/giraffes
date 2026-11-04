@@ -40,6 +40,8 @@ export const eventKey = {
   checkin: (day: LocalDate): EventKey => `checkin:${day}` as EventKey,
   box: (name: string): EventKey => `box:${name}` as EventKey,
   billing: (what: string): EventKey => `billing:${what}` as EventKey,
+  /** A message about the person's model access: a key connected, refused or removed. */
+  access: (what: string): EventKey => `access:${what}` as EventKey,
   prune: (at: EpochMs): EventKey => `prune:${at}` as EventKey,
 } as const;
 

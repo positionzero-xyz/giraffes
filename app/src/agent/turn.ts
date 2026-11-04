@@ -25,9 +25,9 @@ import {
   type TimeZone,
   type WakeupKey,
 } from "../domain";
-import { modelCallRow, type ActionRejection, type LogRow, type TurnOutcome } from "../ledger/ledger";
+import type { ActionRejection, LogRow, TurnOutcome } from "../ledger/ledger";
 import { NOTICES, type FixedNotice, type Notices } from "../notices";
-import type { ModelId, Usage } from "../model/model";
+import type { PromptParts, PromptSection } from "../model/prompt";
 import {
   admitReminder,
   checkinWakeup,
@@ -190,22 +190,35 @@ function renderTask(t: TurnView["openTasks"][number]): string {
   return `- ${t.ref} (${t.kind}): ${t.title}.${t.proposal ? ` Plan ${t.proposal} offered.` : ""}`;
 }
 
-export function renderUser(view: TurnView): string {
-  const tasks = view.openTasks.length ? view.openTasks.map(renderTask).join("\n") : "(none)";
-  const memory = [view.summary || "(nothing yet)", ...view.notes.map((n) => `- ${n}`)].join("\n");
-  const pending = view.pending.length ? view.pending.map((w) => renderPending(w, view.tz)).join("\n") : "(none)";
-  const conversation = view.recent.length
-    ? view.recent.map((r) => `[${human(r.at, view.tz)}] ${SPEAKER[r.role]} ${r.text}`).join("\n")
-    : "(no earlier messages)";
-  return [
-    `## Now\n${human(view.now, view.tz)} (${weekday(view.now, view.tz)}), ${view.tz}\nLanguage for notices: ${view.language}`,
-    `## Memory\n${memory}`,
-    `## Pending wake-ups\n${pending}`,
-    `## Open tasks\n${tasks}`,
-    `## Unasked messages left today: ${view.unaskedLeftToday}`,
-    `## Conversation\n${conversation}`,
-    `## New\n${view.batch.items.map((i) => renderEvent(i.event, view.tz)).join("\n")}`,
-  ].join("\n\n");
+/** What a turn prompt always keeps whole, so every route's budget can hold it. */
+export const PROMPT_CAPS = { messageChars: 2_000, batchChars: 8_000 } as const;
+
+function renderBatch(view: TurnView): string[] {
+  let left: number = PROMPT_CAPS.batchChars;
+  return view.batch.items.map((i) => {
+    const line = renderEvent(i.event, view.tz);
+    const cut = line.length > Math.min(PROMPT_CAPS.messageChars, left) ? clip(line, Math.max(1, Math.min(PROMPT_CAPS.messageChars, left))) : line;
+    left = Math.max(0, left - cut.length);
+    return cut;
+  });
+}
+
+const keep = (title: string, lines: readonly string[]): PromptSection => ({ title, keep: lines, trim: [], dropRank: 0 });
+
+/** The turn prompt as sections: the conversation, then notes, are what a smaller route's budget trims first. */
+export function renderUser(view: TurnView): PromptParts {
+  const conversation = view.recent.map((r) => `[${human(r.at, view.tz)}] ${SPEAKER[r.role]} ${r.text}`);
+  return {
+    sections: [
+      keep("Now", [`${human(view.now, view.tz)} (${weekday(view.now, view.tz)}), ${view.tz}`, `Language for notices: ${view.language}`]),
+      { title: "Memory", keep: [view.summary || "(nothing yet)"], trim: view.notes.map((n) => `- ${n}`), dropRank: 2 },
+      keep("Pending wake-ups", view.pending.length ? view.pending.map((w) => renderPending(w, view.tz)) : ["(none)"]),
+      keep("Open tasks", view.openTasks.length ? view.openTasks.map(renderTask) : ["(none)"]),
+      keep(`Unasked messages left today: ${view.unaskedLeftToday}`, []),
+      conversation.length ? { title: "Conversation", keep: [], trim: conversation, dropRank: 1 } : keep("Conversation", ["(no earlier messages)"]),
+      keep("New", renderBatch(view)),
+    ],
+  };
 }
 
 export type NewTurn = TurnRow & { readonly eventKey: EventKey };
@@ -525,7 +538,8 @@ export type NoModelReason =
   | { readonly kind: "block" }
   | { readonly kind: "ignored" }
   | { readonly kind: "stale_lifecycle" }
-  | { readonly kind: "refused_budget"; readonly alreadyToldToday: boolean }
+  | { readonly kind: "over_cap"; readonly scope: "byok" | "included" | "included_ceiling"; readonly capUsd: string; readonly alreadyToldToday: boolean }
+  | { readonly kind: "no_access"; readonly text: string; readonly alreadyToldToday: boolean }
   | { readonly kind: "lapsed"; readonly alreadyToldToday: boolean }
   | { readonly kind: "model_failed" }
   | { readonly kind: "poison" }
@@ -566,9 +580,15 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     case "stale_lifecycle":
       outcome = "stale";
       break;
-    case "refused_budget":
+    case "over_cap": {
       outcome = "refused_budget";
-      text = textWithoutModel(view, why.alreadyToldToday ? null : t.monthlyLimit);
+      const notice = why.scope === "byok" ? t.ownCapReached(why.capUsd) : why.scope === "included" ? t.includedCapReached : t.monthlyLimit;
+      text = textWithoutModel(view, why.alreadyToldToday ? null : notice);
+      break;
+    }
+    case "no_access":
+      outcome = "no_access";
+      text = textWithoutModel(view, why.alreadyToldToday ? null : why.text);
       break;
     case "lapsed":
       outcome = "lapsed";
@@ -642,18 +662,8 @@ function planAdmissionTurn(view: TurnView, why: Extract<NoModelReason, { kind: "
   };
 }
 
-export type TurnCall =
-  | {
-      readonly kind: "settled";
-      readonly reservationId: string;
-      readonly model: ModelId;
-      readonly estimate: MicroUsd;
-      readonly cost: MicroUsd;
-      readonly usage: Usage | null;
-    }
-  | { readonly kind: "refused"; readonly scope: "user_cap" | "global_ceiling"; readonly model: ModelId; readonly estimate: MicroUsd }
-  | { readonly kind: "box"; readonly id: string; readonly model: ModelId; readonly usage: Usage | null }
-  | { readonly kind: "none" };
+/** What a turn's model call cost; its model_call rows were written when each attempt settled. */
+export type TurnCall = { readonly kind: "served"; readonly costMicro: MicroUsd } | { readonly kind: "none" };
 
 export function logsForTurn(input: {
   readonly agent: AgentKey;
@@ -674,66 +684,12 @@ export function logsForTurn(input: {
       batchSize: view.batch.items.length,
       outcome: commit.outcome,
       refusedForBudget: commit.outcome === "refused_budget",
-      costMicro: call.kind === "settled" ? call.cost : NO_COST,
+      costMicro: call.kind === "served" ? call.costMicro : NO_COST,
       attempts: Math.max(...view.batch.items.map((i) => i.attempts)),
       startedAt: input.startedAt,
       finishedAt: input.now,
     },
   ];
-  switch (call.kind) {
-    case "settled":
-      rows.push(
-        modelCallRow({
-          id: call.reservationId,
-          agent,
-          purpose: "turn",
-          model: call.model,
-          backend: "api",
-          status: "settled",
-          estimate: call.estimate,
-          cost: call.cost,
-          usage: call.usage,
-          at: input.now,
-        }),
-      );
-      break;
-    case "refused":
-      rows.push(
-        modelCallRow({
-          id: `refused:${turnId}`,
-          agent,
-          purpose: "turn",
-          model: call.model,
-          backend: "api",
-          status: call.scope === "user_cap" ? "refused_user_cap" : "refused_global_ceiling",
-          estimate: call.estimate,
-          cost: NO_COST,
-          usage: null,
-          at: input.now,
-        }),
-      );
-      break;
-    case "box":
-      rows.push(
-        modelCallRow({
-          id: call.id,
-          agent,
-          purpose: "turn",
-          model: call.model,
-          backend: "box",
-          status: "settled",
-          estimate: NO_COST,
-          cost: NO_COST,
-          usage: call.usage,
-          at: input.now,
-        }),
-      );
-      break;
-    case "none":
-      break;
-    default:
-      assertNever(call);
-  }
   rows.push(
     ...commit.rejected.map((r, i): LogRow => ({ stream: "rejection", id: `${turnId}|${i}`, agent, turnId, action: r.action, reason: r.reason, at: input.now })),
   );

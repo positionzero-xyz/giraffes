@@ -1,6 +1,5 @@
 import { z } from "zod";
-import { bridgeBody, readBridgeReply } from "../model/bridge";
-import type { ModelRequest, Usage } from "../model/model";
+import { bridgeBody, NO_USAGE, readBridgeReply, type JsonSchema, type WireResult } from "../model/client";
 import type { Fetch } from "./host";
 import type { BoxToken } from "./names";
 
@@ -9,16 +8,18 @@ export type BoxHealth =
   | { readonly kind: "unauthorized" }
   | { readonly kind: "unavailable"; readonly detail: string };
 
-export type BoxReply<T> =
-  | { readonly kind: "ok"; readonly value: T; readonly usage: Usage }
-  | { readonly kind: "failed"; readonly usage: Usage | null }
+export type BoxRequest = { readonly model: string; readonly system: string; readonly user: string; readonly jsonSchema: JsonSchema };
+
+export type BoxReply =
+  /** The CLI answered; whether the answer is valid is the caller's to decide. */
+  | { readonly kind: "reply"; readonly reply: Extract<WireResult, { kind: "reply" }> }
   | { readonly kind: "signed_out" }
   | { readonly kind: "unauthorized" }
   | { readonly kind: "unavailable"; readonly detail: string };
 
 export interface BoxClient {
   health(url: string, token: BoxToken): Promise<BoxHealth>;
-  parse<T>(url: string, token: BoxToken, req: ModelRequest<T>): Promise<BoxReply<T>>;
+  parse(url: string, token: BoxToken, req: BoxRequest): Promise<BoxReply>;
 }
 
 export const BOX_TIMEOUTS = { parseMs: 120_000, healthMs: 15_000 } as const;
@@ -50,7 +51,7 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
       return parsed.success ? { kind: "up", signedIn: parsed.data.signedIn } : { kind: "unavailable", detail: "health reply unreadable" };
     },
 
-    async parse<T>(url: string, token: BoxToken, req: ModelRequest<T>): Promise<BoxReply<T>> {
+    async parse(url, token, req) {
       let res: Response;
       let text: string;
       try {
@@ -67,8 +68,7 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
       if (res.status === 409) return { kind: "signed_out" };
       if (res.status === 401) return { kind: "unauthorized" };
       if (!res.ok) return { kind: "unavailable", detail: `parse ${res.status}` };
-      const result = readBridgeReply(jsonOrNull(text), req.schema);
-      return result.ok ? { kind: "ok", value: result.value, usage: result.usage } : { kind: "failed", usage: result.usage };
+      return { kind: "reply", reply: readBridgeReply(jsonOrNull(text)) ?? { kind: "reply", text: "", stop: "end", usage: NO_USAGE, reportedMicro: null } };
     },
   };
 }

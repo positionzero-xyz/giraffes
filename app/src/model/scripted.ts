@@ -1,42 +1,56 @@
-import type { ModelClient, ModelFailure, ModelRequest, ModelResult, Purpose, Usage } from "./model";
+import { DEV_URL_SCRIPTED } from "../access/access";
+import { OUTPUTS } from "../agent/purposes";
+import type { MicroUsd } from "../domain";
+import type { Connect, ModelClient, Usage, WireRequest, WireResult } from "./client";
+import type { CallPurpose } from "./routes";
+
+export type ScriptFailure = "invalid_output" | "refused_by_model" | "unavailable" | "rejected" | "in_doubt";
 
 export type ScriptStep =
   | { readonly kind: "output"; readonly value: unknown; readonly usage?: Partial<Usage> }
-  | { readonly kind: "fail"; readonly failure: ModelFailure }
+  | { readonly kind: "fail"; readonly failure: ScriptFailure }
   | { readonly kind: "throw" }
   | { readonly kind: "hold"; readonly then: ScriptStep };
 
 export type ScriptedModel = ModelClient & {
-  readonly calls: ReadonlyArray<{ readonly purpose: Purpose; readonly system: string; readonly user: string }>;
+  readonly calls: ReadonlyArray<{ readonly purpose: CallPurpose; readonly system: string; readonly user: string }>;
   release(): void;
   assertDone(): void;
 };
 
 const DEFAULT_USAGE: Usage = { inputTokens: 1000, outputTokens: 100, cacheWriteTokens: 0, cacheReadTokens: 0 };
-const NO_RESPONSE: ReadonlySet<ModelFailure> = new Set(["unavailable", "rejected", "in_doubt"]);
 
+/** Each failure as the wire would show it, so the real classification decides what it means. */
+const FAILURE: Readonly<Record<ScriptFailure, WireResult>> = {
+  invalid_output: { kind: "reply", text: "not json", stop: "end", usage: DEFAULT_USAGE, reportedMicro: null },
+  refused_by_model: { kind: "reply", text: "", stop: "refusal", usage: DEFAULT_USAGE, reportedMicro: null },
+  unavailable: { kind: "status", status: 529, retryAfterMs: null, billing: false },
+  rejected: { kind: "status", status: 400, retryAfterMs: null, billing: false },
+  in_doubt: { kind: "network" },
+};
+
+/** A wire client that plays canned outputs, checked against the purpose's real schema so a drifted script fails loudly. */
 export function scripted(steps: readonly ScriptStep[], opts: { readonly compaction?: readonly ScriptStep[] } = {}): ScriptedModel {
   const queue = [...steps];
   const compaction = opts.compaction ? [...opts.compaction] : queue;
-  const calls: { purpose: Purpose; system: string; user: string }[] = [];
+  const calls: { purpose: CallPurpose; system: string; user: string }[] = [];
   let released = false;
 
-  async function play<T>(step: ScriptStep, req: ModelRequest<T>): Promise<ModelResult<T>> {
+  async function play(step: ScriptStep, purpose: CallPurpose): Promise<WireResult> {
     switch (step.kind) {
       case "output": {
-        const parsed = req.schema.safeParse(step.value);
-        if (!parsed.success) throw new Error(`scripted output doesn't match the schema: ${parsed.error.message}`);
-        return { ok: true, value: parsed.data, usage: { ...DEFAULT_USAGE, ...step.usage } };
+        if (purpose !== "probe" && !OUTPUTS[purpose].safeParse(step.value).success) {
+          throw new Error(`scripted output doesn't match the schema: ${OUTPUTS[purpose].safeParse(step.value).error?.message}`);
+        }
+        return { kind: "reply", text: JSON.stringify(step.value), stop: "end", usage: { ...DEFAULT_USAGE, ...step.usage }, reportedMicro: null as MicroUsd | null };
       }
       case "fail":
-        return { ok: false, failure: step.failure, usage: NO_RESPONSE.has(step.failure) ? null : DEFAULT_USAGE };
+        return FAILURE[step.failure];
       case "throw":
         throw new Error("scripted exception from the model call");
       case "hold":
-        // A flag the test flips, not a promise the test creates: the agent never waits on a promise
-        // that belongs to another request context.
         while (!released) await new Promise((r) => setTimeout(r, 1));
-        return play(step.then, req);
+        return play(step.then, purpose);
     }
   }
 
@@ -49,11 +63,17 @@ export function scripted(steps: readonly ScriptStep[], opts: { readonly compacti
       const left = queue.length + (compaction === queue ? 0 : compaction.length);
       if (left > 0) throw new Error(`${left} scripted step(s) never used`);
     },
-    async parse<T>(req: ModelRequest<T>): Promise<ModelResult<T>> {
-      calls.push({ purpose: req.purpose, system: req.system, user: req.user });
-      const step = (req.purpose === "compaction" ? compaction : queue).shift();
-      if (!step) throw new Error(`unexpected model call #${calls.length} (${req.purpose}): the script has no step left`);
-      return play(step, req);
+    async send(req: WireRequest): Promise<WireResult> {
+      const purpose = req.route.purpose;
+      calls.push({ purpose, system: req.system, user: req.user });
+      const step = (purpose === "compaction" ? compaction : queue).shift();
+      if (!step) throw new Error(`unexpected model call #${calls.length} (${purpose}): the script has no step left`);
+      return play(step, purpose);
     },
   };
+}
+
+/** Serves the dev lane from `model` and every other endpoint through `other`. */
+export function scriptedConnect(model: ModelClient, other: Connect): Connect {
+  return (e) => (e.protocol === "bridge" && e.baseUrl === DEV_URL_SCRIPTED ? model : other(e));
 }

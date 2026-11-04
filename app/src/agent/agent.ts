@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import type { z } from "zod";
-import { apiCapOf, NO_STANDING, PAID_PLANS, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan, type Standing, type SubscriptionId } from "../billing/plan";
+import { accessOf, ModelAccess, type BoxAnswer, type BoxLane, type IncludedConfig, type KeysConfig, type Served } from "../access/access";
+import { NO_STANDING, PAID_PLANS, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan, type Standing, type SubscriptionId } from "../billing/plan";
 import { INVITE_FOR_MS, MANAGE_NOTE, planChanged, planChoices, planStatus, type Links } from "../billing/say";
 import { d1Billing, type BillingStore } from "../billing/store";
 import { parseSubscription, stripeApi, type BillingEvent, type StripeApi } from "../billing/stripe";
@@ -51,17 +51,19 @@ import {
   type Seat,
   type TimeZone,
 } from "../domain";
-import { d1Ledger, modelCallRow, type LeaseAnswer, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
+import { d1Ledger, modelCallRow, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
 import { NOTICES } from "../notices";
-import { scripted, type ScriptStep } from "../model/scripted";
-import { makeModelClient, routeOf, type ModelClient, type ModelId, type ModelResult, type Purpose, type Usage } from "../model/model";
+import { scripted, scriptedConnect, type ScriptStep } from "../model/scripted";
+import { connect, type Connect } from "../model/client";
+import type { PromptParts } from "../model/prompt";
+import { PROMPT_FLOOR_BYTES, type Purpose } from "../model/routes";
+import { devLane, DEV_URL_SCRIPTED } from "../access/access";
 import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach";
 import { inLineReserve, type QuotaReading } from "../policy/quota";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
-import { costOf, decideReservation, estimate, SPEND } from "../policy/spend";
 import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../policy/time";
 import { ADMISSION, planAdmission, type AdmissionAnswer, type AdmissionMode, type AdmissionStep } from "./admission";
-import { COMPACTION, compactionCommit, CompactionOutputSchema, planCompaction } from "./compaction";
+import { COMPACTION, compactionCommit, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import { migrate } from "./schema";
 import {
@@ -71,8 +73,6 @@ import {
   type NoteMessage,
   type OutboxRow,
   type OutboxView,
-  type Reservation,
-  type Settlement,
   type TaskSnapshot,
 } from "./store";
 import {
@@ -82,7 +82,6 @@ import {
   planWithoutModel,
   renderUser,
   TURN,
-  TurnOutputSchema,
   type Batch,
   type TurnCall,
   type TurnCommit,
@@ -98,7 +97,6 @@ const LOG_BATCHES_PER_DRAIN = 10;
 const MODEL_RETRY_BASE_MS = 30_000;
 const NO_COST = 0 as MicroUsd;
 const BOX_STEPS_PER_DRAIN = 3;
-const utf8 = new TextEncoder();
 
 export type Clock = { now(): EpochMs };
 
@@ -114,7 +112,10 @@ export type BoxDeps = {
 const boxServes = (deps: BoxDeps | null, agent: AgentKey): deps is BoxDeps => deps !== null && (deps.onlyFor === null || deps.onlyFor === agent);
 
 export type AgentDeps = {
-  readonly model: ModelClient;
+  /** Builds a wire client for an endpoint: a person's key, our included tier, or the dev bridge. */
+  readonly connect: Connect;
+  readonly keys: KeysConfig;
+  readonly included: IncludedConfig;
   readonly ledger: Ledger;
   readonly channels: ChannelRegistry;
   readonly clock: Clock;
@@ -131,15 +132,30 @@ export type BillingDeps = {
 
 const STAFF: Seat = { cohort: "staff", half: null, code: null, inviter: null };
 
-type BoxCall<T> =
-  | { readonly kind: "box_ok"; readonly value: T; readonly usage: Usage; readonly id: string; readonly model: ModelId }
-  | { readonly kind: "box_failed"; readonly usage: Usage | null; readonly id: string; readonly model: ModelId };
+/** A model call a group asks its owner to serve; the group names the ownership version it was told. */
+export type ServeRequest = {
+  readonly group: AgentKey;
+  readonly ownershipVersion: number;
+  readonly purpose: Purpose;
+  readonly system: string;
+  readonly prompt: PromptParts;
+};
 
-type ModelCall<T> =
-  | { readonly kind: "ok"; readonly value: T; readonly reservation: Reservation; readonly usage: Usage }
-  | { readonly kind: "failed"; readonly reservation: Reservation; readonly usage: Usage | null }
-  | { readonly kind: "unavailable"; readonly reservation: Reservation | null; readonly failure: "unavailable" | "rejected" | "in_doubt" }
-  | { readonly kind: "refused"; readonly scope: "user_cap" | "global_ceiling"; readonly model: ModelId; readonly estimate: MicroUsd };
+export type AccessView = {
+  readonly lanes: readonly ("box" | "key" | "included")[];
+  /** What the person's key is, never the key: the snapshot proves it stays sealed. */
+  readonly key: {
+    readonly provider: string;
+    readonly model: string;
+    readonly hint: string;
+    readonly mode: "strict" | "loose";
+    readonly sealedBytes: number;
+    readonly capMicro: MicroUsd;
+    readonly backup: boolean;
+    readonly health: string;
+  } | null;
+  readonly spentMicro: { readonly byok: MicroUsd; readonly included: MicroUsd };
+};
 
 export type AgentSnapshot = {
   readonly agent: { readonly key: AgentKey; readonly status: PersonStatus; readonly tz: TimeZone; readonly language: Language } | null;
@@ -152,6 +168,7 @@ export type AgentSnapshot = {
   readonly plan: Plan;
   readonly tasks: readonly TaskSnapshot[];
   readonly admission: Admission;
+  readonly access: AccessView;
 };
 
 export class Agent extends DurableObject<Env> {
@@ -165,6 +182,8 @@ export class Agent extends DurableObject<Env> {
   #billing: Promise<unknown> = Promise.resolve();
   /** In memory on purpose: losing it on a restart costs one more try of a box that may still be wedged. */
   #skipBoxUntil = 0;
+  /** Marks this instance's reservations, so recovery settles only those a dead instance left. */
+  readonly #instance = crypto.randomUUID();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -282,18 +301,60 @@ export class Agent extends DurableObject<Env> {
     const now = this.#deps.clock.now();
     const a = this.#store.agent();
     const box = this.#store.box();
+    const month = utcMonth(now);
+    const spent = { byok: this.#store.spend("byok", month).spent, included: this.#store.spend("included", month).spent };
     return {
       agent: a ? { key: a.key, status: a.status, tz: a.tz, language: a.language } : null,
       turns: this.#store.recentTurns(50),
       outbox: this.#store.recentOutbox(50),
       pendingWakeups: this.#store.pendingWakeups(),
       unaskedSentToday: a ? this.#store.unaskedAdmitted(localDate(now, a.tz)) : 0,
-      spendThisMonthMicro: this.#store.monthSpend(utcMonth(now)).spent,
+      spendThisMonthMicro: (spent.byok + spent.included) as MicroUsd,
       box: box ? { host: box.host, state: box.state } : null,
       plan: this.#plan(now),
       tasks: this.#store.tasks(),
       admission: this.#store.admission(),
+      access: this.#accessView(now, spent),
     };
+  }
+
+  #accessView(now: EpochMs, spentMicro: AccessView["spentMicro"]): AccessView {
+    const k = this.#store.key();
+    const plan = this.#plan(now);
+    const lanes = accessOf({
+      admitted: mayspend(this.#store.admission()),
+      plan,
+      box: this.#boxLane().state(),
+      key: k,
+      included: this.#deps.included,
+    }).lanes.map((l) => l.kind);
+    return {
+      lanes,
+      key: k && {
+        provider: k.provider,
+        model: k.model,
+        hint: k.hint,
+        mode: k.mode,
+        sealedBytes: k.sealed.ciphertext.length,
+        capMicro: k.capMicro,
+        backup: k.backup,
+        health: k.health.kind === "ok" ? "ok" : `resting:${k.health.fault}`,
+      },
+      spentMicro,
+    };
+  }
+
+  /** Runs one model call for a group this person owns, on this person's access and limits. Groups arrive in week 3. */
+  async serve(req: ServeRequest): Promise<Served<Purpose> | { readonly kind: "not_owner" }> {
+    if (!this.#store.ownsGroup(req.group, req.ownershipVersion)) return { kind: "not_owner" };
+    const plan = await this.#planNow(this.#agent().key, this.#deps.clock.now());
+    if (plan.kind === "lapsed") return { kind: "no_access", why: "nothing", told: false };
+    return this.#access().call({ purpose: req.purpose, system: req.system, prompt: req.prompt, plan });
+  }
+
+  /** Records that this person owns `group` at `version`; the group DO that week 3 adds is its only caller. */
+  async recordGroup(group: AgentKey, version: number): Promise<void> {
+    this.#store.recordGroup(group, version);
   }
 
   /** The operator takes this person out of the beta: their wake-ups are skipped and every message gets a fixed reply. */
@@ -308,10 +369,14 @@ export class Agent extends DurableObject<Env> {
     this.#deps = { ...this.#deps, ...over };
   }
 
-  /** Dev only: the next turns and compactions return these outputs, so a `wrangler dev` run can prove model-driven paths without a model. */
+  /**
+   * Dev only: this person gets a dev lane whose next turns and compactions return these outputs, so a `wrangler dev`
+   * run can prove model-driven paths without a model. Until a script is posted, a dev person has no access at all.
+   */
   script(turns: readonly unknown[], compaction: readonly unknown[]): void {
     const output = (value: unknown): ScriptStep => ({ kind: "output", value });
-    this.withDeps({ model: scripted(turns.map(output), { compaction: compaction.map(output) }) });
+    const model = scripted(turns.map(output), { compaction: compaction.map(output) });
+    this.withDeps({ connect: scriptedConnect(model, this.#deps.connect), included: devLane(DEV_URL_SCRIPTED) });
   }
 
   async #runDrain(): Promise<void> {
@@ -319,7 +384,7 @@ export class Agent extends DurableObject<Env> {
     const started = clock.now();
     try {
       await this.#phase("turns", async () => {
-        const poisoned = this.#store.recover(started);
+        const poisoned = this.#store.recover(started, this.#instance);
         if (poisoned) this.#commitPoison(poisoned);
         this.#fireDueWakeups();
         while (clock.now() - started < DRAIN_BUDGET_MS) {
@@ -386,59 +451,76 @@ export class Agent extends DurableObject<Env> {
     const a = this.#agent();
     const view = this.#view(batch, a);
     const bypass = bypassModel(view);
-    if (bypass) return this.#commit(planWithoutModel(view, bypass), view, a.key, { kind: "none" }, null);
+    if (bypass) return this.#commit(planWithoutModel(view, bypass), view, a.key, { kind: "none" });
     if (!mayspend(view.admission)) return this.#admission(view, a);
     const first = batch.items[0].event;
     if (first.kind === "choice" && first.choice.kind === "consent") {
-      return this.#commit(planWithoutModel(view, { kind: "ignored" }), view, a.key, { kind: "none" }, null);
+      return this.#commit(planWithoutModel(view, { kind: "ignored" }), view, a.key, { kind: "none" });
     }
     const command = commandOf(first);
     if (command) return this.#command(command, view, a.key);
     const plan = await this.#planNow(a.key, view.now);
     if (plan.kind === "lapsed") {
       const alreadyToldToday = this.#store.toldToday("lapsed", startOfLocalDay(view.now, view.tz));
-      return this.#commit(planWithoutModel(view, { kind: "lapsed", alreadyToldToday }), view, a.key, { kind: "none" }, null);
+      return this.#commit(planWithoutModel(view, { kind: "lapsed", alreadyToldToday }), view, a.key, { kind: "none" });
     }
 
-    const call = await this.#callModel(TURN_SYSTEM, renderUser(view), TurnOutputSchema, batch.items[0].key, a.key, plan);
-    switch (call.kind) {
-      case "box_ok":
-      case "box_failed": {
-        const commit = call.kind === "box_ok" ? planTurn(call.value, view) : planWithoutModel(view, { kind: "model_failed" });
-        return this.#commit(commit, view, a.key, { kind: "box", id: call.id, model: call.model, usage: call.usage }, null);
-      }
-      case "ok": {
-        const settle = { reservation: call.reservation, cost: costOf(call.reservation.model, call.usage) };
-        return this.#commit(planTurn(call.value, view), view, a.key, settledCall(settle, call.usage), settle);
-      }
-      case "failed": {
-        const settle = { reservation: call.reservation, cost: call.usage ? costOf(call.reservation.model, call.usage) : NO_COST };
-        return this.#commit(planWithoutModel(view, { kind: "model_failed" }), view, a.key, settledCall(settle, call.usage), settle);
-      }
-      case "refused": {
+    const served = await this.#access().call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(view), plan });
+    switch (served.kind) {
+      case "ok":
+        return this.#commit(planTurn(served.value, view), view, a.key, { kind: "served", costMicro: served.call.costMicro });
+      case "failed":
+        return this.#commit(planWithoutModel(view, { kind: "model_failed" }), view, a.key, { kind: "served", costMicro: served.call.costMicro });
+      case "over_cap": {
         const alreadyToldToday = this.#store.toldToday("refused_budget", startOfLocalDay(view.now, view.tz));
-        const commit = planWithoutModel(view, { kind: "refused_budget", alreadyToldToday });
-        return this.#commit(commit, view, a.key, { kind: "refused", scope: call.scope, model: call.model, estimate: call.estimate }, null);
+        const capUsd = usd(this.#store.key()?.capMicro ?? (0 as MicroUsd));
+        return this.#commit(planWithoutModel(view, { kind: "over_cap", scope: served.scope, capUsd, alreadyToldToday }), view, a.key, { kind: "none" });
+      }
+      case "no_access": {
+        const alreadyToldToday = served.told || this.#store.toldToday("no_access", startOfLocalDay(view.now, view.tz));
+        const text = served.why === "box_not_ready" ? NOTICES[view.language].boxNotReady : this.#onboarding(view.language, plan, a.key);
+        return this.#commit(planWithoutModel(view, { kind: "no_access", text, alreadyToldToday }), view, a.key, { kind: "none" });
       }
       case "unavailable":
-        return this.#modelUnavailable(view, a.key, call);
+        return this.#modelUnavailable(view, a.key);
       default:
-        return assertNever(call);
+        return assertNever(served);
     }
   }
 
-  #commit(
-    commit: TurnCommit,
-    view: TurnView,
-    agent: AgentKey,
-    call: TurnCall,
-    settle: Settlement | null,
-    extra: readonly LogRow[] = [],
-    box: Box | null = null,
-  ): void {
+  /** What someone with no access is offered: only what this deploy can give them. */
+  #onboarding(lang: Language, plan: Plan, agent: AgentKey): string {
+    const box = boxServes(this.#deps.box, agent) && planAllowsBox(plan.kind);
+    const included = this.#deps.included.on && this.#deps.included.who === "plan" && this.#deps.billing.config.on;
+    return NOTICES[lang].noAccess({ box, key: this.#deps.keys.on, included });
+  }
+
+  #access(): ModelAccess {
+    return new ModelAccess({
+      store: this.#store,
+      connect: this.#deps.connect,
+      box: this.#boxLane(),
+      keys: this.#deps.keys,
+      included: this.#deps.included,
+      clock: this.#deps.clock,
+      instance: this.#instance,
+    });
+  }
+
+  #boxLane(): BoxLane {
+    return {
+      state: () => {
+        const box = this.#store.box();
+        const a = this.#store.agent();
+        return box && a && boxServes(this.#deps.box, a.key) ? box.state : null;
+      },
+      parse: (req) => this.#parseOnBox(req),
+    };
+  }
+
+  #commit(commit: TurnCommit, view: TurnView, agent: AgentKey, call: TurnCall, box: Box | null = null): void {
     const now = this.#deps.clock.now();
-    const logs = [...logsForTurn({ agent, commit, view, call, startedAt: view.now, now }), ...extra];
-    this.#store.commitTurn(commit, settle, logs, now, box);
+    this.#store.commitTurn(commit, logsForTurn({ agent, commit, view, call, startedAt: view.now, now }), now, box);
   }
 
   /**
@@ -449,7 +531,7 @@ export class Agent extends DurableObject<Env> {
     if (this.#deps.admission === "open") {
       const now = this.#deps.clock.now();
       const admitted = { next: { state: "admitted", seat: STAFF, at: now }, change: "consented", ensureCheckin: checkinWakeup(now, a.tz, a.checkinLocal) } as const;
-      this.#commit(planWithoutModel(view, { kind: "admission", commit: admitted, text: null, consent: false }), view, a.key, { kind: "none" }, null);
+      this.#commit(planWithoutModel(view, { kind: "admission", commit: admitted, text: null, consent: false }), view, a.key, { kind: "none" });
       return;
     }
     let step: AdmissionStep = planAdmission(view, null);
@@ -469,7 +551,7 @@ export class Agent extends DurableObject<Env> {
       if (step.kind !== "commit") throw new Error(`planAdmission asked D1 twice: ${step.kind}`);
     }
     const why = { kind: "admission", commit: step.commit, text: step.text, consent: step.consent } as const;
-    this.#commit(planWithoutModel(view, why), view, a.key, { kind: "none" }, null);
+    this.#commit(planWithoutModel(view, why), view, a.key, { kind: "none" });
   }
 
   /** D1 is out: retry on the model's backoff, then say to try again, changing nothing. */
@@ -479,10 +561,10 @@ export class Agent extends DurableObject<Env> {
     if (attempts >= TURN.maxModelAttempts) {
       const unchanged = { next: view.admission, change: null, ensureCheckin: null };
       const why = { kind: "admission", commit: unchanged, text: NOTICES[view.language].billingBusy, consent: false } as const;
-      return this.#commit(planWithoutModel(view, why), view, agent, { kind: "none" }, null);
+      return this.#commit(planWithoutModel(view, why), view, agent, { kind: "none" });
     }
     const keys = view.batch.items.map((i) => i.key);
-    this.#store.releaseBatch(keys, (now + MODEL_RETRY_BASE_MS * 2 ** (attempts - 1)) as EpochMs, null, [], now);
+    this.#store.releaseBatch(keys, (now + MODEL_RETRY_BASE_MS * 2 ** (attempts - 1)) as EpochMs, [], now);
   }
 
   async #command(command: Command, view: TurnView, agent: AgentKey): Promise<void> {
@@ -530,7 +612,7 @@ export class Agent extends DurableObject<Env> {
   }
 
   #reply(view: TurnView, agent: AgentKey, text: string, note: string = text): void {
-    this.#commit(planWithoutModel(view, { kind: "command", text, note }), view, agent, { kind: "none" }, null);
+    this.#commit(planWithoutModel(view, { kind: "command", text, note }), view, agent, { kind: "none" });
   }
 
   async #standingNow(agent: AgentKey): Promise<{ readonly plan: Plan; readonly standing: Standing }> {
@@ -655,7 +737,7 @@ export class Agent extends DurableObject<Env> {
   async #boxReply(view: TurnView, agent: AgentKey, deps: BoxDeps | null, t: { readonly box: Box | null; readonly say: BoxSay }): Promise<void> {
     const message = deps && t.box ? await this.#boxMessage(deps, t.box, t.say) : boxMessage(t.say, view.language, null);
     const commit = planWithoutModel(view, { kind: "command", text: message.text, note: message.note });
-    this.#commit(commit, view, agent, { kind: "none" }, null, [], t.box);
+    this.#commit(commit, view, agent, { kind: "none" }, t.box);
   }
 
   async #boxMessage(deps: BoxDeps, box: Box, say: BoxSay): Promise<{ readonly text: string; readonly note: string }> {
@@ -727,116 +809,53 @@ export class Agent extends DurableObject<Env> {
     return health.kind === "unavailable" ? { kind: "down", retryable: true, detail: health.detail } : health;
   }
 
-  async #callBox<T>(system: string, user: string, schema: z.ZodType<T>, agent: AgentKey): Promise<BoxCall<T> | null> {
+  /** The box lane: the person's own plan pays, so nothing is reserved. A box that can't answer moves the call on. */
+  async #parseOnBox(req: Parameters<BoxLane["parse"]>[0]): Promise<BoxAnswer> {
     const deps = this.#deps.box;
     const box = this.#store.box();
-    if (!boxServes(deps, agent) || box?.state !== "signed_in" || this.#deps.clock.now() < this.#skipBoxUntil) return null;
-    const id = crypto.randomUUID();
-    const model = routeOf("turn").model;
-    const res = await deps.client.parse(box.url, await boxToken(deps.secret, box.name), { purpose: "turn", system, user, schema });
+    const agent = this.#agent().key;
+    if (!boxServes(deps, agent) || box?.state !== "signed_in") return { kind: "moved_on", transient: false, told: false };
+    if (this.#deps.clock.now() < this.#skipBoxUntil) return { kind: "moved_on", transient: true, told: false };
+    const res = await deps.client.parse(box.url, await boxToken(deps.secret, box.name), { model: req.model, system: req.system, user: req.user, jsonSchema: req.jsonSchema });
     const now = this.#deps.clock.now();
     const missed = (status: "rejected" | "unavailable"): LogRow =>
-      modelCallRow({ id, agent, purpose: "turn", model, backend: "box", status, estimate: NO_COST, cost: NO_COST, usage: null, at: now });
+      modelCallRow({ id: crypto.randomUUID(), agent, purpose: req.purpose, model: `claude-plan:${req.model}`, backend: "box", status, estimate: NO_COST, cost: NO_COST, usage: null, at: now });
     switch (res.kind) {
-      case "ok":
-        return { kind: "box_ok", value: res.value, usage: res.usage, id, model };
-      case "failed":
-        return { kind: "box_failed", usage: res.usage, id, model };
+      case "reply":
+        return { kind: "reply", reply: res.reply };
       case "signed_out": {
         const t = onSignedOut(box, now);
         this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [missed("rejected")], now);
-        return null;
+        return { kind: "moved_on", transient: false, told: true };
       }
       case "unauthorized":
         this.#store.applyBox(needsEnsure(box, now), null, [missed("rejected")], now);
-        return null;
+        return { kind: "moved_on", transient: true, told: false };
       case "unavailable":
         console.warn("box unavailable", res.detail);
         this.#skipBoxUntil = now + BOX.skipAfterUnavailableMs;
         this.#store.appendLogs([missed("unavailable")], now);
-        return null;
+        return { kind: "moved_on", transient: true, told: false };
       default:
         return assertNever(res);
     }
   }
 
-  async #callModel<T>(
-    system: string,
-    user: string,
-    schema: z.ZodType<T>,
-    eventKey: EventKey,
-    agent: AgentKey,
-    plan: Plan,
-  ): Promise<ModelCall<T> | BoxCall<T>> {
-    const box = planAllowsBox(plan.kind) && mayspend(this.#store.admission()) ? await this.#callBox(system, user, schema, agent) : null;
-    return box ?? this.#callApi("turn", system, user, schema, eventKey, agent, plan);
-  }
-
   #commitPoison(batch: Batch): void {
     const a = this.#agent();
     const view = this.#view(batch, a);
-    this.#commit(planWithoutModel(view, { kind: "poison" }), view, a.key, { kind: "none" }, null);
+    this.#commit(planWithoutModel(view, { kind: "poison" }), view, a.key, { kind: "none" });
   }
 
-  #modelUnavailable(view: TurnView, agent: AgentKey, call: Unavailable): void {
+  #modelUnavailable(view: TurnView, agent: AgentKey): void {
     const now = this.#deps.clock.now();
-    const { settle, logs } = closeUnavailable(call, agent, now);
     const attempts = Math.max(...view.batch.items.map((i) => i.attempts));
     const requested = intentOf(view.batch.items[0].event) === "requested";
     if (attempts >= (requested ? TURN.maxRequestedModelAttempts : TURN.maxModelAttempts)) {
-      return this.#commit(planWithoutModel(view, { kind: "model_failed" }), view, agent, { kind: "none" }, settle, logs);
+      return this.#commit(planWithoutModel(view, { kind: "model_failed" }), view, agent, { kind: "none" });
     }
     const keys = view.batch.items.map((i) => i.key);
-    this.#store.releaseBatch(keys, (now + MODEL_RETRY_BASE_MS * 2 ** (attempts - 1)) as EpochMs, settle, logs, now);
-  }
-
-  async #callApi<T>(
-    purpose: Purpose,
-    system: string,
-    user: string,
-    schema: z.ZodType<T>,
-    eventKey: EventKey | null,
-    agent: AgentKey,
-    plan: Plan,
-  ): Promise<ModelCall<T>> {
-    const route = routeOf(purpose);
-    const cap = mayspend(this.#store.admission()) ? apiCapOf(plan.kind, this.#deps.billing.config.rules) : NO_COST;
-    const now = this.#deps.clock.now();
-    const month = utcMonth(now);
-    const est = estimate(route.model, utf8.encode(system).length + utf8.encode(user).length, route.maxTokens);
-    for (;;) {
-      const decision = decideReservation(this.#store.monthSpend(month), est, cap);
-      if (decision.kind === "reserve") break;
-      if (decision.kind === "refuse") return { kind: "refused", scope: decision.scope, model: route.model, estimate: est };
-      const seq = this.#store.beginLease(month);
-      let answer: LeaseAnswer;
-      try {
-        answer = await this.#deps.ledger.requestLease({ agent, month, seq, micro: decision.chunk, at: now });
-      } catch (err) {
-        console.warn("lease request failed", err);
-        return { kind: "unavailable", reservation: null, failure: "unavailable" };
-      }
-      if (answer.kind === "ceiling") {
-        this.#store.denyLease(month, seq);
-        return { kind: "refused", scope: "global_ceiling", model: route.model, estimate: est };
-      }
-      this.#store.grantLease(month, seq, answer.micro);
-    }
-    const reservation: Reservation = { id: crypto.randomUUID(), month, purpose, model: route.model, estimate: est };
-    this.#store.reserve(reservation, eventKey, now);
-    let res: ModelResult<T>;
-    try {
-      res = await this.#deps.model.parse({ purpose, system, user, schema });
-    } catch (err) {
-      const at = this.#deps.clock.now();
-      this.#store.settle({ reservation, cost: reservation.estimate }, [callRow(agent, reservation, "in_doubt", reservation.estimate, null, at)], at);
-      throw err;
-    }
-    if (res.ok) return { kind: "ok", value: res.value, reservation, usage: res.usage };
-    if (res.failure === "unavailable" || res.failure === "rejected" || res.failure === "in_doubt") {
-      return { kind: "unavailable", reservation, failure: res.failure };
-    }
-    return { kind: "failed", reservation, usage: res.usage };
+    this.#store.releaseBatch(keys, (now + MODEL_RETRY_BASE_MS * 2 ** (attempts - 1)) as EpochMs, [], now);
   }
 
   async #deliverReady(): Promise<void> {
@@ -934,37 +953,18 @@ export class Agent extends DurableObject<Env> {
     if (!a || !mayspend(this.#store.admission()) || this.#store.compactionRetryAt() > this.#deps.clock.now()) return;
     const person = this.#plan(this.#deps.clock.now());
     if (person.kind === "lapsed") return;
-    const plan = planCompaction(this.#store.compactionInput());
+    const plan = planCompaction(this.#store.compactionInput(), PROMPT_FLOOR_BYTES.compaction - new TextEncoder().encode(COMPACTION_SYSTEM).length);
     if (!plan) return;
-    let call: ModelCall<z.infer<typeof CompactionOutputSchema>>;
+    let served: Served<"compaction">;
     try {
-      call = await this.#callApi("compaction", COMPACTION_SYSTEM, plan.user, CompactionOutputSchema, null, a.key, person);
+      served = await this.#access().call({ purpose: "compaction", system: COMPACTION_SYSTEM, prompt: plan.prompt, plan: person });
     } catch (err) {
-      this.#store.compactionFailed(this.#deps.clock.now(), null, []);
+      this.#store.compactionFailed(this.#deps.clock.now());
       throw err;
     }
     const now = this.#deps.clock.now();
-    switch (call.kind) {
-      case "ok": {
-        const cost = costOf(call.reservation.model, call.usage);
-        const logs = [callRow(a.key, call.reservation, "settled", cost, call.usage, now)];
-        this.#store.commitCompaction(compactionCommit(plan, call.value), { reservation: call.reservation, cost }, logs, now);
-        return;
-      }
-      case "failed": {
-        const cost = call.usage ? costOf(call.reservation.model, call.usage) : NO_COST;
-        this.#store.compactionFailed(now, { reservation: call.reservation, cost }, [callRow(a.key, call.reservation, "settled", cost, call.usage, now)]);
-        return;
-      }
-      case "unavailable": {
-        const { settle, logs } = closeUnavailable(call, a.key, now);
-        return this.#store.compactionFailed(now, settle, logs);
-      }
-      case "refused":
-        return this.#store.compactionFailed(now, null, []);
-      default:
-        return assertNever(call);
-    }
+    if (served.kind === "ok") this.#store.commitCompaction(compactionCommit(plan, served.value), now);
+    else if (served.kind !== "no_access") this.#store.compactionFailed(now);
   }
 
   async #flushLogs(): Promise<void> {
@@ -1006,36 +1006,13 @@ export class Agent extends DurableObject<Env> {
   }
 }
 
-type Unavailable = Extract<ModelCall<unknown>, { kind: "unavailable" }>;
-
 const DROPPED: Readonly<Record<Extract<UnaskedVerdict, { verdict: "drop" }>["reason"], UnaskedStatus>> = {
   budget: "dropped_budget",
   blocked: "dropped_blocked",
   quota: "dropped_quota",
 };
 
-function closeUnavailable(call: Unavailable, agent: AgentKey, now: EpochMs): { settle: Settlement | null; logs: LogRow[] } {
-  const r = call.reservation;
-  if (!r) return { settle: null, logs: [] };
-  const cost = call.failure === "in_doubt" ? r.estimate : NO_COST;
-  return { settle: { reservation: r, cost }, logs: [callRow(agent, r, call.failure, cost, null, now)] };
-}
-
-function settledCall(settle: Settlement, usage: Usage | null): TurnCall {
-  const { reservation, cost } = settle;
-  return { kind: "settled", reservationId: reservation.id, model: reservation.model, estimate: reservation.estimate, cost, usage };
-}
-
-function callRow(
-  agent: AgentKey,
-  r: Reservation,
-  status: "settled" | Unavailable["failure"],
-  cost: MicroUsd,
-  usage: Usage | null,
-  at: EpochMs,
-): LogRow {
-  return modelCallRow({ id: r.id, agent, purpose: r.purpose, model: r.model, backend: "api", status, estimate: r.estimate, cost, usage, at });
-}
+const usd = (micro: MicroUsd): string => (micro / 1_000_000).toFixed(2);
 
 function longDate(t: EpochMs, tz: TimeZone, lang: Language): string {
   return new Intl.DateTimeFormat(NOTICES[lang].dateLocale, { day: "numeric", month: "long", year: "numeric", timeZone: tz }).format(t);
@@ -1070,8 +1047,10 @@ function boxDeps(c: BoxConfig): BoxDeps | null {
 function defaultDeps(env: Env): AgentDeps {
   const config = loadConfig(env);
   return {
-    model: makeModelClient(config.model),
-    ledger: d1Ledger(env.LEDGER, SPEND.globalCeilingMicro),
+    connect: connect((input, init) => fetch(input, init)),
+    keys: config.keys,
+    included: config.included,
+    ledger: d1Ledger(env.LEDGER),
     channels: makeChannels(config),
     clock: { now: () => Date.now() as EpochMs },
     box: boxDeps(config.box),

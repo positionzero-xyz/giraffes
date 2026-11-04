@@ -1,5 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
+import { betaStartSql } from "../src/ledger/beta-start";
 
 const DAY = 86_400_000;
 const WEEK = 7 * DAY;
@@ -219,6 +220,23 @@ describe("gate views", () => {
 
     expect(await rows("SELECT task_kind, opened, completed FROM tasks_by_type")).toEqual([{ task_kind: "plan", opened: 3, completed: 1 }]);
     expect(await rows("SELECT task_kind, evidence, completed FROM tasks_by_evidence")).toEqual([{ task_kind: "plan", evidence: "plan_accepted", completed: 1 }]);
+  });
+
+  test("beta-codes --start sets the start once, says the old and new dates, and moves it only with --force", async () => {
+    const apply = async (startsAt: number, force: boolean) => {
+      const [report, write] = betaStartSql(startsAt, force);
+      const said = (await rows(report))[0];
+      await run(write);
+      return said;
+    };
+    const first = Date.parse("2026-11-16T00:00:00+07:00");
+    const later = Date.parse("2026-11-23T00:00:00+07:00");
+
+    expect(await apply(first, false)).toEqual({ old_start: "none", new_start: "2026-11-15T17:00:00.000Z", outcome: "set" });
+    expect(await apply(later, false)).toEqual({ old_start: "2026-11-15T17:00:00Z", new_start: "2026-11-22T17:00:00.000Z", outcome: "kept the old start: pass --force to move it" });
+    expect(await rows("SELECT starts_at FROM beta")).toEqual([{ starts_at: first }]);
+    expect(await apply(later, true)).toMatchObject({ old_start: "2026-11-15T17:00:00Z", outcome: "set" });
+    expect(await rows("SELECT starts_at FROM beta")).toEqual([{ starts_at: later }]);
   });
 
   test("every view reads", async () => {

@@ -24,6 +24,16 @@ need() { command -v "$1" >/dev/null || { echo "$1 is not installed: $2" >&2; exi
 need node "https://nodejs.org"
 need docker "https://docs.docker.com/get-docker/"
 need fly "https://fly.io/docs/flyctl/install/"
+if [ $dry = 1 ]; then
+  # Any call that slips past run() or a dry check hits these instead of a real account.
+  shims=$(mktemp -d)
+  trap 'rm -rf "$shims"' EXIT
+  for c in fly flyctl npx npm wrangler docker curl stripe; do
+    printf '#!/usr/bin/env bash\necho "dry run refused to run: %s $*" >&2\nexit 97\n' "$c" > "$shims/$c"
+    chmod +x "$shims/$c"
+  done
+  PATH="$shims:$PATH"
+fi
 [ -d node_modules ] || run npm ci
 
 say "Accounts"
@@ -108,7 +118,7 @@ fi
 
 say "Check one throwaway box on Fly (about a cent; it deletes itself)"
 if [ "$(ask "Run it now? y/n" y)" = y ] && [ $dry = 0 ]; then
-  FLY_API_TOKEN="$fly_token" FLY_ORG="$org" BOX_IMAGE="$image" BOX_SECRET="$box_secret" BOX_REGION="$region" BOX_APP_PREFIX="$prefix" \
+  FLY_API_TOKEN="$(fly tokens create org --org "$org" --name giraffes-verify --expiry 1h)" FLY_ORG="$org" BOX_IMAGE="$image" BOX_SECRET="$(random)" BOX_REGION="$region" BOX_APP_PREFIX="$prefix" \
     node scripts/fly-verify.ts --yes
 fi
 

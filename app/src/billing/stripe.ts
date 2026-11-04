@@ -3,7 +3,7 @@ import type { Fetch } from "../box/host";
 import type { StripeConfig } from "../config";
 import { CHANNEL_IDS, type AgentKey, type Brand, type EpochMs } from "../domain";
 import { PAID_PLANS, SUBSCRIPTION_STATUSES, type CustomerId, type PaidPlan, type PlanRules, type Subscription, type SubscriptionId } from "./plan";
-import { formBody, PRICE_NAMES, priceKey, STRIPE_API, STRIPE_EVENT_TYPES, type Form, type PriceName } from "./wire";
+import { formBody, LEGACY_PRICE_KEYS, PRICE_NAMES, priceKey, STRIPE_API, STRIPE_EVENT_TYPES, type Form, type PriceName } from "./wire";
 
 export const DONE_PATH = "/billing/done";
 const SIGNATURE_TOLERANCE_MS = 5 * 60_000;
@@ -23,6 +23,15 @@ export interface StripeApi {
   subscription(id: SubscriptionId): Promise<StripeReply<unknown>>;
 }
 
+function priceOf(cfg: StripeConfig, plan: PaidPlan): string {
+  const price = cfg.prices[plan];
+  if (price === null) throw new Error(`no Stripe price for the ${plan} plan`);
+  return price;
+}
+
+/** The plans /plan sells: `included` only while it has a price, which INCLUDED=on requires. */
+export const offeredPlans = (cfg: StripeConfig): readonly PaidPlan[] => PAID_PLANS.filter((p) => cfg.prices[p] !== null);
+
 export function checkoutForm(cfg: StripeConfig, rules: PlanRules, req: CheckoutRequest): Form {
   const done = `${cfg.publicUrl}${DONE_PATH}`;
   const form: Form = {
@@ -34,7 +43,7 @@ export function checkoutForm(cfg: StripeConfig, rules: PlanRules, req: CheckoutR
     "metadata[plan]": req.plan,
     "subscription_data[metadata][agent_key]": req.agent,
     "subscription_data[metadata][plan]": req.plan,
-    "line_items[0][price]": cfg.prices[req.plan],
+    "line_items[0][price]": priceOf(cfg, req.plan),
     "line_items[0][quantity]": 1,
   };
   const extra = rules.plusMaxSeats - rules.plusSeats;
@@ -148,7 +157,7 @@ const Session = z.object({ mode: z.string(), client_reference_id: z.string().nul
 const EventSubscription = z.object({ id: z.string().min(1), metadata: Metadata });
 
 const agentKey = (raw: string | null | undefined): AgentKey | null => (raw && AGENT_KEY.test(raw) ? (raw as AgentKey) : null);
-const paidPlan = (raw: string | null | undefined): PaidPlan | null => PAID_PLANS.find((p) => p === raw) ?? null;
+const paidPlan = (raw: string | null | undefined): PaidPlan | null => (raw === "ai" ? "included" : (PAID_PLANS.find((p) => p === raw) ?? null));
 
 export function parseEvent(raw: unknown): ParsedEvent {
   const env = Envelope.safeParse(raw);
@@ -191,7 +200,8 @@ const idOf = (x: string | { readonly id: string }) => (typeof x === "string" ? x
 
 /** By product or lookup key rather than price id, so a price replaced by `stripe-setup.ts` still counts for those on it. */
 function priceName(price: z.infer<typeof Price>): PriceName | null {
-  return PRICE_NAMES.find((n) => priceKey(n) === idOf(price.product) || priceKey(n) === price.lookup_key) ?? null;
+  const key = (k: string | null | undefined) => (k ? (LEGACY_PRICE_KEYS[k] ?? PRICE_NAMES.find((n) => priceKey(n) === k) ?? null) : null);
+  return key(idOf(price.product)) ?? key(price.lookup_key);
 }
 
 export function parseSubscription(raw: unknown, rules: PlanRules): SubscriptionRead {

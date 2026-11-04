@@ -24,13 +24,14 @@ for (const name of PRICE_NAMES) {
   amounts[name] = n;
 }
 
-const result = await stripeSetup({ secretKey, publicUrl, amounts, fetch });
+const included = args.includes("--included");
+const result = await stripeSetup({ secretKey, publicUrl, amounts, included, fetch });
 for (const line of result.log) console.log(line);
 console.log("\nSet these on the Worker (vars or `npx wrangler secret put <NAME>`):");
 console.log("BILLING=on");
 console.log(`PUBLIC_URL=${publicUrl.replace(/\/+$/, "")}`);
 console.log("STRIPE_SECRET_KEY=<the key you ran this with>");
-for (const name of PRICE_NAMES) console.log(`STRIPE_PRICE_${name.toUpperCase()}=${result.prices[name]}`);
+for (const name of PRICE_NAMES) if (result.prices[name]) console.log(`STRIPE_PRICE_${name.toUpperCase()}=${result.prices[name]}`);
 console.log(`STRIPE_PORTAL_CONFIGURATION=${result.portal}`);
 console.log(
   result.webhook.secret

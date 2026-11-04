@@ -1,6 +1,7 @@
 import type { AgentKey, Brand, EpochMs } from "../domain";
 
-export const PAID_PLANS = ["standard", "plus", "ai"] as const;
+/** `included` runs on our own quota and is sold only while INCLUDED=on; a subscription still on the old `ai` product reads as it. */
+export const PAID_PLANS = ["standard", "plus", "included"] as const;
 export type PaidPlan = (typeof PAID_PLANS)[number];
 type PlanKind = "trial" | PaidPlan | "lapsed";
 
@@ -59,7 +60,7 @@ export type PlanRow = Standing & { readonly trialEndsAt: EpochMs | null };
 
 export type Plan =
   | { readonly kind: "trial"; readonly endsAt: EpochMs | null }
-  | { readonly kind: "standard" | "ai" }
+  | { readonly kind: "standard" | "included" }
   | { readonly kind: "plus"; readonly role: "owner" | "member" }
   | { readonly kind: "lapsed" };
 
@@ -70,7 +71,7 @@ export function planOf(row: PlanRow | null, now: EpochMs, billing: boolean, rule
   if (own === "plus") return { kind: "plus", role: "owner" };
   if (own === "standard") return { kind: "standard" };
   if (row?.seat) return { kind: "plus", role: "member" };
-  if (own === "ai") return { kind: "ai" };
+  if (own === "included") return { kind: "included" };
   if (!billing) return { kind: "trial", endsAt: null };
   const endsAt = row?.trialEndsAt ?? trialEnd(now, rules);
   return endsAt > now ? { kind: "trial", endsAt } : { kind: "lapsed" };
@@ -82,7 +83,7 @@ export function planAllowsBox(plan: PlanKind): boolean {
     case "standard":
     case "plus":
       return true;
-    case "ai":
+    case "included":
     case "lapsed":
       return false;
   }

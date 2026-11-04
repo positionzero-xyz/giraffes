@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS boxes (
 CREATE TABLE IF NOT EXISTS billing_subscription (
   id         TEXT PRIMARY KEY,
   owner_key  TEXT NOT NULL,
-  plan       TEXT NOT NULL CHECK (plan IN ('standard', 'plus', 'ai')),
+  plan       TEXT NOT NULL CHECK (plan IN ('standard', 'plus', 'included')),
   customer_id TEXT,
   status     TEXT NOT NULL CHECK (status IN ('incomplete', 'incomplete_expired', 'trialing', 'active', 'past_due', 'unpaid', 'paused', 'canceled')),
   seats      INTEGER NOT NULL,

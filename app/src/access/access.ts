@@ -87,7 +87,7 @@ export function accessOf(f: AccessFacts): Access {
   if (boxAllowed && f.box === "signed_in") lanes.push({ kind: "box" });
   if (f.key && (!planConnected || f.key.backup)) lanes.push({ kind: "key", key: f.key });
   const own = planConnected || f.key !== null;
-  if (!own && f.included.on && (f.included.who === "everyone" || f.plan.kind === "ai")) lanes.push({ kind: "included", included: f.included });
+  if (!own && f.included.on && (f.included.who === "everyone" || f.plan.kind === "included")) lanes.push({ kind: "included", included: f.included });
   return { lanes, whenEmpty: planConnected ? "box_not_ready" : "nothing" };
 }
 

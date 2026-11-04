@@ -33,7 +33,7 @@ const countingSeat = (s: string, now: string) =>
      AND (SELECT COUNT(*) FROM billing_seat o WHERE o.subscription_id = ${s}.subscription_id AND o.left_at IS NULL
           AND (o.joined_at < ${s}.joined_at OR (o.joined_at = ${s}.joined_at AND o.agent_key < ${s}.agent_key))) < cb.seats - 1)`;
 
-const OWN_ORDER: Readonly<Record<PaidPlan, number>> = { plus: 0, standard: 1, ai: 2 };
+const OWN_ORDER: Readonly<Record<PaidPlan, number>> = { plus: 0, standard: 1, included: 2 };
 
 type JoinRow = {
   used_by: AgentKey | null;

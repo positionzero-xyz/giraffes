@@ -27,14 +27,14 @@ export type Notices = {
   readonly freeBeta: string;
   readonly onTrial: (daysLeft: number) => string;
   readonly onStandard: string;
-  readonly onAi: string;
+  readonly onIncluded: string;
   readonly onPlusMember: string;
   readonly onPlusOwner: (places: { readonly taken: number; readonly seats: number } | null) => string;
   readonly noPlan: string;
   readonly pickPlan: string;
   readonly standardChoice: (link: string) => string;
   readonly plusChoice: (link: string, seats: number, maxSeats: number) => string;
-  readonly aiChoice: (link: string) => string;
+  readonly includedChoice: (link: string) => string;
   readonly noLinks: string;
   readonly manage: (link: string) => string;
   readonly noPortal: string;
@@ -164,7 +164,7 @@ const en: Notices = {
   freeBeta: "You're on the free beta, so there's nothing to pay.",
   onTrial: (n) => `You're on the free trial, with ${days(n)} left.`,
   onStandard: "You're on the Standard plan.",
-  onAi: "You're on the AI plan.",
+  onIncluded: "You're on the plan with AI included.",
   onPlusMember: "You're on a Plus plan someone shared with you. Send /leave to leave it.",
   onPlusOwner: (places) =>
     places
@@ -175,7 +175,7 @@ const en: Notices = {
   standardChoice: (link) => `Standard, your own Claude box: ${link}`,
   plusChoice: (link, seats, maxSeats) =>
     `Plus, a box each for up to ${seats} people${maxSeats > seats ? ` (add places up to ${maxSeats} at checkout)` : ""}: ${link}`,
-  aiChoice: (link) => `AI, answers from our AI with no box: ${link}`,
+  includedChoice: (link) => `AI included, if you don't bring your own: ${link}`,
   noLinks: "I couldn't make the payment links just now. Send /plan again in a minute.",
   manage: (link) => `To change or cancel your plan: ${link}`,
   noPortal: "I couldn't make the link to manage your plan just now. Send /plan again in a minute.",
@@ -337,7 +337,7 @@ const th: Notices = {
   freeBeta: "ตอนนี้ใช้รุ่นทดลองฟรีอยู่ ไม่ต้องจ่ายอะไรค่ะ",
   onTrial: (n) => `ตอนนี้อยู่ในช่วงทดลองใช้ฟรี เหลืออีก ${n} วันค่ะ`,
   onStandard: "ตอนนี้ใช้แพ็กเกจ Standard อยู่ค่ะ",
-  onAi: "ตอนนี้ใช้แพ็กเกจ AI อยู่ค่ะ",
+  onIncluded: "ตอนนี้ใช้แพ็กเกจที่รวม AI ไว้แล้วค่ะ",
   onPlusMember: "ตอนนี้ใช้แพ็กเกจ Plus ที่มีคนแชร์ให้อยู่ค่ะ ถ้าต้องการออกให้ส่ง /leave",
   onPlusOwner: (places) =>
     places
@@ -348,7 +348,7 @@ const th: Notices = {
   standardChoice: (link) => `Standard มีกล่อง Claude ของตัวเอง: ${link}`,
   plusChoice: (link, seats, maxSeats) =>
     `Plus มีกล่องให้คนละกล่อง สูงสุด ${seats} คน${maxSeats > seats ? ` (เพิ่มได้ถึง ${maxSeats} คนตอนชำระเงิน)` : ""}: ${link}`,
-  aiChoice: (link) => `AI ตอบด้วย AI ของเรา ไม่มีกล่อง: ${link}`,
+  includedChoice: (link) => `รวม AI ไว้ให้ ไม่ต้องใช้ AI ของคุณเอง: ${link}`,
   noLinks: "ตอนนี้สร้างลิงก์ชำระเงินไม่ได้ค่ะ ส่ง /plan อีกครั้งในอีกสักครู่นะคะ",
   manage: (link) => `เปลี่ยนหรือยกเลิกแพ็กเกจได้ที่: ${link}`,
   noPortal: "ตอนนี้สร้างลิงก์จัดการแพ็กเกจไม่ได้ค่ะ ส่ง /plan อีกครั้งในอีกสักครู่นะคะ",

@@ -365,6 +365,24 @@ export const MIGRATIONS: readonly string[] = [
   DROP TABLE reservation;
   ALTER TABLE reservation_next RENAME TO reservation;
   `,
+  `
+  CREATE TABLE plan_next (
+    one                INTEGER PRIMARY KEY CHECK (one = 1),
+    trial_ends_at      INTEGER,
+    own_subscription   TEXT,
+    own_plan           TEXT CHECK (own_plan IN ('standard', 'plus', 'included')),
+    seat_subscription  TEXT,
+    seat_owner         TEXT,
+    updated_at         INTEGER NOT NULL,
+    CHECK ((own_subscription IS NULL) = (own_plan IS NULL)),
+    CHECK ((seat_subscription IS NULL) = (seat_owner IS NULL))
+  );
+  INSERT INTO plan_next (one, trial_ends_at, own_subscription, own_plan, seat_subscription, seat_owner, updated_at)
+    SELECT one, trial_ends_at, own_subscription, CASE own_plan WHEN 'ai' THEN 'included' ELSE own_plan END, seat_subscription, seat_owner, updated_at
+    FROM plan;
+  DROP TABLE plan;
+  ALTER TABLE plan_next RENAME TO plan;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

@@ -52,7 +52,7 @@ export interface Env {
   STRIPE_PRICE_STANDARD?: string;
   STRIPE_PRICE_PLUS?: string;
   STRIPE_PRICE_SEAT?: string;
-  STRIPE_PRICE_AI?: string;
+  STRIPE_PRICE_INCLUDED?: string;
   STRIPE_PORTAL_CONFIGURATION?: string;
   PUBLIC_URL?: string;
 }
@@ -70,7 +70,8 @@ export type BoxConfig =
 export type StripeConfig = {
   readonly secretKey: string;
   readonly webhookSecret: string;
-  readonly prices: { readonly standard: string; readonly plus: string; readonly seat: string; readonly ai: string };
+  /** `included` is null unless INCLUDED=on, so /plan never sells a tier that is off. */
+  readonly prices: { readonly standard: string; readonly plus: string; readonly seat: string; readonly included: string | null };
   readonly portalConfiguration: string;
   readonly publicUrl: string;
 };
@@ -270,7 +271,7 @@ function billingConfig(env: Env): BillingConfig {
             standard: required(env, "STRIPE_PRICE_STANDARD", why),
             plus: required(env, "STRIPE_PRICE_PLUS", why),
             seat: required(env, "STRIPE_PRICE_SEAT", why),
-            ai: required(env, "STRIPE_PRICE_AI", why),
+            included: env.INCLUDED === "on" ? required(env, "STRIPE_PRICE_INCLUDED", "BILLING=on with INCLUDED=on") : null,
           },
           portalConfiguration: required(env, "STRIPE_PORTAL_CONFIGURATION", why),
           publicUrl: httpUrl("PUBLIC_URL", required(env, "PUBLIC_URL", why)),

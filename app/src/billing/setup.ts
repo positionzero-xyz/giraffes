@@ -2,19 +2,19 @@ import { formBody, PRICE_NAMES, priceKey, STRIPE_API, STRIPE_EVENT_TYPES, type F
 
 export { PRICE_NAMES, type PriceName };
 
-export const DEFAULT_AMOUNTS: Readonly<Record<PriceName, number>> = { standard: 29900, plus: 69900, seat: 19900, ai: 17900 };
+export const DEFAULT_AMOUNTS: Readonly<Record<PriceName, number>> = { standard: 29900, plus: 69900, seat: 19900, included: 17900 };
 
 const PRODUCT_NAMES: Readonly<Record<PriceName, string>> = {
   standard: "Giraffes Standard",
   plus: "Giraffes Plus",
   seat: "Giraffes Plus extra place",
-  ai: "Giraffes AI",
+  included: "Giraffes AI included",
 };
 
 type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
 type SetupResult = {
-  readonly prices: Readonly<Record<PriceName, string>>;
+  readonly prices: Readonly<Partial<Record<PriceName, string>>>;
   readonly portal: string;
   /** `secret` is only known when the endpoint was created by this run. */
   readonly webhook: { readonly id: string; readonly secret: string | null };
@@ -26,9 +26,9 @@ type Endpoint = { id: string; url: string; secret?: string };
 type PortalConfiguration = { id: string; active: boolean; metadata: Record<string, string> | null };
 
 /** No seat price: the portal can't switch a subscription with two products, such as Plus with extra places. */
-const PORTAL_PLANS = ["standard", "plus", "ai"] as const satisfies readonly PriceName[];
+const PORTAL_PLANS = ["standard", "plus", "included"] as const satisfies readonly PriceName[];
 
-function portalForm(prices: Readonly<Record<PriceName, string>>, returnUrl: string): Form {
+function portalForm(prices: Readonly<Partial<Record<PriceName, string>>>, returnUrl: string): Form {
   const form: Form = {
     "metadata[giraffes]": "portal",
     default_return_url: returnUrl,
@@ -40,9 +40,9 @@ function portalForm(prices: Readonly<Record<PriceName, string>>, returnUrl: stri
     "features[subscription_update][default_allowed_updates][0]": "price",
     "features[subscription_update][proration_behavior]": "create_prorations",
   };
-  PORTAL_PLANS.forEach((name, i) => {
+  PORTAL_PLANS.filter((name) => prices[name] !== undefined).forEach((name, i) => {
     form[`features[subscription_update][products][${i}][product]`] = priceKey(name);
-    form[`features[subscription_update][products][${i}][prices][0]`] = prices[name];
+    form[`features[subscription_update][products][${i}][prices][0]`] = prices[name] as string;
   });
   return form;
 }
@@ -51,6 +51,8 @@ export async function stripeSetup(o: {
   readonly secretKey: string;
   readonly publicUrl: string;
   readonly amounts: Readonly<Record<PriceName, number>>;
+  /** The included plan's product and price are made only when the operator turns that tier on. */
+  readonly included: boolean;
   readonly fetch: Fetch;
 }): Promise<SetupResult> {
   const log: string[] = [];
@@ -67,8 +69,8 @@ export async function stripeSetup(o: {
     return { status: res.status, body };
   }
 
-  const prices = {} as Record<PriceName, string>;
-  for (const name of PRICE_NAMES) {
+  const prices: Partial<Record<PriceName, string>> = {};
+  for (const name of PRICE_NAMES.filter((n) => n !== "included" || o.included)) {
     const product = priceKey(name);
     if ((await call("GET", `/products/${product}`)).status === 404) {
       await call("POST", "/products", { id: product, name: PRODUCT_NAMES[name] });

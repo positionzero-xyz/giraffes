@@ -1,9 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { accessOf, ModelAccess, type BoxAnswer, type BoxLane, type IncludedConfig, type KeysConfig, type Served } from "../access/access";
-import { NO_STANDING, PAID_PLANS, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan, type Standing, type SubscriptionId } from "../billing/plan";
+import { NO_STANDING, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan, type Standing, type SubscriptionId } from "../billing/plan";
 import { INVITE_FOR_MS, MANAGE_NOTE, planChanged, planChoices, planStatus, type Links } from "../billing/say";
 import { d1Billing, type BillingStore } from "../billing/store";
-import { parseSubscription, stripeApi, type BillingEvent, type StripeApi } from "../billing/stripe";
+import { offeredPlans, parseSubscription, stripeApi, type BillingEvent, type StripeApi } from "../billing/stripe";
 import { boxClient, type BoxClient } from "../box/client";
 import { flyHost } from "../box/fly";
 import { staticHost, type BoxHost, type BoxHostKind, type Fetch } from "../box/host";
@@ -642,7 +642,7 @@ export class Agent extends DurableObject<Env> {
         if (!config.on || (plan.kind !== "trial" && plan.kind !== "lapsed")) return say(status);
         const links = await this.#checkoutLinks(agent, view.batch.items[0].key);
         if (!links) return say(`${status}\n${t.noLinks}`);
-        const choices = planChoices(config.rules, links, lang);
+        const choices = planChoices(config.rules, offeredPlans(config.stripe), links, lang);
         return { text: `${status}\n${choices.text}`, note: `${status}\n${choices.note}` };
       }
       case "invite": {
@@ -698,8 +698,9 @@ export class Agent extends DurableObject<Env> {
     }
     if (!expired) return null;
 
+    const plans = this.#deps.billing.config.on ? offeredPlans(this.#deps.billing.config.stripe) : [];
     const results = await Promise.all(
-      PAID_PLANS.map(async (plan) => ({ plan, result: await stripe.checkout({ agent, plan, idempotencyKey: `${agent}|${key}|${plan}` }) })),
+      plans.map(async (plan) => ({ plan, result: await stripe.checkout({ agent, plan, idempotencyKey: `${agent}|${key}|${plan}` }) })),
     );
     const now = this.#deps.clock.now();
     const links: Partial<Record<PaidPlan, string>> = {};
@@ -711,7 +712,7 @@ export class Agent extends DurableObject<Env> {
       this.#store.checkoutOpened(result.value.id, key, now);
       links[plan] = result.value.url;
     }
-    return PAID_PLANS.every((p) => links[p]) ? (links as Links) : null;
+    return plans.every((p) => links[p]) ? links : null;
   }
 
   async #boxCommand(view: TurnView, agent: AgentKey): Promise<void> {

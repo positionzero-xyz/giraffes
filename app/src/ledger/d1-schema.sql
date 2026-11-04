@@ -342,11 +342,15 @@ SELECT COALESCE(SUM(kind IN ('leave_count', 'privacy', 'group_memory_leak')), 0)
        COALESCE(SUM(kind IN ('red_team_pass', 'red_team_fail')), 0) AS red_team_attempts
 FROM safety_incident;
 
--- Active recruits and joiners, and how many of them answered 'very'.
+-- Active recruits and joiners, and how many of them answered 'very' the last time they answered.
 CREATE VIEW IF NOT EXISTS gate_survey AS
+WITH latest AS (
+  SELECT s.agent_key, s.answer FROM survey_response s
+  WHERE s.answered_at = (SELECT MAX(answered_at) FROM survey_response WHERE agent_key = s.agent_key)
+)
 SELECT COUNT(DISTINCT w.agent_key) AS active,
-       COUNT(DISTINCT CASE WHEN s.answer = 'very' THEN w.agent_key END) AS very
-FROM weekly_active w LEFT JOIN survey_response s ON s.agent_key = w.agent_key;
+       COUNT(DISTINCT CASE WHEN l.answer = 'very' THEN w.agent_key END) AS very
+FROM weekly_active w LEFT JOIN latest l ON l.agent_key = w.agent_key;
 
 CREATE VIEW IF NOT EXISTS retention AS
 SELECT p.cohort, p.half, (t.finished_at - p.week0) / 604800000 AS week, COUNT(DISTINCT p.agent_key) AS active
@@ -355,9 +359,16 @@ WHERE t.event_kind IN ('message', 'choice') AND t.finished_at >= p.week0
 GROUP BY p.cohort, p.half, week;
 
 CREATE VIEW IF NOT EXISTS tasks_by_type AS
-SELECT t.kind AS task_kind, f.kind AS evidence, COUNT(*) AS opened, COUNT(f.id) AS completed
+SELECT t.kind AS task_kind, COUNT(*) AS opened,
+       SUM(EXISTS (SELECT 1 FROM task_fact f WHERE f.task_id = t.id AND f.completes = 1)) AS completed
 FROM task t JOIN participant p USING (agent_key)
-LEFT JOIN task_fact f ON f.task_id = t.id AND f.completes = 1
+WHERE p.cohort IN ('recruit', 'joiner')
+GROUP BY t.kind;
+
+CREATE VIEW IF NOT EXISTS tasks_by_evidence AS
+SELECT t.kind AS task_kind, f.kind AS evidence, COUNT(*) AS completed
+FROM task t JOIN participant p USING (agent_key)
+JOIN task_fact f ON f.task_id = t.id AND f.completes = 1
 WHERE p.cohort IN ('recruit', 'joiner')
 GROUP BY t.kind, f.kind;
 
@@ -373,7 +384,7 @@ SELECT gate, COALESCE(CASE gate
   WHEN 'gate_spread' THEN (SELECT joiners_week2 >= 10 FROM gate_spread)
   WHEN 'gate_groups' THEN (SELECT groups_with_outcome >= 10 FROM gate_groups)
   WHEN 'gate_cost' THEN (SELECT MAX(hit_cap * 1.0 / wau) < 0.2 FROM gate_cost)
-  WHEN 'gate_safety' THEN (SELECT incidents = 0 AND red_team_passes = 0 FROM gate_safety)
+  WHEN 'gate_safety' THEN (SELECT incidents = 0 AND red_team_passes = 0 AND red_team_attempts > 0 FROM gate_safety)
   WHEN 'gate_survey' THEN (SELECT very * 1.0 / NULLIF(active, 0) >= 0.4 FROM gate_survey)
 END, 0) AS passed
 FROM gates ORDER BY n;

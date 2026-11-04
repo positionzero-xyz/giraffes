@@ -154,7 +154,10 @@ The gate queries are views in the ledger, for example:
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_summary"
 ```
 
-Safety incidents and survey answers are operator rows in `safety_incident` and `survey_response`.
+Safety incidents and survey answers are operator rows in `safety_incident` and `survey_response`. The
+safety gate can't pass before at least one red-team attempt is recorded, and the survey gate counts each
+person's latest answer. `tasks_by_type` counts tasks opened and completed per kind, and
+`tasks_by_evidence` breaks the completions down by the fact that completed them.
 
 ### Update an existing ledger
 

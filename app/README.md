@@ -163,97 +163,11 @@ person's latest answer. `tasks_by_type` counts tasks opened and completed per ki
 
 ### Update an existing ledger
 
-Per-person model access adds the backends `key` and `included`, the purpose `probe`, the status
-`provider_refused` and the turn outcome `no_access`, and renames the plan `ai` to `included`. Old CHECKs on
-`model_call`, `turn_log` and `billing_subscription` refuse those, so rebuild the three tables before
-deploying it. The copies name their columns, because a ledger that added `model_call.backend` with
-`ALTER` has it last:
+No ledger has been deployed yet, so there is nothing to upgrade: create the ledger fresh from
+`src/ledger/d1-schema.sql`, as in step 1 above, or with `--local` for the dev ledger. To start a local ledger
+over, delete it and load the schema file again.
 
-```sh
-npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW weekly_active; DROP VIEW retention; DROP VIEW gate_cost; DROP INDEX turn_log_agent_time; DROP INDEX model_call_agent_time; DROP INDEX billing_subscription_owner; ALTER TABLE turn_log RENAME TO turn_log_old; ALTER TABLE model_call RENAME TO model_call_old; ALTER TABLE billing_subscription RENAME TO billing_subscription_old"
-npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
-npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO turn_log (id, agent_key, event_kind, batch_size, outcome, refused_for_budget, cost_micro, attempts, started_at, finished_at) SELECT id, agent_key, event_kind, batch_size, outcome, refused_for_budget, cost_micro, attempts, started_at, finished_at FROM turn_log_old; DROP TABLE turn_log_old; INSERT INTO model_call (id, agent_key, purpose, model, backend, status, estimate_micro, cost_micro, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at) SELECT id, agent_key, purpose, model, backend, status, estimate_micro, cost_micro, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at FROM model_call_old; DROP TABLE model_call_old; INSERT INTO billing_subscription (id, owner_key, plan, customer_id, status, seats, past_due_since, updated_at) SELECT id, owner_key, CASE plan WHEN 'ai' THEN 'included' ELSE plan END, customer_id, status, seats, past_due_since, updated_at FROM billing_subscription_old; DROP TABLE billing_subscription_old"
-```
-
-After deploying it, nothing writes `spend_lease`, the global ceiling's old table. Drop it then with
-`DROP TABLE spend_lease`. Old `model_call` rows keep `backend = 'api'` and models without a provider
-prefix, and old `turn_log` rows keep `refused_budget` for the old $15 cap.
-
-Re-running `src/ledger/d1-schema.sql` adds new tables and views, such as `action_rejection`. Do that
-before you deploy code that writes to them, or log shipping backs off until the table exists. Re-running
-the file doesn't change the CHECK constraints of a table that already exists. A row that an old CHECK
-refuses, such as a `rejected` model call or a `too_long` rejection in a ledger created before those values
-existed, fails its log flush. The flush backs off and retries, and log shipping stays stuck behind that
-row until the table is migrated. `model_call.status` and `action_rejection.reason` have both gained
-values, most recently the rejection `bad_zone`. To migrate their CHECKs, rebuild the two tables:
-
-```sh
-npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW cost_per_agent_week; DROP INDEX model_call_agent_time; DROP INDEX action_rejection_agent_time; ALTER TABLE model_call RENAME TO model_call_old; ALTER TABLE action_rejection RENAME TO action_rejection_old"
-npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
-npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO model_call SELECT * FROM model_call_old; DROP TABLE model_call_old; INSERT INTO action_rejection SELECT * FROM action_rejection_old; DROP TABLE action_rejection_old"
-```
-
-The second command recreates both tables with the current CHECKs, their indexes and the view. Run the
-same commands with `--local` to migrate the dev ledger.
-
-The LINE quota check adds the `line_quota` and `line_quota_alert` tables, which re-running the schema file
-creates, and the unasked status `dropped_quota`, which an old `unasked_message` CHECK refuses. Rebuild that
-table before deploying it:
-
-```sh
-npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW unasked_with_followup; DROP INDEX unasked_agent_time; ALTER TABLE unasked_message RENAME TO unasked_message_old"
-npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
-npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO unasked_message SELECT * FROM unasked_message_old; DROP TABLE unasked_message_old"
-```
-
-Billing adds the `billing_subscription`, `billing_seat` and `billing_invite` tables, which re-running the
-schema file creates, and the turn outcome `lapsed`, which an old `turn_log` CHECK refuses. Rebuild
-`turn_log` before deploying billing. The second command recreates the table, its indexes and views, and
-the billing tables:
-
-```sh
-npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW gate_weekly_delegation; DROP VIEW weekly_delegation; DROP VIEW unasked_with_followup; DROP INDEX turn_log_agent_time; DROP INDEX turn_log_task; ALTER TABLE turn_log RENAME TO turn_log_old"
-npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
-npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO turn_log SELECT * FROM turn_log_old; DROP TABLE turn_log_old"
-```
-
-Tasks and the beta's admission drop `turn_log`'s task columns, add `task_id` and `purpose` to
-`unasked_message`, add rejection reasons and the turn outcome `not_admitted`, and replace the gate views.
-Rebuild those three tables, dropping the old views first, before deploying them:
-
-```sh
-npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW IF EXISTS gate_weekly_delegation; DROP VIEW IF EXISTS weekly_delegation; DROP VIEW IF EXISTS unasked_with_followup; DROP VIEW IF EXISTS block_rate; DROP VIEW IF EXISTS cost_per_agent_week; DROP INDEX turn_log_agent_time; DROP INDEX IF EXISTS turn_log_task; DROP INDEX unasked_agent_time; DROP INDEX action_rejection_agent_time; ALTER TABLE turn_log RENAME TO turn_log_old; ALTER TABLE unasked_message RENAME TO unasked_message_old; ALTER TABLE action_rejection RENAME TO action_rejection_old"
-npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
-npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO turn_log SELECT id, agent_key, event_kind, batch_size, outcome, refused_for_budget, cost_micro, attempts, started_at, finished_at FROM turn_log_old; DROP TABLE turn_log_old; INSERT INTO unasked_message SELECT id, agent_key, trigger_kind, text, status, day, at, NULL, 'unlinked' FROM unasked_message_old; DROP TABLE unasked_message_old; INSERT INTO action_rejection SELECT * FROM action_rejection_old; DROP TABLE action_rejection_old"
-```
-
-A ledger that ran the schema file from before the billing fixes has a `billing_subscription` without
-`customer_id` and `past_due_since`, and with the `period_end` and `event_at` columns the Worker no
-longer writes. While `BILLING=off` the Worker answers Stripe with 404, so the table is empty. Recreate it,
-and add the `billing_duplicate` table, before turning billing on:
-
-```sh
-npx wrangler d1 execute giraffes-ledger --remote --command "SELECT COUNT(*) FROM billing_subscription"
-npx wrangler d1 execute giraffes-ledger --remote --command "DROP INDEX billing_subscription_owner; DROP TABLE billing_subscription"
-npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
-```
-
-Run the drop only when the count is 0.
-
-The box path adds the `boxes` table, which re-running the schema file creates, and a `backend` column on
-`model_call`, which it can't add to an existing table. Add the column once, before deploying code that
-writes it:
-
-```sh
-npx wrangler d1 execute giraffes-ledger --remote --command "ALTER TABLE model_call ADD COLUMN backend TEXT NOT NULL DEFAULT 'api' CHECK (backend IN ('api', 'box'))"
-npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
-```
-
-If you rebuild `model_call` with the commands above instead, the rebuilt table already has the column, so
-skip the `ALTER`. `SELECT *` copies by position, so replace the copy of `model_call` in the third command
-with one that names the old columns, and every old row gets `backend = 'api'`:
-
-```sh
-INSERT INTO model_call (id, agent_key, purpose, model, status, estimate_micro, cost_micro, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at)
-SELECT id, agent_key, purpose, model, status, estimate_micro, cost_micro, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at FROM model_call_old
-```
+Re-running the schema file adds tables and views that are new, but never changes the columns or CHECKs of
+a table that already exists. Once a ledger is deployed, the next change to an existing table needs a real
+migration: one SQL file that drops the views depending on the table, rebuilds the table, copies its rows by
+named columns and recreates the views, tested against a copy of the previous schema with rows in it.

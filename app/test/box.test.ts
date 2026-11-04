@@ -691,7 +691,7 @@ describe("connecting a Claude plan", () => {
 
 describe("retiring a box the plan no longer allows", () => {
   const retiring = (until: string) => boxMessage("retiring", "en", null, until).text;
-  const subscribe = async (kit: BillingKit, user: string, plan: "standard" | "ai") => {
+  const subscribe = async (kit: BillingKit, user: string, plan: "standard" | "included") => {
     expect((await stripeChange(kit, { user, sub: `sub_${user}`, plan, status: "active", type: "customer.subscription.created" })).status).toBe(200);
   };
 

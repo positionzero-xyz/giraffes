@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
 import { planAllowsBox, planOf, type CustomerId, type PlanRules, type Subscription, type SubscriptionId } from "../src/billing/plan";
 import { d1Billing, type BillingStore } from "../src/billing/store";
-import { checkoutForm, parseEvent, parseSubscription, stripeApi, verifySignature, type CheckoutId } from "../src/billing/stripe";
+import { checkoutForm, offeredPlans, parseEvent, parseSubscription, stripeApi, verifySignature, type CheckoutId } from "../src/billing/stripe";
 import { DEFAULT_AMOUNTS, stripeSetup } from "../src/billing/setup";
 import { formBody, STRIPE_EVENT_TYPES } from "../src/billing/wire";
 import { boxMessage } from "../src/box/machine";
@@ -43,7 +43,7 @@ async function row(sub: string) {
   return env.LEDGER.prepare("SELECT plan, status, seats, customer_id FROM billing_subscription WHERE id = ?").bind(sub).first();
 }
 
-async function pay(kit: BillingKit, c: DevChat, user: string, plan: "standard" | "plus" | "ai", o: { extraSeats?: number } = {}) {
+async function pay(kit: BillingKit, c: DevChat, user: string, plan: "standard" | "plus" | "included", o: { extraSeats?: number } = {}) {
   const res = await stripeChange(kit, { user, sub: `sub_${user}`, plan, status: "active", type: "customer.subscription.created", extraSeats: o.extraSeats });
   expect(res.status).toBe(200);
   await c.settle();
@@ -56,10 +56,10 @@ describe("plan rules", () => {
   const id = "sub_1" as SubscriptionId;
   const trial = { trialEndsAt: later(14), own: null, seat: null };
 
-  test("a paid plan beats a seat, a seat beats ai, and ai beats the trial", () => {
+  test("a paid plan beats a seat, a seat beats included, and included beats the trial", () => {
     expect(planOf({ ...trial, own: { id, plan: "standard" }, seat: { id, owner: agent("o") } }, now, true, rules)).toEqual({ kind: "standard" });
-    expect(planOf({ ...trial, own: { id, plan: "ai" }, seat: { id, owner: agent("o") } }, now, true, rules)).toEqual({ kind: "plus", role: "member" });
-    expect(planOf({ ...trial, own: { id, plan: "ai" } }, now, true, rules)).toEqual({ kind: "ai" });
+    expect(planOf({ ...trial, own: { id, plan: "included" }, seat: { id, owner: agent("o") } }, now, true, rules)).toEqual({ kind: "plus", role: "member" });
+    expect(planOf({ ...trial, own: { id, plan: "included" } }, now, true, rules)).toEqual({ kind: "included" });
     expect(planOf(trial, now, true, rules)).toEqual({ kind: "trial", endsAt: later(14) });
   });
 
@@ -69,8 +69,8 @@ describe("plan rules", () => {
     expect(planOf(null, now, true, rules)).toEqual({ kind: "trial", endsAt: later(14) });
   });
 
-  test("the box comes with trial, standard and plus, not with ai or lapsed", () => {
-    expect((["trial", "standard", "plus", "ai", "lapsed"] as const).filter(planAllowsBox)).toEqual(["trial", "standard", "plus"]);
+  test("the box comes with trial, standard and plus, not with included or lapsed", () => {
+    expect((["trial", "standard", "plus", "included", "lapsed"] as const).filter(planAllowsBox)).toEqual(["trial", "standard", "plus"]);
   });
 
 });
@@ -82,7 +82,15 @@ describe("configuration", () => {
     expect(load({})).toEqual({ on: false, rules: { trialDays: 14, plusSeats: 3, plusMaxSeats: 6 } });
   });
 
-  test.each(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_STANDARD", "STRIPE_PRICE_PLUS", "STRIPE_PRICE_SEAT", "STRIPE_PRICE_AI", "STRIPE_PORTAL_CONFIGURATION", "PUBLIC_URL"])(
+  test("the included plan's price is needed only while INCLUDED is on, and nothing sells it otherwise", () => {
+    const on = load({ ...STRIPE_VARS, ...INCLUDED_VARS, STRIPE_PRICE_INCLUDED: "price_included" });
+    expect(on.on && on.stripe.prices.included).toBe("price_included");
+    expect(() => load({ ...STRIPE_VARS, ...INCLUDED_VARS })).toThrow("STRIPE_PRICE_INCLUDED");
+    const off = load({ ...STRIPE_VARS, STRIPE_PRICE_INCLUDED: "price_included" });
+    expect(off.on && offeredPlans(off.stripe)).toEqual(["standard", "plus"]);
+  });
+
+  test.each(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_STANDARD", "STRIPE_PRICE_PLUS", "STRIPE_PRICE_SEAT", "STRIPE_PORTAL_CONFIGURATION", "PUBLIC_URL"])(
     "BILLING=on without %s fails at load",
     (name) => {
       const vars: Record<string, string> = { ...STRIPE_VARS };
@@ -187,12 +195,12 @@ describe("stripe boundary", () => {
     const refused = stripeApi(cfg, rules, async () =>
       Response.json({ error: { type: "invalid_request_error", code: "api_key_invalid", message: "Invalid API Key provided: sk_test_****fake" } }, { status: 401 }),
     );
-    const r = await refused.checkout({ agent: agent("ann"), plan: "ai", idempotencyKey: "k" });
+    const r = await refused.checkout({ agent: agent("ann"), plan: "standard", idempotencyKey: "k" });
     expect(r).toEqual({ ok: false, status: 401, detail: "checkout 401 invalid_request_error api_key_invalid" });
     const down = stripeApi(cfg, rules, async () => {
       throw new TypeError("fetch failed");
     });
-    expect(await down.checkout({ agent: agent("ann"), plan: "ai", idempotencyKey: "k" })).toMatchObject({ ok: false });
+    expect(await down.checkout({ agent: agent("ann"), plan: "standard", idempotencyKey: "k" })).toMatchObject({ ok: false });
     expect(JSON.stringify(r)).not.toContain("sk_test");
   });
 
@@ -202,8 +210,13 @@ describe("stripe boundary", () => {
       kind: "ours",
       subscription: { id: "sub_1", owner: "p:dev:ann", customer: "cus_ann", plan: "plus", status: "past_due", seats: 6 },
     });
-    const byMetadata = { ...stripeSubscription({ user: "ann", sub: "sub_2", plan: "ai", status: "active" }), items: { data: [] } };
-    expect(parseSubscription(byMetadata, rules)).toMatchObject({ kind: "ours", subscription: { plan: "ai", seats: 1 } });
+    const byMetadata = { ...stripeSubscription({ user: "ann", sub: "sub_2", plan: "included", status: "active" }), items: { data: [] } };
+    expect(parseSubscription(byMetadata, rules)).toMatchObject({ kind: "ours", subscription: { plan: "included", seats: 1 } });
+    const legacy = stripeSubscription({ user: "ann", sub: "sub_4", plan: "included", status: "active" });
+    legacy.items.data[0].price = { id: "price_old", object: "price", product: "giraffes_ai", lookup_key: "giraffes_ai" };
+    legacy.metadata.plan = "ai";
+    expect(parseSubscription(legacy, rules)).toMatchObject({ kind: "ours", subscription: { plan: "included" } });
+    expect(parseSubscription({ ...legacy, items: { data: [] } }, rules)).toMatchObject({ kind: "ours", subscription: { plan: "included" } });
     expect(parseSubscription({ ...plus, metadata: {} }, rules)).toMatchObject({ kind: "not_ours" });
     expect(parseSubscription(null, rules)).toMatchObject({ kind: "not_ours" });
     expect(parseSubscription({ id: "sub_3" }, rules)).toMatchObject({ kind: "invalid" });
@@ -302,7 +315,7 @@ describe("trial and lapse", () => {
     expect(model.calls).toHaveLength(1);
   });
 
-  test("/plan during the trial gives the days left and three Checkout links, which stay out of the history", async () => {
+  test("/plan during the trial gives the days left and a Checkout link per plan on sale, which stay out of the history", async () => {
     const kit = billingOn();
     const model = scripted([]);
     const c = await devChat("dee", { model, at: "2099-11-04T10:00", billing: kit.deps });
@@ -311,9 +324,10 @@ describe("trial and lapse", () => {
 
     const [text] = await c.received();
     expect(text.split("\n").slice(0, 2)).toEqual(["You're on the free trial, with 14 days left.", "Pick a plan:"]);
-    for (const p of ["standard", "plus", "ai"]) expect(text).toContain(`https://checkout.stripe.test/${p}/`);
+    for (const p of ["standard", "plus"]) expect(text).toContain(`https://checkout.stripe.test/${p}/`);
+    expect(text).not.toContain("included");
     expect(kit.stripe.checkouts).toEqual(
-      ["standard", "plus", "ai"].map((plan) => ({ agent: "p:dev:dee", plan, idempotencyKey: `p:dev:dee|dev:plan-1|${plan}` })),
+      ["standard", "plus"].map((plan) => ({ agent: "p:dev:dee", plan, idempotencyKey: `p:dev:dee|dev:plan-1|${plan}` })),
     );
     expect(JSON.stringify((await c.snapshot()).turns)).not.toContain("checkout.stripe.test");
     expect(model.calls).toHaveLength(0);
@@ -353,8 +367,8 @@ describe("checkout and the portal", () => {
 
     await c.say("/plan", { id: "plan-b" });
 
-    expect(first.map((id) => kit.stripe.sessions.get(id))).toEqual(["expired", "complete", "expired"]);
-    expect([...kit.stripe.sessions.values()].filter((s) => s === "open")).toHaveLength(3);
+    expect(first.map((id) => kit.stripe.sessions.get(id))).toEqual(["expired", "complete"]);
+    expect([...kit.stripe.sessions.values()].filter((s) => s === "open")).toHaveLength(2);
     const [, second] = await c.received();
     expect(second).toContain("Pick a plan:");
   });
@@ -365,13 +379,13 @@ describe("checkout and the portal", () => {
     await c.say("/plan");
     kit.stripe.expiresFailing = true;
     await c.say("/plan");
-    expect(kit.stripe.checkouts).toHaveLength(3);
+    expect(kit.stripe.checkouts).toHaveLength(2);
 
     kit.stripe.expiresFailing = false;
     await c.say("/plan");
 
     expect((await c.received())[1]).toBe(`You're on the free trial, with 14 days left.\n${NOTICE.noLinks}`);
-    expect([...kit.stripe.sessions.values()]).toEqual(["expired", "expired", "expired", "open", "open", "open"]);
+    expect([...kit.stripe.sessions.values()]).toEqual(["expired", "expired", "open", "open"]);
   });
 
   test("a person who pays gets a link to manage the plan instead of Checkout links, kept out of the history", async () => {
@@ -399,8 +413,8 @@ describe("checkout and the portal", () => {
     await c.received();
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     await stripeChange(kit, { user: "ike", sub: "sub_ike_1", plan: "standard", status: "active" });
-    await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "ai", status: "active" });
-    await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "ai", status: "active" });
+    await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "included", status: "active" });
+    await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "included", status: "active" });
     await c.settle();
 
     expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", NOTICE.duplicate]);
@@ -433,14 +447,14 @@ describe("stripe webhook", () => {
     const c = await devChat("gil", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
     await c.say("/plan");
     await c.received();
-    kit.stripe.subscriptions.set("sub_gil", stripeSubscription({ user: "gil", sub: "sub_gil", plan: "ai", status: "active" }));
-    const e = checkoutEvent({ user: "gil", sub: "sub_gil", plan: "ai" });
+    kit.stripe.subscriptions.set("sub_gil", stripeSubscription({ user: "gil", sub: "sub_gil", plan: "included", status: "active" }));
+    const e = checkoutEvent({ user: "gil", sub: "sub_gil", plan: "included" });
 
     expect(await (await postStripe(e)).text()).toBe("applied");
     expect(await (await postStripe(e)).text()).toBe("duplicate");
     await c.settle();
 
-    expect(await c.received()).toEqual(["Thanks. Your AI plan is active."]);
+    expect(await c.received()).toEqual(["Thanks. Your AI included plan is active."]);
   });
 
   test("every event stores what Stripe holds now, whatever its own payload says, and a cancelled one stays cancelled", async () => {
@@ -504,7 +518,7 @@ describe("stripe webhook", () => {
     await c.say("/plan");
     await c.received();
     kit.stripe.readsFailing = true;
-    const e = subscriptionEvent({ user: "jan", sub: "sub_jan", plan: "ai", status: "active" });
+    const e = subscriptionEvent({ user: "jan", sub: "sub_jan", plan: "included", status: "active" });
     kit.stripe.subscriptions.set("sub_jan", e.data.object);
 
     await expect(postStripe(e)).rejects.toThrow();
@@ -512,7 +526,7 @@ describe("stripe webhook", () => {
     kit.stripe.readsFailing = false;
     expect(await (await postStripe(e)).text()).toBe("applied");
     await c.settle();
-    expect(await c.received()).toEqual(["Thanks. Your AI plan is active."]);
+    expect(await c.received()).toEqual(["Thanks. Your AI included plan is active."]);
   });
 
   test("events that aren't ours are acknowledged and ignored", async () => {
@@ -805,16 +819,16 @@ describe("each turn's plan", () => {
   });
 });
 
-describe("the ai plan", () => {
-  test("ai has no box: /claude says so and a connected box is no longer used", async () => {
+describe("the included plan", () => {
+  test("included has no box: /claude says so and a connected box is no longer used", async () => {
     const kit = billingOn();
     const box = fakeBox({ signedIn: true });
     const model = scripted([chat("From the API.")]);
     const c = await devChat("val", { model, at: "2099-11-04T10:00", billing: kit.deps, box: box.deps });
     await c.say("/claude");
     await c.received();
-    await pay(kit, c, "val", "ai");
-    expect(await c.received()).toEqual(["Thanks. Your AI plan is active.", boxMessage("retiring", "en", null, "18 November 2099").text]);
+    await pay(kit, c, "val", "included");
+    expect(await c.received()).toEqual(["Thanks. Your AI included plan is active.", boxMessage("retiring", "en", null, "18 November 2099").text]);
 
     await c.say("hello");
     await c.say("/claude");
@@ -823,7 +837,7 @@ describe("the ai plan", () => {
     expect(box.parses).toEqual([]);
   });
 
-  test("with INCLUDED on, the ai plan runs on our key up to INCLUDED_CAP_USD, and the trial gets none of it", async () => {
+  test("with INCLUDED on, the included plan runs on our key up to INCLUDED_CAP_USD, and the trial gets none of it", async () => {
     const kit = billingOn();
     const included = loadConfig({ MODEL_BACKEND: "scripted", DEV_MODE: "1", ...INCLUDED_VARS, INCLUDED_CAP_USD: "1" } as unknown as Env).included;
     const spendsTheCap = Math.ceil((1_000_000 * 1_000_000) / HAIKU_5_5.inputPerM);
@@ -832,7 +846,7 @@ describe("the ai plan", () => {
     await c.say("hello");
     expect(await c.received()).toEqual([NOTICE.noAccess({ box: false, key: true, included: true })]);
 
-    await pay(kit, c, "wes", "ai");
+    await pay(kit, c, "wes", "included");
     await c.received();
     await c.say("hello");
     await c.say("again");
@@ -851,7 +865,7 @@ describe("the ai plan", () => {
     const included = loadConfig({ MODEL_BACKEND: "scripted", DEV_MODE: "1", ...INCLUDED_VARS } as unknown as Env).included;
     const provider = fakeProvider([{ kind: "status", status: 402 }]);
     const c = await devChat("xan", { model: null, provider, included, at: "2099-11-04T10:00", billing: kit.deps });
-    await pay(kit, c, "xan", "ai");
+    await pay(kit, c, "xan", "included");
     await c.received();
 
     await c.say("hello");
@@ -917,18 +931,33 @@ describe("stripe setup", () => {
     };
     return { fetch, products, prices, endpoints, portals, posts };
   }
-  const opts = (fetch: ReturnType<typeof fakeAccount>["fetch"], amounts = DEFAULT_AMOUNTS) => ({ secretKey: "sk_test_fake", publicUrl: "https://giraffes.test/", amounts, fetch });
+  const opts = (fetch: ReturnType<typeof fakeAccount>["fetch"], amounts = DEFAULT_AMOUNTS, included = true) => ({
+    secretKey: "sk_test_fake",
+    publicUrl: "https://giraffes.test/",
+    amounts,
+    included,
+    fetch,
+  });
+
+  test("without --included, the included plan gets no product, no price and no place in the portal", async () => {
+    const account = fakeAccount();
+    const r = await stripeSetup(opts(account.fetch, DEFAULT_AMOUNTS, false));
+
+    expect([...account.products].sort()).toEqual(["giraffes_plus", "giraffes_seat", "giraffes_standard"]);
+    expect(r.prices.included).toBeUndefined();
+    expect(JSON.stringify(account.portals[0].form)).not.toContain("giraffes_included");
+  });
 
   test("a first run creates four products, four THB monthly prices and the endpoint for the events the Worker handles", async () => {
     const account = fakeAccount();
     const r = await stripeSetup(opts(account.fetch));
 
-    expect([...account.products].sort()).toEqual(["giraffes_ai", "giraffes_plus", "giraffes_seat", "giraffes_standard"]);
+    expect([...account.products].sort()).toEqual(["giraffes_included", "giraffes_plus", "giraffes_seat", "giraffes_standard"]);
     expect(account.prices.map((p) => [p.lookup_key, p.unit_amount, p.currency, p.recurring.interval])).toEqual([
       ["giraffes_standard", 29900, "thb", "month"],
       ["giraffes_plus", 69900, "thb", "month"],
       ["giraffes_seat", 19900, "thb", "month"],
-      ["giraffes_ai", 17900, "thb", "month"],
+      ["giraffes_included", 17900, "thb", "month"],
     ]);
     expect(account.endpoints).toEqual([{ id: r.webhook.id, url: "https://giraffes.test/webhook/stripe", events: [...STRIPE_EVENT_TYPES] }]);
     expect(r.webhook.secret).toBe("whsec_made");
@@ -944,12 +973,12 @@ describe("stripe setup", () => {
     expect(account.posts.slice(posts)).toEqual([`/billing_portal/configurations/${first.portal}`, `/webhook_endpoints/${first.webhook.id}`]);
     expect(again).toMatchObject({ prices: first.prices, portal: first.portal, webhook: { id: first.webhook.id, secret: null } });
 
-    const raised = await stripeSetup(opts(account.fetch, { ...DEFAULT_AMOUNTS, ai: 19900 }));
-    expect(raised.prices.ai).not.toBe(first.prices.ai);
-    expect({ ...raised.prices, ai: first.prices.ai }).toEqual(first.prices);
-    expect(account.prices.filter((p) => p.lookup_key === "giraffes_ai").map((p) => p.unit_amount)).toEqual([19900]);
+    const raised = await stripeSetup(opts(account.fetch, { ...DEFAULT_AMOUNTS, included: 19900 }));
+    expect(raised.prices.included).not.toBe(first.prices.included);
+    expect({ ...raised.prices, included: first.prices.included }).toEqual(first.prices);
+    expect(account.prices.filter((p) => p.lookup_key === "giraffes_included").map((p) => p.unit_amount)).toEqual([19900]);
     expect(account.portals).toHaveLength(1);
-    expect(account.portals[0].form["features[subscription_update][products][2][prices][0]"]).toBe(raised.prices.ai);
+    expect(account.portals[0].form["features[subscription_update][products][2][prices][0]"]).toBe(raised.prices.included);
   });
 
   test("the portal configuration lets a person update their card, see invoices, cancel at period end and switch plans", async () => {
@@ -971,8 +1000,8 @@ describe("stripe setup", () => {
       "features[subscription_update][products][0][prices][0]": r.prices.standard,
       "features[subscription_update][products][1][product]": "giraffes_plus",
       "features[subscription_update][products][1][prices][0]": r.prices.plus,
-      "features[subscription_update][products][2][product]": "giraffes_ai",
-      "features[subscription_update][products][2][prices][0]": r.prices.ai,
+      "features[subscription_update][products][2][product]": "giraffes_included",
+      "features[subscription_update][products][2][prices][0]": r.prices.included,
     });
     expect(r.log).toContain(`portal configuration ${r.portal}: created`);
   });

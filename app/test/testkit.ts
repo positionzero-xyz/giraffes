@@ -480,7 +480,6 @@ export const STRIPE_VARS = {
   STRIPE_PRICE_STANDARD: "price_standard",
   STRIPE_PRICE_PLUS: "price_plus",
   STRIPE_PRICE_SEAT: "price_seat",
-  STRIPE_PRICE_AI: "price_ai",
   STRIPE_PORTAL_CONFIGURATION: "bpc_fake",
   PUBLIC_URL: "https://giraffes.test",
 } as const;
@@ -575,7 +574,7 @@ let stripeEvents = 0;
 export type StripeSubscriptionOpts = {
   readonly user: string;
   readonly sub: string;
-  readonly plan: "standard" | "plus" | "ai";
+  readonly plan: "standard" | "plus" | "included";
   readonly status: string;
   readonly extraSeats?: number;
   readonly customer?: string;
@@ -583,7 +582,7 @@ export type StripeSubscriptionOpts = {
 
 /** A subscription object as `GET /v1/subscriptions/{id}` returns it, on the prices `stripe-setup.ts` makes. */
 export function stripeSubscription(o: StripeSubscriptionOpts) {
-  const price = (name: string) => ({ id: `price_${name}`, object: "price", product: `giraffes_${name}`, lookup_key: `giraffes_${name}` });
+  const price = (name: string) => ({ id: `price_${name}`, object: "price", product: `giraffes_${name}`, lookup_key: `giraffes_${name}` as string | null });
   const items = [{ price: price(o.plan), quantity: 1 }];
   if (o.extraSeats) items.push({ price: price("seat"), quantity: o.extraSeats });
   return {
@@ -591,7 +590,7 @@ export function stripeSubscription(o: StripeSubscriptionOpts) {
     object: "subscription",
     status: o.status,
     customer: o.customer ?? `cus_${o.user}`,
-    metadata: { agent_key: personAgentKey({ channel: "dev", channelUserId: o.user }), plan: o.plan },
+    metadata: { agent_key: personAgentKey({ channel: "dev", channelUserId: o.user }), plan: o.plan as string },
     items: { object: "list", data: items },
   };
 }
@@ -607,7 +606,7 @@ export function subscriptionEvent(o: StripeSubscriptionOpts & { readonly type?: 
   };
 }
 
-export function checkoutEvent(o: { readonly user: string; readonly sub: string; readonly plan: "standard" | "plus" | "ai"; readonly id?: string }) {
+export function checkoutEvent(o: { readonly user: string; readonly sub: string; readonly plan: "standard" | "plus" | "included"; readonly id?: string }) {
   const agent = personAgentKey({ channel: "dev", channelUserId: o.user });
   return {
     id: o.id ?? `evt_${++stripeEvents}`,

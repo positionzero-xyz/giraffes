@@ -80,13 +80,14 @@ async function aesKey(secret: string, agent: AgentKey): Promise<CryptoKey> {
   ]);
 }
 
-const aad = (provider: ProviderId, baseUrl: string) => utf8.encode(`${provider}\n${baseUrl}`);
+/** Binds a sealed key to its provider and base URL, so a row pointed at another host fails to open. */
+const sealBinding = (provider: ProviderId, baseUrl: string) => utf8.encode(`${provider}\n${baseUrl}`);
 
 /** AES-256-GCM under a key derived from the secret and this person's agent key, so a row copied into another DO fails to open. */
 export async function seal(secret: string, agent: AgentKey, draft: Pick<KeyDraft, "provider" | "baseUrl" | "key">): Promise<Sealed> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv, additionalData: aad(draft.provider, draft.baseUrl) },
+    { name: "AES-GCM", iv, additionalData: sealBinding(draft.provider, draft.baseUrl) },
     await aesKey(secret, agent),
     utf8.encode(draft.key.reveal()),
   );
@@ -96,7 +97,7 @@ export async function seal(secret: string, agent: AgentKey, draft: Pick<KeyDraft
 async function tryOpen(secret: string, agent: AgentKey, k: Pick<StoredKey, "provider" | "baseUrl" | "sealed">): Promise<SecretKey | null> {
   try {
     const plain = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: k.sealed.iv, additionalData: aad(k.provider, k.baseUrl) },
+      { name: "AES-GCM", iv: k.sealed.iv, additionalData: sealBinding(k.provider, k.baseUrl) },
       await aesKey(secret, agent),
       k.sealed.ciphertext,
     );

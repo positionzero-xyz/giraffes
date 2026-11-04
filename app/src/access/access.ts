@@ -180,18 +180,21 @@ function userBudget(route: Route, mode: SchemaMode, purpose: Purpose, system: st
 const HOUR_MS = 60 * 60_000;
 const MIN_MS = 60_000;
 
-function restFor(fault: KeyFault, failures: number, retryAfterMs: number | null): number | null {
-  const doubling = (base: number, max: number) => Math.min(base * 2 ** Math.min(failures, 10), max);
+/** How long a fault rests the key. An unreadable key rests until it is replaced or the configured secrets change. */
+type Rest = { readonly kind: "until_replaced" } | { readonly kind: "for"; readonly ms: number };
+
+function restFor(fault: KeyFault, failures: number, retryAfterMs: number | null): Rest {
+  const doubling = (base: number, max: number): Rest => ({ kind: "for", ms: Math.min(base * 2 ** Math.min(failures, 10), max) });
   switch (fault) {
     case "credential":
     case "payment":
       return doubling(HOUR_MS, 24 * HOUR_MS);
     case "model":
-      return 24 * HOUR_MS;
+      return { kind: "for", ms: 24 * HOUR_MS };
     case "rate":
-      return retryAfterMs ?? doubling(15 * MIN_MS, 6 * HOUR_MS);
+      return retryAfterMs === null ? doubling(15 * MIN_MS, 6 * HOUR_MS) : { kind: "for", ms: retryAfterMs };
     case "unreadable":
-      return null;
+      return { kind: "until_replaced" };
     default:
       return assertNever(fault);
   }
@@ -403,7 +406,7 @@ export class ModelAccess {
     const now = clock.now();
     const failures = k.health.kind === "resting" ? k.health.failures : 0;
     const rest = restFor(fault, failures, retryAfterMs);
-    const until = rest === null ? null : ((now + rest) as EpochMs);
+    const until = rest.kind === "for" ? ((now + rest.ms) as EpochMs) : null;
     const text = this.#faultText(k, fault, until);
     const today = localDate(now, store.agent()?.tz ?? DEFAULT_TIME_ZONE);
     const r = store.restKey(fault, until, { key: eventKey.access(`fault:${now}`), message: { texts: [text], note: text } }, today, now, k.revision, under);

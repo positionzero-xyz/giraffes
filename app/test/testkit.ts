@@ -13,8 +13,9 @@ import { boxClient } from "../src/box/client";
 import type { BoxHost, HostResult } from "../src/box/host";
 import { boxName, type BoxName } from "../src/box/names";
 import type { ChannelAdapter } from "../src/channels/channel";
-import { eventKey, parseChoice, personAgentKey, type EpochMs, type Identity, type LocalDateTime, type MicroUsd } from "../src/domain";
-import type { LeaseAnswer, Ledger, LogRow } from "../src/ledger/ledger";
+import type { AdmissionMode } from "../src/agent/admission";
+import { eventKey, parseChoice, personAgentKey, type ChannelEvent, type EpochMs, type Identity, type LocalDateTime, type MicroUsd } from "../src/domain";
+import { d1Ledger, type LeaseAnswer, type Ledger, type LogRow } from "../src/ledger/ledger";
 import { scripted, type ScriptStep, type ScriptedModel } from "../src/model/scripted";
 import type { QuotaReading } from "../src/policy/quota";
 import { SPEND } from "../src/policy/spend";
@@ -50,7 +51,11 @@ export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): Mem
   const seen = new Set<string>();
   const leases = new Map<string, { month: string; micro: MicroUsd }>();
   const boxes = new Map<string, { name: string; host: string }>();
+  const seats = d1Ledger(env.LEDGER, SPEND.globalCeilingMicro);
   return {
+    checkInvite: (code, caps) => seats.checkInvite(code, caps),
+    claimSeat: (req) => seats.claimSeat(req),
+    issueInvite: (req) => seats.issueInvite(req),
     lineQuotaReading: null,
     async recordLineQuota() {},
     async lineQuota() {
@@ -140,6 +145,10 @@ export type DevChat = {
   say(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<void>;
   /** The person taps a button whose data is `data`, such as "a:1.1". */
   tap(data: string): Promise<void>;
+  /** Any channel event, past the webhook, such as a Telegram follow with its start code. */
+  event(e: ChannelEvent): Promise<void>;
+  /** The operator removes the person from the beta. */
+  remove(): Promise<void>;
   settle(): Promise<void>;
   alarm(): Promise<void>;
   advanceTo(local: string): Promise<void>;
@@ -159,19 +168,23 @@ export async function devChat(
     readonly deliveries?: readonly DeliveryStep[];
     readonly box?: BoxDeps;
     readonly billing?: BillingDeps;
-    /** A LINE person's messages go straight into their agent, past the webhook's signature check. */
-    readonly line?: boolean;
+    /** A LINE or Telegram person's events go straight into their agent, past the webhook's signature check. */
+    readonly channel?: "line" | "telegram";
+    /** Open unless the test is about the beta's admission. Billing needs it open. */
+    readonly admission?: AdmissionMode;
   },
 ): Promise<DevChat> {
   const clock = fakeClock(local(opts.at));
   const ledger = opts.ledger ?? memoryLedger();
   const channel = scriptedChannel(opts.deliveries);
-  const identity: Identity = { channel: opts.line ? "line" : "dev", channelUserId: user };
+  const identity: Identity = { channel: opts.channel ?? "dev", channelUserId: user };
   const stub = env.AGENT.get(env.AGENT.idFromName(personAgentKey(identity)));
   const channels = { line: channel, telegram: channel, dev: channel };
   const box = opts.box ? { box: opts.box } : {};
   const billing = opts.billing ? { billing: opts.billing } : {};
-  await runInDurableObject<Agent, void>(stub, (agent) => agent.withDeps({ model: opts.model, clock, ledger, channels, ...box, ...billing }));
+  const admission = opts.admission ?? "open";
+  await runInDurableObject<Agent, void>(stub, (agent) => agent.withDeps({ model: opts.model, clock, ledger, channels, admission, ...box, ...billing }));
+  const keyOf = (id: string) => (identity.channel === "line" ? eventKey.line(id) : eventKey.telegram(++messageIds));
   let seen = 0;
   const nextAlarm = () => runInDurableObject(stub, (_agent, state) => state.storage.getAlarm());
 
@@ -183,7 +196,7 @@ export async function devChat(
       const body = { user, text, id: o.id ?? `m${++messageIds}`, at: o.at ?? clock.now() };
       if (identity.channel === "dev") return SELF.fetch("https://agent.test/webhook/dev", { method: "POST", body: JSON.stringify(body) });
       const at = body.at as EpochMs;
-      await stub.enqueue({ agent: personAgentKey(identity), identity, key: eventKey.line(body.id), receivedAt: at, event: { kind: "message", text } });
+      await stub.enqueue({ agent: personAgentKey(identity), identity, key: keyOf(body.id), receivedAt: at, event: { kind: "message", text } });
       return new Response("ok");
     },
     async say(text, o) {
@@ -194,9 +207,16 @@ export async function devChat(
     async tap(data) {
       const choice = parseChoice(data);
       if (!choice) throw new Error(`not a button: ${data}`);
-      const at = clock.now();
-      const key = identity.channel === "line" ? eventKey.line(`tap${++messageIds}`) : eventKey.dev(`tap${++messageIds}`);
-      await stub.enqueue({ agent: personAgentKey(identity), identity, key, receivedAt: at, event: { kind: "choice", choice, at } });
+      await chat.event({ kind: "choice", choice, at: clock.now() });
+    },
+    async event(e) {
+      const id = `e${++messageIds}`;
+      const key = identity.channel === "dev" ? eventKey.dev(id) : keyOf(id);
+      await stub.enqueue({ agent: personAgentKey(identity), identity, key, receivedAt: clock.now(), event: e });
+      await chat.settle();
+    },
+    async remove() {
+      await stub.remove();
       await chat.settle();
     },
     async settle() {

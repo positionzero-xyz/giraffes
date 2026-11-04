@@ -424,7 +424,7 @@ describe("time zone and language", () => {
 
   test("a LINE person's fixed notices are in Thai from the first message", async () => {
     const model = scripted([throws(), throws(), throws()]);
-    const c = await devChat("U0123456789abcdef0123456789abcdef", { model, at: "2099-11-04T10:00", line: true });
+    const c = await devChat("U0123456789abcdef0123456789abcdef", { model, at: "2099-11-04T10:00", channel: "line" });
 
     await c.say("สวัสดี");
 
@@ -557,7 +557,7 @@ describe("delivery", () => {
     ]);
     const ledger = memoryLedger();
     ledger.lineQuotaReading = { at: local("2099-11-04T09:00"), month: "2099-11", limit: 1000, used: 950 };
-    const c = await devChat("U00000000000000000000000000000001", { model, at: "2099-11-04T10:00", ledger, line: true });
+    const c = await devChat("U00000000000000000000000000000001", { model, at: "2099-11-04T10:00", ledger, channel: "line" });
 
     await c.say("remind me at 11:30 to take my pills");
     await c.advanceTo("2099-11-04T12:00");
@@ -574,7 +574,7 @@ describe("delivery", () => {
     ]);
     const ledger = memoryLedger();
     ledger.lineQuotaReading = { at: local("2099-10-31T23:00"), month: "2099-10", limit: 1000, used: 990 };
-    const c = await devChat("U00000000000000000000000000000002", { model, at: "2099-11-01T10:00", ledger, line: true });
+    const c = await devChat("U00000000000000000000000000000002", { model, at: "2099-11-01T10:00", ledger, channel: "line" });
 
     await c.say("I'm planning a trip");
     await c.advanceTo("2099-11-01T12:00");

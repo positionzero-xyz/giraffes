@@ -92,7 +92,6 @@ export type LogRow =
       readonly taskId: string;
       readonly kind: FactKind;
       readonly ref: string;
-      /** JSON. */
       readonly detail: string;
       /** This fact moved the task to completed. At most one fact per task has it. */
       readonly completes: boolean;

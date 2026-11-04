@@ -222,7 +222,6 @@ export const mayspend = (a: Admission): a is Extract<Admission, { state: "admitt
 
 export type PersonStatus = "active" | "blocked";
 
-/** Cuts a text to `max` characters with an ellipsis, never splitting a surrogate pair. */
 export function clip(text: string, max: number): string {
   const cut = text.slice(0, max - 1);
   return `${/[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut}…`;

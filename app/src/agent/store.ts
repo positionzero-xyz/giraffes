@@ -546,7 +546,6 @@ export class AgentStore {
       .toArray();
   }
 
-  /** The open proposal on the newest agent message that was delivered, if that message carried one. */
   private acceptable(): AcceptableProposal | null {
     const r = this.sql
       .exec<{ id: ProposalId; task_id: TaskId; version: number; sent_at: EpochMs }>(
@@ -671,7 +670,7 @@ export class AgentStore {
   ): { readonly resolve: (t: TaskTarget) => TaskId | null; readonly proposal: string | null } {
     const open = new Map(this.sql.exec<{ id: TaskId; ref: TaskRef }>("SELECT id, ref FROM task WHERE status = 'open'").toArray().map((r) => [r.ref, r.id]));
     const resolve = (t: TaskTarget): TaskId | null => ("id" in t ? t.id : (open.get(t.ref) ?? null));
-    const agent = c.open.length + c.facts.length > 0 || c.propose ? this.agent()?.key : undefined;
+    const agent = this.agent()?.key;
     for (const t of c.open) {
       if (open.has(t.ref) || !agent) continue;
       const { id } = this.sql

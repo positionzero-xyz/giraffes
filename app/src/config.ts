@@ -298,10 +298,11 @@ function operatorChat(raw: string | undefined, configured: Readonly<Record<Opera
 }
 
 function admissionMode(raw: string | undefined, billing: BillingConfig): AdmissionMode {
-  const mode = present(raw) ? raw : "beta";
-  if (!ADMISSION_MODES.some((m) => m === mode)) throw new Error(`unknown ADMISSION: ${mode}`);
+  const given = present(raw) ? raw : "beta";
+  const mode = ADMISSION_MODES.find((m) => m === given);
+  if (mode === undefined) throw new Error(`unknown ADMISSION: ${given}`);
   if (mode === "beta" && billing.on) throw new Error("ADMISSION=beta can't run with BILLING=on; set ADMISSION=open to sell plans");
-  return mode as AdmissionMode;
+  return mode;
 }
 
 export function loadConfig(env: Env): Config {

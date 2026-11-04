@@ -98,7 +98,6 @@ export type EnsureStep = Extract<Step, { kind: "ensure" }>;
 
 const LINK_NOTE = "<sign-in link>";
 
-
 export const needsLink = (say: BoxSay): boolean => say === "link" || say === "signed_out_link";
 
 export function boxMessage(say: BoxSay, lang: Language, link: string | null, until: string = ""): { readonly text: string; readonly note: string } {

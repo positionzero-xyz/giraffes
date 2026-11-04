@@ -21,13 +21,12 @@ registerHooks({
 const { connect, runParse, SecretKey } = await import("../src/model/client.ts");
 const { fitPrompt } = await import("../src/model/prompt.ts");
 const { isProviderId, PROVIDERS } = await import("../src/model/providers.ts");
-const { routeFor } = await import("../src/model/routes.ts");
+const { PROMPT_FLOOR_BYTES, routeFor } = await import("../src/model/routes.ts");
 const { costOf, estimate } = await import("../src/policy/spend.ts");
 const { renderUser, planTurn, TurnOutputSchema } = await import("../src/agent/turn.ts");
 const { compactionCommit, CompactionOutputSchema, planCompaction } = await import("../src/agent/compaction.ts");
 const { COMPACTION_SYSTEM, TURN_SYSTEM } = await import("../src/agent/prompt.ts");
 const { fromLocal, localDate, parseLocalDateTime, parseTimeZone } = await import("../src/policy/time.ts");
-const { PROMPT_FLOOR_BYTES } = await import("../src/model/routes.ts");
 
 const USAGE = `usage: node scripts/eval.ts --routes <provider:model,...> [--yes] [--fixtures eval/fixtures] [--only <tag>]
   [--repeat 3] [--mode strict|loose|both] [--max-usd 2] [--gate valid=0.98,checks=0.9,month_usd=0.6] [--out eval/out]

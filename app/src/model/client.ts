@@ -127,7 +127,7 @@ async function post(fetch: Fetch, url: string, headers: Record<string, string>, 
   }
 }
 
-const UNREADABLE_REPLY: WireResult = { kind: "reply", text: "", stop: "end", usage: null, reportedMicro: null };
+export const UNREADABLE_REPLY: Extract<WireResult, { kind: "reply" }> ={ kind: "reply", text: "", stop: "end", usage: null, reportedMicro: null };
 
 const AnthropicReply = z.object({
   content: z.array(z.object({ type: z.string(), text: z.string().optional() })),
@@ -275,7 +275,6 @@ export function readBridgeReply(raw: unknown): Extract<WireResult, { kind: "repl
     reportedMicro: null,
   };
 }
-
 
 function bridge(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): ModelClient {
   return {

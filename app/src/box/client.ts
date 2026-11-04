@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { bridgeBody, readBridgeReply, type JsonSchema, type WireResult } from "../model/client";
+import { bridgeBody, readBridgeReply, UNREADABLE_REPLY, type JsonSchema, type WireResult } from "../model/client";
 import type { Fetch } from "./host";
 import type { BoxToken } from "./names";
 
@@ -68,7 +68,7 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
       if (res.status === 409) return { kind: "signed_out" };
       if (res.status === 401) return { kind: "unauthorized" };
       if (!res.ok) return { kind: "unavailable", detail: `parse ${res.status}` };
-      return { kind: "reply", reply: readBridgeReply(jsonOrNull(text)) ?? { kind: "reply", text: "", stop: "end", usage: null, reportedMicro: null } };
+      return { kind: "reply", reply: readBridgeReply(jsonOrNull(text)) ?? UNREADABLE_REPLY };
     },
   };
 }

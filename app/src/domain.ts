@@ -175,8 +175,10 @@ export const personDecision = (f: TaskFact): boolean => FACTS[f.kind].decision &
 export type ProposalId = Brand<string, "ProposalId">;
 export const proposalId = (task: TaskId, version: number): ProposalId => `${task}.${version}` as ProposalId;
 
-/** `backup`: yes to the person's own key backing up their Claude plan. */
-/** A backup answer names the key revision it was asked about; null is a button from before buttons carried one. */
+/**
+ * `backup`: yes to the person's own key backing up their Claude plan. It names the key revision it was asked about;
+ * null is a button from before buttons carried one.
+ */
 export type Choice = { readonly kind: "accept"; readonly proposal: ProposalId } | { readonly kind: "consent" } | { readonly kind: "backup"; readonly revision: number | null };
 
 /** "a:7.1", "c" or "b:3": short enough for Telegram's 64-byte callback_data and a LINE postback. */

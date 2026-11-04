@@ -1,8 +1,9 @@
+import { z } from "zod";
 import { planAllowsBox, type Plan } from "../billing/plan";
 import type { BoxState } from "../box/machine";
 import { assertNever, eventKey, mayspend, type AgentKey, type EpochMs, type MicroUsd } from "../domain";
 import { modelCallRow, type Backend, type ModelCallStatus } from "../ledger/ledger";
-import { NOTICES } from "../notices";
+import { NOTICES, type KeyPageError } from "../notices";
 import { OUTPUTS, outputOf, type Output } from "../agent/purposes";
 import type { AgentStore, Reservation } from "../agent/store";
 import {
@@ -25,8 +26,6 @@ import { PROVIDERS, type ModelRef } from "../model/providers";
 import { routeFor, type CallPurpose, type Purpose, type Route, type Source } from "../model/routes";
 import { costOf, estimate, fits, type SpendScope } from "../policy/spend";
 import { DEFAULT_TIME_ZONE, localDate, toLocal, utcMonth } from "../policy/time";
-import { z } from "zod";
-import type { KeyPageError } from "../notices";
 import { endpointOf, open, secretsFingerprint, sessionOf, type KeyDraft, type KeySecrets, type StoredKey } from "./key";
 
 export type KeysConfig =

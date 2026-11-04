@@ -71,17 +71,10 @@ export function planCompaction(input: CompactionInput, budgetBytes: number, forc
 
   const turnLines: string[] = [];
   const noteLines: string[] = [];
-  const promptOf = (): PromptParts => ({
-    sections: [section("Current summary", [input.summary || "(empty)"]), section("Turns being removed", turnLines), section("Notes being folded", noteLines)],
+  const promptOf = (turns: readonly string[] = turnLines): PromptParts => ({
+    sections: [section("Current summary", [input.summary || "(empty)"]), section("Turns being removed", turns), section("Notes being folded", noteLines)],
   });
-  const fits = () => bytesOf(renderPrompt(promptOf())) <= budgetBytes;
-  const fitsAlone = (line: string) => {
-    const before = turnLines.splice(0);
-    turnLines.push(line);
-    const ok = fits();
-    turnLines.splice(0, turnLines.length, ...before);
-    return ok;
-  };
+  const fits = (turns: readonly string[] = turnLines) => bytesOf(renderPrompt(promptOf(turns))) <= budgetBytes;
 
   const foldSeqs: number[] = [];
   let foldThroughSeq = input.throughSeq;
@@ -95,7 +88,7 @@ export function planCompaction(input: CompactionInput, budgetBytes: number, forc
     } else {
       turnLines.pop();
       if (old) continue;
-      if (fitsAlone(turnLine(t))) break;
+      if (fits([turnLine(t)])) break;
       turnLines.push(placeholder(t));
       if (!fits()) {
         turnLines.pop();

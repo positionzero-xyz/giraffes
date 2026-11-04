@@ -1,6 +1,5 @@
 import { DEV_URL_SCRIPTED } from "../access/access";
 import { OUTPUTS } from "../agent/purposes";
-import type { MicroUsd } from "../domain";
 import type { Connect, ModelClient, Usage, WireRequest, WireResult } from "./client";
 import type { CallPurpose } from "./routes";
 
@@ -38,10 +37,9 @@ export function scripted(steps: readonly ScriptStep[], opts: { readonly compacti
   async function play(step: ScriptStep, purpose: CallPurpose): Promise<WireResult> {
     switch (step.kind) {
       case "output": {
-        if (purpose !== "probe" && !OUTPUTS[purpose].safeParse(step.value).success) {
-          throw new Error(`scripted output doesn't match the schema: ${OUTPUTS[purpose].safeParse(step.value).error?.message}`);
-        }
-        return { kind: "reply", text: JSON.stringify(step.value), stop: "end", usage: { ...DEFAULT_USAGE, ...step.usage }, reportedMicro: null as MicroUsd | null };
+        const parsed = purpose === "probe" ? null : OUTPUTS[purpose].safeParse(step.value);
+        if (parsed && !parsed.success) throw new Error(`scripted output doesn't match the schema: ${parsed.error.message}`);
+        return { kind: "reply", text: JSON.stringify(step.value), stop: "end", usage: { ...DEFAULT_USAGE, ...step.usage }, reportedMicro: null };
       }
       case "fail":
         return FAILURE[step.failure];

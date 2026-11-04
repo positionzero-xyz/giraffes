@@ -3,7 +3,10 @@ import { eventKey, parseChoice, personAgentKey, type ChannelEvent, type EpochMs,
 import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
 
 const API = "https://api.line.me/v2/bot/message";
-const Quota = z.object({ type: z.enum(["none", "limited"]), value: z.number().int().nonnegative().optional() });
+const Quota = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("none") }),
+  z.object({ type: z.literal("limited"), value: z.number().int().nonnegative() }),
+]);
 const Consumption = z.object({ totalUsage: z.number().int().nonnegative() });
 /** LINE says a reply token is good for about one minute. */
 const REPLY_TOKEN_TTL_MS = 60_000;
@@ -164,6 +167,5 @@ export async function lineQuota(accessToken: string): Promise<{ readonly limit: 
     return res.json();
   };
   const [quota, consumption] = await Promise.all([get("quota").then((j) => Quota.parse(j)), get("quota/consumption").then((j) => Consumption.parse(j))]);
-  if (quota.type === "limited" && quota.value === undefined) throw new Error("LINE quota: a limited quota without a value");
-  return { limit: quota.type === "limited" ? (quota.value ?? 0) : null, used: consumption.totalUsage };
+  return { limit: quota.type === "limited" ? quota.value : null, used: consumption.totalUsage };
 }

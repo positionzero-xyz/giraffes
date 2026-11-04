@@ -510,8 +510,8 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   const agentTexts = [...sends];
   const late = lateTrigger(view);
   if (late && agentTexts.length > 0) {
-    const given = out.lateNotice?.trim();
-    const notice = given ? fit(given, TURN.maxLateNoticeChars, "late_notice") : t.lateFallback(human(late.dueAt, view.tz));
+    const written = out.lateNotice?.trim();
+    const notice = written ? fit(written, TURN.maxLateNoticeChars, "late_notice") : t.lateFallback(human(late.dueAt, view.tz));
     agentTexts[0] = `${notice}\n${agentTexts[0]}`;
   }
   const noticeText = (agentTexts.length > 0 || intent === "reply") && notices.size > 0 ? [...notices].join("\n") : null;

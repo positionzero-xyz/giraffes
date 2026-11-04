@@ -298,17 +298,16 @@ export class AgentStore {
   claimBatch(now: EpochMs): Batch | null {
     return this.tx(() => {
       const ready = this.sql
-        .exec<InboxCols & { kind: AgentEventKind }>(
-          `SELECT event_key, kind, payload, attempts, received_at FROM inbox
-           WHERE status = 'pending' AND ready_at <= ? ORDER BY seq LIMIT ?`,
-          now,
+        .exec<InboxCols & { kind: AgentEventKind; ready_at: EpochMs }>(
+          `SELECT event_key, kind, payload, attempts, received_at, ready_at FROM inbox
+           WHERE status = 'pending' ORDER BY seq LIMIT ?`,
           TURN.maxBatchMessages,
         )
         .toArray();
       const [head] = ready;
-      if (!head) return null;
-      const command = (r: (typeof ready)[number]) => r.kind === "message" && commandOf(fromJson<AgentEvent>(r.payload)) !== null;
-      const end = head.kind === "message" && !command(head) ? ready.findIndex((r) => r.kind !== "message" || command(r)) : 1;
+      if (!head || head.ready_at > now) return null;
+      const joins = (r: (typeof ready)[number]) => r.kind === "message" && r.ready_at <= now && commandOf(fromJson<AgentEvent>(r.payload)) === null;
+      const end = joins(head) ? ready.findIndex((r) => !joins(r)) : 1;
       const rows = end === -1 ? ready : ready.slice(0, end);
       const keys = rows.map((r) => r.event_key);
       this.sql.exec(
@@ -557,6 +556,14 @@ export class AgentStore {
 
   private pendingReminders(): number {
     return this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM wakeup WHERE status = 'pending' AND kind = 'reminder'").one().n;
+  }
+
+  /** A message, follow or block not yet handled; it may cancel or move a wake-up, or change whether one fires. */
+  channelEventWaiting(): boolean {
+    return (
+      this.sql.exec("SELECT 1 FROM inbox WHERE status IN ('pending', 'processing') AND kind IN ('message', 'lifecycle') LIMIT 1").toArray()
+        .length > 0
+    );
   }
 
   dueWakeups(now: EpochMs): readonly PendingWakeup[] {
@@ -824,6 +831,7 @@ export class AgentStore {
 
   readiness(now: EpochMs): {
     readonly inboxReadyAt: EpochMs | null;
+    readonly channelEventWaiting: boolean;
     readonly earliestWakeups: readonly { readonly origin: WakeupOrigin; readonly dueAt: EpochMs }[];
     readonly outboxReadyAt: EpochMs | null;
     readonly logsReadyAt: EpochMs | null;
@@ -838,7 +846,8 @@ export class AgentStore {
       )
       .one();
     return {
-      inboxReadyAt: min("SELECT MIN(ready_at) AS t FROM inbox WHERE status IN ('pending', 'processing')"),
+      inboxReadyAt: min("SELECT (SELECT ready_at FROM inbox WHERE status IN ('pending', 'processing') ORDER BY seq LIMIT 1) AS t"),
+      channelEventWaiting: this.channelEventWaiting(),
       earliestWakeups: this.sql
         .exec<{ origin: WakeupOrigin; due_at: EpochMs }>(
           "SELECT origin, MIN(due_at) AS due_at FROM wakeup WHERE status = 'pending' GROUP BY origin",

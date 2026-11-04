@@ -321,7 +321,7 @@ export class Agent extends DurableObject<Env> {
   #fireDueWakeups(): void {
     const now = this.#deps.clock.now();
     const a = this.#store.agent();
-    if (!a) return;
+    if (!a || this.#store.channelEventWaiting()) return;
     for (const firing of planFiring(now, a.tz, a.status, a.checkinLocal, this.#store.dueWakeups(now))) {
       this.#store.applyFiring(firing, now);
     }
@@ -854,7 +854,7 @@ export class Agent extends DurableObject<Env> {
     const now = this.#deps.clock.now();
     const r = this.#store.readiness(now);
     const a = this.#store.agent();
-    const fireTimes = a ? r.earliestWakeups.map((w) => fireAt(w, a.tz)) : [];
+    const fireTimes = a && !r.channelEventWaiting ? r.earliestWakeups.map((w) => fireAt(w, a.tz)) : [];
     const t = nextAlarm({
       now,
       inboxReadyAt: r.inboxReadyAt,

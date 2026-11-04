@@ -1005,7 +1005,7 @@ export class Agent extends DurableObject<Env> {
       case "reply":
         return { kind: "reply", reply: res.reply };
       case "signed_out": {
-        const t = onSignedOut(box, now);
+        const t = onSignedOut(box, now, this.#store.key()?.backup === true);
         this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [missed("rejected")], now);
         return { kind: "moved_on", transient: false, told: true };
       }

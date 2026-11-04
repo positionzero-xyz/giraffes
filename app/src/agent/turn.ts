@@ -576,6 +576,12 @@ export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "blo
   return e.change === "block" ? { kind: "block" } : null;
 }
 
+/** What the person must do before anyone answers, which a follow needs too: it is the first thing a new person sends. */
+function accessNotice(view: TurnView, notice: string | null): string | null {
+  const e = trigger(view);
+  return e.kind === "lifecycle" && e.change === "follow" ? notice : textWithoutModel(view, notice);
+}
+
 function textWithoutModel(view: TurnView, notice: string | null): string | null {
   const e = trigger(view);
   if (e.kind === "message") return notice;
@@ -606,16 +612,16 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     case "over_cap": {
       outcome = "refused_budget";
       const notice = why.scope === "byok" ? t.ownCapReached(why.capUsd) : why.scope === "included" ? t.includedCapReached : t.monthlyLimit;
-      text = textWithoutModel(view, why.alreadyToldToday ? null : notice);
+      text = accessNotice(view, why.alreadyToldToday ? null : notice);
       break;
     }
     case "no_access":
       outcome = "no_access";
-      text = textWithoutModel(view, why.alreadyToldToday ? null : why.text);
+      text = accessNotice(view, why.alreadyToldToday ? null : why.text);
       break;
     case "lapsed":
       outcome = "lapsed";
-      text = textWithoutModel(view, why.alreadyToldToday ? null : t.lapsed);
+      text = accessNotice(view, why.alreadyToldToday ? null : t.lapsed);
       break;
     case "model_failed":
     case "poison":

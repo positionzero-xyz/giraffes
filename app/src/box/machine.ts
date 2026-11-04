@@ -68,6 +68,7 @@ export const BOX_SAYS = [
   "still_setting_up",
   "link",
   "signed_out_link",
+  "signed_out_backup",
   "connected",
   "already_connected",
   "setup_failed",
@@ -98,7 +99,7 @@ export type EnsureStep = Extract<Step, { kind: "ensure" }>;
 
 const LINK_NOTE = "<sign-in link>";
 
-export const needsLink = (say: BoxSay): boolean => say === "link" || say === "signed_out_link";
+export const needsLink = (say: BoxSay): boolean => say === "link" || say === "signed_out_link" || say === "signed_out_backup";
 
 export function boxMessage(say: BoxSay, lang: Language, link: string | null, until: string = ""): { readonly text: string; readonly note: string } {
   const text = NOTICES[lang].box[say];
@@ -232,6 +233,7 @@ export function onPlan(b: Box, allowsBox: boolean, now: EpochMs): Transition {
   return { box: { ...b, retireAt: (now + BOX.retireAfterMs) as EpochMs }, say: "retiring" };
 }
 
-export function onSignedOut(b: Box, now: EpochMs): Reply {
-  return { box: linkSent(b, null, now), say: "signed_out_link" };
+/** `backup`: the person's key answers while the plan is signed out, so the notice says so instead of saying nothing will. */
+export function onSignedOut(b: Box, now: EpochMs, backup: boolean): Reply {
+  return { box: linkSent(b, null, now), say: backup ? "signed_out_backup" : "signed_out_link" };
 }

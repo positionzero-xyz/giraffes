@@ -533,7 +533,7 @@ export class AgentStore {
 
   toldToday(outcome: "refused_budget" | "lapsed" | "no_access", dayStart: EpochMs): boolean {
     return (
-      this.sql.exec("SELECT 1 FROM inbox WHERE outcome = ? AND finished_at >= ? AND kind = 'message' LIMIT 1", outcome, dayStart).toArray()
+      this.sql.exec("SELECT 1 FROM inbox WHERE outcome = ? AND finished_at >= ? AND kind IN ('message', 'lifecycle') LIMIT 1", outcome, dayStart).toArray()
         .length > 0
     );
   }

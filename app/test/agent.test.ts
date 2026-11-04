@@ -1,9 +1,10 @@
 import { describe, expect, test } from "vitest";
 import { NOTICE, TURN } from "../src/agent/turn";
-import type { EpochMs } from "../src/domain";
+import type { EpochMs, LocalDateTime, TimeZone } from "../src/domain";
 import { priceOf, routeOf } from "../src/model/model";
 import type { ScriptStep } from "../src/model/scripted";
 import { costOf, SPEND } from "../src/policy/spend";
+import { fromLocal, toLocal } from "../src/policy/time";
 import { cancel, chat, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, throws, turn, wall } from "./testkit";
 
 const until = async (done: () => boolean) => {
@@ -354,6 +355,80 @@ describe("order across retries", () => {
     expect(await c.received()).toEqual(["Cancelled."]);
     expect((await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder")).toEqual([]);
     expect(c.logs("rejection")).toEqual([]);
+    model.assertDone();
+  });
+});
+
+describe("time zone and language", () => {
+  const LONDON = "Europe/London" as TimeZone;
+  const london = (s: string) => fromLocal(s as LocalDateTime, LONDON);
+  const locale = (timeZone: string, language: string) => ({ type: "set_locale", timeZone, language });
+
+  test("a person in London gets the check-in at 09:00, quiet hours and reminders on London time", async () => {
+    const model = scripted([
+      turn({ actions: [schedule("dentist", "2099-11-05T15:00", "Dentist"), send("Set for 3pm.")], task: ["reminder", "dentist", "started"] }),
+      turn({
+        actions: [locale("Europe/London", "en"), schedule("follow-up", "2099-11-04T23:00", "Ask about the flat", false), send("Got it, London time.")],
+        task: ["chat", "zone", "completed"],
+      }),
+      turn({ actions: [send("Did you hear back about the flat?")], lateNotice: "This was due last night.", task: ["chat", "flat", "progressed"] }),
+      chat("Morning!"),
+    ]);
+    const c = await devChat("lyn", { model, at: "2099-11-04T10:00" });
+    await c.say("remind me about the dentist tomorrow at 3pm");
+
+    await c.say("by the way, I live in London");
+
+    const after = await c.snapshot();
+    expect(after.agent?.tz).toBe("Europe/London");
+    expect(after.pendingWakeups.map((w) => [w.key, toLocal(w.dueAt, LONDON)])).toEqual([
+      ["follow-up", "2099-11-04T23:00"],
+      ["daily-checkin", "2099-11-05T09:00"],
+      ["dentist", "2099-11-05T15:00"],
+    ]);
+
+    c.clock.set(london("2099-11-04T03:00"));
+    await c.advanceTo(toLocal(london("2099-11-05T09:30"), "Asia/Bangkok" as TimeZone));
+
+    expect(c.channel.delivered.map((d) => [d.text, toLocal(d.at, LONDON)])).toEqual([
+      ["Set for 3pm.", "2099-11-04T03:00"],
+      ["Got it, London time.", "2099-11-04T03:00"],
+      ["This was due last night.\nDid you hear back about the flat?", "2099-11-05T08:00"],
+      ["Morning!", "2099-11-05T09:00"],
+    ]);
+    expect(model.calls.at(-1)?.user).toContain("Europe/London");
+    model.assertDone();
+  });
+
+  test("a time zone code can't read is rejected, logged and corrected, and the zone stays", async () => {
+    const model = scripted([turn({ actions: [locale("Mars/Olympus", "en"), send("Switched to Mars time.")], task: ["chat", "zone", "completed"] })]);
+    const c = await devChat("mae", { model, at: "2099-11-04T10:00" });
+
+    await c.say("I live on Mars now");
+
+    expect(await c.received()).toEqual(["Switched to Mars time.\n(I couldn't find that time zone, so I kept the one you had.)"]);
+    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([["set_locale", "bad_zone"]]);
+    expect((await c.snapshot()).agent?.tz).toBe("Asia/Bangkok");
+  });
+
+  test("a person who asks for Thai gets code-written corrections in Thai from that turn on", async () => {
+    const model = scripted([
+      turn({ actions: [locale("Asia/Bangkok", "th"), schedule("dentist", "tomorrow at 9", "Dentist"), send("ตั้งให้แล้วค่ะ")], task: ["reminder", "dentist", "started"] }),
+    ]);
+    const c = await devChat("pim", { model, at: "2099-11-04T10:00" });
+
+    await c.say("คุยภาษาไทยนะ แล้วเตือนไปหาหมอฟันพรุ่งนี้เก้าโมง");
+
+    expect(await c.received()).toEqual(["ตั้งให้แล้วค่ะ\n(อ่านเวลานั้นไม่ออก เลยยังไม่ได้ตั้งเตือนให้ค่ะ)"]);
+  });
+
+  test("a LINE person's fixed notices are in Thai from the first message", async () => {
+    const model = scripted([throws(), throws(), throws()]);
+    const c = await devChat("U0123456789abcdef0123456789abcdef", { model, at: "2099-11-04T10:00", line: true });
+
+    await c.say("สวัสดี");
+
+    expect(await c.received()).toEqual(["ขอโทษค่ะ ตอนนี้ยังตอบข้อความนั้นไม่ได้ ช่วยส่งมาใหม่อีกครั้งได้ไหมคะ"]);
     model.assertDone();
   });
 });

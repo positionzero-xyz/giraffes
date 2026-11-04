@@ -13,7 +13,7 @@ import { boxClient } from "../src/box/client";
 import type { BoxHost, HostResult } from "../src/box/host";
 import { boxName, type BoxName } from "../src/box/names";
 import type { ChannelAdapter } from "../src/channels/channel";
-import { personAgentKey, type EpochMs, type LocalDateTime, type MicroUsd } from "../src/domain";
+import { eventKey, personAgentKey, type EpochMs, type Identity, type LocalDateTime, type MicroUsd } from "../src/domain";
 import type { LeaseAnswer, Ledger, LogRow } from "../src/ledger/ledger";
 import { scripted, type ScriptStep, type ScriptedModel } from "../src/model/scripted";
 import { SPEND } from "../src/policy/spend";
@@ -140,12 +140,15 @@ export async function devChat(
     readonly deliveries?: readonly DeliveryStep[];
     readonly box?: BoxDeps;
     readonly billing?: BillingDeps;
+    /** A LINE person's messages go straight into their agent, past the webhook's signature check. */
+    readonly line?: boolean;
   },
 ): Promise<DevChat> {
   const clock = fakeClock(local(opts.at));
   const ledger = opts.ledger ?? memoryLedger();
   const channel = scriptedChannel(opts.deliveries);
-  const stub = env.AGENT.get(env.AGENT.idFromName(personAgentKey({ channel: "dev", channelUserId: user })));
+  const identity: Identity = { channel: opts.line ? "line" : "dev", channelUserId: user };
+  const stub = env.AGENT.get(env.AGENT.idFromName(personAgentKey(identity)));
   const channels = { line: channel, telegram: channel, dev: channel };
   const box = opts.box ? { box: opts.box } : {};
   const billing = opts.billing ? { billing: opts.billing } : {};
@@ -157,9 +160,12 @@ export async function devChat(
     model: opts.model,
     clock,
     channel,
-    post(text, o = {}) {
+    async post(text, o = {}) {
       const body = { user, text, id: o.id ?? `m${++messageIds}`, at: o.at ?? clock.now() };
-      return SELF.fetch("https://agent.test/webhook/dev", { method: "POST", body: JSON.stringify(body) });
+      if (identity.channel === "dev") return SELF.fetch("https://agent.test/webhook/dev", { method: "POST", body: JSON.stringify(body) });
+      const at = body.at as EpochMs;
+      await stub.enqueue({ agent: personAgentKey(identity), identity, key: eventKey.line(body.id), receivedAt: at, event: { kind: "message", text } });
+      return new Response("ok");
     },
     async say(text, o) {
       const res = await chat.post(text, o);

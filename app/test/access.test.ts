@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { kidOf } from "../src/access/key";
@@ -56,7 +57,17 @@ describe("no access", () => {
 
   test("MODEL_BACKEND=anthropic, left in an old deploy's env, fails loudly instead of serving on our key", () => {
     expect(() => loadConfig({ MODEL_BACKEND: "anthropic" } as unknown as Env)).toThrow("MODEL_BACKEND=anthropic was removed");
-    expect(loadConfig({} as unknown as Env)).toMatchObject({ model: { backend: "live" }, included: { on: false }, keys: { on: false } });
+    expect(loadConfig({ KEY_SECRET: TEST_KEY_SECRET, PUBLIC_URL: "https://giraffes.test" } as unknown as Env)).toMatchObject({
+      model: { backend: "live" },
+      included: { on: false },
+      keys: { on: true },
+    });
+  });
+
+  test("a live deploy refuses to start without KEY_SECRET, since people's keys are how it answers; a dev backend may run without one", () => {
+    expect(() => loadConfig({} as unknown as Env)).toThrow("KEY_SECRET");
+    expect(() => loadConfig({ PUBLIC_URL: "https://giraffes.test" } as unknown as Env)).toThrow("KEY_SECRET");
+    expect(loadConfig({ MODEL_BACKEND: "scripted", DEV_MODE: "1" } as unknown as Env).keys.on).toBe(false);
   });
 });
 
@@ -245,6 +256,39 @@ describe("operator transitions", () => {
     expect(await c.received()).toEqual([NOTICE.keyUnreadable, NOTICE.keyUnreadable]);
     expect(provider.seen).toHaveLength(0);
     expect((await c.snapshot()).access.key?.health).toBe("resting:unreadable");
+  });
+
+  test("a key found unreadable is opened again once the configured secret changes, here back to the one that sealed it", async () => {
+    const provider = fakeProvider([reply("Readable again.")]);
+    const wrong = { ...TEST_KEYS, secrets: { current: "another-key-secret-abcdefghijklmnopqrs", previous: null } };
+    const c = await devChat("hel", { model: null, provider, at: "2099-11-04T10:00", keys: wrong });
+    await giveKey(c.agent);
+    await c.say("hello");
+    expect(await c.received()).toEqual([NOTICE.keyUnreadable]);
+
+    const fixed = await devChat("hel", { model: null, provider, at: "2099-11-04T10:05" });
+    await fixed.say("hello again");
+
+    expect(await fixed.received()).toEqual(["Readable again."]);
+    expect((await fixed.snapshot()).access.key?.health).toBe("ok");
+  });
+
+  test("a key found unreadable while keys were off works again as soon as KEY_SECRET is set", async () => {
+    const provider = fakeProvider([reply("Keys are on.")]);
+    const c = await devChat("hem", { model: null, provider, at: "2099-11-04T10:00", keys: { on: false, defaultCapMicro: 5_000_000 as MicroUsd } });
+    await giveKey(c.agent);
+    await c.say("hello");
+    expect((await c.snapshot()).access.key?.health).toBe("resting:unreadable");
+
+    const on = await devChat("hem", { model: null, provider, at: "2099-11-04T10:05" });
+    await on.say("hello again");
+
+    expect(await on.received()).toEqual(["Keys are on."]);
+  });
+
+  test("a sealed key names the secret that sealed it by a short HMAC of a fixed label", async () => {
+    const expected = createHmac("sha256", TEST_KEY_SECRET).update("giraffes key fingerprint").digest("hex").slice(0, 12);
+    expect(await kidOf(TEST_KEY_SECRET)).toBe(expected);
   });
 
   test("a deploy over open reservations: one a dead instance left is charged at its estimate and logged once", async () => {

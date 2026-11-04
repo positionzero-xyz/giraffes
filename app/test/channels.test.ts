@@ -1,4 +1,7 @@
+import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { TASKS } from "../src/agent/tasks";
+import { devChannel } from "../src/channels/dev";
 import { TURN } from "../src/agent/turn";
 import { lineChannel } from "../src/channels/line";
 import { SEND_MESSAGE_MAX_CHARS as TELEGRAM_MAX_CHARS, telegramChannel } from "../src/channels/telegram";
@@ -78,6 +81,33 @@ describe("LINE webhook", () => {
   test("without secrets the route doesn't exist", async () => {
     expect(await lineChannel(null).receive(lineWebhook(LINE_BODY, LINE_SIGNATURE))).toEqual({ kind: "rejected", status: 404 });
   });
+
+  test("a postback from a button becomes a choice, with its reply token; unknown data is ignored", async () => {
+    const postback = (id: string, data: string) => ({
+      type: "postback",
+      webhookEventId: id,
+      timestamp: T,
+      mode: "active",
+      source: { type: "user", userId: USER },
+      replyToken: `token-${id}`,
+      postback: { data },
+      deliveryContext: { isRedelivery: false },
+    });
+    const body = JSON.stringify({ destination: "Uaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", events: [postback("P1", "a:7.1"), postback("P2", "c"), postback("P3", "x:1")] });
+    const signature = createHmac("sha256", LINE_SECRET).update(body).digest("base64");
+
+    const received = await line().receive(lineWebhook(body, signature));
+
+    const reply = (id: string) => ({ token: `token-${id}`, expiresAt: T + 60_000 });
+    expect(received).toMatchObject({
+      kind: "accepted",
+      ignored: 1,
+      envelopes: [
+        { key: "line:P1", event: { kind: "choice", choice: { kind: "accept", proposal: "7.1" }, at: T, reply: reply("P1") } },
+        { key: "line:P2", event: { kind: "choice", choice: { kind: "consent" }, at: T, reply: reply("P2") } },
+      ],
+    });
+  });
 });
 
 const NOW = 4097563210000 as EpochMs;
@@ -88,6 +118,32 @@ function outbound(over: Partial<OutboundMessage> = {}): OutboundMessage {
 const fresh = { token: "reply-token-1", expiresAt: (NOW + 50_000) as EpochMs };
 
 describe("LINE delivery", () => {
+  test("a button rides on the last text as a postback quick reply that shows its label", async () => {
+    const seen = stubFetch(() => Response.json({}));
+
+    await line().deliver(outbound({ reply: fresh, button: { label: "Accept plan", data: "a:7.1" } }), NOW);
+
+    expect(seen[0].body).toEqual({
+      replyToken: "reply-token-1",
+      messages: [
+        { type: "text", text: "Done." },
+        {
+          type: "text",
+          text: "(note)",
+          quickReply: { items: [{ type: "action", action: { type: "postback", label: "Accept plan", data: "a:7.1", displayText: "Accept plan" } }] },
+        },
+      ],
+    });
+  });
+
+  test("a reply-only row is never pushed, even when its reply token is refused", async () => {
+    const seen = stubFetch(() => Response.json({ message: "Invalid reply token" }, { status: 400 }));
+
+    expect(await line().deliver(outbound({ replyOnly: true }), NOW)).toMatchObject({ kind: "failed" });
+    expect(await line().deliver(outbound({ replyOnly: true, reply: fresh }), NOW)).toMatchObject({ kind: "failed" });
+    expect(seen.map((s) => s.url.split("/").pop())).toEqual(["reply"]);
+  });
+
   test("a fresh reply token uses the free reply API with every text", async () => {
     const seen = stubFetch(() => Response.json({}));
 
@@ -178,6 +234,10 @@ describe("Telegram webhook", () => {
         envelope("tg:3", { kind: "lifecycle", change: "follow", at: DATE * 1000 }),
       ],
       [
+        { update_id: 8, message: { message_id: 8, date: DATE, chat: privateChat, from, text: "/start k7p3qz" } },
+        envelope("tg:8", { kind: "lifecycle", change: "follow", at: DATE * 1000, code: "K7P3QZ" }),
+      ],
+      [
         { update_id: 4, my_chat_member: { date: DATE, chat: privateChat, from, old_chat_member: { status: "member" }, new_chat_member: { status: "kicked" } } },
         envelope("tg:4", { kind: "lifecycle", change: "block", at: DATE * 1000 }),
       ],
@@ -189,6 +249,24 @@ describe("Telegram webhook", () => {
     for (const [update, expected] of cases) {
       expect(await telegram().receive(tgWebhook(update))).toEqual({ kind: "accepted", envelopes: [expected], ignored: 0 });
     }
+  });
+
+  test("a tap on a button in a private chat becomes a choice, and Telegram is told the tap was received", async () => {
+    const seen = stubFetch(() => Response.json({ ok: true, result: true }));
+    const tap = (update_id: number, data: string) => ({
+      update_id,
+      callback_query: { id: `cb${update_id}`, from, message: { message_id: 9, date: DATE, chat: privateChat }, data },
+    });
+
+    const received = await telegram().receive(tgWebhook(tap(9, "a:7.1")));
+
+    expect(received).toMatchObject({
+      kind: "accepted",
+      ignored: 0,
+      envelopes: [{ agent: "p:telegram:777000111", identity, key: "tg:9", event: { kind: "choice", choice: { kind: "accept", proposal: "7.1" } } }],
+    });
+    expect(seen.map((s) => [s.url, s.body])).toEqual([["https://api.telegram.org/bot123:abc/answerCallbackQuery", { callback_query_id: "cb9" }]]);
+    expect(await telegram().receive(tgWebhook(tap(10, "nonsense")))).toEqual({ kind: "accepted", envelopes: [], ignored: 1 });
   });
 
   test("group chats and unknown updates are ignored, not rejected", async () => {
@@ -247,6 +325,18 @@ describe("Telegram delivery", () => {
     const longestSend = TURN.maxLateNoticeChars + "\n".length + TURN.maxTextChars;
     const longestText = Math.max(longestSend, corrections.length, requestedReminder.length);
     expect(TURN.maxSendsPerTurn * longestText + "\n\n".length * (TURN.maxSendsPerTurn - 1)).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);
+    const withPlan = (TURN.maxSendsPerTurn - 1) * longestSend + corrections.length + t.planAccepted("x".repeat(TASKS.maxTitleChars)).length + TASKS.maxPlanChars;
+    expect(withPlan + "\n\n".length * TURN.maxSendsPerTurn).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);
+  });
+
+  test("a button goes out as one inline button under the message", async () => {
+    const seen = stubFetch(() => Response.json({ ok: true, result: {} }));
+    await telegram().deliver({ ...msg, button: { label: "Accept plan", data: "a:7.1" } }, NOW);
+    expect(seen[0].body).toEqual({
+      chat_id: "777000111",
+      text: "Done.\n\n(note)",
+      reply_markup: { inline_keyboard: [[{ text: "Accept plan", callback_data: "a:7.1" }]] },
+    });
   });
 
   test("a block is reported as the recipient being gone; flood control retries when told", async () => {
@@ -256,5 +346,14 @@ describe("Telegram delivery", () => {
     vi.restoreAllMocks();
     stubFetch(() => Response.json({ ok: false, error_code: 429, parameters: { retry_after: 5 } }, { status: 429 }));
     expect(await telegram().deliver(msg, NOW)).toMatchObject({ kind: "retry", afterMs: 5000 });
+  });
+});
+
+describe("dev channel", () => {
+  test("/tap with a button's data is a tap, since the dev page draws no buttons", async () => {
+    const req = new Request("https://agent.test/webhook/dev", { method: "POST", body: JSON.stringify({ user: "ann", text: "/tap a:1.1", id: "t1", at: T }) });
+    expect(await devChannel(true).receive(req)).toMatchObject({
+      envelopes: [{ key: "dev:t1", event: { kind: "choice", choice: { kind: "accept", proposal: "1.1" }, at: T } }],
+    });
   });
 });

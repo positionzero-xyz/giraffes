@@ -42,9 +42,10 @@ The person texts "remind me tomorrow 9am to call the clinic".
 5. `#callModel("turn", …)` reserves the estimate against the person's month in local SQLite, under the monthly cap their plan sets, asks D1 for a lease chunk only when the local lease is short, then calls the model once. A lapsed person gets no model call: the turn ends with one notice a day instead. The model returns:
    ```json
    { "actions": [
-       { "type": "schedule_wakeup", "key": "call-clinic", "at": "2026-11-05T09:00", "note": "Remind: call the clinic", "asked": true },
+       { "type": "schedule_wakeup", "key": "call-clinic", "at": "2026-11-05T09:00", "note": "Remind: call the clinic", "asked": true, "task": "" },
        { "type": "send", "text": "Done. I'll remind you tomorrow at 9." } ],
-     "task": { "kind": "reminder", "key": "call-clinic", "status": "started" } }
+     "tasks": [],
+     "about": "" }
    ```
 6. `planTurn(output, view)` is pure. A `set_locale` action (an IANA zone and `th` or `en`) is applied first, so the turn's times are read in the new zone and its corrections are in the new language. It cuts over-long texts to their caps, applies cancels before schedules, converts the local time to an instant, admits or rejects each action, and returns one `TurnCommit`. Because a message started the turn and `asked` is true, the wake-up's origin is `person`. A rejected action adds a row to `action_rejection`. It also adds a code-written correction to any turn that sends text, and to any reply to a person even when the model sent none, unless it is a wake-up the agent set for itself.
 7. One transaction appends the person's text and the agent's text to `turn`, inserts the wake-up, inserts one outbox row (`intent = 'reply'`, both texts, the reply handle), marks the inbox row `done`, settles the reservation at the real cost, and appends log rows to `log_outbox`.
@@ -67,7 +68,47 @@ If the wake-up fires more than an hour late, the prompt says so and code prepend
 
 The check-in has the reserved key `daily-checkin`. Code creates it on first contact, on a newer follow, and when a blocked person writes again, and it inserts the successor in the firing transaction. Its inbox key is `checkin:<local date>`, so it fires at most once per local day. While a person is blocked, due wake-ups are skipped.
 
-## Call site 4: a person connects their Claude plan
+## Call site 4: a check-in offers a plan, and the person accepts it
+
+On the daily check-in the model proposes a plan. A reminder or chat is not a task, so those turns return `"tasks": []`.
+
+```json
+{ "actions": [{ "type": "send", "text": "Morning! The long weekend is in 9 days, so I sketched a Chiang Mai trip." }],
+  "tasks": [{ "op": "propose", "ref": "chiang-mai-trip", "kind": "plan", "title": "Chiang Mai long weekend",
+              "plan": "Fri 18:30 overnight train\nSat Doi Suthep at 7 before the heat\nSun 16:00 flight back" }],
+  "about": "" }
+```
+
+1. `planTurn` opens the task, puts the plan last as its own text, and links the message to the task. The check-in is unasked and its task is open, so its purpose is `task_followup`.
+2. One transaction inserts task 1, its `opened` and `proposed` facts, proposal `1.1` bound to the outbox row, and the row with `task_id`, `purpose` and the button `a:1.1`. LINE shows the button as a postback quick reply, Telegram as an inline button, both labelled in the person's language.
+3. The person taps it. LINE's postback or Telegram's `callback_query` becomes `{ kind: "choice", choice: { kind: "accept", proposal: "1.1" } }`, and Telegram is told the tap arrived. On the dev page, `/tap a:1.1` stands in for a tap.
+4. `taskEffects` finds proposal 1.1 open and records `plan_accepted`, `via: "tap"`, caused by the person. The task moves to `completed` with `completes = 1`, and code adds "(Plan accepted: Chiang Mai long weekend.)" to the model's reply. Typing "ok" to that message instead records the same fact with `via: "typed"`.
+
+```ts
+test("a check-in offers a plan, the person taps Accept, and the task completes on that tap", async () => {
+	const model = scripted([chat("Hi!"), turn({ actions: [send("Morning! ...")], tasks: [trip()] }), chat("Great, I'll remind you on Friday.")]);
+	const c = await devChat("tia", { model, at: "2099-11-04T08:00" });
+	await c.say("hello");
+	await c.advanceTo("2099-11-04T09:00");
+
+	await c.tap("a:1.1");
+
+	expect((await c.snapshot()).tasks[0].status).toBe("completed");
+	expect(c.logs("unasked").map((u) => [u.status, u.purpose, u.taskId])).toEqual([["sent", "task_followup", "p:dev:tia|t1"]]);
+});
+```
+
+## Call site 5: a recruit joins the beta
+
+The operator prints codes with `node scripts/beta-codes.ts recruit intl_telegram 40 --start 2026-11-16T00:00:00+07:00` and runs the SQL with `wrangler d1 execute`. A Telegram recruit opens `t.me/<bot>?start=K7P3QZ`, and a LINE recruit sends `/join K7P3QZ`.
+
+1. The follow arrives as `{ kind: "lifecycle", change: "follow", code: "K7P3QZ" }`. The person isn't admitted, so `#turn` hands the batch to `#admission` before anything that can spend.
+2. `planAdmission` asks for a check. `ledger.checkInvite` reads D1 only. A good code moves the DO row to `consenting` and replies with the privacy notice and the consent button, on the reply token only.
+3. The consent tap asks for the seat. `ledger.claimSeat` inserts into `enrollment` if the code is unused and the cohort has room. The DO row becomes `admitted`, the check-in is created, and a fixed welcome goes out. From then on the person's messages reach the model.
+
+Dev-page people skip all of this: they are admitted as staff on first contact.
+
+## Call site 6: a person connects their Claude plan
 
 With `BOX_HOST` set to `fly` or `static`, the person sends `/claude`. `BOX.md` has the full contract.
 
@@ -93,9 +134,9 @@ test("a signed-in person's turn runs on their box with their token, reserves no 
 
 A box still `signed_out` 48 hours after its first link, never signed in, is reclaimed: the host destroys it, the D1 `boxes` row is marked deleted, the DO row goes, and the person is told `/claude` sets it up again.
 
-## Call site 5: a person pays
+## Call site 7: a person pays
 
-With `BILLING=on` (`BOX.md`, "Plans and billing", has the contract), the person's first message with billing on started a 14-day trial. They send `/plan`.
+With `BILLING=on` and `ADMISSION=open` (`BOX.md`, "Plans and billing", has the contract), the person's first message with billing on started a 14-day trial. They send `/plan`.
 
 1. The command runs without the model. It reads the person's standing from D1, says the plan and the days left, expires the Checkout sessions an earlier `/plan` handed out, and adds one new Stripe Checkout link per plan, created with the idempotency key `<agent key>|<message key>|<plan>`. A person who already pays gets a customer portal link instead.
 2. The person pays. Stripe posts `checkout.session.completed` and `customer.subscription.created` to `/webhook/stripe`, in either order. The Worker checks the signature, reads only the subscription id and the owner from each, and calls the owner's `Agent.billingEvent`.
@@ -119,15 +160,15 @@ The fake Stripe in `billingOn` holds what each subscription looks like now, so a
 
 A Plus owner sends `/invite` for a one-time code, another person sends `/join <code>` to take a seat, and `/leave` gives it up. Seats are D1 rows, so a join checks and claims a place in one batch.
 
-## Call site 6: a test drives a conversation
+## Call site 8: a test drives a conversation
 
 `app/test/agent.test.ts` runs inside the Workers runtime with `@cloudflare/vitest-pool-workers`. `devChat` posts to the real `/webhook/dev` route and swaps in a scripted model, a fake clock, an in-memory ledger and a scripted channel. The scripted model checks every canned output against the real schema, so a schema change breaks the script, not production.
 
 ```ts
 test("a reminder the person asked for at 23:00 arrives at 23:00 and isn't counted as unasked", async () => {
 	const model = scripted([
-		turn({ actions: [schedule("bins", "2099-11-04T23:00", "Take the bins out"), send("Will do.")], task: ["reminder", "bins", "started"] }),
-		turn({ actions: [send("Take the bins out!")], task: ["reminder", "bins", "completed"] }),
+		turn({ actions: [schedule("bins", "2099-11-04T23:00", "Take the bins out"), send("Will do.")] }),
+		turn({ actions: [send("Take the bins out!")] }),
 	]);
 	const c = await devChat("dan", { model, at: "2099-11-04T21:30" });
 
@@ -153,11 +194,13 @@ test("a row admitted on an earlier day is admitted again against the day it goes
 
 ## Querying across users
 
-Every log row lands in D1 (`app/src/ledger/d1-schema.sql`). The MVP gates are views over it:
+Every log row lands in D1 (`app/src/ledger/d1-schema.sql`). The MVP gates are views over it. Nobody is a participant until the operator sets the beta's start in `beta`:
 
 ```sh
-npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_weekly_delegation"
-npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM unasked_with_followup WHERE followed = 1"
+npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_summary"
+npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_main"
+npx wrangler d1 execute giraffes-ledger --remote --command "SELECT evidence, via, COUNT(*) FROM completion GROUP BY evidence, via"
+npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM unasked_credit"
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT reason, COUNT(*) FROM action_rejection GROUP BY reason"
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT backend, status, COUNT(*) FROM model_call GROUP BY backend, status"
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT plan, status, COUNT(*) FROM billing_subscription GROUP BY plan, status"

@@ -19,7 +19,7 @@ The LINE reply token is single-use and lives for about a minute. Pushes are bill
 
 `Agent` (one DO per person, `app/src/agent/agent.ts`) has three public methods, `enqueue`, `alarm` and `snapshot`, plus the test-only `withDeps`.
 
-- `enqueue` runs one transaction. It does `INSERT OR IGNORE` into `inbox`, and on first contact it also creates the `agent` row and the first daily check-in. It arms the alarm no later than now, then starts a drain with `ctx.waitUntil(this.alarm())`, so a reply never waits on alarm scheduling. The alarm is the durable backstop if that drain dies.
+- `enqueue` runs one transaction. It does `INSERT OR IGNORE` into `inbox`, and on first contact it also creates the `agent` row. A dev identity, or anyone while `ADMISSION=open`, is admitted then and gets the first daily check-in. Anyone else gets it when they are admitted. It arms the alarm no later than now, then starts a drain with `ctx.waitUntil(this.alarm())`, so a reply never waits on alarm scheduling. The alarm is the durable backstop if that drain dies.
 - `alarm` is the only code that calls a model, changes memory or sends a message. A drain runs isolated phases in order: turns, box, delivery, log flush, compaction, prune. The turns phase recovers what a dead instance left, fires due wake-ups, then loops over batches (claim, turn, deliver, fire due wake-ups) for at most 60 s. A phase that throws is logged and the next phase still runs, so a failing compaction can't hold back delivery or log shipping.
 - Events are claimed strictly in `seq` order. When the oldest unfinished event is waiting out a model backoff, nothing behind it is claimed, whatever its kind, and messages that arrived meanwhile join its batch when it is retried. No kind passes a waiting head, because every kind can change what a later one means: a message can cancel what an earlier one asked for, a follow or block decides whether a later turn is delivered, and a wake-up's turn reads the conversation before it. The cost is that a model outage holds everything for that person for at most its retry window, about 90 s behind a message and about 7.5 minutes behind a requested reminder.
 - Due wake-ups fire only while no message, follow or block is waiting in the inbox, so whatever the person sent before a wake-up fires is applied first: a cancel waiting out an outage still stops the reminder that falls due meanwhile. A burst of messages can hold a wake-up for as long as the burst lasts.
@@ -35,15 +35,19 @@ While a turn awaits the model, the only operations that can interleave are an in
 | `inbox` | the durable queue, all event kinds | `event_key UNIQUE`; `pending → processing → done/failed`; `attempts` bounds retries |
 | `turn` | verbatim conversation not yet in the summary | a turn prompt reads all of it, up to 90 rows |
 | `memory` (1 row) + `memory_note` | compacted summary, model notes | compaction is compare-and-set on `through_turn_seq`; a turn prompt reads the newest 50 notes |
-| `wakeup` | reminders and the check-in | partial `UNIQUE(key) WHERE status = 'pending'`; `origin` is `person`, `agent` or `system` |
-| `outbox` | everything leaving | one row per turn with all its texts; `id` is a UUID and the LINE retry key; `intent` is set by code; `admitted_day` charges the budget once per local day; `in_doubt` bars the reply token |
+| `wakeup` | reminders and the check-in | partial `UNIQUE(key) WHERE status = 'pending'`; `origin` is `person`, `agent` or `system`; `task_id` is the task an agent wake-up follows up |
+| `outbox` | everything leaving | one row per turn with all its texts; `id` is a UUID and the LINE retry key; `intent` is set by code; `admitted_day` charges the budget once per local day; `in_doubt` bars the reply token; `task_id` and `purpose` say what an unasked message is about and why; `choice` is its button; `reply_only` bars a push |
+| `task` | what the person wants done that takes more than one message | a code id; the model's `ref` is unique among open tasks; `status` changes only when a fact is recorded, and `completed`, `closed` and `expired` are final |
+| `task_fact` | everything code knows happened to a task | `UNIQUE(task_id, kind, ref)`, so the same evidence twice is one fact; `completes = 1` on the one fact that moved the task to completed |
+| `proposal` | a plan offered for a task, and the outbox row that carried it | at most one open per task; a newer version supersedes it; an accept must name the open one |
+| `admission` (0 or 1 row) | where the person stands with the beta | no row is a stranger; it is the only thing any spend check reads |
 | `spend_month` + `reservation` | per-person spend and global leases | reserved spend is `SUM(reservation)`, never stored |
 | `log_outbox` + `log_flush` | log rows not yet in D1, and their backoff | written in the same transaction as the fact they record |
 | `box` (0 or 1 row) | the person's box and its state | `next_at` is the next provisioning attempt or sign-in poll, and null in any other state |
 
 Derived, not stored: unasked messages sent today (`COUNT` over `admitted_day`), lateness (`firedAt - dueAt`), reserved spend, whether the person was already told about the monthly limit today (inbox outcomes), and the alarm time.
 
-D1 (`app/src/ledger/d1-schema.sql`) holds the cross-user facts: append-only `agent`, `turn_log`, `model_call`, `unasked_message`, `lifecycle`, `action_rejection` and `line_quota`, plus `spend_lease`, `line_quota_alert` and the `boxes` inventory. The gates are SQL views.
+D1 (`app/src/ledger/d1-schema.sql`) holds the cross-user facts: append-only `agent`, `turn_log`, `model_call`, `unasked_message`, `lifecycle`, `action_rejection`, `task`, `task_fact`, `admission_log` and `line_quota`, plus `spend_lease`, `line_quota_alert`, the `boxes` inventory, and the beta's `invite_code` and `enrollment`. The operator writes `beta`, `safety_incident` and `survey_response`. The gates are SQL views.
 
 ### Types carry the invariants (`app/src/domain.ts`)
 
@@ -53,7 +57,9 @@ D1 (`app/src/ledger/d1-schema.sql`) holds the cross-user facts: append-only `age
 - `Language` is `th` or `en`, and `CHANNEL_LANGUAGE` maps every channel to the language a new person starts in. `notices.ts` holds every code-written text in one table typed by `Notices`, one entry per language, so a text missing in either language fails the build.
 - `ChannelRegistry` is a mapped type over `CHANNEL_IDS`, so a channel id without an adapter fails the build.
 - `LogRow` is one union, and each variant maps to one D1 table in one exhaustive switch.
-- `AgentEvent` is stored as JSON with no SQL CHECK on kind. Week 2's `job_result` is one new variant, and the exhaustive switches name every place that must handle it.
+- `AgentEvent` is stored as JSON with no SQL CHECK on kind. Week 2's `job_result` is one new variant, and the exhaustive switches name every place that must handle it. A tap on a button is a `choice` event.
+- `FACTS` in `domain.ts` is the one list of what can happen to a task, and of which facts complete one or count as the person's own decision. A new kind of evidence is a new entry; no table or view keeps a copy.
+- `mayspend(admission)` is the one test every spend path uses.
 
 ### Where validation lives
 
@@ -64,12 +70,14 @@ Channel adapters authenticate and parse: the HMAC over the raw body for LINE, a 
 ```
 app/src/worker.ts            /webhook/:channel → adapter.receive → Agent.enqueue; dev routes
 app/src/config.ts            Env → Config, the only reader of env strings
-app/src/domain.ts            branded units, ids, events, intent, outbound, task labels, languages
+app/src/domain.ts            branded units, ids, events, intent, outbound, task facts, choices, invite codes, admission, languages
 app/src/notices.ts           every code-written text, in Thai and English
 app/src/agent/agent.ts       the DO: enqueue, drain phases, metered model call, delivery, re-arm
 app/src/agent/store.ts       all DO SQL, synchronous methods (imported only by agent.ts)
 app/src/agent/schema.ts      DO DDL and migrate()
 app/src/agent/turn.ts        TurnOutputSchema, renderUser, planTurn, planWithoutModel, logsForTurn (pure)
+app/src/agent/tasks.ts       taskEffects, planTasks, linkOf, purposeOf, nextStatus, isPlainAccept (pure)
+app/src/agent/admission.ts   planAdmission (pure)
 app/src/agent/compaction.ts  planCompaction, compactionCommit (pure)
 app/src/agent/prompt.ts      byte-stable system prompts and the opportunism playbook
 app/src/policy/{time,schedule,outreach,spend,quota}.ts   pure rules
@@ -78,7 +86,8 @@ app/src/box/{names,host,fly,client,machine}.ts     box secrets, Fly and static h
 app/src/channels/{channel,line,telegram,dev}.ts    port, registry, three adapters
 app/src/ledger/{ledger.ts,d1-schema.sql}           D1 append, leases, gate views
 app/dev/{bridge.ts,chat.html}                      local `claude -p` bridge, dev chat page
-app/test/testkit.ts, app/test/{agent,channels,ledger,model,policy}.test.ts
+app/scripts/beta-codes.ts                         the operator's invite codes and beta start, as SQL
+app/test/testkit.ts, app/test/{agent,evidence,beta,tasks,admission,views,channels,ledger,model,policy}.test.ts
 ```
 
 Tracing a flow takes three files: `worker.ts`, `agent.ts`, and one pure module.
@@ -97,6 +106,12 @@ Tracing a flow takes three files: `worker.ts`, `agent.ts`, and one pure module.
 
 ## Policy decided by code
 
+**A task completes only on evidence code holds.** The model doesn't label a turn's task or say when it is done. It returns `tasks`, a list of plain ops (`open`, `propose` or `close`, a ref it reuses across turns, a kind, a title and a plan that is `""` unless it proposes), and `about`, the ref of the task its messages are about. `planTasks` checks them: at most 3 ops, at most 20 open tasks, one proposal per turn, a plan of at least 2 lines and 80 characters, and no ops on a task that finished this turn. A rejection is logged and the person isn't told. A proposed plan goes out as its own text, last, under an Accept button, and counts as one of the 3 sends. The store creates the proposal (`<task id>.<version>`) in the same transaction as the outbox row that carries it, and supersedes the task's open one. `taskEffects` is the only place that records acceptance: a tap on the open proposal, or a message that is only a plain yes (`ok`, `โอเคค่ะ` and a closed list like them) when the newest message the person received carried an open proposal sent within 48 hours. Each fact keeps `via`, `tap` or `typed`. It runs whether or not the model answers, so an accept still commits and is confirmed when the turn fails. The store applies `nextStatus` in the transaction that records the fact, so a task completes once, and a fact on a task already closed or expired changes nothing. An open task untouched for 30 days expires. Week 1 has one kind of evidence, `plan_accepted`; a worker that books, publishes or reports a group's outcome later adds its own entry to `FACTS`.
+
+**Code decides why an unasked message went out.** `linkOf` picks the message's task by fixed precedence: the task proposed this turn, the firing wake-up's task if it is still open, then `about` if it names a task that is open or that finished this turn. `purposeOf` sets `task_followup` for a link to a task still open after the turn, `bookkeeping` for a check code scheduled or a task that just finished, and `unlinked` otherwise. The model never labels purpose. A message's task is a code id fixed before it went out, so a later turn can't claim credit for it.
+
+**Admission.** While `ADMISSION=beta` (the default), a person on LINE or Telegram is a stranger until they present an invite code and consent. A code arrives as Telegram's `/start CODE`, as `/join CODE`, or as a message that is only a code. Presenting it only reads D1 (`checkInvite`), so nobody holds a seat they never consented to. A good code gets the privacy notice and a consent button. The tap claims the seat with one conditional insert into `enrollment`, capped per cohort, and the DO row becomes `admitted` only after D1 granted it. Seats are never freed. A bad, used or full code waitlists the person, and anyone not admitted is told to send a code at most once per local day. Until admission every reply is code-written, keeps nothing the person wrote, goes out only on the reply token, and starts no check-in. The same `admission` row also gates the model call (the API cap is 0 unless admitted), the box, compaction and wake-ups. `/invite` gives an enrolled person up to 5 joiner codes, and a joiner inherits their inviter's half. `POST /dev/remove` takes someone out: their wake-ups are skipped, every message gets a fixed reply, and their seat stays used. `ADMISSION=open` admits everyone at first contact and gives `/invite` and `/join` back to billing, and `loadConfig` refuses `ADMISSION=beta` with `BILLING=on`, so each mode has exactly one way to redeem a code.
+
 **Who asked decides budget and quiet hours.** A wake-up is `person` only when the turn was started by the person's own message and the model sets `asked: true`. Every wake-up scheduled during a proactive turn is `agent`. The daily check-in (09:00 local) is `system`.
 
 - A `person` wake-up fires at its due time, even between 22:00 and 08:00. Its message is `requested`, so it skips the unasked budget and quiet hours.
@@ -111,7 +126,7 @@ A reminder the person asked for may be for the current minute, and it fires on t
 
 **Lateness.** A wake-up that fires more than an hour after its due time tells the model so. Code prepends the model's `lateNotice`, or a fixed one when the model left it out.
 
-**Send caps.** A turn sends at most 3 texts of 600 characters each, in at most 6 actions. Notes are capped at 300 characters and the late notice at 200. The API doesn't enforce these, because the SDK's `zodOutputFormat` moves length and count limits into the schema's descriptions. So the schema only states them, and `planTurn` cuts a longer text to its cap and drops actions past the sixth, logging each as `too_long` or `too_many_actions`. One long text no longer fails the turn. The output budgets (`maxTokens` 12,000 for turns and 12,500 for compaction) fit the largest output code keeps whole, even in Thai, and `policy.test.ts` pins that.
+**Send caps.** A turn sends at most 3 texts of 600 characters each, in at most 6 actions. Notes are capped at 300 characters and the late notice at 200. The API doesn't enforce these, because the SDK's `zodOutputFormat` moves length and count limits into the schema's descriptions. So the schema only states them, and `planTurn` cuts a longer text to its cap and drops actions past the sixth, logging each as `too_long` or `too_many_actions`. One long text no longer fails the turn. The output budgets (`maxTokens` 18,000 for turns and 12,500 for compaction) fit the largest output code keeps whole, a whole plan included, even in Thai, and `policy.test.ts` pins that.
 
 **LINE quota.** Pushes count against the LINE account's monthly message quota and replies don't. A cron runs the Worker's `scheduled` handler every hour. With LINE configured, it reads LINE's `GET /v2/bot/message/quota` (`type` is `none` or `limited`, with `value` when limited) and `GET /v2/bot/message/quota/consumption` (`totalUsage`), and appends the reading to D1's `line_quota`, keyed by the cron's scheduled time so a retried run adds nothing. At 70% and at 90% of the limit it alerts the operator once per UTC month per threshold, through `OPERATOR_CHAT` (`telegram:<chat id>` or `line:<user id>`) or, with none set, the log. The alert is recorded in `line_quota_alert` only after it went out, so a failed send is retried the next hour. From 90%, the reserve, an unasked message to a LINE person is dropped after quiet hours and before the budget, and logged as `dropped_quota`, which keeps the last tenth of the quota for replies that fall back to a push and for reminders people asked for. Delivery reads the latest reading from D1 only for an unasked LINE row. A reading from an earlier month, or none, holds nothing back, and so does a D1 failure, because the reserve is a margin rather than a limit. LINE doesn't say which time zone its month follows, so for a few hours around the 1st the alert month and LINE's month can differ.
 
@@ -164,6 +179,10 @@ No turn runs inside the webhook request. There are no lock rows, no stored alarm
 - **Duplicate sends.** A crash in the send window can duplicate a Telegram message or an in-doubt LINE reply, in exchange for never losing a reminder.
 - **Lossy compaction lag.** While compaction lags by more than a page (it is failing, or one drain added more than 30 rows), the oldest unfolded turns fall outside the 90-row prompt window until it catches up, one page per drain. In exchange, the prompt is bounded and a reply never waits on compaction.
 - **Two languages for code-written text.** Corrections, the monthly limit, the late-notice fallback, the requested-reminder floor, and the plan and box messages are in Thai or English. A person who writes in another language gets English notices, while the model answers in their language.
+- **Plan acceptance is week 1's only evidence.** A person can accept a thin plan, though code refuses one under 2 lines or 80 characters. In exchange, no model judgment decides whether a task counts. `completion.evidence` and `completion.via` show what a gate's pass rests on.
+- **A typed yes counts.** A closed vocabulary can read an "ok" aimed at something else as acceptance, so it applies only to the newest message the person received, within 48 hours, and code confirms it in the chat. In exchange, nobody has to find a button that LINE hides after the next message.
+- **A model call on every tap**, so the agent can follow up, such as scheduling the trip's reminders.
+- **Replies only before admission.** A LINE reply token that expires before the reply leaves a stranger unanswered, in exchange for no billed push to anyone who isn't in.
 - **One coarse DO class.** One `Agent` holds everything for a person, which gives one transaction per turn. The store and the pure planners keep each file single-purpose.
 
 ## Alternatives considered
@@ -178,6 +197,10 @@ No turn runs inside the webhook request. There are no lock rows, no stored alarm
 - **The model rewrites its whole memory each turn.** It costs output tokens every turn and lets one bad turn erase facts. Rejected for append-only notes plus compare-and-set compaction.
 - **Counting requested reminders against the unasked budget.** A heavy reminder user would lose the fourth reminder they asked for. Rejected.
 - **Typed week-2 job and approval stubs.** The `AgentEvent` union already leaves the slot, and stubs written before the booking probe would be guesses. Not taken.
+- **Keep the model's per-turn task label and check it.** A label can't carry a task's identity across turns, and a week-2 result arrives in a turn the model didn't label. Replaced by code-owned tasks and facts.
+- **The model labels why it sent an unasked message.** Code can't check "this is new", and the credit rule (an open task, the person's decision, then one completion) already excludes the checks the label was meant to catch.
+- **Admission at the Worker edge, or read from D1 each turn.** Either costs a D1 round trip per webhook or turn and splits one person's state across two owners, while consent lives in the DO anyway.
+- **One invite table shared with billing.** The beta's codes and billing's seats differ in cap, lifetime, issuer and meaning. `ADMISSION` routes the same two commands instead.
 
 ## Open questions and risks
 

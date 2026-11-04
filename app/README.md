@@ -76,10 +76,22 @@ Worker reloads.
    ```sh
    FLY_API_TOKEN=... FLY_ORG=... BOX_IMAGE=... BOX_SECRET=... node scripts/fly-verify.ts --yes
    ```
+   Who may use the agent follows `ADMISSION` (see `docs/design/RATIONALE.md`, "Admission"):
+   - `ADMISSION=beta` (the default): people on LINE and Telegram need an invite code and must consent
+     before anything spends. Print recruit or staff codes, and set the beta's start, as SQL to run with
+     `npx wrangler d1 execute giraffes-ledger --remote --command "..."`:
+     ```sh
+     node scripts/beta-codes.ts recruit th_line 40 --start 2026-11-16T00:00:00+07:00
+     node scripts/beta-codes.ts recruit intl_telegram 40
+     ```
+     A Telegram recruit opens `https://t.me/<bot>?start=<code>`; a LINE recruit sends `/join <code>`.
+     Enrolled people get joiner codes with `/invite`. It can't run with `BILLING=on`.
+   - `ADMISSION=open`: everyone is admitted at first contact, and `/invite` and `/join` are billing's.
+
    Plans and payments (`/plan`, `/invite`, `/join <code>`, `/leave`, see `docs/design/BOX.md`) follow `BILLING`:
    - `BILLING=off` (the default): nobody pays, nobody lapses and no trial clock runs. `/plan` says it is
      the free beta.
-   - `BILLING=on` needs the secrets `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`, and the vars
+   - `BILLING=on` needs `ADMISSION=open`, the secrets `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`, and the vars
      `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`, `STRIPE_PRICE_AI`,
      `STRIPE_PORTAL_CONFIGURATION` and `PUBLIC_URL` (the Worker's https URL; Checkout and the billing
      portal send people back to `PUBLIC_URL/billing/done`). Optional vars: `TRIAL_DAYS` (default 14,
@@ -106,8 +118,10 @@ Worker reloads.
 The gate queries are views in the ledger, for example:
 
 ```sh
-npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_weekly_delegation"
+npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_summary"
 ```
+
+Safety incidents and survey answers are operator rows in `safety_incident` and `survey_response`.
 
 ### Update an existing ledger
 
@@ -147,6 +161,16 @@ the billing tables:
 npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW gate_weekly_delegation; DROP VIEW weekly_delegation; DROP VIEW unasked_with_followup; DROP INDEX turn_log_agent_time; DROP INDEX turn_log_task; ALTER TABLE turn_log RENAME TO turn_log_old"
 npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
 npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO turn_log SELECT * FROM turn_log_old; DROP TABLE turn_log_old"
+```
+
+Tasks and the beta's admission drop `turn_log`'s task columns, add `task_id` and `purpose` to
+`unasked_message`, add rejection reasons and the turn outcome `not_admitted`, and replace the gate views.
+Rebuild those three tables, dropping the old views first, before deploying them:
+
+```sh
+npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW IF EXISTS gate_weekly_delegation; DROP VIEW IF EXISTS weekly_delegation; DROP VIEW IF EXISTS unasked_with_followup; DROP VIEW IF EXISTS block_rate; DROP VIEW IF EXISTS cost_per_agent_week; DROP INDEX turn_log_agent_time; DROP INDEX IF EXISTS turn_log_task; DROP INDEX unasked_agent_time; DROP INDEX action_rejection_agent_time; ALTER TABLE turn_log RENAME TO turn_log_old; ALTER TABLE unasked_message RENAME TO unasked_message_old; ALTER TABLE action_rejection RENAME TO action_rejection_old"
+npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
+npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO turn_log SELECT id, agent_key, event_kind, batch_size, outcome, refused_for_budget, cost_micro, attempts, started_at, finished_at FROM turn_log_old; DROP TABLE turn_log_old; INSERT INTO unasked_message SELECT id, agent_key, trigger_kind, text, status, day, at, NULL, 'unlinked' FROM unasked_message_old; DROP TABLE unasked_message_old; INSERT INTO action_rejection SELECT * FROM action_rejection_old; DROP TABLE action_rejection_old"
 ```
 
 A ledger that ran the schema file from before the billing fixes has a `billing_subscription` without

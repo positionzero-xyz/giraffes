@@ -61,7 +61,8 @@ export type OutboxId = Brand<string, "OutboxId">;
 export type ReplyHandle = { readonly token: string; readonly expiresAt: EpochMs };
 
 export type ChannelEvent =
-  | { readonly kind: "message"; readonly text: string; readonly reply?: ReplyHandle }
+  /** `redacted`: code removed what looked like an API key before the message was stored. */
+  | { readonly kind: "message"; readonly text: string; readonly reply?: ReplyHandle; readonly redacted?: true }
   | {
       readonly kind: "lifecycle";
       readonly change: "follow" | "block";
@@ -174,15 +175,17 @@ export const personDecision = (f: TaskFact): boolean => FACTS[f.kind].decision &
 export type ProposalId = Brand<string, "ProposalId">;
 export const proposalId = (task: TaskId, version: number): ProposalId => `${task}.${version}` as ProposalId;
 
-export type Choice = { readonly kind: "accept"; readonly proposal: ProposalId } | { readonly kind: "consent" };
+/** `backup`: yes to the person's own key backing up their Claude plan. */
+export type Choice = { readonly kind: "accept"; readonly proposal: ProposalId } | { readonly kind: "consent" } | { readonly kind: "backup" };
 
-/** "a:7.1" or "c": short enough for Telegram's 64-byte callback_data and a LINE postback. */
+/** "a:7.1", "c" or "b": short enough for Telegram's 64-byte callback_data and a LINE postback. */
 export function choiceToken(c: Choice): string {
-  return c.kind === "accept" ? `a:${c.proposal}` : "c";
+  return c.kind === "accept" ? `a:${c.proposal}` : c.kind === "consent" ? "c" : "b";
 }
 
 export function parseChoice(token: string): Choice | null {
   if (token === "c") return { kind: "consent" };
+  if (token === "b") return { kind: "backup" };
   const m = /^a:([1-9]\d{0,9}\.[1-9]\d{0,5})$/.exec(token);
   return m ? { kind: "accept", proposal: m[1] as ProposalId } : null;
 }

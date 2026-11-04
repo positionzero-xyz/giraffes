@@ -1,5 +1,10 @@
 import { z } from "zod";
 import chatPage from "../dev/chat.html";
+import keyPage from "./access/page.html";
+import { readTicket } from "./access/key";
+import type { KeysConfig } from "./access/access";
+import { PROVIDER_IDS, PROVIDERS } from "./model/providers";
+import { NOTICES } from "./notices";
 import { DONE_PATH, parseEvent, verifySignature } from "./billing/stripe";
 import { makeChannels } from "./channels/channel";
 import { devIdentity } from "./channels/dev";
@@ -31,6 +36,11 @@ export default {
       if (received.kind === "rejected") return new Response(null, { status: received.status });
       await Promise.all(received.envelopes.map((e) => agentStub(env, e.agent).enqueue(e)));
       return new Response("ok");
+    }
+
+    if (config.keys.on && url.pathname === "/key") {
+      if (req.method === "GET") return new Response(KEY_PAGE, { headers: KEY_PAGE_HEADERS });
+      if (req.method === "POST") return keyForm(req, env, config.keys);
     }
 
     if (config.billing.on) {
@@ -74,6 +84,56 @@ async function tellOperator(config: Config, text: string, now: EpochMs): Promise
   if (sent.kind === "sent") return to.channel;
   console.warn("operator alert not sent", sent.kind);
   return null;
+}
+
+/** The key page carries no secret and no person's data, so it is the same for everyone; the ticket stays in the URL fragment. */
+const KEY_PAGE = keyPage.replace(
+  "__DATA__",
+  JSON.stringify({
+    providers: PROVIDER_IDS.map((id) => ({
+      id,
+      label: PROVIDERS[id].label,
+      defaultModel: PROVIDERS[id].defaultModel,
+      custom: PROVIDERS[id].baseUrl === null,
+      signup: PROVIDERS[id].signup,
+    })),
+    text: { en: NOTICES.en.keyPage, th: NOTICES.th.keyPage },
+  }).replaceAll("<", "\\u003c"),
+);
+
+const KEY_PAGE_HEADERS = {
+  "content-type": "text/html; charset=utf-8",
+  "cache-control": "no-store",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+  "content-security-policy":
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+};
+
+const MAX_KEY_FORM_BYTES = 4096;
+const KeyForm = z.object({
+  ticket: z.string().max(300),
+  provider: z.string().max(40),
+  model: z.string().max(200),
+  baseUrl: z.string().max(300),
+  key: z.string().max(600),
+});
+
+/** Never logs the body: it carries the person's key. The ticket is checked here before any DO wakes. */
+async function keyForm(req: Request, env: Env, keys: Extract<KeysConfig, { on: true }>): Promise<Response> {
+  const body = await req.text();
+  if (body.length > MAX_KEY_FORM_BYTES) return Response.json({ ok: false, error: "bad_form" }, { status: 413 });
+  let raw: unknown = null;
+  try {
+    raw = JSON.parse(body);
+  } catch {}
+  const form = KeyForm.safeParse(raw);
+  if (!form.success) return Response.json({ ok: false, error: "bad_form" }, { status: 400 });
+  const ticket = await readTicket(keys.secrets, form.data.ticket, Date.now() as EpochMs);
+  if (!ticket) return Response.json({ ok: false, error: "expired" }, { status: 401 });
+  const { ticket: _, ...fields } = form.data;
+  const result = await env.AGENT.get(env.AGENT.idFromString(ticket.doId)).connectKey(ticket.nonceHash, fields);
+  return Response.json(result, { status: result.ok ? 200 : 422 });
 }
 
 export function agentStub(env: Env, key: AgentKey) {

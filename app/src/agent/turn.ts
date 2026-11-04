@@ -159,7 +159,9 @@ function renderEvent(e: AgentEvent, tz: TimeZone): string {
     case "choice":
       return e.choice.kind === "accept"
         ? `The person tapped Accept on plan ${e.choice.proposal}.`
-        : "The person agreed to the privacy notice.";
+        : e.choice.kind === "consent"
+          ? "The person agreed to the privacy notice."
+          : "The person chose to use their own key as a backup.";
     case "wakeup": {
       const asked = e.origin === "person" ? " The person asked for this reminder." : "";
       return `Your wake-up "${e.key}" fired: ${e.note}. Due ${human(e.dueAt, tz)}.${asked}${lateLine(e, tz)}`;
@@ -334,7 +336,12 @@ function personTurns(view: TurnView): NewTurn[] {
     const e = item.event;
     if (e.kind === "message") turns.push({ role: "person", text: e.text, at: item.receivedAt, eventKey: item.key });
     if (e.kind === "choice") {
-      const text = e.choice.kind === "accept" ? `[tapped Accept on plan ${e.choice.proposal}]` : "[agreed to the privacy notice]";
+      const text =
+        e.choice.kind === "accept"
+          ? `[tapped Accept on plan ${e.choice.proposal}]`
+          : e.choice.kind === "consent"
+            ? "[agreed to the privacy notice]"
+            : "[chose to use their key as a backup]";
       turns.push({ role: "person", text, at: item.receivedAt, eventKey: item.key });
     }
   }

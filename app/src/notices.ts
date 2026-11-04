@@ -268,7 +268,7 @@ const en: Notices = {
     ].join("\n"),
   keyResting: "Your key isn't working right now. I'll try it again later.",
   keyConnected: (p, m) => `Connected: ${p} (${m}). Your messages now use your own key.`,
-  backupAsk: (p) => `You've connected your Claude plan and a ${p} key. Use your key as a backup when your Claude plan isn't available? It only spends your key's money when your plan can't answer.`,
+  backupAsk: (p) => `You've connected your Claude plan and your ${p} key. Use your key as a backup when your Claude plan isn't available? It only spends your key's money when your plan can't answer.`,
   backupButton: "Use my key as backup",
   backupOn: "OK. Your key backs up your Claude plan. Send /key backup off to stop.",
   backupOff: "OK. Your key isn't used while your Claude plan is connected.",

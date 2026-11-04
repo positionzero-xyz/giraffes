@@ -232,6 +232,15 @@ function toKey(r: KeyCols): StoredKey {
   };
 }
 
+export type KeyTicket = {
+  readonly expiresAt: EpochMs;
+  /** The access revision when the link was issued; a save from it is refused once the revision moved. */
+  readonly revision: number;
+  readonly status: "issued" | "validating" | "saved" | "failed";
+  /** What a repeat submission is told: "saved", or the error the first one got. */
+  readonly outcome: string | null;
+};
+
 /** A key as the store saves it: sealed, with the schema mode its provider's probe decided. */
 export type NewKey = Omit<StoredKey, "backup" | "backupAskedAt" | "revision" | "health">;
 
@@ -338,7 +347,7 @@ function button(choice: string | null, language: Language): Pick<OutboundMessage
   const c = choice === null ? null : parseChoice(choice);
   if (c === null || choice === null) return {};
   const t = NOTICES[language];
-  return { button: { label: c.kind === "accept" ? t.acceptButton : t.consentButton, data: choice } };
+  return { button: { label: c.kind === "accept" ? t.acceptButton : c.kind === "consent" ? t.consentButton : t.backupButton, data: choice } };
 }
 
 function toAdmission(r: AdmissionCols | undefined): Admission {
@@ -1201,9 +1210,17 @@ export class AgentStore {
    * Saves a key unless the access revision moved since `expectRevision`, so a slow validation can't overwrite a newer
    * key or a removal. A replacement keeps the cap and the backup answer, and clears any fault.
    */
-  saveKey(k: NewKey, expectRevision: number, message: { readonly key: EventKey; readonly message: NoteMessage } | null, logs: readonly LogRow[], now: EpochMs): boolean {
+  saveKey(
+    k: NewKey,
+    expectRevision: number,
+    message: { readonly key: EventKey; readonly message: NoteMessage } | null,
+    logs: readonly LogRow[],
+    now: EpochMs,
+    ticket: string | null = null,
+  ): boolean {
     return this.tx(() => {
       if (this.keyRevision() !== expectRevision) return false;
+      if (ticket !== null) this.finishTicket(ticket, "saved", "saved");
       const revision = expectRevision + 1;
       this.sql.exec("UPDATE key_revision SET revision = ?", revision);
       this.sql.exec(
@@ -1230,6 +1247,42 @@ export class AgentStore {
       this.insertLogs(logs, now);
       return true;
     });
+  }
+
+  /** Only the newest link works: issuing one drops every other unused ticket, and any that expired. */
+  issueTicket(nonceHash: string, expiresAt: EpochMs, now: EpochMs): void {
+    this.tx(() => {
+      this.sql.exec("DELETE FROM key_ticket WHERE status = 'issued' OR expires_at <= ?", now);
+      this.sql.exec(
+        "INSERT INTO key_ticket (nonce_hash, expires_at, revision, created_at) VALUES (?, ?, ?, ?)",
+        nonceHash,
+        expiresAt,
+        this.keyRevision(),
+        now,
+      );
+    });
+  }
+
+  ticket(nonceHash: string): KeyTicket | null {
+    const r = this.sql
+      .exec<{ expires_at: EpochMs; revision: number; status: KeyTicket["status"]; outcome: string | null }>(
+        "SELECT expires_at, revision, status, outcome FROM key_ticket WHERE nonce_hash = ?",
+        nonceHash,
+      )
+      .toArray()[0];
+    return r ? { expiresAt: r.expires_at, revision: r.revision, status: r.status, outcome: r.outcome } : null;
+  }
+
+  /** Moves a live ticket to validating before any provider call; false when it is used, in use or gone. */
+  startValidating(nonceHash: string, now: EpochMs): boolean {
+    return (
+      this.sql.exec("UPDATE key_ticket SET status = 'validating' WHERE nonce_hash = ? AND status = 'issued' AND expires_at > ?", nonceHash, now)
+        .rowsWritten > 0
+    );
+  }
+
+  finishTicket(nonceHash: string, status: "saved" | "failed", outcome: string): void {
+    this.sql.exec("UPDATE key_ticket SET status = ?, outcome = ? WHERE nonce_hash = ? AND status = 'validating'", status, outcome, nonceHash);
   }
 
   removeKey(): boolean {

@@ -383,6 +383,17 @@ export const MIGRATIONS: readonly string[] = [
   DROP TABLE plan;
   ALTER TABLE plan_next RENAME TO plan;
   `,
+  `
+  CREATE TABLE key_ticket (
+    nonce_hash  TEXT PRIMARY KEY,
+    expires_at  INTEGER NOT NULL,
+    revision    INTEGER NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'issued' CHECK (status IN ('issued', 'validating', 'saved', 'failed')),
+    outcome     TEXT,
+    created_at  INTEGER NOT NULL,
+    CHECK ((status IN ('saved', 'failed')) = (outcome IS NOT NULL))
+  );
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

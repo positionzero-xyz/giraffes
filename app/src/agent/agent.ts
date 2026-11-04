@@ -1,4 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
+import { draftKey, issueTicket, redactSecrets, seal, type KeyFields } from "../access/key";
+import { OWN_CAP_RANGE_USD } from "../config";
 import { accessOf, ModelAccess, type BoxAnswer, type BoxLane, type IncludedConfig, type KeysConfig, type Served } from "../access/access";
 import { NO_STANDING, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan, type Standing, type SubscriptionId } from "../billing/plan";
 import { INVITE_FOR_MS, MANAGE_NOTE, planChanged, planChoices, planStatus, type Links } from "../billing/say";
@@ -35,6 +37,7 @@ import { loadConfig, type BillingConfig, type BoxConfig, type Env } from "../con
 import {
   assertNever,
   CHANNEL_LANGUAGE,
+  choiceToken,
   eventKey,
   intentOf,
   mayspend,
@@ -52,11 +55,12 @@ import {
   type TimeZone,
 } from "../domain";
 import { d1Ledger, modelCallRow, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
-import { NOTICES } from "../notices";
+import { NOTICES, type KeyPageError } from "../notices";
 import { scripted, scriptedConnect, type ScriptStep } from "../model/scripted";
 import { connect, type Connect } from "../model/client";
 import type { PromptParts } from "../model/prompt";
-import { PROMPT_FLOOR_BYTES, type Purpose } from "../model/routes";
+import { PROVIDERS } from "../model/providers";
+import { PROMPT_FLOOR_BYTES, routeFor, type Purpose } from "../model/routes";
 import { devLane, DEV_URL_SCRIPTED } from "../access/access";
 import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach";
 import { inLineReserve, type QuotaReading } from "../policy/quota";
@@ -97,6 +101,8 @@ const LOG_BATCHES_PER_DRAIN = 10;
 const MODEL_RETRY_BASE_MS = 30_000;
 const NO_COST = 0 as MicroUsd;
 const BOX_STEPS_PER_DRAIN = 3;
+const KEY_TICKET_MS = 15 * 60_000;
+const KEY_LINK_NOTE = "<key link>";
 
 export type Clock = { now(): EpochMs };
 
@@ -140,6 +146,8 @@ export type ServeRequest = {
   readonly system: string;
   readonly prompt: PromptParts;
 };
+
+export type ConnectResult = { readonly ok: true; readonly provider: string; readonly model: string } | { readonly ok: false; readonly error: KeyPageError };
 
 export type AccessView = {
   readonly lanes: readonly ("box" | "key" | "included")[];
@@ -192,8 +200,9 @@ export class Agent extends DurableObject<Env> {
     this.#deps = defaultDeps(env);
   }
 
-  async enqueue(envelope: InboundEnvelope): Promise<"queued" | "duplicate"> {
+  async enqueue(given: InboundEnvelope): Promise<"queued" | "duplicate"> {
     const now = this.#deps.clock.now();
+    const envelope = withoutSecrets(given);
     const first = {
       tz: DEFAULT_TIME_ZONE,
       language: CHANNEL_LANGUAGE[envelope.identity.channel],
@@ -352,6 +361,80 @@ export class Agent extends DurableObject<Env> {
     return this.#access().call({ purpose: req.purpose, system: req.system, prompt: req.prompt, plan });
   }
 
+  /**
+   * The key page's submission. The ticket moves to validating before any provider call, so a repeat submission gets the
+   * stored outcome instead of a second probe, and the save is refused if the access revision moved since the link went out.
+   */
+  async connectKey(nonceHash: string, fields: KeyFields): Promise<ConnectResult> {
+    const now = this.#deps.clock.now();
+    const keys = this.#deps.keys;
+    const t = this.#store.ticket(nonceHash);
+    const a = this.#store.agent();
+    if (!keys.on || !a || !t || t.expiresAt <= now) return { ok: false, error: "expired" };
+    if (t.status === "validating") return { ok: false, error: "busy" };
+    if (t.status !== "issued") return this.#storedOutcome(t.outcome);
+    const draft = draftKey(fields, { devMode: loadConfig(this.env).devMode });
+    if (!draft.ok) return draft;
+    if (!this.#store.startValidating(nonceHash, now)) return { ok: false, error: "busy" };
+    const existing = this.#store.key();
+    const capMicro = existing?.capMicro ?? keys.defaultCapMicro;
+    const probe = await this.#access().probe(draft.value, capMicro);
+    const after = this.#deps.clock.now();
+    if (!probe.ok) {
+      this.#store.finishTicket(nonceHash, "failed", probe.error);
+      return probe;
+    }
+    const d = draft.value;
+    const label = PROVIDERS[d.provider].label;
+    const text = NOTICES[a.language].keyConnected(label, d.model);
+    const sealed = await seal(keys.secrets.current, a.key, d);
+    const saved = this.#store.saveKey(
+      { provider: d.provider, baseUrl: d.baseUrl, model: d.model, auth: d.auth, mode: probe.mode, sealed, hint: d.key.hint, capMicro, connectedAt: after },
+      t.revision,
+      { key: eventKey.access(`connected:${after}`), message: { texts: [text], note: text } },
+      [],
+      after,
+      nonceHash,
+    );
+    if (!saved) {
+      this.#store.finishTicket(nonceHash, "failed", "superseded");
+      return { ok: false, error: "superseded" };
+    }
+    this.#askBackupIfDue(after);
+    await this.#armNoLaterThan(after);
+    this.ctx.waitUntil(this.alarm());
+    return { ok: true, provider: label, model: d.model };
+  }
+
+  #storedOutcome(outcome: string | null): ConnectResult {
+    if (outcome === "saved") {
+      const k = this.#store.key();
+      return k ? { ok: true, provider: PROVIDERS[k.provider].label, model: k.model } : { ok: false, error: "used" };
+    }
+    return { ok: false, error: (outcome as KeyPageError | null) ?? "used" };
+  }
+
+  /** A fresh one-time link to the key page; only the newest works. Null while keys are off. */
+  async #keyLink(lang: Language): Promise<string | null> {
+    const keys = this.#deps.keys;
+    if (!keys.on) return null;
+    const now = this.#deps.clock.now();
+    const t = await issueTicket(keys.secrets.current, this.ctx.id.toString(), (now + KEY_TICKET_MS) as EpochMs);
+    this.#store.issueTicket(t.nonceHash, t.expiresAt, now);
+    return `${keys.publicUrl}/key#t=${t.token}&l=${lang}`;
+  }
+
+  /** Asks once per key, when the person has both their own key and a connected Claude plan, whether the key may back it up. */
+  #askBackupIfDue(now: EpochMs): void {
+    const k = this.#store.key();
+    const box = this.#store.box();
+    const a = this.#store.agent();
+    if (!k || k.backupAskedAt !== null || !box || !a || !boxServes(this.#deps.box, a.key)) return;
+    if (box.state !== "signed_in" && box.state !== "signed_out") return;
+    const text = NOTICES[a.language].backupAsk(PROVIDERS[k.provider].label);
+    this.#store.askBackup({ texts: [text], note: text }, choiceToken({ kind: "backup" }), eventKey.access(`backup:${now}`), now);
+  }
+
   /** Records that this person owns `group` at `version`; the group DO that week 3 adds is its only caller. */
   async recordGroup(group: AgentKey, version: number): Promise<void> {
     this.#store.recordGroup(group, version);
@@ -457,6 +540,7 @@ export class Agent extends DurableObject<Env> {
     if (first.kind === "choice" && first.choice.kind === "consent") {
       return this.#commit(planWithoutModel(view, { kind: "ignored" }), view, a.key, { kind: "none" });
     }
+    if (first.kind === "choice" && first.choice.kind === "backup") return this.#keyCommand({ kind: "key_backup", on: true }, view, a.key);
     const command = commandOf(first);
     if (command) return this.#command(command, view, a.key);
     const plan = await this.#planNow(a.key, view.now);
@@ -572,6 +656,12 @@ export class Agent extends DurableObject<Env> {
     switch (command.kind) {
       case "claude":
         return this.#boxCommand(view, agent);
+      case "key":
+      case "key_remove":
+      case "key_cap":
+      case "key_backup":
+      case "pasted_key":
+        return this.#keyCommand(command, view, agent);
       case "plan":
       case "invite":
       case "join":
@@ -587,6 +677,57 @@ export class Agent extends DurableObject<Env> {
         }
         return this.#reply(view, agent, reply.text, reply.note);
       }
+      default:
+        return assertNever(command);
+    }
+  }
+
+  async #keyCommand(command: Extract<Command, { kind: "key" | "key_remove" | "key_cap" | "key_backup" | "pasted_key" }>, view: TurnView, agent: AgentKey): Promise<void> {
+    const t = NOTICES[view.language];
+    const now = this.#deps.clock.now();
+    const k = this.#store.key();
+    const dollars = (micro: MicroUsd) => usd(micro);
+    switch (command.kind) {
+      case "pasted_key": {
+        const link = await this.#keyLink(view.language);
+        return this.#reply(view, agent, t.pastedKey(link), t.pastedKey(link && KEY_LINK_NOTE));
+      }
+      case "key": {
+        const link = await this.#keyLink(view.language);
+        if (link === null) return this.#reply(view, agent, t.keysOff);
+        if (!k) return this.#reply(view, agent, t.keyLink(link), t.keyLink(KEY_LINK_NOTE));
+        const box = this.#store.box();
+        const planConnected = box !== null && boxServes(this.#deps.box, agent) && (box.state === "signed_in" || box.state === "signed_out");
+        const status = (l: string) =>
+          [
+            t.keyStatus({
+              provider: PROVIDERS[k.provider].label,
+              model: k.model,
+              hint: k.hint,
+              spentUsd: dollars(this.#store.spend("byok", utcMonth(now)).spent),
+              capUsd: dollars(k.capMicro),
+              approximate: !routeFor({ kind: "key", provider: k.provider, model: k.model }, "turn").priced,
+              backup: planConnected ? k.backup : null,
+              link: l,
+            }),
+            ...(k.health.kind === "resting" ? [t.keyResting] : []),
+          ].join("\n");
+        return this.#reply(view, agent, status(link), status(KEY_LINK_NOTE));
+      }
+      case "key_remove":
+        return this.#reply(view, agent, this.#store.removeKey() ? t.keyRemoved : t.noKey);
+      case "key_cap": {
+        if (!k) return this.#reply(view, agent, t.noKey);
+        if (command.usd < OWN_CAP_RANGE_USD.min || command.usd > OWN_CAP_RANGE_USD.max) {
+          return this.#reply(view, agent, t.keyCapRange(OWN_CAP_RANGE_USD.min.toFixed(2), OWN_CAP_RANGE_USD.max.toFixed(2)));
+        }
+        const micro = Math.round(command.usd * 1_000_000) as MicroUsd;
+        this.#store.setKeyCap(micro);
+        return this.#reply(view, agent, t.keyCapSet(dollars(micro)));
+      }
+      case "key_backup":
+        if (!this.#store.setBackup(command.on, now)) return this.#reply(view, agent, t.noKey);
+        return this.#reply(view, agent, command.on ? t.backupOn : t.backupOff);
       default:
         return assertNever(command);
     }
@@ -739,6 +880,7 @@ export class Agent extends DurableObject<Env> {
     const message = deps && t.box ? await this.#boxMessage(deps, t.box, t.say) : boxMessage(t.say, view.language, null);
     const commit = planWithoutModel(view, { kind: "command", text: message.text, note: message.note });
     this.#commit(commit, view, agent, { kind: "none" }, t.box);
+    this.#askBackupIfDue(this.#deps.clock.now());
   }
 
   async #boxMessage(deps: BoxDeps, box: Box, say: BoxSay): Promise<{ readonly text: string; readonly note: string }> {
@@ -757,6 +899,11 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #stepBox(): Promise<void> {
+    await this.#advanceBox();
+    this.#askBackupIfDue(this.#deps.clock.now());
+  }
+
+  async #advanceBox(): Promise<void> {
     const deps = this.#deps.box;
     const box = this.#store.box();
     if (!deps || !box) return;
@@ -1014,6 +1161,14 @@ const DROPPED: Readonly<Record<Extract<UnaskedVerdict, { verdict: "drop" }>["rea
 };
 
 const usd = (micro: MicroUsd): string => (micro / 1_000_000).toFixed(2);
+
+/** A message that looks like it carries an API key is never stored as written, not even in the inbox. */
+function withoutSecrets(envelope: InboundEnvelope): InboundEnvelope {
+  const e = envelope.event;
+  if (e.kind !== "message") return envelope;
+  const r = redactSecrets(e.text);
+  return r.found ? { ...envelope, event: { ...e, text: r.text, redacted: true } } : envelope;
+}
 
 function longDate(t: EpochMs, tz: TimeZone, lang: Language): string {
   return new Intl.DateTimeFormat(NOTICES[lang].dateLocale, { day: "numeric", month: "long", year: "numeric", timeZone: tz }).format(t);

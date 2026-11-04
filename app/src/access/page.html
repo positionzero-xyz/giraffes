@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Giraffes</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.4; }
+  label { display: block; margin-top: 1rem; font-weight: 600; }
+  input, select, button { font: inherit; width: 100%; box-sizing: border-box; padding: 0.5rem; margin-top: 0.25rem; }
+  button { margin-top: 1.5rem; cursor: pointer; }
+  #status { margin-top: 1rem; min-height: 1.5rem; }
+  .error { color: #a00; }
+  [hidden] { display: none; }
+</style>
+</head>
+<body>
+<h1 id="title"></h1>
+<p id="intro"></p>
+<form id="form" autocomplete="off">
+  <label for="provider" id="providerLabel"></label>
+  <select id="provider" name="provider"></select>
+  <p><a id="signup" target="_blank" rel="noopener noreferrer" hidden></a></p>
+  <div id="baseUrlRow" hidden>
+    <label for="baseUrl" id="baseUrlLabel"></label>
+    <input id="baseUrl" name="baseUrl" type="url" inputmode="url" spellcheck="false">
+  </div>
+  <label for="model" id="modelLabel"></label>
+  <input id="model" name="model" spellcheck="false">
+  <label for="key" id="keyLabel"></label>
+  <input id="key" name="key" type="password" spellcheck="false" autocomplete="off">
+  <button id="connect" type="submit"></button>
+</form>
+<p id="status" role="status"></p>
+<script type="application/json" id="data">__DATA__</script>
+<script>
+  const data = JSON.parse(document.getElementById("data").textContent);
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const ticket = hash.get("t") || "";
+  const lang = hash.get("l") === "th" ? "th" : "en";
+  const t = data.text[lang];
+  document.documentElement.lang = lang;
+  const $ = (id) => document.getElementById(id);
+  for (const [id, key] of [["title", "title"], ["intro", "intro"], ["providerLabel", "provider"], ["baseUrlLabel", "baseUrl"], ["modelLabel", "model"], ["keyLabel", "key"], ["connect", "connect"]]) $(id).textContent = t[key];
+  document.title = t.title;
+  for (const p of data.providers) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.label;
+    $("provider").append(o);
+  }
+  function pick() {
+    const p = data.providers.find((x) => x.id === $("provider").value);
+    $("baseUrlRow").hidden = !p.custom;
+    $("model").placeholder = p.defaultModel || "";
+    $("signup").hidden = !p.signup;
+    if (p.signup) { $("signup").href = p.signup; $("signup").textContent = t.getKey; }
+  }
+  $("provider").addEventListener("change", pick);
+  pick();
+  function say(text, error) {
+    $("status").textContent = text;
+    $("status").className = error ? "error" : "";
+  }
+  if (!ticket) say(t.errors.expired, true);
+  $("form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    $("connect").disabled = true;
+    say(t.checking, false);
+    let answer = { ok: false, error: "unreachable" };
+    try {
+      const res = await fetch("/key", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ticket, provider: $("provider").value, model: $("model").value, baseUrl: $("baseUrl").value, key: $("key").value }),
+      });
+      answer = await res.json();
+    } catch {}
+    if (answer.ok) {
+      $("key").value = "";
+      $("form").hidden = true;
+      say(t.connected, false);
+      return;
+    }
+    say(t.errors[answer.error] || t.errors.bad_form, true);
+    $("connect").disabled = false;
+  });
+</script>
+</body>
+</html>

@@ -25,7 +25,9 @@ import { PROVIDERS, type ModelRef } from "../model/providers";
 import { routeFor, type CallPurpose, type Purpose, type Route, type Source } from "../model/routes";
 import { costOf, estimate, fits, type SpendScope } from "../policy/spend";
 import { toLocal, utcMonth } from "../policy/time";
-import { endpointOf, open, sessionOf, type KeySecrets, type StoredKey } from "./key";
+import { z } from "zod";
+import type { KeyPageError } from "../notices";
+import { endpointOf, open, sessionOf, type KeyDraft, type KeySecrets, type StoredKey } from "./key";
 
 export type KeysConfig =
   | { readonly on: false; readonly defaultCapMicro: MicroUsd }
@@ -132,6 +134,32 @@ export type CallRequest<P extends Purpose> = { readonly purpose: P; readonly sys
 type Next = { readonly kind: "next"; readonly transient?: boolean; readonly overCap?: OverCap; readonly told?: boolean };
 type LaneResult<P extends Purpose> = { readonly kind: "served"; readonly served: Served<P> } | Next;
 
+export type ProbeResult = { readonly ok: true; readonly mode: SchemaMode } | { readonly ok: false; readonly error: Extract<KeyPageError, ProbeError> };
+type ProbeError = "bad_key" | "no_credit" | "bad_model" | "rate_limited" | "unreachable" | "no_json" | "over_cap";
+
+const ProbeOutput = z.object({ ok: z.boolean() });
+const PROBE_SYSTEM = "You check that an API key works. Reply with JSON only.";
+const PROBE_USER = 'Reply with {"ok": true}.';
+
+function probeError(a: Attempt<unknown> | null): ProbeError {
+  if (a === null) return "over_cap";
+  switch (a.kind) {
+    case "fault":
+      return a.fault === "credential" ? "bad_key" : a.fault === "payment" ? "no_credit" : a.fault === "model" ? "bad_model" : "rate_limited";
+    case "turned_away":
+      return "rate_limited";
+    case "in_doubt":
+      return "unreachable";
+    case "ok":
+    case "invalid":
+    case "refused_by_model":
+    case "rejected":
+      return "no_json";
+    default:
+      return assertNever(a);
+  }
+}
+
 const HOUR_MS = 60 * 60_000;
 const MIN_MS = 60_000;
 
@@ -194,6 +222,26 @@ export class ModelAccess {
     if (overCap) return { kind: "over_cap", scope: overCap };
     const boxWaiting = access.whenEmpty === "box_not_ready" || (access.lanes.length > 0 && access.lanes.every((l) => l.kind === "box"));
     return { kind: "no_access", why: boxWaiting ? "box_not_ready" : "nothing", told };
+  }
+
+  /**
+   * One tiny call that decides whether a key works and which schema mode its endpoint honours: strict first, then loose
+   * when the provider leaves that to the probe. It reserves and is charged to the person's own spend like any call.
+   */
+  async probe(draft: KeyDraft, capMicro: MicroUsd): Promise<ProbeResult> {
+    const route = routeFor({ kind: "key", provider: draft.provider, model: draft.model }, "probe");
+    const client = this.deps.connect(endpointOf(draft, draft.key, await sessionOf(this.#agent())));
+    const policy = PROVIDERS[draft.provider].schema;
+    const modes: readonly SchemaMode[] = policy === "strict" ? ["strict"] : policy === "loose" ? ["loose"] : ["strict", "loose"];
+    let last: Attempt<unknown> | null = null;
+    for (const mode of modes) {
+      const out = await runParse(client, { route, mode, system: PROBE_SYSTEM, user: PROBE_USER, schema: ProbeOutput }, this.#meter("byok", capMicro, "key"));
+      if (out.overCap && out.last === null) return { ok: false, error: "over_cap" };
+      last = out.last;
+      if (last?.kind === "ok") return { ok: true, mode };
+      if (last?.kind !== "rejected" && last?.kind !== "invalid") break;
+    }
+    return { ok: false, error: probeError(last) };
   }
 
   #lane<P extends Purpose>(lane: Lane, req: CallRequest<P>): Promise<LaneResult<P>> {

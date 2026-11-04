@@ -1,26 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { z } from "zod";
 import { apiCapOf, NO_STANDING, PAID_PLANS, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan, type Standing, type SubscriptionId } from "../billing/plan";
-import {
-  BILLING_BUSY,
-  BILLING_OFF,
-  DUPLICATE,
-  INVITE_FOR_MS,
-  INVITE_NOT_OWNER,
-  inviteFull,
-  inviteText,
-  JOIN,
-  LEFT,
-  manage,
-  MANAGE_NOTE,
-  NO_LINKS,
-  NO_PORTAL,
-  NOT_SEATED,
-  planChanged,
-  planChoices,
-  planStatus,
-  type Links,
-} from "../billing/say";
+import { INVITE_FOR_MS, MANAGE_NOTE, planChanged, planChoices, planStatus, type Links } from "../billing/say";
 import { d1Billing, type BillingStore } from "../billing/store";
 import { parseSubscription, stripeApi, type BillingEvent, type StripeApi } from "../billing/stripe";
 import { boxClient, type BoxClient } from "../box/client";
@@ -51,8 +32,9 @@ import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
 import { makeChannels, type ChannelRegistry } from "../channels/channel";
 import { commandOf, type Command } from "./commands";
 import { loadConfig, type BillingConfig, type BoxConfig, type Env } from "../config";
-import { assertNever, eventKey, intentOf, type AgentKey, type EpochMs, type EventKey, type InboundEnvelope, type MicroUsd, type PersonStatus, type TimeZone } from "../domain";
+import { assertNever, CHANNEL_LANGUAGE, eventKey, intentOf, type AgentKey, type EpochMs, type EventKey, type InboundEnvelope, type Language, type MicroUsd, type PersonStatus, type TimeZone } from "../domain";
 import { d1Ledger, modelCallRow, type LeaseAnswer, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
+import { NOTICES } from "../notices";
 import { makeModelClient, routeOf, type ModelClient, type ModelId, type ModelResult, type Purpose, type Usage } from "../model/model";
 import { admitUnasked, OUTREACH } from "../policy/outreach";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
@@ -65,7 +47,6 @@ import { AgentStore, type AgentRow, type NoteMessage, type OutboxRow, type Outbo
 import {
   bypassModel,
   logsForTurn,
-  NOTICE,
   planTurn,
   planWithoutModel,
   renderUser,
@@ -133,7 +114,7 @@ type ModelCall<T> =
   | { readonly kind: "refused"; readonly scope: "user_cap" | "global_ceiling"; readonly model: ModelId; readonly estimate: MicroUsd };
 
 export type AgentSnapshot = {
-  readonly agent: { readonly key: AgentKey; readonly status: PersonStatus; readonly tz: TimeZone } | null;
+  readonly agent: { readonly key: AgentKey; readonly status: PersonStatus; readonly tz: TimeZone; readonly language: Language } | null;
   readonly turns: readonly TurnRow[];
   readonly outbox: readonly OutboxView[];
   readonly pendingWakeups: readonly PendingWakeup[];
@@ -166,6 +147,7 @@ export class Agent extends DurableObject<Env> {
     const now = this.#deps.clock.now();
     const first = {
       tz: DEFAULT_TIME_ZONE,
+      language: CHANNEL_LANGUAGE[envelope.identity.channel],
       checkinLocal: SCHEDULE.defaultCheckinLocal,
       checkin: checkinWakeup(now, DEFAULT_TIME_ZONE, SCHEDULE.defaultCheckinLocal),
       trialEndsAt: this.#deps.billing.config.on ? trialEnd(now, this.#deps.billing.config.rules) : null,
@@ -214,7 +196,9 @@ export class Agent extends DurableObject<Env> {
     if (owned.length < 2) return;
     console.error("person owns more than one paying subscription", owner, owned.join(" "));
     await store.recordDuplicate(owner, owned, now);
-    this.#store.notifyOnce(`duplicate:${owned.join(" ")}`, eventKey.billing("duplicate"), { texts: [DUPLICATE], note: DUPLICATE }, now);
+    const a = this.#store.agent();
+    const text = a ? NOTICES[a.language].duplicate : null;
+    this.#store.notifyOnce(`duplicate:${owned.join(" ")}`, eventKey.billing("duplicate"), text ? { texts: [text], note: text } : null, now);
     await this.#armNoLaterThan(now);
     this.ctx.waitUntil(this.alarm());
   }
@@ -225,7 +209,8 @@ export class Agent extends DurableObject<Env> {
     const standing = await store.standing(agent, now);
     const before = this.#plan(now);
     const after = planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, config.on, config.rules);
-    const text = config.on ? planChanged(before, after, now) : null;
+    const a = this.#store.agent();
+    const text = config.on && a ? planChanged(before, after, now, a.language) : null;
     const message = text ? { key: eventKey.billing("plan"), message: { texts: [text] as const, note: text } } : null;
     this.#store.applyStanding(standing, message, now);
     if (message) {
@@ -267,7 +252,7 @@ export class Agent extends DurableObject<Env> {
     const a = this.#store.agent();
     const box = this.#store.box();
     return {
-      agent: a ? { key: a.key, status: a.status, tz: a.tz } : null,
+      agent: a ? { key: a.key, status: a.status, tz: a.tz, language: a.language } : null,
       turns: this.#store.recentTurns(50),
       outbox: this.#store.recentOutbox(50),
       pendingWakeups: this.#store.pendingWakeups(),
@@ -339,6 +324,7 @@ export class Agent extends DurableObject<Env> {
     return {
       now,
       tz: a.tz,
+      language: a.language,
       status: a.status,
       statusAt: a.statusAt,
       checkinLocal: a.checkinLocal,
@@ -410,13 +396,14 @@ export class Agent extends DurableObject<Env> {
       case "invite":
       case "join":
       case "leave": {
-        if (!this.#deps.billing.config.on && command.kind !== "plan") return this.#reply(view, agent, BILLING_OFF);
+        const t = NOTICES[view.language];
+        if (!this.#deps.billing.config.on && command.kind !== "plan") return this.#reply(view, agent, t.billingOff);
         let reply: { readonly text: string; readonly note: string };
         try {
           reply = await this.#billingCommand(command, view, agent);
         } catch (err) {
           console.warn("billing command failed", command.kind, err);
-          reply = { text: BILLING_BUSY, note: BILLING_BUSY };
+          reply = { text: t.billingBusy, note: t.billingBusy };
         }
         return this.#reply(view, agent, reply.text, reply.note);
       }
@@ -444,50 +431,53 @@ export class Agent extends DurableObject<Env> {
   ): Promise<{ readonly text: string; readonly note: string }> {
     const { config, store } = this.#deps.billing;
     const now = this.#deps.clock.now();
+    const lang = view.language;
+    const t = NOTICES[lang];
     const say = (text: string) => ({ text, note: text });
     switch (command.kind) {
       case "plan": {
         const { plan, standing } = await this.#standingNow(agent);
         const places = plan.kind === "plus" && plan.role === "owner" ? await store.places(agent, now) : null;
-        const status = planStatus(plan, now, places);
-        if (config.on && standing.own) return this.#manageLink(status, standing.own.id);
+        const status = planStatus(plan, now, places, lang);
+        if (config.on && standing.own) return this.#manageLink(status, standing.own.id, lang);
         if (!config.on || (plan.kind !== "trial" && plan.kind !== "lapsed")) return say(status);
         const links = await this.#checkoutLinks(agent, view.batch.items[0].key);
-        if (!links) return say(`${status}\n${NO_LINKS}`);
-        const choices = planChoices(config.rules, links);
+        if (!links) return say(`${status}\n${t.noLinks}`);
+        const choices = planChoices(config.rules, links, lang);
         return { text: `${status}\n${choices.text}`, note: `${status}\n${choices.note}` };
       }
       case "invite": {
         const code = inviteCode();
         const r = await store.invite(agent, code, now, (now + INVITE_FOR_MS) as EpochMs);
-        if (r.kind === "created") return { text: inviteText(code), note: inviteText("<code>") };
-        return say(r.kind === "full" ? inviteFull(r.seats) : INVITE_NOT_OWNER);
+        if (r.kind === "created") return { text: t.invite(code), note: t.invite("<code>") };
+        return say(r.kind === "full" ? t.inviteFull(r.seats) : t.inviteNotOwner);
       }
       case "join": {
         const r = await store.join(command.code, agent, now);
         if (r === "joined") await this.#standingNow(agent);
-        return say(JOIN[r]);
+        return say(t.join[r]);
       }
       case "leave": {
         const closed = await store.leave(agent, now);
-        if (!closed && !this.#store.plan()?.seat) return say(NOT_SEATED);
+        if (!closed && !this.#store.plan()?.seat) return say(t.notSeated);
         const { plan } = await this.#standingNow(agent);
-        return say(`${LEFT}\n${plan.kind === "lapsed" ? NOTICE.lapsed : planStatus(plan, now, null)}`);
+        return say(`${t.left}\n${plan.kind === "lapsed" ? t.lapsed : planStatus(plan, now, null, lang)}`);
       }
       default:
         return assertNever(command);
     }
   }
 
-  async #manageLink(status: string, id: SubscriptionId): Promise<{ readonly text: string; readonly note: string }> {
+  async #manageLink(status: string, id: SubscriptionId, lang: Language): Promise<{ readonly text: string; readonly note: string }> {
+    const t = NOTICES[lang];
     const { store, stripe } = this.#deps.billing;
     const customer = await store.customer(id);
     const portal = stripe && customer ? await stripe.portal(customer) : null;
     if (!portal?.ok) {
       console.warn("portal link failed", id, portal ? portal.detail : "no customer");
-      return { text: `${status}\n${NO_PORTAL}`, note: `${status}\n${NO_PORTAL}` };
+      return { text: `${status}\n${t.noPortal}`, note: `${status}\n${t.noPortal}` };
     }
-    return { text: `${status}\n${manage(portal.value.url)}`, note: `${status}\n${manage(MANAGE_NOTE)}` };
+    return { text: `${status}\n${t.manage(portal.value.url)}`, note: `${status}\n${t.manage(MANAGE_NOTE)}` };
   }
 
   /**
@@ -546,17 +536,18 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #boxReply(view: TurnView, agent: AgentKey, deps: BoxDeps | null, t: { readonly box: Box | null; readonly say: BoxSay }): Promise<void> {
-    const message = deps && t.box ? await this.#boxMessage(deps, t.box, t.say) : boxMessage(t.say, null);
+    const message = deps && t.box ? await this.#boxMessage(deps, t.box, t.say) : boxMessage(t.say, view.language, null);
     const commit = planWithoutModel(view, { kind: "command", text: message.text, note: message.note });
     this.#commit(commit, view, agent, { kind: "none" }, null, [], t.box);
   }
 
   async #boxMessage(deps: BoxDeps, box: Box, say: BoxSay): Promise<{ readonly text: string; readonly note: string }> {
-    if (say === "retiring" && box.retireAt !== null) return boxMessage(say, null, longDate(box.retireAt, this.#agent().tz));
-    if (!needsLink(say)) return boxMessage(say, null);
+    const a = this.#agent();
+    if (say === "retiring" && box.retireAt !== null) return boxMessage(say, a.language, null, longDate(box.retireAt, a.tz, a.language));
+    if (!needsLink(say)) return boxMessage(say, a.language, null);
     const exp = (this.#deps.clock.now() + BOX.ticketForMs) as EpochMs;
     const ticket = await signinTicket(await boxToken(deps.secret, box.name), exp);
-    return boxMessage(say, signinUrl(box.url, ticket));
+    return boxMessage(say, a.language, signinUrl(box.url, ticket));
   }
 
   async #outboxMessage(deps: BoxDeps, box: Box, say: BoxSay | null): Promise<NoteMessage | null> {
@@ -599,7 +590,7 @@ export class Agent extends DurableObject<Env> {
       return;
     }
     await this.#deps.ledger.releaseBox(this.#agent().key, this.#deps.clock.now());
-    const m = goneMessage(step.box);
+    const m = goneMessage(step.box, this.#agent().language);
     this.#store.removeBox(step.box.name, { texts: [m.text], note: m.note }, this.#deps.clock.now());
   }
 
@@ -899,8 +890,8 @@ function callRow(
   return modelCallRow({ id: r.id, agent, purpose: r.purpose, model: r.model, backend: "api", status, estimate: r.estimate, cost, usage, at });
 }
 
-function longDate(t: EpochMs, tz: TimeZone): string {
-  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: tz }).format(t);
+function longDate(t: EpochMs, tz: TimeZone, lang: Language): string {
+  return new Intl.DateTimeFormat(NOTICES[lang].dateLocale, { day: "numeric", month: "long", year: "numeric", timeZone: tz }).format(t);
 }
 
 function boxDeps(c: BoxConfig): BoxDeps | null {

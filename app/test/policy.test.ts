@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { CompactionOutputSchema, planCompaction } from "../src/agent/compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "../src/agent/prompt";
-import { NOTICE, planTurn, planWithoutModel, TURN, TurnOutputSchema, type Batch, type InboxItem, type TurnOutput, type TurnView } from "../src/agent/turn";
+import { planTurn, planWithoutModel, TURN, TurnOutputSchema, type Batch, type InboxItem, type TurnOutput, type TurnView } from "../src/agent/turn";
 import {
   CHECKIN_KEY,
   TASK_KINDS,
@@ -18,11 +18,13 @@ import {
   type WakeupKey,
 } from "../src/domain";
 import { priceOf, routeOf } from "../src/model/model";
+import { NOTICES } from "../src/notices";
 import { admitUnasked, quietUntil } from "../src/policy/outreach";
 import { fireAt, isLate, nextAlarm, planFiring, wakeupOrigin, type PendingWakeup } from "../src/policy/schedule";
 import { costOf, decideReservation, estimate, PROMPT_OVERHEAD_TOKENS, SPEND } from "../src/policy/spend";
 import { fromLocal, nextLocalTime, parseLocalDateTime, parseTimeZone, toLocal } from "../src/policy/time";
 
+const NOTICE = NOTICES.en;
 const BKK = parseTimeZone("Asia/Bangkok")!;
 const NYC = parseTimeZone("America/New_York")!;
 const at = (iso: string) => Date.parse(iso) as EpochMs;
@@ -124,6 +126,7 @@ function view(over: Partial<TurnView> & { readonly batch?: Batch } = {}): TurnVi
   return {
     now: NOW,
     tz: BKK,
+    language: "en",
     status: "active",
     statusAt: 0 as EpochMs,
     checkinLocal: "09:00",
@@ -231,6 +234,29 @@ describe("reminders", () => {
       { action: "schedule_wakeup:r0", reason: "past" },
       { action: "schedule_wakeup:rent", reason: "limit" },
     ]);
+  });
+
+  test("a new time zone reads the turn's times in that zone and keeps pending reminders at their local times", () => {
+    const london = parseTimeZone("Europe/London")!;
+    const pending = [reminder("dentist", local("2026-11-05T15:00")), checkin(local("2026-11-05T09:00"))];
+    const commit = planTurn(
+      output([schedule("gym", "2026-11-04T18:00"), { type: "set_locale", timeZone: "Europe/London", language: "th" }]),
+      view({ pending }),
+    );
+    expect(commit.locale).toEqual({ tz: london, language: "th" });
+    expect(commit.wakeupsAdd.map((w) => [w.key, w.dueAt])).toEqual([["gym", local("2026-11-04T18:00", london)]]);
+    expect(commit.wakeupsRetime).toEqual([
+      { key: "dentist", dueAt: local("2026-11-05T15:00", london) },
+      { key: CHECKIN_KEY, dueAt: local("2026-11-04T09:00", london) },
+    ]);
+  });
+
+  test("an unknown time zone is rejected and changes nothing but the language", () => {
+    const commit = planTurn(output([{ type: "set_locale", timeZone: "Bangkok time", language: "th" }]), view({ pending: [reminder("dentist", local("2026-11-05T15:00"))] }));
+    expect(commit.locale).toEqual({ tz: BKK, language: "th" });
+    expect(commit.wakeupsRetime).toEqual([]);
+    expect(commit.rejected).toEqual([{ action: "set_locale", reason: "bad_zone" }]);
+    expect(commit.outbound?.texts).toEqual([NOTICES.th.badZone]);
   });
 
   test("the check-in can't be cancelled or scheduled by the model", () => {

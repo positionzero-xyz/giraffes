@@ -1,8 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
-import { NOTICE } from "../src/agent/turn";
 import { planAllowsBox, planOf, type CustomerId, type PlanRules, type Subscription, type SubscriptionId } from "../src/billing/plan";
-import { BILLING_BUSY, BILLING_OFF, DUPLICATE, inviteFull, JOIN, LEFT, NO_LINKS, NO_PORTAL, NOT_SEATED } from "../src/billing/say";
 import { d1Billing, type BillingStore } from "../src/billing/store";
 import { checkoutForm, parseEvent, parseSubscription, stripeApi, verifySignature, type CheckoutId } from "../src/billing/stripe";
 import { DEFAULT_AMOUNTS, stripeSetup } from "../src/billing/setup";
@@ -11,6 +9,7 @@ import { boxMessage } from "../src/box/machine";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs, MicroUsd } from "../src/domain";
 import { priceOf, routeOf } from "../src/model/model";
+import { NOTICES } from "../src/notices";
 import {
   billingOn,
   chat,
@@ -31,6 +30,8 @@ import {
   type BillingKit,
   type DevChat,
 } from "./testkit";
+
+const NOTICE = NOTICES.en;
 
 const quietCheckin = () => turn({ actions: [quiet()], task: ["chat", "checkin", "none"] });
 const agent = (user: string) => `p:dev:${user}` as AgentKey;
@@ -238,7 +239,7 @@ describe("billing off", () => {
     await c.say("/invite");
     await c.say("/join ABC234");
     await c.say("/leave");
-    expect(await c.received()).toEqual(["You're on the free beta, so there's nothing to pay.", BILLING_OFF, BILLING_OFF, BILLING_OFF]);
+    expect(await c.received()).toEqual(["You're on the free beta, so there's nothing to pay.", NOTICE.billingOff, NOTICE.billingOff, NOTICE.billingOff]);
 
     c.clock.set(local("2099-12-30T10:00"));
     await c.say("hello");
@@ -280,7 +281,7 @@ describe("trial and lapse", () => {
     c.clock.set(local("2099-11-19T08:00"));
     await c.say("anyone?");
 
-    expect(await c.received()).toEqual([NOTICE.lapsed, boxMessage("retiring", null, "2 December 2099").text, NOTICE.lapsed]);
+    expect(await c.received()).toEqual([NOTICE.lapsed, boxMessage("retiring", "en", null, "2 December 2099").text, NOTICE.lapsed]);
     expect(model.calls).toHaveLength(1);
     expect(box.parses).toEqual([]);
     expect(c.logs("turn").filter((t) => t.eventKind === "message").map((t) => t.outcome)).toEqual(["acted", "no_model", "lapsed", "lapsed", "lapsed"]);
@@ -318,7 +319,7 @@ describe("trial and lapse", () => {
 
     kit.stripe.failing = true;
     await c.say("/plan");
-    expect(await c.received()).toEqual([`You're on the free trial, with 14 days left.\n${NO_LINKS}`]);
+    expect(await c.received()).toEqual([`You're on the free trial, with 14 days left.\n${NOTICE.noLinks}`]);
   });
 
   test("a payment after the trial lapsed is announced and the model answers again", async () => {
@@ -368,7 +369,7 @@ describe("checkout and the portal", () => {
     kit.stripe.expiresFailing = false;
     await c.say("/plan");
 
-    expect((await c.received())[1]).toBe(`You're on the free trial, with 14 days left.\n${NO_LINKS}`);
+    expect((await c.received())[1]).toBe(`You're on the free trial, with 14 days left.\n${NOTICE.noLinks}`);
     expect([...kit.stripe.sessions.values()]).toEqual(["expired", "expired", "expired", "open", "open", "open"]);
   });
 
@@ -387,7 +388,7 @@ describe("checkout and the portal", () => {
 
     kit.stripe.failing = true;
     await c.say("/plan");
-    expect(await c.received()).toEqual([`You're on the Standard plan.\n${NO_PORTAL}`]);
+    expect(await c.received()).toEqual([`You're on the Standard plan.\n${NOTICE.noPortal}`]);
   });
 
   test("a second paying subscription is logged and recorded, nothing is cancelled, and the person is told once", async () => {
@@ -401,7 +402,7 @@ describe("checkout and the portal", () => {
     await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "ai", status: "active" });
     await c.settle();
 
-    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", DUPLICATE]);
+    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", NOTICE.duplicate]);
     expect(errors.mock.calls.flat().join(" ")).toContain("sub_ike_1 sub_ike_2");
     errors.mockRestore();
     const found = await env.LEDGER.prepare("SELECT owner_key, subscription_ids FROM billing_duplicate").all();
@@ -628,17 +629,17 @@ describe("plus seats", () => {
     await noa.say(`/join ${codes[0]}`);
     await noa.say(`/join ${codes[1].toLowerCase()}`);
     await ola.say(`/join ${codes[2]}`);
-    expect(await mia.received()).toEqual([JOIN.joined]);
-    expect(await noa.received()).toEqual([JOIN.bad_code, JOIN.joined]);
-    expect(await ola.received()).toEqual([JOIN.full]);
+    expect(await mia.received()).toEqual([NOTICE.join.joined]);
+    expect(await noa.received()).toEqual([NOTICE.join.bad_code, NOTICE.join.joined]);
+    expect(await ola.received()).toEqual([NOTICE.join.full]);
     expect((await mia.snapshot()).plan).toEqual({ kind: "plus", role: "member" });
     await owner.say("/plan");
     await owner.say("/invite");
-    expect(await owner.received()).toEqual(["You're on the Plus plan, with 3 of 3 places taken. Send /invite to add someone.\nTo change or cancel your plan: https://billing.stripe.test/p/cus_kit", inviteFull(3)]);
+    expect(await owner.received()).toEqual(["You're on the Plus plan, with 3 of 3 places taken. Send /invite to add someone.\nTo change or cancel your plan: https://billing.stripe.test/p/cus_kit", NOTICE.inviteFull(3)]);
 
     await pay(kit, owner, "kit", "plus", { extraSeats: 1 });
     await ola.say(`/join ${codes[2]}`);
-    expect(await ola.received()).toEqual([JOIN.joined]);
+    expect(await ola.received()).toEqual([NOTICE.join.joined]);
     expect(await row("sub_kit")).toMatchObject({ seats: 4 });
   });
 
@@ -652,7 +653,7 @@ describe("plus seats", () => {
     await owner.say("/invite");
     const code = codeIn((await owner.received())[0]);
     await owner.say(`/join ${code}`);
-    expect(await owner.received()).toEqual([JOIN.own]);
+    expect(await owner.received()).toEqual([NOTICE.join.own]);
 
     await member.say(`/join ${code}`);
     await owner.say("/invite");
@@ -660,7 +661,7 @@ describe("plus seats", () => {
     await member.say("/leave");
     await member.say("/leave");
 
-    expect(await member.received()).toEqual([JOIN.joined, JOIN.seated, `${LEFT}\nYou're on the free trial, with 14 days left.`, NOT_SEATED]);
+    expect(await member.received()).toEqual([NOTICE.join.joined, NOTICE.join.seated, `${NOTICE.left}\nYou're on the free trial, with 14 days left.`, NOTICE.notSeated]);
     expect((await member.snapshot()).plan.kind).toBe("trial");
   });
 
@@ -759,7 +760,7 @@ describe("plus seats", () => {
     await member.say("/leave");
     await member.say("/leave");
 
-    expect(await member.received()).toEqual([BILLING_BUSY, `${LEFT}\nYou're on the free trial, with 14 days left.`, NOT_SEATED]);
+    expect(await member.received()).toEqual([NOTICE.billingBusy, `${NOTICE.left}\nYou're on the free trial, with 14 days left.`, NOTICE.notSeated]);
     expect(await real.members("sub_yan" as SubscriptionId)).toEqual([]);
   });
 });
@@ -812,12 +813,12 @@ describe("the ai plan", () => {
     await c.say("/claude");
     await c.received();
     await pay(kit, c, "val", "ai");
-    expect(await c.received()).toEqual(["Thanks. Your AI plan is active.", boxMessage("retiring", null, "18 November 2099").text]);
+    expect(await c.received()).toEqual(["Thanks. Your AI plan is active.", boxMessage("retiring", "en", null, "18 November 2099").text]);
 
     await c.say("hello");
     await c.say("/claude");
 
-    expect(await c.received()).toEqual(["From the API.", boxMessage("not_in_plan", null).text]);
+    expect(await c.received()).toEqual(["From the API.", boxMessage("not_in_plan", "en", null).text]);
     expect(box.parses).toEqual([]);
   });
 

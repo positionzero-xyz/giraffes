@@ -13,7 +13,7 @@ import {
   type WakeupKey,
 } from "../domain";
 import { quietUntil } from "./outreach";
-import { fromLocal, localDate, nextLocalTime, parseLocalDateTime } from "./time";
+import { fromLocal, localDate, nextLocalTime, parseLocalDateTime, toLocal } from "./time";
 
 const MINUTE_MS = 60 * 1000;
 
@@ -82,6 +82,11 @@ export function checkinWakeup(after: EpochMs, tz: TimeZone, checkinLocal: TimeOf
     note: "Daily check-in",
     dueAt: nextLocalTime(after, tz, checkinLocal),
   };
+}
+
+/** A reminder keeps its local wall time in the new zone; the check-in moves to its next local time there. */
+export function retime(w: NewWakeup, from: TimeZone, to: TimeZone, now: EpochMs, checkinLocal: TimeOfDay): EpochMs {
+  return w.kind === "checkin" ? checkinWakeup(now, to, checkinLocal).dueAt : fromLocal(toLocal(w.dueAt, from), to);
 }
 
 export function fireAt(w: { readonly origin: PendingWakeup["origin"]; readonly dueAt: EpochMs }, tz: TimeZone): EpochMs {

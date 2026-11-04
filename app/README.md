@@ -107,7 +107,7 @@ the file doesn't change the CHECK constraints of a table that already exists. A 
 refuses, such as a `rejected` model call or a `too_long` rejection in a ledger created before those values
 existed, fails its log flush. The flush backs off and retries, and log shipping stays stuck behind that
 row until the table is migrated. `model_call.status` and `action_rejection.reason` have both gained
-values. To migrate their CHECKs, rebuild the two tables:
+values, most recently the rejection `bad_zone`. To migrate their CHECKs, rebuild the two tables:
 
 ```sh
 npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW cost_per_agent_week; DROP INDEX model_call_agent_time; DROP INDEX action_rejection_agent_time; ALTER TABLE model_call RENAME TO model_call_old; ALTER TABLE action_rejection RENAME TO action_rejection_old"

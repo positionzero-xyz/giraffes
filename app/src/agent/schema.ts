@@ -232,6 +232,10 @@ export const MIGRATIONS: readonly string[] = [
   DROP TABLE box;
   ALTER TABLE box_next RENAME TO box;
   `,
+  `
+  ALTER TABLE agent ADD COLUMN language TEXT NOT NULL DEFAULT 'en' CHECK (language IN ('th', 'en'));
+  UPDATE agent SET language = 'th' WHERE channel = 'line';
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

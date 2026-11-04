@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { NOTICE, TURN } from "../src/agent/turn";
+import { TURN } from "../src/agent/turn";
 import { lineChannel } from "../src/channels/line";
 import { SEND_MESSAGE_MAX_CHARS as TELEGRAM_MAX_CHARS, telegramChannel } from "../src/channels/telegram";
-import type { EpochMs, Identity, OutboundMessage, OutboxId } from "../src/domain";
+import { LANGUAGES, type EpochMs, type Identity, type OutboundMessage, type OutboxId } from "../src/domain";
+import { NOTICES, type FixedNotice } from "../src/notices";
 
 type Seen = { url: string; headers: Headers; body: unknown };
 
@@ -226,11 +227,23 @@ describe("Telegram delivery", () => {
     expect(accepted.map((s) => [s.url, s.body])).toEqual([["https://api.telegram.org/bot123:abc/sendMessage", { chat_id: "777000111", text: "Done.\n\n(note)" }]]);
   });
 
-  test("the longest row a turn can produce fits one Telegram message", () => {
+  test.each(LANGUAGES)("the longest row a turn can produce fits one Telegram message, in %s", (lang) => {
+    const t = NOTICES[lang];
     const due = "2026-11-04 09:00";
-    const fixed = Object.values(NOTICE).filter((n) => typeof n === "string");
-    const corrections = [...fixed, ...Array.from({ length: TURN.maxActions }, () => NOTICE.reminderKept(due))].join("\n");
-    const requestedReminder = `${NOTICE.lateFallback(due)}\n${NOTICE.reminder("x".repeat(TURN.maxNoteChars))}`;
+    const rejections: FixedNotice[] = [
+      "reminderLimit",
+      "reminderPast",
+      "reminderTooFar",
+      "reminderBadTime",
+      "reminderDuplicate",
+      "reminderNotSet",
+      "tooManyActions",
+      "checkinReserved",
+      "cancelNotFound",
+      "badZone",
+    ];
+    const corrections = [...rejections.map((k) => t[k]), ...Array.from({ length: TURN.maxActions }, () => t.reminderKept(due))].join("\n");
+    const requestedReminder = `${t.lateFallback(due)}\n${t.reminder("x".repeat(TURN.maxNoteChars))}`;
     const longestSend = TURN.maxLateNoticeChars + "\n".length + TURN.maxTextChars;
     const longestText = Math.max(longestSend, corrections.length, requestedReminder.length);
     expect(TURN.maxSendsPerTurn * longestText + "\n\n".length * (TURN.maxSendsPerTurn - 1)).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);

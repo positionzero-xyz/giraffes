@@ -12,6 +12,12 @@ export type TimeOfDay = `${number}:${number}`;
 export const CHANNEL_IDS = ["line", "telegram", "dev"] as const;
 export type ChannelId = (typeof CHANNEL_IDS)[number];
 
+export const LANGUAGES = ["th", "en"] as const;
+export type Language = (typeof LANGUAGES)[number];
+
+/** The language a person's code-written notices start in, until they ask for another. */
+export const CHANNEL_LANGUAGE: { readonly [K in ChannelId]: Language } = { line: "th", telegram: "en", dev: "en" };
+
 export type Identity = { readonly channel: ChannelId; readonly channelUserId: string };
 
 export type AgentKey = Brand<string, "AgentKey">;

@@ -50,20 +50,22 @@ D1 (`app/src/ledger/d1-schema.sql`) holds the cross-user facts: append-only `age
 - Branded `EpochMs`, `MicroUsd` (integer), `TimeZone`, `LocalDateTime`, `EventKey`, `WakeupKey`, `OutboxId` and `AgentKey`. An `EventKey` comes only from the `eventKey.*` constructors, so every dedupe key has a stated source.
 - `intentOf(event)` returns `reply`, `requested` or `unasked` from the event kind and the wake-up origin. The model has no intent field.
 - The model reads and writes local wall time only. Zone math lives in `policy/time.ts`.
+- `Language` is `th` or `en`, and `CHANNEL_LANGUAGE` maps every channel to the language a new person starts in. `notices.ts` holds every code-written text in one table typed by `Notices`, one entry per language, so a text missing in either language fails the build.
 - `ChannelRegistry` is a mapped type over `CHANNEL_IDS`, so a channel id without an adapter fails the build.
 - `LogRow` is one union, and each variant maps to one D1 table in one exhaustive switch.
 - `AgentEvent` is stored as JSON with no SQL CHECK on kind. Week 2's `job_result` is one new variant, and the exhaustive switches name every place that must handle it.
 
 ### Where validation lives
 
-Channel adapters authenticate and parse: the HMAC over the raw body for LINE, a constant-time header compare for Telegram, and identity extraction. Wire types never leave `channels/<name>.ts`. `loadConfig` validates env once. The zod schema checks the shape of model output in the backend, and `planTurn` checks its meaning (times, limits, keys) and its lengths, which the API doesn't enforce. Inside the agent, data is trusted and typed.
+Channel adapters authenticate and parse: the HMAC over the raw body for LINE, a constant-time header compare for Telegram, and identity extraction. Wire types never leave `channels/<name>.ts`. `loadConfig` validates env once. The zod schema checks the shape of model output in the backend, and `planTurn` checks its meaning (times, limits, keys, time zones) and its lengths, which the API doesn't enforce. Inside the agent, data is trusted and typed.
 
 ### Module map
 
 ```
 app/src/worker.ts            /webhook/:channel → adapter.receive → Agent.enqueue; dev routes
 app/src/config.ts            Env → Config, the only reader of env strings
-app/src/domain.ts            branded units, ids, events, intent, outbound, task labels
+app/src/domain.ts            branded units, ids, events, intent, outbound, task labels, languages
+app/src/notices.ts           every code-written text, in Thai and English
 app/src/agent/agent.ts       the DO: enqueue, drain phases, metered model call, delivery, re-arm
 app/src/agent/store.ts       all DO SQL, synchronous methods (imported only by agent.ts)
 app/src/agent/schema.ts      DO DDL and migrate()
@@ -113,7 +115,7 @@ A reminder the person asked for may be for the current minute, and it fires on t
 
 **Reachability.** Follow and block events carry the platform's timestamp. One older than the last recorded change is logged as `stale` and changes nothing. A block skips the model. A message from a blocked person, written at or after that block, sets them active and re-creates a missing check-in, so the reply is delivered. A send that fails because the person is gone (Telegram 403) marks them blocked but leaves the timestamp alone, because our clock isn't comparable with the platform's. While a person is blocked, their wake-ups are skipped (the check-in gets no successor) and their outbox rows are dropped.
 
-**Time zone.** Week 1 runs every person on Asia/Bangkok time. The `agent.tz` column exists and the zone math takes a zone, but nothing sets a per-person zone yet. A Telegram user elsewhere gets reminder times and quiet hours in Bangkok time.
+**Time zone and language.** A person starts on Asia/Bangkok time, with notices in Thai on LINE and in English on Telegram and the dev page. When they say where they live or which language they want, the model returns `set_locale` with an IANA zone and `th` or `en`. It is one plain action with two required fields, so the schema gains no `anyOf` or optional branch that a cheaper model might not support. `planTurn` checks the zone with `parseTimeZone` and rejects one it can't read as `bad_zone`, with a correction, while the language still applies. A new zone applies to the whole turn: the turn's own times are read in it, and every pending reminder keeps its local wall time there, because a time a person gave was meant on their clock and was read in Bangkok time until now. A reminder that moves into the past fires on the next alarm and says it is late. The check-in moves to the next 09:00 in the new zone, which a check-in already fired that local date can't repeat, because its inbox key is the date. Quiet hours, the unasked budget's local day and the prompt's clock all read `agent.tz`. A new language applies to the notices of the same turn.
 
 ## Spend
 
@@ -159,7 +161,7 @@ No turn runs inside the webhook request. There are no lock rows, no stored alarm
 - **Unused leases.** Up to $0.50 per active person of unused global lease at month end ($50 at 100 people), in exchange for no cross-user hop per call and no global hot row.
 - **Duplicate sends.** A crash in the send window can duplicate a Telegram message or an in-doubt LINE reply, in exchange for never losing a reminder.
 - **Lossy compaction lag.** While compaction lags by more than a page (it is failing, or one drain added more than 30 rows), the oldest unfolded turns fall outside the 90-row prompt window until it catches up, one page per drain. In exchange, the prompt is bounded and a reply never waits on compaction.
-- **English notices.** Code-written text is English: corrections, the monthly limit, the late-notice fallback and the requested-reminder floor. The model writes its own late notice in the person's language.
+- **Two languages for code-written text.** Corrections, the monthly limit, the late-notice fallback, the requested-reminder floor, and the plan and box messages are in Thai or English. A person who writes in another language gets English notices, while the model answers in their language.
 - **One coarse DO class.** One `Agent` holds everything for a person, which gives one transaction per turn. The store and the pure planners keep each file single-purpose.
 
 ## Alternatives considered

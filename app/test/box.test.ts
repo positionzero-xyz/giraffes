@@ -9,7 +9,7 @@ import { boxName, boxToken, signinTicket, type BoxName, type BoxToken } from "..
 import { MIGRATIONS } from "../src/agent/schema";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs } from "../src/domain";
-import { NOTICE } from "../src/agent/turn";
+import { NOTICES } from "../src/notices";
 import {
   billingOn,
   BOX_SECRET,
@@ -26,7 +26,8 @@ import {
   type MemoryLedger,
 } from "./testkit";
 
-const say = (s: BoxSay) => boxMessage(s, null).text;
+const NOTICE = NOTICES.en;
+const say = (s: BoxSay) => boxMessage(s, "en", null).text;
 const LINK = /^https:\/\/([a-z0-9-]+)\.box\.test\/signin#t=(\d+)\.([A-Za-z0-9_-]+)$/m;
 
 describe("names and secrets", () => {
@@ -670,7 +671,7 @@ describe("connecting a Claude plan", () => {
 });
 
 describe("retiring a box the plan no longer allows", () => {
-  const retiring = (until: string) => boxMessage("retiring", null, until).text;
+  const retiring = (until: string) => boxMessage("retiring", "en", null, until).text;
   const subscribe = async (kit: BillingKit, user: string, plan: "standard" | "ai") => {
     expect((await stripeChange(kit, { user, sub: `sub_${user}`, plan, status: "active", type: "customer.subscription.created" })).status).toBe(200);
   };

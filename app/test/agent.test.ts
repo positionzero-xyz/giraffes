@@ -1,11 +1,14 @@
 import { describe, expect, test } from "vitest";
-import { NOTICE, TURN } from "../src/agent/turn";
+import { TURN } from "../src/agent/turn";
 import type { EpochMs, LocalDateTime, TimeZone } from "../src/domain";
 import { priceOf, routeOf } from "../src/model/model";
 import type { ScriptStep } from "../src/model/scripted";
+import { NOTICES } from "../src/notices";
 import { costOf, SPEND } from "../src/policy/spend";
 import { fromLocal, toLocal } from "../src/policy/time";
 import { cancel, chat, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, throws, turn, wall } from "./testkit";
+
+const NOTICE = NOTICES.en;
 
 const until = async (done: () => boolean) => {
   for (let i = 0; i < 2000 && !done(); i++) await new Promise((r) => setTimeout(r, 1));
@@ -371,8 +374,9 @@ describe("time zone and language", () => {
         actions: [locale("Europe/London", "en"), schedule("follow-up", "2099-11-04T23:00", "Ask about the flat", false), send("Got it, London time.")],
         task: ["chat", "zone", "completed"],
       }),
-      turn({ actions: [send("Did you hear back about the flat?")], lateNotice: "This was due last night.", task: ["chat", "flat", "progressed"] }),
       chat("Morning!"),
+      turn({ actions: [send("Did you hear back about the flat?")], lateNotice: "This was due last night.", task: ["chat", "flat", "progressed"] }),
+      chat("Morning again!"),
     ]);
     const c = await devChat("lyn", { model, at: "2099-11-04T10:00" });
     await c.say("remind me about the dentist tomorrow at 3pm");
@@ -382,19 +386,19 @@ describe("time zone and language", () => {
     const after = await c.snapshot();
     expect(after.agent?.tz).toBe("Europe/London");
     expect(after.pendingWakeups.map((w) => [w.key, toLocal(w.dueAt, LONDON)])).toEqual([
+      ["daily-checkin", "2099-11-04T09:00"],
       ["follow-up", "2099-11-04T23:00"],
-      ["daily-checkin", "2099-11-05T09:00"],
       ["dentist", "2099-11-05T15:00"],
     ]);
 
-    c.clock.set(london("2099-11-04T03:00"));
     await c.advanceTo(toLocal(london("2099-11-05T09:30"), "Asia/Bangkok" as TimeZone));
 
     expect(c.channel.delivered.map((d) => [d.text, toLocal(d.at, LONDON)])).toEqual([
       ["Set for 3pm.", "2099-11-04T03:00"],
       ["Got it, London time.", "2099-11-04T03:00"],
+      ["Morning!", "2099-11-04T09:00"],
       ["This was due last night.\nDid you hear back about the flat?", "2099-11-05T08:00"],
-      ["Morning!", "2099-11-05T09:00"],
+      ["Morning again!", "2099-11-05T09:00"],
     ]);
     expect(model.calls.at(-1)?.user).toContain("Europe/London");
     model.assertDone();

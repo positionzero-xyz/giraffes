@@ -20,6 +20,7 @@ import {
   type Identity,
   type InboundEnvelope,
   type Intent,
+  type Language,
   type LocalDate,
   type MicroUsd,
   type OutboundMessage,
@@ -43,6 +44,7 @@ export type AgentRow = {
   readonly key: AgentKey;
   readonly identity: Identity;
   readonly tz: TimeZone;
+  readonly language: Language;
   readonly checkinLocal: TimeOfDay;
   readonly status: PersonStatus;
   readonly statusAt: EpochMs;
@@ -78,6 +80,7 @@ type AgentCols = {
   channel: ChannelId;
   channel_user_id: string;
   tz: TimeZone;
+  language: Language;
   checkin_local: TimeOfDay;
   status: PersonStatus;
   status_at: EpochMs;
@@ -195,13 +198,14 @@ export class AgentStore {
 
   agent(): AgentRow | null {
     const r = this.sql
-      .exec<AgentCols>("SELECT agent_key, channel, channel_user_id, tz, checkin_local, status, status_at FROM agent")
+      .exec<AgentCols>("SELECT agent_key, channel, channel_user_id, tz, language, checkin_local, status, status_at FROM agent")
       .toArray()[0];
     if (!r) return null;
     return {
       key: r.agent_key,
       identity: { channel: r.channel, channelUserId: r.channel_user_id },
       tz: r.tz,
+      language: r.language,
       checkinLocal: r.checkin_local,
       status: r.status,
       statusAt: r.status_at,
@@ -210,7 +214,7 @@ export class AgentStore {
 
   enqueue(
     envelope: InboundEnvelope,
-    first: { readonly tz: TimeZone; readonly checkinLocal: TimeOfDay; readonly checkin: NewWakeup; readonly trialEndsAt: EpochMs | null },
+    first: { readonly tz: TimeZone; readonly language: Language; readonly checkinLocal: TimeOfDay; readonly checkin: NewWakeup; readonly trialEndsAt: EpochMs | null },
     now: EpochMs,
   ): "inserted" | "duplicate" {
     return this.tx(() => {
@@ -223,12 +227,13 @@ export class AgentStore {
         );
       }
       const created = this.sql.exec(
-        `INSERT OR IGNORE INTO agent (one, agent_key, channel, channel_user_id, tz, checkin_local, created_at)
-         VALUES (1, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO agent (one, agent_key, channel, channel_user_id, tz, language, checkin_local, created_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?)`,
         envelope.agent,
         envelope.identity.channel,
         envelope.identity.channelUserId,
         first.tz,
+        first.language,
         first.checkinLocal,
         now,
       ).rowsWritten;
@@ -380,6 +385,10 @@ export class AgentStore {
           key,
         );
       }
+      if (commit.locale) this.sql.exec("UPDATE agent SET tz = ?, language = ?", commit.locale.tz, commit.locale.language);
+      for (const r of commit.wakeupsRetime) {
+        this.sql.exec("UPDATE wakeup SET due_at = ? WHERE key = ? AND status = 'pending'", r.dueAt, r.key);
+      }
       if (commit.wakeupsAdd.length > 0 && this.pendingReminders() + commit.wakeupsAdd.length > SCHEDULE.maxPendingReminders) {
         throw new Error("a turn would leave more pending reminders than the cap");
       }
@@ -506,10 +515,10 @@ export class AgentStore {
   }
 
   /** Tells the person `message` unless `once` was already told, marking it like a handled Stripe event. */
-  notifyOnce(once: string, key: EventKey, message: NoteMessage, now: EpochMs): void {
+  notifyOnce(once: string, key: EventKey, message: NoteMessage | null, now: EpochMs): void {
     this.tx(() => {
       if (this.billingEventSeen(once)) return;
-      if (this.agent()) this.insertMessage(key, message, now);
+      if (message && this.agent()) this.insertMessage(key, message, now);
       this.billingEventDone(once, now);
     });
   }

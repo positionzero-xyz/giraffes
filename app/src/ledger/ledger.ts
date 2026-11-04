@@ -100,7 +100,7 @@ export type Backend = (typeof BACKENDS)[number];
 export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "lapsed", "model_failed", "poison", "no_model", "stale"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 
-export const ACTION_REJECTIONS = [...REMINDER_REJECTIONS, "not_pending", "too_many_sends", "too_many_actions", "too_long"] as const;
+export const ACTION_REJECTIONS = [...REMINDER_REJECTIONS, "not_pending", "bad_zone", "too_many_sends", "too_many_actions", "too_long"] as const;
 export type ActionRejection = (typeof ACTION_REJECTIONS)[number];
 
 export const UNASKED_STATUSES = ["sent", "dropped_budget", "dropped_blocked", "failed"] as const;

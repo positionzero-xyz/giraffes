@@ -1,4 +1,5 @@
-import type { EpochMs } from "../domain";
+import type { EpochMs, Language } from "../domain";
+import { NOTICES } from "../notices";
 import type { BoxHostKind } from "./host";
 import type { BoxName } from "./names";
 
@@ -95,35 +96,17 @@ export type EnsureStep = Extract<Step, { kind: "ensure" }>;
 
 const LINK_NOTE = "<sign-in link>";
 
-const SAY: Readonly<Record<BoxSay, (link: string, until: string) => string>> = {
-  unavailable: () => "Connecting your own Claude plan isn't available yet.",
-  full: () => "I can't connect another Claude plan right now. Please try again later.",
-  busy: () => "I can't start setting up your Claude connection right now. Please try again in a few minutes.",
-  setting_up: () => "Setting up your Claude connection. I'll send you a sign-in link in a few minutes.",
-  still_setting_up: () => "Your Claude connection is still being set up. I'll send the sign-in link when it's ready.",
-  link: (link) => `Sign in to Claude here to connect your plan. The link works for 30 minutes.\n${link}`,
-  signed_out_link: (link) =>
-    `Your Claude plan is signed out, so I'm answering without it for now. Sign in again here. The link works for 30 minutes.\n${link}`,
-  connected: () => "Your Claude plan is connected. Your messages now use your Claude plan.",
-  already_connected: () => "Your Claude plan is already connected.",
-  setup_failed: () => "I couldn't set up your Claude connection. Send /claude to start over.",
-  reclaimed: () => "Nobody signed in to your Claude connection for 2 days, so I removed it. Send /claude to set it up again.",
-  resetting: () => "I'm removing your old Claude connection. Send /claude again in a few minutes.",
-  not_in_plan: () => "Your plan doesn't include connecting your own Claude plan. Send /plan to see the plans.",
-  retiring: (_, until) =>
-    `Your plan doesn't include connecting your own Claude plan, so I'll remove your Claude connection on ${until} unless your plan resumes. Send /plan to see the plans.`,
-  retired: () => "Your plan doesn't include connecting your own Claude plan, so I removed your Claude connection. Send /plan to see the plans.",
-};
 
 export const needsLink = (say: BoxSay): boolean => say === "link" || say === "signed_out_link";
 
-export function boxMessage(say: BoxSay, link: string | null, until: string = ""): { readonly text: string; readonly note: string } {
-  return { text: SAY[say](link ?? LINK_NOTE, until), note: SAY[say](LINK_NOTE, until) };
+export function boxMessage(say: BoxSay, lang: Language, link: string | null, until: string = ""): { readonly text: string; readonly note: string } {
+  const text = NOTICES[lang].box[say];
+  return { text: text(link ?? LINK_NOTE, until), note: text(LINK_NOTE, until) };
 }
 
 const GONE: Readonly<Record<ReclaimReason, BoxSay>> = { unused: "reclaimed", failed: "setup_failed", retired: "retired" };
 
-export const goneMessage = (b: Reclaiming) => boxMessage(GONE[b.reason], null);
+export const goneMessage = (b: Reclaiming, lang: Language) => boxMessage(GONE[b.reason], lang, null);
 
 function to(b: Box, status: BoxStatus, now: EpochMs): Box {
   const { name, host, url, retireAt, image, ensureAt } = b;

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   CHECKIN_KEY,
+  LANGUAGES,
   TASK_KINDS,
   TASK_STATUSES,
   WAKEUP_KEY_PATTERN,
@@ -13,6 +14,7 @@ import {
   type EpochMs,
   type EventKey,
   type Intent,
+  type Language,
   type MicroUsd,
   type PersonStatus,
   type ReplyHandle,
@@ -22,18 +24,20 @@ import {
   type WakeupKey,
 } from "../domain";
 import { modelCallRow, type ActionRejection, type LogRow, type TurnOutcome } from "../ledger/ledger";
+import { NOTICES, type FixedNotice, type Notices } from "../notices";
 import type { ModelId, Usage } from "../model/model";
 import {
   admitReminder,
   checkinWakeup,
   remindersOverCap,
   isLate,
+  retime,
   wakeupOrigin,
   type NewReminder,
   type NewWakeup,
   type PendingWakeup,
 } from "../policy/schedule";
-import { toLocal, weekday } from "../policy/time";
+import { parseTimeZone, toLocal, weekday } from "../policy/time";
 
 export const TURN = {
   recentNotes: 50,
@@ -66,6 +70,11 @@ const ActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("cancel_wakeup"), key: Slug }),
   z.object({ type: z.literal("remember"), note: z.string().min(1).describe(atMost(TURN.maxNoteChars)) }),
   z.object({ type: z.literal("quiet") }),
+  z.object({
+    type: z.literal("set_locale"),
+    timeZone: z.string().describe("The person's IANA time zone, such as Asia/Bangkok or Europe/London"),
+    language: z.enum(LANGUAGES).describe("The language of code-written notices"),
+  }),
 ]);
 
 export const TurnOutputSchema = z.object({
@@ -93,6 +102,7 @@ export type TurnRow = { readonly role: "person" | "agent" | "note"; readonly tex
 export type TurnView = {
   readonly now: EpochMs;
   readonly tz: TimeZone;
+  readonly language: Language;
   readonly status: PersonStatus;
   readonly statusAt: EpochMs;
   readonly checkinLocal: TimeOfDay;
@@ -157,7 +167,7 @@ export function renderUser(view: TurnView): string {
     ? view.recent.map((r) => `[${human(r.at, view.tz)}] ${SPEAKER[r.role]} ${r.text}`).join("\n")
     : "(no earlier messages)";
   return [
-    `## Now\n${human(view.now, view.tz)} (${weekday(view.now, view.tz)}), ${view.tz}`,
+    `## Now\n${human(view.now, view.tz)} (${weekday(view.now, view.tz)}), ${view.tz}\nLanguage for notices: ${view.language}`,
     `## Memory\n${memory}`,
     `## Pending wake-ups\n${pending}`,
     `## Unasked messages left today: ${view.unaskedLeftToday}`,
@@ -184,6 +194,8 @@ export type TurnCommit = {
   readonly outbound: Outbound | null;
   readonly wakeupsCancel: readonly WakeupKey[];
   readonly wakeupsAdd: readonly NewReminder[];
+  readonly wakeupsRetime: readonly { readonly key: WakeupKey; readonly dueAt: EpochMs }[];
+  readonly locale: { readonly tz: TimeZone; readonly language: Language } | null;
   readonly notes: readonly string[];
   readonly task: TaskLabel | null;
   readonly reachability: Reachability | null;
@@ -191,35 +203,18 @@ export type TurnCommit = {
   readonly rejected: readonly { readonly action: string; readonly reason: ActionRejection }[];
 };
 
-export const NOTICE = {
-  reminderLimit: "(I can hold 20 reminders at most. Cancel one and ask again.)",
-  reminderPast: "(That time has already passed, so I didn't set it.)",
-  reminderTooFar: "(I can only set reminders up to a year ahead, so I didn't set it.)",
-  reminderBadTime: "(I couldn't read that time, so I didn't set the reminder.)",
-  reminderDuplicate: "(I already have that reminder set, so I didn't change it.)",
-  reminderKept: (dueLocal: string) => `(Your reminder is still set for ${dueLocal}.)`,
-  reminderNotSet: "(I couldn't set that reminder.)",
-  tooManyActions: "(That was more than I can do in one message, so I skipped some of it.)",
-  checkinReserved: "(The daily check-in can't be set or cancelled like a reminder.)",
-  cancelNotFound: "(I couldn't find that reminder, so nothing was cancelled.)",
-  lateFallback: (dueLocal: string) => `Sorry, this is late. It was due at ${dueLocal}.`,
-  monthlyLimit: "I've reached my usage limit for this month, so I can't help until it resets on the 1st.",
-  lapsed: "You have no active plan, so I can't answer messages for now. Send /plan to pick one.",
-  failed: "Sorry, I couldn't process that. Could you say it again?",
-  reminder: (note: string) => `Reminder: ${note}`,
-} as const;
-
-const REJECTION_NOTICE: Readonly<Record<ActionRejection, string | null>> = {
-  limit: NOTICE.reminderLimit,
-  past: NOTICE.reminderPast,
-  duplicate: NOTICE.reminderDuplicate,
-  too_far: NOTICE.reminderTooFar,
-  bad_time: NOTICE.reminderBadTime,
-  bad_key: NOTICE.reminderNotSet,
-  reserved_key: NOTICE.checkinReserved,
-  not_pending: NOTICE.cancelNotFound,
+const REJECTION_NOTICE: Readonly<Record<ActionRejection, FixedNotice | null>> = {
+  limit: "reminderLimit",
+  past: "reminderPast",
+  duplicate: "reminderDuplicate",
+  too_far: "reminderTooFar",
+  bad_time: "reminderBadTime",
+  bad_key: "reminderNotSet",
+  reserved_key: "checkinReserved",
+  not_pending: "cancelNotFound",
+  bad_zone: "badZone",
   too_many_sends: null,
-  too_many_actions: NOTICE.tooManyActions,
+  too_many_actions: "tooManyActions",
   too_long: null,
 };
 
@@ -314,7 +309,13 @@ function triggerNote(e: AgentEvent, tz: TimeZone): string | null {
   }
 }
 
-export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
+export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
+  const actions = out.actions.slice(0, TURN.maxActions);
+  const setLocale = actions.findLast((a) => a.type === "set_locale");
+  const language = setLocale?.language ?? given.language;
+  const t = NOTICES[language];
+  const zone = setLocale ? parseTimeZone(setLocale.timeZone) : null;
+  const view: TurnView = { ...given, tz: zone ?? given.tz, language };
   const first = trigger(view);
   const intent = intentOf(first);
   const pending = new Map<WakeupKey, NewWakeup>(view.pending.map((w) => [w.key, w]));
@@ -328,7 +329,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   const reject = (action: string, reason: ActionRejection, tellPerson: boolean) => {
     rejected.push({ action, reason });
     const notice = REJECTION_NOTICE[reason];
-    if (tellPerson && notice !== null) notices.add(notice);
+    if (tellPerson && notice !== null) notices.add(t[notice]);
   };
   const fit = (text: string, max: number, action: string): string => {
     if (text.length <= max) return text;
@@ -336,10 +337,10 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
     return clip(text, max);
   };
 
-  const actions = out.actions.slice(0, TURN.maxActions);
   for (const a of out.actions.slice(TURN.maxActions)) {
-    reject(actionLabel(a), "too_many_actions", a.type === "cancel_wakeup" || (a.type === "schedule_wakeup" && a.asked));
+    reject(actionLabel(a), "too_many_actions", a.type === "cancel_wakeup" || a.type === "set_locale" || (a.type === "schedule_wakeup" && a.asked));
   }
+  if (setLocale && zone === null) reject("set_locale", "bad_zone", true);
   const cancelsFirst = [...actions.filter((a) => a.type === "cancel_wakeup"), ...actions.filter((a) => a.type !== "cancel_wakeup")];
   for (const a of cancelsFirst) {
     switch (a.type) {
@@ -362,7 +363,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
           if (key !== null && original !== undefined && !adds.has(key)) {
             cancelled.delete(key);
             pending.set(key, original);
-            if (a.asked) notices.add(NOTICE.reminderKept(human(original.dueAt, view.tz)));
+            if (a.asked) notices.add(t.reminderKept(human(original.dueAt, given.tz)));
           }
         }
         break;
@@ -382,6 +383,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
         notes.push(fit(a.note, TURN.maxNoteChars, "remember"));
         break;
       case "quiet":
+      case "set_locale":
         break;
       default:
         assertNever(a);
@@ -393,12 +395,18 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
     pending.delete(key);
     reject(`schedule_wakeup:${key}`, "limit", askedFor.has(key));
   }
+  const wakeupsRetime =
+    view.tz === given.tz
+      ? []
+      : [...pending.values()]
+          .filter((w) => !adds.has(w.key))
+          .map((w) => ({ key: w.key, dueAt: retime(w, given.tz, view.tz, view.now, view.checkinLocal) }));
 
   const agentTexts = [...sends];
   const late = lateTrigger(view);
   if (late && agentTexts.length > 0) {
     const given = out.lateNotice?.trim();
-    const notice = given ? fit(given, TURN.maxLateNoticeChars, "late_notice") : NOTICE.lateFallback(human(late.dueAt, view.tz));
+    const notice = given ? fit(given, TURN.maxLateNoticeChars, "late_notice") : t.lateFallback(human(late.dueAt, view.tz));
     agentTexts[0] = `${notice}\n${agentTexts[0]}`;
   }
   const noticeText = (agentTexts.length > 0 || intent === "reply") && notices.size > 0 ? [...notices].join("\n") : null;
@@ -418,7 +426,9 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   if (noticeText !== null) turns.push({ role: "note", text: noticeText, at: view.now, eventKey: view.batch.items[0].key });
   if (requestedReminder !== null) turns.push({ role: "note", text: requestedReminder, at: view.now, eventKey: view.batch.items[0].key });
 
-  const acted = texts.length > 0 || adds.size > 0 || cancelled.size > 0 || notes.length > 0 || effects.reachability !== null;
+  const locale = setLocale ? { tz: view.tz, language } : null;
+  const acted =
+    texts.length > 0 || adds.size > 0 || cancelled.size > 0 || notes.length > 0 || effects.reachability !== null || locale !== null;
   return {
     batchKeys: batchKeys(view),
     outcome: acted ? "acted" : "quiet",
@@ -426,6 +436,8 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
     outbound: outbound(texts, intent, view),
     wakeupsCancel: [...cancelled.keys()],
     wakeupsAdd: [...adds.values()],
+    wakeupsRetime,
+    locale,
     notes,
     task: out.task,
     ...effects,
@@ -453,11 +465,13 @@ function textWithoutModel(view: TurnView, notice: string | null): string | null 
   const e = trigger(view);
   if (e.kind === "message") return notice;
   if (e.kind !== "wakeup" || e.origin !== "person") return null;
-  const late = isLate(e) ? `${NOTICE.lateFallback(human(e.dueAt, view.tz))}\n` : "";
-  return `${late}${NOTICE.reminder(e.note)}`;
+  const t = NOTICES[view.language];
+  const late = isLate(e) ? `${t.lateFallback(human(e.dueAt, view.tz))}\n` : "";
+  return `${late}${t.reminder(e.note)}`;
 }
 
 export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit {
+  const t: Notices = NOTICES[view.language];
   let outcome: TurnOutcome;
   let text: string | null = null;
   let note: string | null = null;
@@ -470,16 +484,16 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
       break;
     case "refused_budget":
       outcome = "refused_budget";
-      text = textWithoutModel(view, why.alreadyToldToday ? null : NOTICE.monthlyLimit);
+      text = textWithoutModel(view, why.alreadyToldToday ? null : t.monthlyLimit);
       break;
     case "lapsed":
       outcome = "lapsed";
-      text = textWithoutModel(view, why.alreadyToldToday ? null : NOTICE.lapsed);
+      text = textWithoutModel(view, why.alreadyToldToday ? null : t.lapsed);
       break;
     case "model_failed":
     case "poison":
       outcome = why.kind;
-      text = textWithoutModel(view, NOTICE.failed);
+      text = textWithoutModel(view, t.failed);
       break;
     case "command":
       outcome = "no_model";
@@ -499,6 +513,8 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     outbound: outbound(text === null ? [] : [text], intentOf(trigger(view)), view),
     wakeupsCancel: [],
     wakeupsAdd: [],
+    wakeupsRetime: [],
+    locale: null,
     notes: [],
     task: null,
     ...lifecycleEffects(view),

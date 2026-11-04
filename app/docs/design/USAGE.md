@@ -46,14 +46,14 @@ The person texts "remind me tomorrow 9am to call the clinic".
        { "type": "send", "text": "Done. I'll remind you tomorrow at 9." } ],
      "task": { "kind": "reminder", "key": "call-clinic", "status": "started" } }
    ```
-6. `planTurn(output, view)` is pure. It cuts over-long texts to their caps, applies cancels before schedules, converts the local time to an instant, admits or rejects each action, and returns one `TurnCommit`. Because a message started the turn and `asked` is true, the wake-up's origin is `person`. A rejected action adds a row to `action_rejection`. It also adds a code-written correction to any turn that sends text, and to any reply to a person even when the model sent none, unless it is a wake-up the agent set for itself.
+6. `planTurn(output, view)` is pure. A `set_locale` action (an IANA zone and `th` or `en`) is applied first, so the turn's times are read in the new zone and its corrections are in the new language. It cuts over-long texts to their caps, applies cancels before schedules, converts the local time to an instant, admits or rejects each action, and returns one `TurnCommit`. Because a message started the turn and `asked` is true, the wake-up's origin is `person`. A rejected action adds a row to `action_rejection`. It also adds a code-written correction to any turn that sends text, and to any reply to a person even when the model sent none, unless it is a wake-up the agent set for itself.
 7. One transaction appends the person's text and the agent's text to `turn`, inserts the wake-up, inserts one outbox row (`intent = 'reply'`, both texts, the reply handle), marks the inbox row `done`, settles the reservation at the real cost, and appends log rows to `log_outbox`.
 8. Delivery uses the free LINE reply API while the token is fresh and the row is not in doubt. Otherwise it pushes with `X-Line-Retry-Key = outbox.id`.
 9. After the batches, the drain delivers any deferred rows, flushes `log_outbox` to D1, compacts one page if due, prunes, and re-arms.
 
 ## Call site 3: a wake-up fires
 
-The wake-up from call site 2 is a `wakeup` row (`key = 'call-clinic'`, `origin = 'person'`, `status = 'pending'`). The re-arm includes its fire time, so the alarm is set for 09:00 Bangkok time.
+The wake-up from call site 2 is a `wakeup` row (`key = 'call-clinic'`, `origin = 'person'`, `status = 'pending'`). The re-arm includes its fire time, so the alarm is set for 09:00 in the person's zone, Asia/Bangkok until they name another.
 
 At 09:00 `planFiring` (pure) returns a firing for each due row whose fire time has passed. One transaction inserts the inbox event keyed `wake:<id>` and marks the wake-up `fired`. The event then runs through the same turn as a message. Its origin decides the rest:
 

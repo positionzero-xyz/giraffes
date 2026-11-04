@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { TURN } from "../src/agent/turn";
 import type { EpochMs, LocalDateTime, TimeZone } from "../src/domain";
@@ -839,5 +839,30 @@ describe("dev runs", () => {
       outbox = (await snapshot()).outbox;
     }
     expect(outbox).toEqual([expect.objectContaining({ texts: ["Scripted hello."], status: "sent" })]);
+  });
+});
+
+describe("legacy data over the reminder cap", () => {
+  test("a turn that adds reminders to 21 already pending commits, refusing the fresh ones, and is not poisoned", async () => {
+    const model = scripted([turn({ actions: [schedule("one-more", "2099-11-04T20:00", "x"), schedule("and-another", "2099-11-04T21:00", "y"), send("Done.")] })]);
+    const c = await devChat("cap21", { model, at: "2099-11-04T10:00" });
+    await c.say("hi first");
+    await c.received();
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_a, state) => {
+      for (let i = 0; i < 21; i++) {
+        state.storage.sql.exec(
+          "INSERT INTO wakeup (key, kind, origin, note, due_at, created_at, created_by, bookkeeping) VALUES (?, 'reminder', 'person', 'old', ?, ?, 'test', 0)",
+          `old-${i}`,
+          local("2099-11-10T10:00"),
+          local("2099-11-04T10:00"),
+        );
+      }
+    });
+
+    await c.say("remind me twice");
+
+    expect(await c.received()).toEqual([`Done.\n${NOTICES.en.reminderLimit}`]);
+    expect((await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder")).toHaveLength(21);
+    expect(c.logs("turn").map((l) => l.outcome)).toEqual(["acted", "acted"]);
   });
 });

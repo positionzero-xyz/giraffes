@@ -173,6 +173,18 @@ function wakeupEvent(dueAt: EpochMs, firedAt: EpochMs, origin: "person" | "agent
 }
 
 describe("reminders", () => {
+  test("with 21 reminders already pending, every fresh one is refused and the earlier ones are left alone", () => {
+    const pending = Array.from({ length: 21 }, (_, i) => reminder(`old-${i}`, local("2026-11-10T10:00")));
+    const commit = planTurn(output([schedule("new-a", "2026-11-04T20:00"), schedule("new-b", "2026-11-04T21:00"), send("Done.")]), view({ pending }));
+    expect(commit.wakeupsAdd).toEqual([]);
+    expect(commit.wakeupsCancel).toEqual([]);
+    expect(commit.rejected).toEqual([
+      { action: "schedule_wakeup:new-a", reason: "limit" },
+      { action: "schedule_wakeup:new-b", reason: "limit" },
+    ]);
+    expect(commit.outbound?.texts).toEqual(["Done.", NOTICE.reminderLimit]);
+  });
+
   test("a reminder is admitted in the person's zone", () => {
     const commit = planTurn(output([schedule("bins", "2026-11-04T23:00"), send("Will do.")]), view());
     expect(commit.wakeupsAdd).toEqual([

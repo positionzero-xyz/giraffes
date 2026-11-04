@@ -48,6 +48,21 @@ describe("no access", () => {
     expect((await c.snapshot()).access.lanes).toEqual([]);
   });
 
+  test("someone who adds the agent with nothing connected gets the offer then, and not again that day", async () => {
+    const provider = fakeProvider();
+    const c = await devChat("ada", { model: null, provider, at: "2099-11-04T10:00" });
+
+    await c.say("/follow");
+    expect(await c.received()).toEqual([ONBOARDING]);
+    await c.say("hi");
+    expect(await c.received()).toEqual([]);
+    expect(provider.seen).toHaveLength(0);
+    expect(c.logs("turn").map((l) => [l.eventKind, l.outcome])).toEqual([
+      ["lifecycle", "no_access"],
+      ["message", "no_access"],
+    ]);
+  });
+
   test("the offer names only what this deploy can give", () => {
     expect(NOTICE.noAccess({ box: true, key: true, included: false })).toContain("/claude");
     expect(NOTICE.noAccess({ box: false, key: true, included: false })).not.toContain("/claude");

@@ -526,6 +526,7 @@ describe("connecting a Claude plan", () => {
     const [notice, ...rest] = await c.received();
     expect(rest).toEqual([]);
     expect(notice.startsWith(say("signed_out_link").split("\n")[0])).toBe(true);
+    expect(notice).not.toMatch(/answering/);
     expect((await linkIn(notice, "gus", local("2099-11-04T10:00"))).valid).toBe(true);
     expect((await c.snapshot()).box?.state).toBe("signed_out");
 
@@ -588,6 +589,24 @@ describe("connecting a Claude plan", () => {
       ["box", "unavailable"],
       ["key", "settled"],
     ]);
+  });
+
+  test("a box that answers signed_out says the backup key answers for now, and the key does", async () => {
+    const box = fakeBox({ signedIn: true });
+    const provider = fakeProvider([{ kind: "output", value: { actions: [{ type: "send", text: "From your key." }], tasks: [], about: "" } }]);
+    const c = await devChat("hob", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await giveKey(c.agent, { backup: true });
+    await c.received();
+    box.signedIn = false;
+    box.replies.push({ kind: "signed_out" });
+
+    await c.say("hello");
+
+    const [notice, ...rest] = await c.received();
+    expect(notice.startsWith(say("signed_out_backup").split("\n")[0])).toBe(true);
+    expect((await linkIn(notice, "hob", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect(rest).toEqual(["From your key."]);
   });
 
   test("a new BOX_IMAGE brings a live box up to date on its next drain, once and without a word to the person", async () => {

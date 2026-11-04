@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS unasked_message (
   agent_key    TEXT NOT NULL,
   trigger_kind TEXT NOT NULL,
   text         TEXT NOT NULL,
-  status       TEXT NOT NULL CHECK (status IN ('sent', 'dropped_budget', 'dropped_blocked', 'failed')),
+  status       TEXT NOT NULL CHECK (status IN ('sent', 'dropped_budget', 'dropped_blocked', 'dropped_quota', 'failed')),
   day          TEXT,
   at           INTEGER NOT NULL
 );
@@ -111,6 +111,21 @@ CREATE TABLE IF NOT EXISTS billing_invite (
   expires_at      INTEGER NOT NULL,
   used_by         TEXT,
   used_at         INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS line_quota (
+  at     INTEGER PRIMARY KEY,
+  month  TEXT NOT NULL,
+  quota  INTEGER,
+  used   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS line_quota_alert (
+  month   TEXT NOT NULL,
+  percent INTEGER NOT NULL,
+  via     TEXT NOT NULL CHECK (via IN ('line', 'telegram', 'log')),
+  at      INTEGER NOT NULL,
+  PRIMARY KEY (month, percent)
 );
 
 CREATE TABLE IF NOT EXISTS spend_lease (

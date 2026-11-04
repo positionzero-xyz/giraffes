@@ -46,6 +46,11 @@ those events. The side panel shows each delivery's intent and status and the pen
 
    A channel needs both of its secrets or neither. Without them its webhook answers 404.
 
+   With LINE configured, an hourly cron (in `wrangler.jsonc`) reads the LINE message quota into the ledger
+   and alerts at 70% and 90% of it, once a month each. Set the var `OPERATOR_CHAT` to
+   `telegram:<chat id>` or `line:<user id>` to get the alerts in that chat, on a channel that is configured.
+   Without it they go to the Worker log.
+
    To let people connect their own Claude plan (`/claude`, see `docs/design/BOX.md`), set `BOX_HOST`:
    - `BOX_HOST=none` (the default): `/claude` replies that it isn't available, and nothing else changes.
    - `BOX_HOST=fly` needs the secrets `BOX_SECRET` (at least 16 characters; every box name and token
@@ -117,6 +122,16 @@ npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO model_ca
 
 The second command recreates both tables with the current CHECKs, their indexes and the view. Run the
 same commands with `--local` to migrate the dev ledger.
+
+The LINE quota check adds the `line_quota` and `line_quota_alert` tables, which re-running the schema file
+creates, and the unasked status `dropped_quota`, which an old `unasked_message` CHECK refuses. Rebuild that
+table before deploying it:
+
+```sh
+npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW unasked_with_followup; DROP INDEX unasked_agent_time; ALTER TABLE unasked_message RENAME TO unasked_message_old"
+npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
+npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO unasked_message SELECT * FROM unasked_message_old; DROP TABLE unasked_message_old"
+```
 
 Billing adds the `billing_subscription`, `billing_seat` and `billing_invite` tables, which re-running the
 schema file creates, and the turn outcome `lapsed`, which an old `turn_log` CHECK refuses. Rebuild

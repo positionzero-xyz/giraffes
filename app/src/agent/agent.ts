@@ -36,7 +36,8 @@ import { assertNever, CHANNEL_LANGUAGE, eventKey, intentOf, type AgentKey, type 
 import { d1Ledger, modelCallRow, type LeaseAnswer, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
 import { NOTICES } from "../notices";
 import { makeModelClient, routeOf, type ModelClient, type ModelId, type ModelResult, type Purpose, type Usage } from "../model/model";
-import { admitUnasked, OUTREACH } from "../policy/outreach";
+import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach";
+import { inLineReserve, type QuotaReading } from "../policy/quota";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
 import { costOf, decideReservation, estimate, SPEND } from "../policy/spend";
 import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../policy/time";
@@ -746,12 +747,13 @@ export class Agent extends DurableObject<Env> {
         sentToday: this.#store.unaskedAdmitted(localDate(now, a.tz)),
         dailyBudget: OUTREACH.dailyUnaskedBudget,
         status: a.status,
+        inQuotaReserve: row.to.channel === "line" && inLineReserve(await this.#lineQuota(), now),
       });
       switch (verdict.verdict) {
         case "defer":
           return this.#store.reschedule(row.id, verdict.until);
         case "drop":
-          return this.#store.drop(row.id, verdict.reason, now, unaskedLog(verdict.reason === "budget" ? "dropped_budget" : "dropped_blocked", null));
+          return this.#store.drop(row.id, verdict.reason, now, unaskedLog(DROPPED[verdict.reason], null));
         case "send":
           day = verdict.day;
           break;
@@ -785,6 +787,16 @@ export class Agent extends DurableObject<Env> {
         ]);
       default:
         return assertNever(delivery);
+    }
+  }
+
+  /** An unreadable reading holds nothing back: the reserve is a margin, and the person's message matters more. */
+  async #lineQuota(): Promise<QuotaReading | null> {
+    try {
+      return await this.#deps.ledger.lineQuota();
+    } catch (err) {
+      console.warn("LINE quota reading unavailable", err);
+      return null;
     }
   }
 
@@ -866,6 +878,12 @@ export class Agent extends DurableObject<Env> {
 }
 
 type Unavailable = Extract<ModelCall<unknown>, { kind: "unavailable" }>;
+
+const DROPPED: Readonly<Record<Extract<UnaskedVerdict, { verdict: "drop" }>["reason"], UnaskedStatus>> = {
+  budget: "dropped_budget",
+  blocked: "dropped_blocked",
+  quota: "dropped_quota",
+};
 
 function closeUnavailable(call: Unavailable, agent: AgentKey, now: EpochMs): { settle: Settlement | null; logs: LogRow[] } {
   const r = call.reservation;

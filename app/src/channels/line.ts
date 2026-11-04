@@ -3,6 +3,8 @@ import { eventKey, personAgentKey, type ChannelEvent, type EpochMs, type Inbound
 import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
 
 const API = "https://api.line.me/v2/bot/message";
+const Quota = z.object({ type: z.enum(["none", "limited"]), value: z.number().int().nonnegative().optional() });
+const Consumption = z.object({ totalUsage: z.number().int().nonnegative() });
 /** LINE says a reply token is good for about one minute. */
 const REPLY_TOKEN_TTL_MS = 60_000;
 const REPLY_TOKEN_SAFETY_MS = 10_000;
@@ -131,4 +133,16 @@ function classify(status: number, body: string): Delivery {
   if (status === 429 && body.includes("monthly limit")) return { kind: "failed", detail: `quota: ${body}` };
   if (status === 429 || status >= 500) return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail: `${status} ${body}` };
   return { kind: "failed", detail: `${status} ${body}` };
+}
+
+/** This month's message limit (null when the account has none) and the messages sent so far, which count pushes and not replies. */
+export async function lineQuota(accessToken: string): Promise<{ readonly limit: number | null; readonly used: number }> {
+  const get = async (path: string): Promise<unknown> => {
+    const res = await fetch(`${API}/${path}`, { headers: { authorization: `Bearer ${accessToken}` } });
+    if (!res.ok) throw new Error(`LINE ${path}: ${res.status} ${await res.text()}`);
+    return res.json();
+  };
+  const [quota, consumption] = await Promise.all([get("quota").then((j) => Quota.parse(j)), get("quota/consumption").then((j) => Consumption.parse(j))]);
+  if (quota.type === "limited" && quota.value === undefined) throw new Error("LINE quota: a limited quota without a value");
+  return { limit: quota.type === "limited" ? (quota.value ?? 0) : null, used: consumption.totalUsage };
 }

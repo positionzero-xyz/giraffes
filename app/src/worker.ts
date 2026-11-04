@@ -2,8 +2,13 @@ import chatPage from "../dev/chat.html";
 import { DONE_PATH, parseEvent, verifySignature } from "./billing/stripe";
 import { makeChannels } from "./channels/channel";
 import { devIdentity } from "./channels/dev";
-import { loadConfig, type Config, type Env } from "./config";
-import { CHANNEL_IDS, personAgentKey, type AgentKey, type ChannelId, type EpochMs } from "./domain";
+import { lineQuota } from "./channels/line";
+import { loadConfig, type Config, type Env, type OperatorChat } from "./config";
+import { CHANNEL_IDS, personAgentKey, type AgentKey, type ChannelId, type EpochMs, type OutboxId } from "./domain";
+import { d1Ledger } from "./ledger/ledger";
+import { alertsDue, quotaAlert } from "./policy/quota";
+import { SPEND } from "./policy/spend";
+import { utcMonth } from "./policy/time";
 
 export { Agent } from "./agent/agent";
 
@@ -39,7 +44,36 @@ export default {
     }
     return new Response("not found", { status: 404 });
   },
+
+  /** The hourly cron in wrangler.jsonc. */
+  async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+    const config = loadConfig(env);
+    if (config.line) await checkLineQuota(config, config.line.accessToken, env, controller.scheduledTime as EpochMs);
+  },
 } satisfies ExportedHandler<Env>;
+
+async function checkLineQuota(config: Config, accessToken: string, env: Env, now: EpochMs): Promise<void> {
+  const ledger = d1Ledger(env.LEDGER, SPEND.globalCeilingMicro);
+  const reading = { at: now, month: utcMonth(now), ...(await lineQuota(accessToken)) };
+  await ledger.recordLineQuota(reading);
+  for (const percent of alertsDue(reading, await ledger.lineQuotaAlerts(reading.month))) {
+    const via = await tellOperator(config, quotaAlert(reading, percent), now);
+    if (via !== null) await ledger.lineQuotaAlerted(reading.month, percent, via, now);
+  }
+}
+
+/** Null when the alert didn't go out, so the next hour tries again. */
+async function tellOperator(config: Config, text: string, now: EpochMs): Promise<OperatorChat["channel"] | "log" | null> {
+  const to = config.operatorChat;
+  if (to === null) {
+    console.warn(text);
+    return "log";
+  }
+  const sent = await makeChannels(config)[to.channel].deliver({ id: crypto.randomUUID() as OutboxId, to, texts: [text], intent: "requested" }, now);
+  if (sent.kind === "sent") return to.channel;
+  console.warn("operator alert not sent", sent.kind);
+  return null;
+}
 
 export function agentStub(env: Env, key: AgentKey) {
   return env.AGENT.get(env.AGENT.idFromName(key));

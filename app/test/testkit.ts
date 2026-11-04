@@ -16,6 +16,7 @@ import type { ChannelAdapter } from "../src/channels/channel";
 import { eventKey, personAgentKey, type EpochMs, type Identity, type LocalDateTime, type MicroUsd } from "../src/domain";
 import type { LeaseAnswer, Ledger, LogRow } from "../src/ledger/ledger";
 import { scripted, type ScriptStep, type ScriptedModel } from "../src/model/scripted";
+import type { QuotaReading } from "../src/policy/quota";
 import { SPEND } from "../src/policy/spend";
 import { DEFAULT_TIME_ZONE, fromLocal, toLocal } from "../src/policy/time";
 
@@ -51,6 +52,14 @@ export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): Mem
   const boxes = new Map<string, { name: string; host: string }>();
   return {
     lineQuotaReading: null,
+    async recordLineQuota() {},
+    async lineQuota() {
+      return this.lineQuotaReading as QuotaReading | null;
+    },
+    async lineQuotaAlerts() {
+      return [];
+    },
+    async lineQuotaAlerted() {},
     rows,
     boxes,
     async claimBox(req) {

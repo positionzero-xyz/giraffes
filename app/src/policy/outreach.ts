@@ -16,7 +16,7 @@ export function quietUntil(t: EpochMs, tz: TimeZone): EpochMs | null {
 export type UnaskedVerdict =
   | { readonly verdict: "send"; readonly day: LocalDate }
   | { readonly verdict: "defer"; readonly until: EpochMs }
-  | { readonly verdict: "drop"; readonly reason: "budget" | "blocked" };
+  | { readonly verdict: "drop"; readonly reason: "budget" | "blocked" | "quota" };
 
 export function admitUnasked(input: {
   readonly now: EpochMs;
@@ -25,10 +25,12 @@ export function admitUnasked(input: {
   readonly sentToday: number;
   readonly dailyBudget: number;
   readonly status: PersonStatus;
+  readonly inQuotaReserve: boolean;
 }): UnaskedVerdict {
   if (input.status === "blocked") return { verdict: "drop", reason: "blocked" };
   const until = quietUntil(input.now, input.tz);
   if (until !== null) return { verdict: "defer", until };
+  if (input.inQuotaReserve) return { verdict: "drop", reason: "quota" };
   const today = localDate(input.now, input.tz);
   if (input.admittedDay === today) return { verdict: "send", day: today };
   if (input.sentToday >= input.dailyBudget) return { verdict: "drop", reason: "budget" };

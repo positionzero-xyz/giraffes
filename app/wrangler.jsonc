@@ -10,5 +10,6 @@
   "d1_databases": [
     { "binding": "LEDGER", "database_name": "giraffes-ledger", "database_id": "<set on first deploy>" }
   ],
+  "triggers": { "crons": ["0 * * * *"] },
   "vars": { "MODEL_BACKEND": "anthropic" }
 }

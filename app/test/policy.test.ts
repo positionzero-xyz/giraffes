@@ -76,7 +76,7 @@ describe("quiet hours", () => {
 });
 
 describe("unasked budget", () => {
-  const input = { tz: BKK, admittedDay: null, dailyBudget: 3, status: "active" as const };
+  const input = { tz: BKK, admittedDay: null, dailyBudget: 3, status: "active" as const, inQuotaReserve: false };
 
   test("the first three of a local day are sent, charged to the local date", () => {
     expect(admitUnasked({ ...input, now: at("2026-11-04T15:00+07:00"), sentToday: 2 })).toEqual({ verdict: "send", day: "2026-11-04" });
@@ -104,6 +104,12 @@ describe("unasked budget", () => {
     const admittedDay = "2026-11-04" as LocalDate;
     expect(admitUnasked({ ...input, admittedDay, now: at("2026-11-05T08:00+07:00"), sentToday: 2 })).toEqual({ verdict: "send", day: "2026-11-05" });
     expect(admitUnasked({ ...input, admittedDay, now: at("2026-11-05T08:00+07:00"), sentToday: 3 })).toEqual({ verdict: "drop", reason: "budget" });
+  });
+
+  test("at the LINE quota reserve, a row is dropped after quiet hours and before the budget", () => {
+    const reserve = { ...input, inQuotaReserve: true };
+    expect(admitUnasked({ ...reserve, now: at("2026-11-04T23:00+07:00"), sentToday: 0 })).toEqual({ verdict: "defer", until: at("2026-11-05T08:00+07:00") });
+    expect(admitUnasked({ ...reserve, now: at("2026-11-04T15:00+07:00"), sentToday: 0 })).toEqual({ verdict: "drop", reason: "quota" });
   });
 
   test("a blocked person is dropped before anything else", () => {

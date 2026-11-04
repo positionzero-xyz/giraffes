@@ -659,7 +659,7 @@ export class AgentStore {
     this.sql.exec("UPDATE outbox SET status = 'pending', ready_at = ?, in_doubt = 1 WHERE id = ?", readyAt, id);
   }
 
-  drop(id: OutboxId, reason: "budget" | "blocked" | "failed", now: EpochMs, logs: readonly LogRow[]): void {
+  drop(id: OutboxId, reason: "budget" | "blocked" | "quota" | "failed", now: EpochMs, logs: readonly LogRow[]): void {
     this.tx(() => {
       this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = ?, closed_at = ? WHERE id = ?", reason, now, id);
       this.insertLogs(logs, now);

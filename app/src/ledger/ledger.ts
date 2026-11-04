@@ -13,6 +13,7 @@ import {
 import type { BoxHostKind } from "../box/host";
 import type { BoxName } from "../box/names";
 import type { ModelId, Purpose, Usage } from "../model/model";
+import type { QuotaReading } from "../policy/quota";
 import { REMINDER_REJECTIONS } from "../policy/schedule";
 
 export type LogRow =
@@ -103,7 +104,7 @@ export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 export const ACTION_REJECTIONS = [...REMINDER_REJECTIONS, "not_pending", "bad_zone", "too_many_sends", "too_many_actions", "too_long"] as const;
 export type ActionRejection = (typeof ACTION_REJECTIONS)[number];
 
-export const UNASKED_STATUSES = ["sent", "dropped_budget", "dropped_blocked", "failed"] as const;
+export const UNASKED_STATUSES = ["sent", "dropped_budget", "dropped_blocked", "dropped_quota", "failed"] as const;
 export type UnaskedStatus = (typeof UNASKED_STATUSES)[number];
 
 export function modelCallRow(input: {
@@ -159,6 +160,10 @@ export interface Ledger {
   requestLease(req: LeaseRequest): Promise<LeaseAnswer>;
   claimBox(req: BoxClaim): Promise<"granted" | "full">;
   releaseBox(agent: AgentKey, at: EpochMs): Promise<void>;
+  recordLineQuota(r: QuotaReading): Promise<void>;
+  lineQuota(): Promise<QuotaReading | null>;
+  lineQuotaAlerts(month: UtcMonth): Promise<number[]>;
+  lineQuotaAlerted(month: UtcMonth, percent: number, via: "line" | "telegram" | "log", at: EpochMs): Promise<void>;
 }
 
 const APPEND_CHUNK = 100;
@@ -276,6 +281,28 @@ export function d1Ledger(db: D1Database, ceiling: MicroUsd): Ledger {
     },
     async releaseBox(agent, at) {
       await db.prepare("UPDATE boxes SET deleted_at = ? WHERE agent_key = ? AND deleted_at IS NULL").bind(at, agent).run();
+    },
+    async recordLineQuota(r) {
+      await db
+        .prepare("INSERT INTO line_quota (at, month, quota, used) VALUES (?, ?, ?, ?) ON CONFLICT (at) DO NOTHING")
+        .bind(r.at, r.month, r.limit, r.used)
+        .run();
+    },
+    async lineQuota() {
+      const r = await db
+        .prepare("SELECT at, month, quota, used FROM line_quota ORDER BY at DESC LIMIT 1")
+        .first<{ at: EpochMs; month: UtcMonth; quota: number | null; used: number }>();
+      return r ? { at: r.at, month: r.month, limit: r.quota, used: r.used } : null;
+    },
+    async lineQuotaAlerts(month) {
+      const { results } = await db.prepare("SELECT percent FROM line_quota_alert WHERE month = ?").bind(month).all<{ percent: number }>();
+      return results.map((r) => r.percent);
+    },
+    async lineQuotaAlerted(month, percent, via, at) {
+      await db
+        .prepare("INSERT INTO line_quota_alert (month, percent, via, at) VALUES (?, ?, ?, ?) ON CONFLICT (month, percent) DO NOTHING")
+        .bind(month, percent, via, at)
+        .run();
     },
   };
 }

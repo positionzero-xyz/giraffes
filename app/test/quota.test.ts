@@ -1,6 +1,6 @@
 import { createExecutionContext, createScheduledController, env, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { Env } from "../src/config";
+import { loadConfig, type Env } from "../src/config";
 import worker from "../src/worker";
 
 const LINE_TOKEN = "line-access-token";
@@ -91,5 +91,15 @@ describe("LINE quota", () => {
     await hourly({}, "2099-11-20T00:00:00Z");
     expect(line.lineCalls).toEqual([]);
     expect(await readings()).toEqual([]);
+  });
+
+  test("OPERATOR_CHAT must name a configured channel and a real id", () => {
+    const base = { MODEL_BACKEND: "scripted", DEV_MODE: "1", ...LINE_VARS } as unknown as Env;
+    expect(loadConfig({ ...base, OPERATOR_CHAT: "line:U0123456789abcdef0123456789abcdef" }).operatorChat).toEqual({
+      channel: "line",
+      channelUserId: "U0123456789abcdef0123456789abcdef",
+    });
+    expect(() => loadConfig({ ...base, OPERATOR_CHAT: "telegram:4242" })).toThrow("isn't configured");
+    expect(() => loadConfig({ ...base, OPERATOR_CHAT: "line:bob" })).toThrow("OPERATOR_CHAT must be");
   });
 });

@@ -1,6 +1,6 @@
 import type { Agent } from "./agent/agent";
 import type { PlanRules } from "./billing/plan";
-import type { AgentKey, MicroUsd } from "./domain";
+import type { AgentKey, Identity, MicroUsd } from "./domain";
 
 export interface Env {
   AGENT: DurableObjectNamespace<Agent>;
@@ -16,6 +16,7 @@ export interface Env {
   TELEGRAM_WEBHOOK_SECRET?: string;
 
   DEV_MODE?: string;
+  OPERATOR_CHAT?: string;
 
   BOX_HOST?: string;
   BOX_SECRET?: string;
@@ -74,6 +75,8 @@ export type Config = {
     | { readonly backend: "scripted" };
   readonly line: { readonly channelSecret: string; readonly accessToken: string } | null;
   readonly telegram: { readonly botToken: string; readonly webhookSecret: string } | null;
+  /** Where operator alerts go; null logs them instead. */
+  readonly operatorChat: OperatorChat | null;
   readonly box: BoxConfig;
   readonly billing: BillingConfig;
 };
@@ -222,13 +225,29 @@ function billingConfig(env: Env): BillingConfig {
   }
 }
 
+const OPERATOR_CHAT = /^(?:telegram:(-?\d{1,20})|line:(U[0-9a-f]{32}))$/;
+
+export type OperatorChat = Identity & { readonly channel: "line" | "telegram" };
+
+function operatorChat(raw: string | undefined, configured: Readonly<Record<OperatorChat["channel"], boolean>>): OperatorChat | null {
+  if (!present(raw)) return null;
+  const m = OPERATOR_CHAT.exec(raw);
+  if (!m) throw new Error("OPERATOR_CHAT must be telegram:<chat id> or line:<user id>");
+  const chat: OperatorChat = m[1] !== undefined ? { channel: "telegram", channelUserId: m[1] } : { channel: "line", channelUserId: m[2] };
+  if (!configured[chat.channel]) throw new Error(`OPERATOR_CHAT is on ${chat.channel}, which isn't configured`);
+  return chat;
+}
+
 export function loadConfig(env: Env): Config {
   const devMode = env.DEV_MODE === "1";
+  const line = pair("LINE", env.LINE_CHANNEL_SECRET, env.LINE_CHANNEL_ACCESS_TOKEN, (channelSecret, accessToken) => ({ channelSecret, accessToken }));
+  const telegram = pair("Telegram", env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_WEBHOOK_SECRET, (botToken, webhookSecret) => ({ botToken, webhookSecret }));
   return {
     devMode,
     model: modelConfig(env, devMode),
-    line: pair("LINE", env.LINE_CHANNEL_SECRET, env.LINE_CHANNEL_ACCESS_TOKEN, (channelSecret, accessToken) => ({ channelSecret, accessToken })),
-    telegram: pair("Telegram", env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_WEBHOOK_SECRET, (botToken, webhookSecret) => ({ botToken, webhookSecret })),
+    line,
+    telegram,
+    operatorChat: operatorChat(env.OPERATOR_CHAT, { line: line !== null, telegram: telegram !== null }),
     box: boxConfig(env, devMode),
     billing: billingConfig(env),
   };

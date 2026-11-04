@@ -92,6 +92,7 @@ export type Notices = {
   readonly backupButton: string;
   readonly backupOn: string;
   readonly backupOff: string;
+  readonly backupStale: string;
   readonly noKey: string;
   readonly keyRemoved: string;
   readonly keyCapSet: (capUsd: string) => string;
@@ -272,6 +273,7 @@ const en: Notices = {
   backupButton: "Use my key as backup",
   backupOn: "OK. Your key backs up your Claude plan. Send /key backup off to stop.",
   backupOff: "OK. Your key isn't used while your Claude plan is connected.",
+  backupStale: "That question was about a key you've since replaced or removed, so nothing changed. Send /key backup on to let your current key back up your Claude plan.",
   noKey: "You haven't added an API key.",
   keyRemoved: "Your key is removed. I've forgotten it.",
   keyCapSet: (cap) => `Your key's monthly limit is now $${cap}.`,
@@ -445,6 +447,7 @@ const th: Notices = {
   backupButton: "ใช้ key เป็นตัวสำรอง",
   backupOn: "ได้ค่ะ key ของคุณจะเป็นตัวสำรองของ Claude ส่ง /key backup off ถ้าอยากหยุด",
   backupOff: "ได้ค่ะ ระหว่างที่เชื่อม Claude อยู่ จะไม่ใช้ key ของคุณนะคะ",
+  backupStale: "คำถามนั้นเป็นของ key ที่เปลี่ยนหรือลบไปแล้ว เลยยังไม่ได้เปลี่ยนอะไรค่ะ ส่ง /key backup on ถ้าอยากให้ key ปัจจุบันเป็นตัวสำรองของ Claude",
   noKey: "ยังไม่ได้ใส่ API key ไว้ค่ะ",
   keyRemoved: "ลบ key ของคุณแล้วค่ะ ไม่ได้เก็บไว้อีก",
   keyCapSet: (cap) => `ตั้งวงเงินต่อเดือนของ key เป็น $${cap} แล้วค่ะ`,

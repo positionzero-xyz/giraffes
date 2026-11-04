@@ -1272,52 +1272,73 @@ export class AgentStore {
     this.sql.exec("UPDATE key_ticket SET status = ?, outcome = ? WHERE nonce_hash = ? AND status = 'validating'", status, outcome, nonceHash);
   }
 
-  removeKey(): boolean {
+  /**
+   * Every write below names the key revision it was made for and does nothing once the key moved on, so a call that
+   * started on one key can't change the key that replaced it.
+   */
+  removeKey(expectRevision: number | null): boolean {
     return this.tx(() => {
-      const removed = this.sql.exec("DELETE FROM model_key").rowsWritten > 0;
+      const current = this.key();
+      if (current !== null && current.revision !== expectRevision) return false;
+      this.sql.exec("DELETE FROM model_key");
       this.sql.exec("UPDATE key_revision SET revision = revision + 1");
-      return removed;
+      return current !== null;
     });
   }
 
-  setKeyCap(micro: MicroUsd): boolean {
-    return this.sql.exec("UPDATE model_key SET cap_micro = ?", micro).rowsWritten > 0;
+  setKeyCap(micro: MicroUsd, expectRevision: number): boolean {
+    return this.sql.exec("UPDATE model_key SET cap_micro = ? WHERE revision = ?", micro, expectRevision).rowsWritten > 0;
   }
 
-  setBackup(on: boolean, now: EpochMs): boolean {
-    return this.sql.exec("UPDATE model_key SET backup = ?, backup_asked_at = COALESCE(backup_asked_at, ?)", on ? 1 : 0, now).rowsWritten > 0;
+  setBackup(on: boolean, now: EpochMs, expectRevision: number | null): "set" | "no_key" | "stale" {
+    const current = this.key();
+    if (current === null) return "no_key";
+    if (current.revision !== expectRevision) return "stale";
+    this.sql.exec("UPDATE model_key SET backup = ?, backup_asked_at = COALESCE(backup_asked_at, ?) WHERE revision = ?", on ? 1 : 0, now, expectRevision);
+    return "set";
   }
 
   /** Asks the backup question once per key; true when this call is the one that asked. */
-  askBackup(message: NoteMessage, choice: string, key: EventKey, now: EpochMs): boolean {
+  askBackup(message: NoteMessage, choice: string, key: EventKey, now: EpochMs, expectRevision: number): boolean {
     return this.tx(() => {
-      const asked = this.sql.exec("UPDATE model_key SET backup_asked_at = ? WHERE backup_asked_at IS NULL", now).rowsWritten > 0;
+      const asked = this.sql.exec("UPDATE model_key SET backup_asked_at = ? WHERE backup_asked_at IS NULL AND revision = ?", now, expectRevision).rowsWritten > 0;
       if (asked) this.insertMessage(key, message, now, choice);
       return asked;
     });
   }
 
-  reseal(again: Sealed): void {
-    this.sql.exec("UPDATE model_key SET kid = ?, iv = ?, ciphertext = ?", again.kid, again.iv, again.ciphertext);
+  reseal(again: Sealed, expectRevision: number): boolean {
+    return this.sql.exec("UPDATE model_key SET kid = ?, iv = ?, ciphertext = ? WHERE revision = ?", again.kid, again.iv, again.ciphertext, expectRevision).rowsWritten > 0;
   }
 
   /** The key rests after a provider fault. The person hears about it once a streak, so the notice goes out only if none did. */
-  restKey(fault: KeyFault, until: EpochMs | null, notice: { readonly key: EventKey; readonly message: NoteMessage }, now: EpochMs): void {
-    this.tx(() => {
-      const tell = this.sql.exec("SELECT 1 FROM model_key WHERE told_at IS NULL").toArray().length > 0;
+  restKey(
+    fault: KeyFault,
+    until: EpochMs | null,
+    notice: { readonly key: EventKey; readonly message: NoteMessage },
+    _today: LocalDate,
+    now: EpochMs,
+    expectRevision: number,
+  ): "stale" | "rested" | "told" {
+    return this.tx(() => {
+      const current = this.key();
+      if (current === null || current.revision !== expectRevision) return "stale";
+      const tell = current.health.kind === "ok" || current.health.toldAt === null;
       this.sql.exec(
-        "UPDATE model_key SET fault = ?, failures = MIN(failures + 1, ?), rest_until = ?, told_at = COALESCE(told_at, ?)",
+        "UPDATE model_key SET fault = ?, failures = MIN(failures + 1, ?), rest_until = ?, told_at = COALESCE(told_at, ?) WHERE revision = ?",
         fault,
         KEY_MAX_FAILURES,
         until,
         now,
+        expectRevision,
       );
       if (tell) this.insertMessage(notice.key, notice.message, now);
+      return tell ? "told" : "rested";
     });
   }
 
-  keyHealthy(): void {
-    this.sql.exec("UPDATE model_key SET fault = NULL, failures = 0, rest_until = NULL, told_at = NULL WHERE fault IS NOT NULL");
+  keyHealthy(expectRevision: number): void {
+    this.sql.exec("UPDATE model_key SET fault = NULL, failures = 0, rest_until = NULL, told_at = NULL WHERE fault IS NOT NULL AND revision = ?", expectRevision);
   }
 
   recordGroup(group: AgentKey, version: number): void {

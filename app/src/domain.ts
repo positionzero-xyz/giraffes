@@ -176,16 +176,26 @@ export type ProposalId = Brand<string, "ProposalId">;
 export const proposalId = (task: TaskId, version: number): ProposalId => `${task}.${version}` as ProposalId;
 
 /** `backup`: yes to the person's own key backing up their Claude plan. */
-export type Choice = { readonly kind: "accept"; readonly proposal: ProposalId } | { readonly kind: "consent" } | { readonly kind: "backup" };
+/** A backup answer names the key revision it was asked about; null is a button from before buttons carried one. */
+export type Choice = { readonly kind: "accept"; readonly proposal: ProposalId } | { readonly kind: "consent" } | { readonly kind: "backup"; readonly revision: number | null };
 
-/** "a:7.1", "c" or "b": short enough for Telegram's 64-byte callback_data and a LINE postback. */
+/** "a:7.1", "c" or "b:3": short enough for Telegram's 64-byte callback_data and a LINE postback. */
 export function choiceToken(c: Choice): string {
-  return c.kind === "accept" ? `a:${c.proposal}` : c.kind === "consent" ? "c" : "b";
+  switch (c.kind) {
+    case "accept":
+      return `a:${c.proposal}`;
+    case "consent":
+      return "c";
+    case "backup":
+      return c.revision === null ? "b" : `b:${c.revision}`;
+  }
 }
 
 export function parseChoice(token: string): Choice | null {
   if (token === "c") return { kind: "consent" };
-  if (token === "b") return { kind: "backup" };
+  if (token === "b") return { kind: "backup", revision: null };
+  const backup = /^b:(\d{1,9})$/.exec(token);
+  if (backup) return { kind: "backup", revision: Number(backup[1]) };
   const m = /^a:([1-9]\d{0,9}\.[1-9]\d{0,5})$/.exec(token);
   return m ? { kind: "accept", proposal: m[1] as ProposalId } : null;
 }

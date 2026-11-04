@@ -128,6 +128,7 @@ export function fakeProvider(steps: readonly ProviderStep[] = []): FakeProvider 
     const next = queue.shift();
     if (!next) throw new Error(`the provider got a request the test didn't script: ${input}`);
     const step = next.kind === "call" ? await next.run() : next;
+    if (step.kind === "call") throw new Error("a call step must answer with another kind");
     if (step.kind === "network") throw new TypeError("fetch failed");
     if (step.kind === "raw") return new Response(typeof step.body === "string" ? step.body : JSON.stringify(step.body), { headers: { "content-type": "application/json" } });
     if (step.kind === "hang") {
@@ -171,7 +172,7 @@ export async function giveKey(
       0 as EpochMs,
     );
     if (!saved) throw new Error("giveKey: the key wasn't saved");
-    if (k.backup !== undefined) store.setBackup(k.backup, 0 as EpochMs);
+    if (k.backup !== undefined) store.setBackup(k.backup, 0 as EpochMs, store.keyRevision());
   });
 }
 

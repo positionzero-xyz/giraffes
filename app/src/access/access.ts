@@ -24,7 +24,7 @@ import { bytesOf, fitPrompt, type PromptParts } from "../model/prompt";
 import { PROVIDERS, type ModelRef } from "../model/providers";
 import { routeFor, type CallPurpose, type Purpose, type Route, type Source } from "../model/routes";
 import { costOf, estimate, fits, type SpendScope } from "../policy/spend";
-import { toLocal, utcMonth } from "../policy/time";
+import { DEFAULT_TIME_ZONE, localDate, toLocal, utcMonth } from "../policy/time";
 import { z } from "zod";
 import type { KeyPageError } from "../notices";
 import { endpointOf, open, sessionOf, type KeyDraft, type KeySecrets, type StoredKey } from "./key";
@@ -299,10 +299,9 @@ export class ModelAccess {
     const agent = this.#agent();
     const opened = keys.on ? await open(keys.secrets, agent, k) : ({ kind: "unreadable" } as const);
     if (opened.kind === "unreadable") {
-      this.#rest(k, "unreadable", null);
-      return { kind: "next", told: true };
+      return this.#rest(k, "unreadable", null) === "stale" ? { kind: "next", transient: true } : { kind: "next", told: true };
     }
-    if (opened.kind === "resealed") store.reseal(opened.again);
+    if (opened.kind === "resealed" && !store.reseal(opened.again, k.revision)) return { kind: "next", transient: true };
     const route = routeFor({ kind: "key", provider: k.provider, model: k.model }, req.purpose);
     const user = this.#fit(route, k.mode, req);
     if (user === null) return this.#oversized(route, "key", "key");
@@ -311,10 +310,10 @@ export class ModelAccess {
     const out = await runParse(client, { route, mode: k.mode, system: req.system, user, schema: outputOf(req.purpose) }, meter);
     const last = out.last;
     if (last?.kind === "fault") {
-      this.#rest(k, last.fault, last.retryAfterMs);
+      if (this.#rest(k, last.fault, last.retryAfterMs) === "stale") return { kind: "next", transient: true };
       return { kind: "next", told: true, transient: last.fault === "rate" };
     }
-    if (last?.kind === "ok" || last?.kind === "invalid" || last?.kind === "refused_by_model") store.keyHealthy();
+    if (last?.kind === "ok" || last?.kind === "invalid" || last?.kind === "refused_by_model") store.keyHealthy(k.revision);
     return this.#outcome(out, route, "key", "byok", meter.spent);
   }
 
@@ -352,7 +351,8 @@ export class ModelAccess {
     }
   }
 
-  #rest(k: StoredKey, fault: KeyFault, retryAfterMs: number | null): void {
+  /** "stale": the key was replaced or removed while this call ran, so nothing rested and nobody was told. */
+  #rest(k: StoredKey, fault: KeyFault, retryAfterMs: number | null): "stale" | "rested" | "told" {
     const { store, clock } = this.deps;
     const now = clock.now();
     const failures = k.health.kind === "resting" ? k.health.failures : 0;
@@ -372,7 +372,8 @@ export class ModelAccess {
             : fault === "rate"
               ? t.keyRateLimited(label, until === null || !a ? "" : toLocal(until, a.tz).slice(11))
               : t.keyUnreadable;
-    store.restKey(fault, until, { key: eventKey.access(`fault:${now}`), message: { texts: [text], note: text } }, now);
+    const today = localDate(now, a?.tz ?? DEFAULT_TIME_ZONE);
+    return store.restKey(fault, until, { key: eventKey.access(`fault:${now}`), message: { texts: [text], note: text } }, today, now, k.revision);
   }
 
   #meter(scope: SpendScope, cap: MicroUsd, backend: "key" | "included"): Meter & { readonly spent: () => MicroUsd } {

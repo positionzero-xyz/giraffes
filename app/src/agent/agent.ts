@@ -426,7 +426,7 @@ export class Agent extends DurableObject<Env> {
     if (!k || k.backupAskedAt !== null || !box || !a || !boxServes(this.#deps.box, a.key)) return;
     if (box.state !== "signed_in" && box.state !== "signed_out") return;
     const text = NOTICES[a.language].backupAsk(PROVIDERS[k.provider].label);
-    this.#store.askBackup({ texts: [text], note: text }, choiceToken({ kind: "backup" }), eventKey.access(`backup:${now}`), now);
+    this.#store.askBackup({ texts: [text], note: text }, choiceToken({ kind: "backup", revision: k.revision }), eventKey.access(`backup:${now}`), now, k.revision);
   }
 
   async recordGroup(group: AgentKey, version: number): Promise<void> {
@@ -533,7 +533,7 @@ export class Agent extends DurableObject<Env> {
     if (first.kind === "choice" && first.choice.kind === "consent") {
       return this.#commit(planWithoutModel(view, { kind: "ignored" }), view, a.key, { kind: "none" });
     }
-    if (first.kind === "choice" && first.choice.kind === "backup") return this.#keyCommand({ kind: "key_backup", on: true }, view, a.key);
+    if (first.kind === "choice" && first.choice.kind === "backup") return this.#backupTap(first.choice.revision, view, a.key);
     const command = commandOf(first);
     if (command) return this.#command(command, view, a.key);
     const plan = await this.#planNow(a.key, view.now);
@@ -701,22 +701,29 @@ export class Agent extends DurableObject<Env> {
         return this.#reply(view, agent, status(link), status(KEY_LINK_NOTE));
       }
       case "key_remove":
-        return this.#reply(view, agent, this.#store.removeKey() ? t.keyRemoved : t.noKey);
+        return this.#reply(view, agent, this.#store.removeKey(k?.revision ?? null) ? t.keyRemoved : t.noKey);
       case "key_cap": {
         if (!k) return this.#reply(view, agent, t.noKey);
         if (command.usd < OWN_CAP_RANGE_USD.min || command.usd > OWN_CAP_RANGE_USD.max) {
           return this.#reply(view, agent, t.keyCapRange(OWN_CAP_RANGE_USD.min.toFixed(2), OWN_CAP_RANGE_USD.max.toFixed(2)));
         }
         const micro = Math.round(command.usd * 1_000_000) as MicroUsd;
-        this.#store.setKeyCap(micro);
+        this.#store.setKeyCap(micro, k.revision);
         return this.#reply(view, agent, t.keyCapSet(usd(micro)));
       }
       case "key_backup":
-        if (!this.#store.setBackup(command.on, now)) return this.#reply(view, agent, t.noKey);
+        if (this.#store.setBackup(command.on, now, k?.revision ?? null) !== "set") return this.#reply(view, agent, t.noKey);
         return this.#reply(view, agent, command.on ? t.backupOn : t.backupOff);
       default:
         return assertNever(command);
     }
+  }
+
+  /** A tap on the backup question counts only for the key it asked about. */
+  #backupTap(revision: number | null, view: TurnView, agent: AgentKey): void {
+    const t = NOTICES[view.language];
+    const set = this.#store.setBackup(true, this.#deps.clock.now(), revision);
+    return this.#reply(view, agent, set === "set" ? t.backupOn : set === "stale" ? t.backupStale : t.noKey);
   }
 
   async #betaCommand(command: Extract<Command, { kind: "invite" | "join" }>, view: TurnView, agent: AgentKey): Promise<void> {

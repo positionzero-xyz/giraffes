@@ -205,10 +205,11 @@ describe("a key alongside a Claude plan", () => {
     await submit(ticket);
     await c.settle();
     expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5"), NOTICE.backupAsk("OpenCode Go")]);
-    expect(c.channel.delivered.at(-1)?.button).toEqual({ label: NOTICE.backupButton, data: "b" });
+    const button = c.channel.delivered.at(-1)?.button;
+    expect(button).toEqual({ label: NOTICE.backupButton, data: expect.stringMatching(/^b:\d+$/) });
     expect((await c.snapshot()).access.key?.backup).toBe(false);
 
-    await c.tap("b");
+    await c.tap(button!.data);
     expect(await c.received()).toEqual([NOTICE.backupOn]);
     expect((await c.snapshot()).access.key?.backup).toBe(true);
 

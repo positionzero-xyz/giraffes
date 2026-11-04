@@ -7,7 +7,9 @@ import {
   assertNever,
   clip,
   intentOf,
+  mayspend,
   parseWakeupKey,
+  type Admission,
   type AgentEvent,
   type AgentEventKind,
   type AgentKey,
@@ -39,6 +41,7 @@ import {
 } from "../policy/schedule";
 import { parseTimeZone, toLocal, weekday } from "../policy/time";
 import {
+  NO_TASKS,
   TASKS,
   linkOf,
   planTasks,
@@ -51,6 +54,7 @@ import {
   type TaskView,
   type UnaskedPurpose,
 } from "./tasks";
+import type { AdmissionCommit } from "./admission";
 
 export const TURN = {
   recentNotes: 50,
@@ -119,6 +123,7 @@ export type Batch = { readonly items: readonly [InboxItem, ...InboxItem[]] };
 export type TurnRow = { readonly role: "person" | "agent" | "note"; readonly text: string; readonly at: EpochMs };
 
 export type TurnView = TaskView & {
+  readonly admission: Admission;
   readonly tz: TimeZone;
   readonly language: Language;
   readonly status: PersonStatus;
@@ -238,6 +243,8 @@ export type TurnCommit = {
   readonly trigger: FactCause;
   readonly reachability: Reachability | null;
   readonly ensureCheckin: NewWakeup | null;
+  /** Set only for someone not admitted, by the admission planner. */
+  readonly admission: AdmissionCommit | null;
   readonly rejected: readonly { readonly action: string; readonly reason: ActionRejection }[];
 };
 
@@ -326,7 +333,7 @@ function lifecycleEffects(view: TurnView): Pick<TurnCommit, "reachability" | "en
   const none = { reachability: null, ensureCheckin: null };
   const reachable = (at: EpochMs) => ({
     reachability: { status: "active" as const, at },
-    ensureCheckin: checkinWakeup(view.now, view.tz, view.checkinLocal),
+    ensureCheckin: mayspend(view.admission) ? checkinWakeup(view.now, view.tz, view.checkinLocal) : null,
   });
   switch (e.kind) {
     case "message":
@@ -509,18 +516,21 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
     tasks,
     trigger: causeOf(view),
     ...effects,
+    admission: null,
     rejected,
   };
 }
 
 export type NoModelReason =
   | { readonly kind: "block" }
+  | { readonly kind: "ignored" }
   | { readonly kind: "stale_lifecycle" }
   | { readonly kind: "refused_budget"; readonly alreadyToldToday: boolean }
   | { readonly kind: "lapsed"; readonly alreadyToldToday: boolean }
   | { readonly kind: "model_failed" }
   | { readonly kind: "poison" }
-  | { readonly kind: "command"; readonly text: string; readonly note: string };
+  | { readonly kind: "command"; readonly text: string; readonly note: string }
+  | { readonly kind: "admission"; readonly commit: AdmissionCommit; readonly text: string | null; readonly consent: boolean };
 
 export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "block" | "stale_lifecycle" }> | null {
   const e = trigger(view);
@@ -550,6 +560,7 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
   let note: string | null = null;
   switch (why.kind) {
     case "block":
+    case "ignored":
       outcome = "no_model";
       break;
     case "stale_lifecycle":
@@ -573,6 +584,8 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
       text = why.text;
       note = why.note;
       break;
+    case "admission":
+      return planAdmissionTurn(view, why);
     default:
       return assertNever(why);
   }
@@ -599,6 +612,32 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     tasks: fx.commit,
     trigger: causeOf(view),
     ...lifecycleEffects(view),
+    admission: null,
+    rejected: [],
+  };
+}
+
+/**
+ * A turn for someone not admitted. It keeps nothing of what they wrote, never pushes, and starts no check-in
+ * until they are admitted.
+ */
+function planAdmissionTurn(view: TurnView, why: Extract<NoModelReason, { kind: "admission" }>): TurnCommit {
+  const out = outbound(why.text === null ? [] : [why.text], "reply", view, { link: null, purpose: null, choice: why.consent ? "consent" : null });
+  return {
+    batchKeys: batchKeys(view),
+    outcome: "not_admitted",
+    turns: [],
+    outbound: out && { ...out, replyOnly: true },
+    wakeupsCancel: [],
+    wakeupsAdd: [],
+    wakeupsRetime: [],
+    locale: null,
+    notes: [],
+    tasks: NO_TASKS,
+    trigger: causeOf(view),
+    reachability: lifecycleEffects(view).reachability,
+    ensureCheckin: null,
+    admission: why.commit,
     rejected: [],
   };
 }

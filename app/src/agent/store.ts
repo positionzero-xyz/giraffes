@@ -11,6 +11,12 @@ import type { BoxName } from "../box/names";
 import {
   assertNever,
   choiceToken,
+  type Admission,
+  type Cohort,
+  type Half,
+  type InviteCode,
+  type Seat,
+  type WaitlistReason,
   eventKey,
   parseChoice,
   personDecision,
@@ -61,6 +67,7 @@ import {
   type TaskTarget,
   type UnaskedPurpose,
 } from "./tasks";
+import type { AdmissionChange, AdmissionCommit } from "./admission";
 import { TURN, type Batch, type InboxItem, type Outbound, type TurnCommit, type TurnRow } from "./turn";
 
 export type AgentRow = {
@@ -102,6 +109,7 @@ export type OutboxView = {
   readonly purpose: UnaskedPurpose | null;
   /** The button's data, such as "a:1.1". */
   readonly choice: string | null;
+  readonly replyOnly: boolean;
 };
 
 export type TaskSnapshot = {
@@ -129,6 +137,16 @@ type AgentCols = {
   checkin_local: TimeOfDay;
   status: PersonStatus;
   status_at: EpochMs;
+};
+type AdmissionCols = {
+  state: Exclude<Admission["state"], "stranger">;
+  reason: WaitlistReason | null;
+  cohort: Cohort | null;
+  half: Half | null;
+  code: InviteCode | null;
+  inviter: AgentKey | null;
+  state_at: EpochMs;
+  told_on: LocalDate | null;
 };
 type InboxCols = { event_key: EventKey; payload: string; attempts: number; received_at: EpochMs };
 type WakeupCols = {
@@ -253,6 +271,22 @@ function button(choice: string | null, language: Language): Pick<OutboundMessage
   return { button: { label: c.kind === "accept" ? t.acceptButton : t.consentButton, data: choice } };
 }
 
+function toAdmission(r: AdmissionCols | undefined): Admission {
+  if (!r) return { state: "stranger" };
+  switch (r.state) {
+    case "waitlisted":
+      return { state: r.state, reason: r.reason ?? "no_code", toldOn: r.told_on };
+    case "consenting":
+      return { state: r.state, code: r.code ?? ("" as InviteCode), at: r.state_at };
+    case "admitted":
+      return { state: r.state, seat: { cohort: r.cohort ?? "staff", half: r.half, code: r.code, inviter: r.inviter }, at: r.state_at };
+    case "removed":
+      return { state: r.state, at: r.state_at };
+    default:
+      return assertNever(r.state);
+  }
+}
+
 function toBatch(items: readonly InboxItem[]): Batch | null {
   const [first, ...rest] = items;
   return first === undefined ? null : { items: [first, ...rest] };
@@ -287,7 +321,15 @@ export class AgentStore {
 
   enqueue(
     envelope: InboundEnvelope,
-    first: { readonly tz: TimeZone; readonly language: Language; readonly checkinLocal: TimeOfDay; readonly checkin: NewWakeup; readonly trialEndsAt: EpochMs | null },
+    first: {
+      readonly tz: TimeZone;
+      readonly language: Language;
+      readonly checkinLocal: TimeOfDay;
+      readonly checkin: NewWakeup;
+      readonly trialEndsAt: EpochMs | null;
+      /** Set when this person is admitted on first contact: a dev identity, or anyone while admission is open. */
+      readonly admit: Seat | null;
+    },
     now: EpochMs,
   ): "inserted" | "duplicate" {
     return this.tx(() => {
@@ -311,11 +353,13 @@ export class AgentStore {
         now,
       ).rowsWritten;
       if (created > 0) {
-        this.insertWakeup(first.checkin, "system", now);
         this.insertLogs(
           [{ stream: "agent", id: `agent:${envelope.agent}`, agent: envelope.agent, channel: envelope.identity.channel, firstSeenAt: now }],
           now,
         );
+        if (first.admit) {
+          this.writeAdmission({ next: { state: "admitted", seat: first.admit, at: now }, change: "consented", ensureCheckin: first.checkin }, now);
+        }
       }
       return this.insertInbox(envelope.key, envelope.event, envelope.receivedAt, now);
     });
@@ -413,6 +457,53 @@ export class AgentStore {
       this.sql.exec("SELECT 1 FROM inbox WHERE outcome = ? AND finished_at >= ? AND kind = 'message' LIMIT 1", outcome, dayStart).toArray()
         .length > 0
     );
+  }
+
+  admission(): Admission {
+    return toAdmission(
+      this.sql.exec<AdmissionCols>("SELECT state, reason, cohort, half, code, inviter, state_at, told_on FROM admission").toArray()[0],
+    );
+  }
+
+  /** The only writer of the admission row; it logs each change and creates the check-in when someone is admitted. */
+  private writeAdmission(c: AdmissionCommit, now: EpochMs): void {
+    const a = c.next;
+    if (a.state === "stranger") return;
+    const seat = a.state === "admitted" ? a.seat : null;
+    this.sql.exec(
+      `INSERT INTO admission (one, state, reason, cohort, half, code, inviter, state_at, told_on) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (one) DO UPDATE SET state = excluded.state, reason = excluded.reason, cohort = excluded.cohort, half = excluded.half,
+         code = excluded.code, inviter = excluded.inviter, state_at = excluded.state_at, told_on = excluded.told_on`,
+      a.state,
+      a.state === "waitlisted" ? a.reason : null,
+      seat?.cohort ?? null,
+      seat?.half ?? null,
+      seat?.code ?? (a.state === "consenting" ? a.code : null),
+      seat?.inviter ?? null,
+      c.change === null ? (this.admissionAt() ?? now) : now,
+      a.state === "waitlisted" ? a.toldOn : null,
+    );
+    if (c.ensureCheckin) this.insertWakeup(c.ensureCheckin, "system", now);
+    if (c.change !== null) this.logAdmission(c.change, a.state === "waitlisted" ? a.reason : (seat?.cohort ?? null), now);
+  }
+
+  private admissionAt(): EpochMs | null {
+    return this.sql.exec<{ state_at: EpochMs }>("SELECT state_at FROM admission").toArray()[0]?.state_at ?? null;
+  }
+
+  private logAdmission(change: AdmissionChange, reason: string | null, now: EpochMs): void {
+    const a = this.agent();
+    if (!a) return;
+    const id = `${a.key}|a${change}|${now}`;
+    this.insertLogs([{ stream: "admission", id, agent: a.key, change, reason, channel: a.identity.channel, at: now }], now);
+  }
+
+  /** The operator takes a person out of the beta. Their seat stays used. */
+  remove(now: EpochMs): void {
+    this.tx(() => {
+      if (this.admission().state === "removed") return;
+      this.writeAdmission({ next: { state: "removed", at: now }, change: "removed", ensureCheckin: null }, now);
+    });
   }
 
   turnContext(
@@ -544,6 +635,7 @@ export class AgentStore {
       }
       for (const w of commit.wakeupsAdd) this.insertWakeup(w, firstKey, now, w.task && tasks.resolve(w.task));
       if (commit.ensureCheckin) this.insertWakeup(commit.ensureCheckin, "system", now);
+      if (commit.admission) this.writeAdmission(commit.admission, now);
       for (const text of commit.notes) {
         this.sql.exec("INSERT INTO memory_note (text, created_at, event_key) VALUES (?, ?, ?)", text, now, firstKey);
       }
@@ -974,10 +1066,11 @@ export class AgentStore {
         task_id: TaskId | null;
         purpose: UnaskedPurpose | null;
         choice: string | null;
-      }>("SELECT id, intent, texts, status, via, task_id, purpose, choice FROM outbox ORDER BY rowid DESC LIMIT ?", limit)
+        reply_only: number;
+      }>("SELECT id, intent, texts, status, via, task_id, purpose, choice, reply_only FROM outbox ORDER BY rowid DESC LIMIT ?", limit)
       .toArray()
       .reverse()
-      .map(({ task_id, ...r }) => ({ ...r, taskId: task_id, texts: fromJson<string[]>(r.texts) }));
+      .map(({ task_id, reply_only, ...r }) => ({ ...r, taskId: task_id, replyOnly: reply_only === 1, texts: fromJson<string[]>(r.texts) }));
   }
 
   monthSpend(month: UtcMonth): MonthSpend {

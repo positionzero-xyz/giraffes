@@ -4,7 +4,7 @@ import { ADMISSION } from "../src/agent/admission";
 import { loadConfig, type Env } from "../src/config";
 import type { InviteCode } from "../src/domain";
 import { NOTICES } from "../src/notices";
-import { chat, devChat, memoryLedger, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
+import { chat, devChat, memoryLedger, type DevChat, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
 
 const t = NOTICES.en;
 const CODE = "K7P3QZ" as InviteCode;
@@ -27,7 +27,7 @@ async function fillRecruits(): Promise<void> {
     .run();
 }
 
-const follow = (c: { clock: { now(): number } }, code?: InviteCode) =>
+const follow = (c: DevChat, code?: InviteCode) =>
   code ? ({ kind: "lifecycle", change: "follow", at: c.clock.now(), code } as const) : ({ kind: "lifecycle", change: "follow", at: c.clock.now() } as const);
 
 describe("admission to the beta", () => {

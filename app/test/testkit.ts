@@ -53,7 +53,7 @@ export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): Mem
   const boxes = new Map<string, { name: string; host: string }>();
   const seats = d1Ledger(env.LEDGER, SPEND.globalCeilingMicro);
   return {
-    checkInvite: (code, caps) => seats.checkInvite(code, caps),
+    checkInvite: (req) => seats.checkInvite(req),
     claimSeat: (req) => seats.claimSeat(req),
     issueInvite: (req) => seats.issueInvite(req),
     lineQuotaReading: null,
@@ -392,6 +392,7 @@ export function fakeBox(
 }
 
 export const STRIPE_VARS = {
+  ADMISSION: "open",
   BILLING: "on",
   STRIPE_SECRET_KEY: "sk_test_fake",
   STRIPE_WEBHOOK_SECRET: "whsec_test_fake",

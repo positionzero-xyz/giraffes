@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS turn_log (
   agent_key          TEXT NOT NULL,
   event_kind         TEXT NOT NULL,
   batch_size         INTEGER NOT NULL,
-  outcome            TEXT NOT NULL CHECK (outcome IN ('acted', 'quiet', 'refused_budget', 'lapsed', 'model_failed', 'poison', 'no_model', 'stale')),
+  outcome            TEXT NOT NULL CHECK (outcome IN ('acted', 'quiet', 'refused_budget', 'lapsed', 'model_failed', 'poison', 'no_model', 'stale', 'not_admitted')),
   refused_for_budget INTEGER NOT NULL CHECK (refused_for_budget IN (0, 1)),
   cost_micro         INTEGER NOT NULL,
   attempts           INTEGER NOT NULL,
@@ -165,3 +165,34 @@ CREATE TABLE IF NOT EXISTS spend_lease (
   PRIMARY KEY (agent_key, month, seq)
 );
 CREATE INDEX IF NOT EXISTS spend_lease_month ON spend_lease (month);
+
+CREATE TABLE IF NOT EXISTS invite_code (
+  code       TEXT PRIMARY KEY,
+  cohort     TEXT NOT NULL CHECK (cohort IN ('recruit', 'joiner', 'staff')),
+  half       TEXT CHECK (half IN ('th_line', 'intl_telegram')),
+  issuer     TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  CHECK ((issuer = 'operator') = (cohort != 'joiner'))
+);
+CREATE INDEX IF NOT EXISTS invite_code_issuer ON invite_code (issuer);
+
+-- A seat, taken when the person consents. Seats are never freed, so cohort counts stay stable.
+CREATE TABLE IF NOT EXISTS enrollment (
+  agent_key TEXT PRIMARY KEY,
+  code      TEXT NOT NULL UNIQUE,
+  cohort    TEXT NOT NULL CHECK (cohort IN ('recruit', 'joiner', 'staff')),
+  half      TEXT CHECK (half IN ('th_line', 'intl_telegram')),
+  inviter   TEXT,
+  channel   TEXT NOT NULL,
+  seated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS admission_log (
+  id        TEXT PRIMARY KEY,
+  agent_key TEXT NOT NULL,
+  change    TEXT NOT NULL CHECK (change IN ('waitlisted', 'consenting', 'consented', 'removed')),
+  reason    TEXT,
+  channel   TEXT NOT NULL,
+  at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS admission_log_agent ON admission_log (agent_key, change);

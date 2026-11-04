@@ -145,6 +145,7 @@ function view(over: Partial<TurnView> & { readonly batch?: Batch } = {}): TurnVi
     openTasks: [],
     acceptable: null,
     tapped: [],
+    admission: { state: "admitted", seat: { cohort: "staff", half: null, code: null, inviter: null }, at: 0 as EpochMs },
     ...over,
   };
 }

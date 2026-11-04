@@ -32,7 +32,25 @@ import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
 import { makeChannels, type ChannelRegistry } from "../channels/channel";
 import { commandOf, type Command } from "./commands";
 import { loadConfig, type BillingConfig, type BoxConfig, type Env } from "../config";
-import { assertNever, CHANNEL_LANGUAGE, eventKey, intentOf, type AgentKey, type EpochMs, type EventKey, type InboundEnvelope, type Language, type MicroUsd, type PersonStatus, type TimeZone } from "../domain";
+import {
+  assertNever,
+  CHANNEL_LANGUAGE,
+  eventKey,
+  INVITE_ALPHABET,
+  intentOf,
+  mayspend,
+  type Admission,
+  type AgentKey,
+  type EpochMs,
+  type EventKey,
+  type InboundEnvelope,
+  type InviteCode,
+  type Language,
+  type MicroUsd,
+  type PersonStatus,
+  type Seat,
+  type TimeZone,
+} from "../domain";
 import { d1Ledger, modelCallRow, type LeaseAnswer, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
 import { NOTICES } from "../notices";
 import { scripted, type ScriptStep } from "../model/scripted";
@@ -42,6 +60,7 @@ import { inLineReserve, type QuotaReading } from "../policy/quota";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
 import { costOf, decideReservation, estimate, SPEND } from "../policy/spend";
 import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../policy/time";
+import { ADMISSION, planAdmission, type AdmissionAnswer, type AdmissionMode, type AdmissionStep } from "./admission";
 import { COMPACTION, compactionCommit, CompactionOutputSchema, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import { migrate } from "./schema";
@@ -101,6 +120,7 @@ export type AgentDeps = {
   readonly clock: Clock;
   readonly box: BoxDeps | null;
   readonly billing: BillingDeps;
+  readonly admission: AdmissionMode;
 };
 
 export type BillingDeps = {
@@ -109,11 +129,11 @@ export type BillingDeps = {
   readonly stripe: StripeApi | null;
 };
 
-const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-
-function inviteCode(): string {
-  return Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => INVITE_ALPHABET[b % INVITE_ALPHABET.length]).join("");
+function inviteCode(): InviteCode {
+  return Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => INVITE_ALPHABET[b % INVITE_ALPHABET.length]).join("") as InviteCode;
 }
+
+const STAFF: Seat = { cohort: "staff", half: null, code: null, inviter: null };
 
 type BoxCall<T> =
   | { readonly kind: "box_ok"; readonly value: T; readonly usage: Usage; readonly id: string; readonly model: ModelId }
@@ -135,6 +155,7 @@ export type AgentSnapshot = {
   readonly box: { readonly host: BoxHostKind; readonly state: BoxState } | null;
   readonly plan: Plan;
   readonly tasks: readonly TaskSnapshot[];
+  readonly admission: Admission;
 };
 
 export class Agent extends DurableObject<Env> {
@@ -164,6 +185,7 @@ export class Agent extends DurableObject<Env> {
       checkinLocal: SCHEDULE.defaultCheckinLocal,
       checkin: checkinWakeup(now, DEFAULT_TIME_ZONE, SCHEDULE.defaultCheckinLocal),
       trialEndsAt: this.#deps.billing.config.on ? trialEnd(now, this.#deps.billing.config.rules) : null,
+      admit: this.#deps.admission === "open" || envelope.identity.channel === "dev" ? STAFF : null,
     };
     if (this.#store.enqueue(envelope, first, now) === "duplicate") return "duplicate";
     await this.#armNoLaterThan(now);
@@ -274,7 +296,15 @@ export class Agent extends DurableObject<Env> {
       box: box ? { host: box.host, state: box.state } : null,
       plan: this.#plan(now),
       tasks: this.#store.tasks(),
+      admission: this.#store.admission(),
     };
+  }
+
+  /** The operator takes this person out of the beta: their wake-ups are skipped and every message gets a fixed reply. */
+  async remove(): Promise<void> {
+    const now = this.#deps.clock.now();
+    this.#store.remove(now);
+    await this.#armNoLaterThan(now);
   }
 
   withDeps(over: Partial<AgentDeps>): void {
@@ -327,7 +357,8 @@ export class Agent extends DurableObject<Env> {
     const now = this.#deps.clock.now();
     const a = this.#store.agent();
     if (!a || this.#store.channelEventWaiting()) return;
-    for (const firing of planFiring(now, a.tz, a.status, a.checkinLocal, this.#store.dueWakeups(now))) {
+    const status = this.#store.admission().state === "removed" ? "blocked" : a.status;
+    for (const firing of planFiring(now, a.tz, status, a.checkinLocal, this.#store.dueWakeups(now))) {
       this.#store.applyFiring(firing, now);
     }
   }
@@ -348,6 +379,7 @@ export class Agent extends DurableObject<Env> {
       status: a.status,
       statusAt: a.statusAt,
       checkinLocal: a.checkinLocal,
+      admission: this.#store.admission(),
       batch,
       ...this.#store.turnContext(COMPACTION.promptTurns, TURN.recentNotes, batch),
       unaskedLeftToday: Math.max(0, OUTREACH.dailyUnaskedBudget - admitted),
@@ -359,7 +391,12 @@ export class Agent extends DurableObject<Env> {
     const view = this.#view(batch, a);
     const bypass = bypassModel(view);
     if (bypass) return this.#commit(planWithoutModel(view, bypass), view, a.key, { kind: "none" }, null);
-    const command = commandOf(batch.items[0].event);
+    if (!mayspend(view.admission)) return this.#admission(view, a);
+    const first = batch.items[0].event;
+    if (first.kind === "choice" && first.choice.kind === "consent") {
+      return this.#commit(planWithoutModel(view, { kind: "ignored" }), view, a.key, { kind: "none" }, null);
+    }
+    const command = commandOf(first);
     if (command) return this.#command(command, view, a.key);
     const plan = await this.#planNow(a.key, view.now);
     if (plan.kind === "lapsed") {
@@ -408,7 +445,52 @@ export class Agent extends DurableObject<Env> {
     this.#store.commitTurn(commit, settle, logs, now, box);
   }
 
+  /**
+   * Everything for someone not admitted runs here, and nothing here spends: a code is checked in D1, the seat is
+   * claimed at consent, and every reply goes out only on the reply token.
+   */
+  async #admission(view: TurnView, a: AgentRow): Promise<void> {
+    if (this.#deps.admission === "open") {
+      const now = this.#deps.clock.now();
+      const admitted = { next: { state: "admitted", seat: STAFF, at: now }, change: "consented", ensureCheckin: checkinWakeup(now, a.tz, a.checkinLocal) } as const;
+      this.#commit(planWithoutModel(view, { kind: "admission", commit: admitted, text: null, consent: false }), view, a.key, { kind: "none" }, null);
+      return;
+    }
+    let step: AdmissionStep = planAdmission(view, null);
+    if (step.kind !== "commit") {
+      const now = this.#deps.clock.now();
+      let answer: AdmissionAnswer;
+      try {
+        answer =
+          step.kind === "check"
+            ? { kind: "checked", check: await this.#deps.ledger.checkInvite({ code: step.code, agent: a.key, caps: ADMISSION.caps }) }
+            : { kind: "claimed", seat: await this.#deps.ledger.claimSeat({ agent: a.key, code: step.code, channel: a.identity.channel, at: now, caps: ADMISSION.caps }) };
+      } catch (err) {
+        console.warn("admission check failed", err);
+        return this.#admissionUnavailable(view, a.key);
+      }
+      step = planAdmission(view, answer);
+      if (step.kind !== "commit") throw new Error(`planAdmission asked D1 twice: ${step.kind}`);
+    }
+    const why = { kind: "admission", commit: step.commit, text: step.text, consent: step.consent } as const;
+    this.#commit(planWithoutModel(view, why), view, a.key, { kind: "none" }, null);
+  }
+
+  /** D1 is out: retry on the model's backoff, then say to try again, changing nothing. */
+  #admissionUnavailable(view: TurnView, agent: AgentKey): void {
+    const now = this.#deps.clock.now();
+    const attempts = Math.max(...view.batch.items.map((i) => i.attempts));
+    if (attempts >= TURN.maxModelAttempts) {
+      const unchanged = { next: view.admission, change: null, ensureCheckin: null };
+      const why = { kind: "admission", commit: unchanged, text: NOTICES[view.language].billingBusy, consent: false } as const;
+      return this.#commit(planWithoutModel(view, why), view, agent, { kind: "none" }, null);
+    }
+    const keys = view.batch.items.map((i) => i.key);
+    this.#store.releaseBatch(keys, (now + MODEL_RETRY_BASE_MS * 2 ** (attempts - 1)) as EpochMs, null, [], now);
+  }
+
   async #command(command: Command, view: TurnView, agent: AgentKey): Promise<void> {
+    if (this.#deps.admission === "beta" && (command.kind === "invite" || command.kind === "join")) return this.#betaCommand(command, view, agent);
     switch (command.kind) {
       case "claude":
         return this.#boxCommand(view, agent);
@@ -430,6 +512,25 @@ export class Agent extends DurableObject<Env> {
       default:
         return assertNever(command);
     }
+  }
+
+  /** The beta's two commands. Joining is admission's job, so someone already in is told so without asking D1. */
+  async #betaCommand(command: Extract<Command, { kind: "invite" | "join" }>, view: TurnView, agent: AgentKey): Promise<void> {
+    const t = NOTICES[view.language];
+    if (command.kind === "join") return this.#reply(view, agent, t.alreadyIn);
+    const now = this.#deps.clock.now();
+    try {
+      for (let tries = 0; tries < 3; tries++) {
+        const code = inviteCode();
+        const r = await this.#deps.ledger.issueInvite({ issuer: agent, code, at: now, max: ADMISSION.invitesPerPerson });
+        if (r === "issued") return this.#reply(view, agent, t.betaInvite(code), t.betaInvite("<code>"));
+        if (r === "limit") return this.#reply(view, agent, t.inviteLimit(ADMISSION.invitesPerPerson));
+        if (r === "not_enrolled") return this.#reply(view, agent, t.inviteNotEnrolled);
+      }
+    } catch (err) {
+      console.warn("invite failed", err);
+    }
+    return this.#reply(view, agent, t.billingBusy);
   }
 
   #reply(view: TurnView, agent: AgentKey, text: string, note: string = text): void {
@@ -671,7 +772,7 @@ export class Agent extends DurableObject<Env> {
     agent: AgentKey,
     plan: Plan,
   ): Promise<ModelCall<T> | BoxCall<T>> {
-    const box = planAllowsBox(plan.kind) ? await this.#callBox(system, user, schema, agent) : null;
+    const box = planAllowsBox(plan.kind) && mayspend(this.#store.admission()) ? await this.#callBox(system, user, schema, agent) : null;
     return box ?? this.#callApi("turn", system, user, schema, eventKey, agent, plan);
   }
 
@@ -703,7 +804,7 @@ export class Agent extends DurableObject<Env> {
     plan: Plan,
   ): Promise<ModelCall<T>> {
     const route = routeOf(purpose);
-    const cap = apiCapOf(plan.kind, this.#deps.billing.config.rules);
+    const cap = mayspend(this.#store.admission()) ? apiCapOf(plan.kind, this.#deps.billing.config.rules) : NO_COST;
     const now = this.#deps.clock.now();
     const month = utcMonth(now);
     const est = estimate(route.model, utf8.encode(system).length + utf8.encode(user).length, route.maxTokens);
@@ -834,7 +935,7 @@ export class Agent extends DurableObject<Env> {
 
   async #compactIfDue(): Promise<void> {
     const a = this.#store.agent();
-    if (!a || this.#store.compactionRetryAt() > this.#deps.clock.now()) return;
+    if (!a || !mayspend(this.#store.admission()) || this.#store.compactionRetryAt() > this.#deps.clock.now()) return;
     const person = this.#plan(this.#deps.clock.now());
     if (person.kind === "lapsed") return;
     const plan = planCompaction(this.#store.compactionInput());
@@ -983,5 +1084,6 @@ function defaultDeps(env: Env): AgentDeps {
       store: d1Billing(env.LEDGER),
       stripe: config.billing.on ? stripeApi(config.billing.stripe, config.billing.rules, (input, init) => fetch(input, init)) : null,
     },
+    admission: config.admission,
   };
 }

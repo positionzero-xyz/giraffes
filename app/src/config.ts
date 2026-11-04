@@ -1,4 +1,5 @@
 import type { Agent } from "./agent/agent";
+import { ADMISSION_MODES, type AdmissionMode } from "./agent/admission";
 import type { PlanRules } from "./billing/plan";
 import type { AgentKey, Identity, MicroUsd } from "./domain";
 
@@ -30,6 +31,7 @@ export interface Env {
   FLY_API_TOKEN?: string;
   FLY_ORG?: string;
 
+  ADMISSION?: string;
   BILLING?: string;
   TRIAL_DAYS?: string;
   PLUS_SEATS?: string;
@@ -79,6 +81,8 @@ export type Config = {
   readonly operatorChat: OperatorChat | null;
   readonly box: BoxConfig;
   readonly billing: BillingConfig;
+  /** Who may use the agent. Each mode has one way to redeem a code, so the beta's invites and billing's seats never mix. */
+  readonly admission: AdmissionMode;
 };
 
 const present = (v: string | undefined): v is string => v !== undefined && v !== "";
@@ -238,8 +242,17 @@ function operatorChat(raw: string | undefined, configured: Readonly<Record<Opera
   return chat;
 }
 
+/** Defaults to beta, so a deploy that forgets it stays closed. */
+function admissionMode(raw: string | undefined, billing: BillingConfig): AdmissionMode {
+  const mode = present(raw) ? raw : "beta";
+  if (!ADMISSION_MODES.some((m) => m === mode)) throw new Error(`unknown ADMISSION: ${mode}`);
+  if (mode === "beta" && billing.on) throw new Error("ADMISSION=beta can't run with BILLING=on; set ADMISSION=open to sell plans");
+  return mode as AdmissionMode;
+}
+
 export function loadConfig(env: Env): Config {
   const devMode = env.DEV_MODE === "1";
+  const billing = billingConfig(env);
   const line = pair("LINE", env.LINE_CHANNEL_SECRET, env.LINE_CHANNEL_ACCESS_TOKEN, (channelSecret, accessToken) => ({ channelSecret, accessToken }));
   const telegram = pair("Telegram", env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_WEBHOOK_SECRET, (botToken, webhookSecret) => ({ botToken, webhookSecret }));
   return {
@@ -249,6 +262,7 @@ export function loadConfig(env: Env): Config {
     telegram,
     operatorChat: operatorChat(env.OPERATOR_CHAT, { line: line !== null, telegram: telegram !== null }),
     box: boxConfig(env, devMode),
-    billing: billingConfig(env),
+    billing,
+    admission: admissionMode(env.ADMISSION, billing),
   };
 }

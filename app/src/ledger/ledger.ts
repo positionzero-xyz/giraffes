@@ -4,8 +4,11 @@ import {
   type AgentKey,
   type ChannelId,
   type EpochMs,
+  type Cohort,
   type FactCause,
   type FactKind,
+  type Half,
+  type InviteCode,
   type LocalDate,
   type MicroUsd,
   type TaskKind,
@@ -13,6 +16,7 @@ import {
   type UtcMonth,
 } from "../domain";
 import { TASK_REJECTIONS, type UnaskedPurpose } from "../agent/tasks";
+import type { AdmissionChange, InviteCheck, SeatAnswer } from "../agent/admission";
 import type { BoxHostKind } from "../box/host";
 import type { BoxName } from "../box/names";
 import type { ModelId, Purpose, Usage } from "../model/model";
@@ -98,6 +102,16 @@ export type LogRow =
       readonly at: EpochMs;
     }
   | {
+      readonly stream: "admission";
+      readonly id: string;
+      readonly agent: AgentKey;
+      readonly change: AdmissionChange;
+      /** The waitlist reason, or the cohort a person was admitted to. */
+      readonly reason: string | null;
+      readonly channel: ChannelId;
+      readonly at: EpochMs;
+    }
+  | {
       readonly stream: "lifecycle";
       readonly id: string;
       readonly agent: AgentKey;
@@ -129,7 +143,7 @@ export type ModelCallStatus = (typeof MODEL_CALL_STATUSES)[number];
 export const BACKENDS = ["api", "box"] as const;
 export type Backend = (typeof BACKENDS)[number];
 
-export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "lapsed", "model_failed", "poison", "no_model", "stale"] as const;
+export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "lapsed", "model_failed", "poison", "no_model", "stale", "not_admitted"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 
 export const ACTION_REJECTIONS = [
@@ -194,7 +208,14 @@ export type BoxClaim = {
   readonly max: number;
 };
 
+export type SeatCaps = { readonly recruit: number; readonly joiner: number };
+
 export interface Ledger {
+  /** Reads only: a code is checked when it is presented, and nobody holds a seat before consenting. */
+  checkInvite(req: { readonly code: InviteCode; readonly agent: AgentKey; readonly caps: SeatCaps }): Promise<InviteCheck>;
+  /** One conditional insert. A retry by the same person gets their seat back, and a seat is never freed. */
+  claimSeat(req: { readonly agent: AgentKey; readonly code: InviteCode; readonly channel: ChannelId; readonly at: EpochMs; readonly caps: SeatCaps }): Promise<SeatAnswer>;
+  issueInvite(req: { readonly issuer: AgentKey; readonly code: InviteCode; readonly at: EpochMs; readonly max: number }): Promise<"issued" | "taken" | "limit" | "not_enrolled">;
   append(rows: readonly LogRow[]): Promise<void>;
   requestLease(req: LeaseRequest): Promise<LeaseAnswer>;
   claimBox(req: BoxClaim): Promise<"granted" | "full">;
@@ -294,6 +315,10 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
       return db
         .prepare("INSERT INTO lifecycle (id, agent_key, change, source, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")
         .bind(row.id, row.agent, row.change, row.source, row.at);
+    case "admission":
+      return db
+        .prepare("INSERT INTO admission_log (id, agent_key, change, reason, channel, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")
+        .bind(row.id, row.agent, row.change, row.reason, row.channel, row.at);
     case "rejection":
       return db
         .prepare("INSERT INTO action_rejection (id, agent_key, turn_id, action, reason, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")
@@ -303,8 +328,74 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
   }
 }
 
+type InviteCols = { cohort: Cohort; half: Half | null; used: number; taken: number };
+
+/** A joiner's half is the half of whoever invited them. */
+const INVITE_STATE = `SELECT c.cohort,
+         CASE c.cohort WHEN 'joiner' THEN (SELECT half FROM enrollment WHERE agent_key = c.issuer) ELSE c.half END AS half,
+         EXISTS (SELECT 1 FROM enrollment e WHERE e.code = c.code AND e.agent_key != ?2) AS used,
+         (SELECT COUNT(*) FROM enrollment e WHERE e.cohort = c.cohort AND e.agent_key != ?2) AS taken
+       FROM invite_code c WHERE c.code = ?1 AND c.issuer != ?2`;
+
+function inviteCheck(r: InviteCols | null, caps: SeatCaps): InviteCheck {
+  if (r === null) return { kind: "bad_code" };
+  if (r.used) return { kind: "used" };
+  if (r.cohort !== "staff" && r.taken >= caps[r.cohort]) return { kind: "full" };
+  return { kind: "ok", cohort: r.cohort, half: r.half };
+}
+
 export function d1Ledger(db: D1Database, ceiling: MicroUsd): Ledger {
   return {
+    async checkInvite(req) {
+      return inviteCheck(await db.prepare(INVITE_STATE).bind(req.code, req.agent).first<InviteCols>(), req.caps);
+    },
+    async claimSeat(req) {
+      const [, seated, state] = await db.batch([
+        db
+          .prepare(
+            `INSERT INTO enrollment (agent_key, code, cohort, half, inviter, channel, seated_at)
+             SELECT ?1, c.code, c.cohort,
+                    CASE c.cohort WHEN 'joiner' THEN (SELECT half FROM enrollment WHERE agent_key = c.issuer) ELSE c.half END,
+                    NULLIF(c.issuer, 'operator'), ?3, ?4
+             FROM invite_code c
+             WHERE c.code = ?2 AND c.issuer != ?1
+               AND NOT EXISTS (SELECT 1 FROM enrollment e WHERE e.code = c.code)
+               AND (c.cohort = 'staff'
+                    OR (SELECT COUNT(*) FROM enrollment e WHERE e.cohort = c.cohort) < CASE c.cohort WHEN 'recruit' THEN ?5 ELSE ?6 END)
+             ON CONFLICT (agent_key) DO NOTHING`,
+          )
+          .bind(req.agent, req.code, req.channel, req.at, req.caps.recruit, req.caps.joiner),
+        db.prepare("SELECT cohort, half, code, inviter FROM enrollment WHERE agent_key = ?1").bind(req.agent),
+        db.prepare(INVITE_STATE).bind(req.code, req.agent),
+      ]);
+      const seat = seated?.results[0] as { cohort: Cohort; half: Half | null; code: InviteCode; inviter: AgentKey | null } | undefined;
+      if (seat) return { kind: "granted", seat };
+      const check = inviteCheck((state?.results[0] as InviteCols | undefined) ?? null, req.caps);
+      return check.kind === "ok" ? { kind: "full" } : check;
+    },
+    async issueInvite(req) {
+      const [inserted, issuer] = await db.batch([
+        db
+          .prepare(
+            `INSERT INTO invite_code (code, cohort, half, issuer, created_at)
+             SELECT ?1, 'joiner', NULL, ?2, ?3
+             WHERE EXISTS (SELECT 1 FROM enrollment WHERE agent_key = ?2 AND cohort IN ('recruit', 'joiner'))
+               AND (SELECT COUNT(*) FROM invite_code WHERE issuer = ?2) < ?4
+             ON CONFLICT (code) DO NOTHING`,
+          )
+          .bind(req.code, req.issuer, req.at, req.max),
+        db
+          .prepare(
+            `SELECT EXISTS (SELECT 1 FROM enrollment WHERE agent_key = ?1 AND cohort IN ('recruit', 'joiner')) AS enrolled,
+                    (SELECT COUNT(*) FROM invite_code WHERE issuer = ?1) AS issued`,
+          )
+          .bind(req.issuer),
+      ]);
+      if ((inserted?.meta.changes ?? 0) > 0) return "issued";
+      const r = issuer?.results[0] as { enrolled: number; issued: number } | undefined;
+      if (!r?.enrolled) return "not_enrolled";
+      return r.issued >= req.max ? "limit" : "taken";
+    },
     async append(rows) {
       for (let i = 0; i < rows.length; i += APPEND_CHUNK) {
         await db.batch(rows.slice(i, i + APPEND_CHUNK).map((row) => insertFor(db, row)));

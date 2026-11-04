@@ -44,6 +44,7 @@ export default {
       if (url.pathname === "/dev/transcript") return transcript(env, url);
     }
     if (config.devMode && config.model.backend === "scripted" && req.method === "POST" && url.pathname === "/dev/script") return script(req, env);
+    if (config.devMode && req.method === "POST" && url.pathname === "/dev/remove") return remove(req, env);
     return new Response("not found", { status: 404 });
   },
 
@@ -110,6 +111,16 @@ async function script(req: Request, env: Env): Promise<Response> {
   const identity = body.success ? devIdentity(body.data.user) : null;
   if (!body.success || !identity) return new Response("body must be {user, turns, compaction?}", { status: 400 });
   await agentStub(env, personAgentKey(identity)).script(body.data.turns, body.data.compaction);
+  return new Response("ok");
+}
+
+const Removal = z.object({ agent: z.string().regex(/^p:(line|telegram|dev):[^:]+$/) });
+
+/** Takes a person out of the beta, by agent key. Dev only until there is an operator route with its own auth. */
+async function remove(req: Request, env: Env): Promise<Response> {
+  const body = Removal.safeParse(await req.json().catch(() => null));
+  if (!body.success) return new Response("body must be {agent: p:<channel>:<id>}", { status: 400 });
+  await agentStub(env, body.data.agent as AgentKey).remove();
   return new Response("ok");
 }
 

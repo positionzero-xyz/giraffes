@@ -117,6 +117,8 @@ price plus the provider's fee from our price cards, not an invoice.
      node scripts/beta-codes.ts recruit th_line 40 --start 2026-11-16T00:00:00+07:00
      node scripts/beta-codes.ts recruit intl_telegram 40
      ```
+     `--start` sets the start only if none is set yet; its first statement prints the old and new dates.
+     Moving a start that is already set, which moves week 0 for every recruit, needs `--force`.
      A Telegram recruit opens `https://t.me/<bot>?start=<code>`; a LINE recruit sends `/join <code>`.
      Enrolled people get joiner codes with `/invite`. It can't run with `BILLING=on`.
    - `ADMISSION=open`: everyone is admitted at first contact, and `/invite` and `/join` are billing's.

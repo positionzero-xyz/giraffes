@@ -1,4 +1,5 @@
 import { COHORTS, HALVES, newInviteCode, type Cohort, type Half } from "../src/domain.ts";
+import { betaStartSql } from "../src/ledger/beta-start.ts";
 
 const [cohort, half, count, ...rest] = process.argv.slice(2);
 
@@ -7,7 +8,7 @@ function fail(message: string): never {
   process.exit(2);
 }
 
-const usage = "usage: node scripts/beta-codes.ts <recruit|staff> <th_line|intl_telegram|-> <count> [--start <ISO time>]";
+const usage = "usage: node scripts/beta-codes.ts <recruit|staff> <th_line|intl_telegram|-> <count> [--start <ISO time> [--force]]";
 if (!COHORTS.some((c) => c === cohort) || cohort === "joiner") fail(`${usage}\nJoiner codes come from /invite.`);
 if (half !== "-" && !HALVES.some((h) => h === half)) fail(usage);
 const n = Number(count);
@@ -22,5 +23,7 @@ const at = rest.indexOf("--start");
 if (at !== -1) {
   const start = Date.parse(rest[at + 1] ?? "");
   if (Number.isNaN(start)) fail("--start takes an ISO time, such as 2026-11-16T00:00:00+07:00");
-  console.log(`INSERT INTO beta (one, starts_at) VALUES (1, ${start}) ON CONFLICT (one) DO UPDATE SET starts_at = excluded.starts_at;`);
+  const force = rest.includes("--force");
+  console.log(betaStartSql(start, force).join("\n"));
+  if (!force) console.error("--start keeps a start that is already set; the first statement's result shows the old and new dates. Pass --force to move it.");
 }

@@ -100,7 +100,7 @@ test("a check-in offers a plan, the person taps Accept, and the task completes o
 
 ## Call site 5: a recruit joins the beta
 
-The operator prints codes with `node scripts/beta-codes.ts recruit intl_telegram 40 --start 2026-11-16T00:00:00+07:00` and runs the SQL with `wrangler d1 execute`. A Telegram recruit opens `t.me/<bot>?start=K7P3QZ`, and a LINE recruit sends `/join K7P3QZ`.
+The operator prints codes with `node scripts/beta-codes.ts recruit intl_telegram 40 --start 2026-11-16T00:00:00+07:00` and runs the SQL with `wrangler d1 execute`. A start already set is kept unless `--force` is given, and the first statement's result shows the old and new dates. A Telegram recruit opens `t.me/<bot>?start=K7P3QZ`, and a LINE recruit sends `/join K7P3QZ`.
 
 1. The follow arrives as `{ kind: "lifecycle", change: "follow", code: "K7P3QZ" }`. The person isn't admitted, so `#turn` hands the batch to `#admission` before anything that can spend.
 2. `planAdmission` asks for a check. `ledger.checkInvite` reads D1 only. A good code moves the DO row to `consenting` and replies with the privacy notice and the consent button, on the reply token only.

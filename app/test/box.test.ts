@@ -16,6 +16,8 @@ import {
   chat,
   devChat,
   fakeBox,
+  fakeProvider,
+  giveKey,
   local,
   memoryLedger,
   stripeChange,
@@ -165,7 +167,7 @@ const token = "box-token" as BoxToken;
 const posts = (rs: readonly FlyRequest[]) => rs.filter((r) => r.method === "POST").map((r) => [r.path, r.body]);
 
 describe("the static host shares one Claude login", () => {
-  const live = (vars: Record<string, string>): Env => ({ MODEL_BACKEND: "anthropic", ANTHROPIC_API_KEY: "fake-key", ...vars }) as unknown as Env;
+  const live = (vars: Record<string, string>): Env => ({ MODEL_BACKEND: "live", ...vars }) as unknown as Env;
   const shared = { BOX_HOST: "static", BOX_SECRET, BOX_STATIC_URL: "https://box.example.test" };
 
   test("outside DEV_MODE it needs BOX_STATIC_OWNER, which must be an agent key", () => {
@@ -318,7 +320,7 @@ describe("fly host", () => {
 });
 
 describe("box client", () => {
-  const req = { purpose: "turn" as const, system: "s", user: "u", schema: z.object({ a: z.string() }) };
+  const req = { model: "claude-haiku-5-5", system: "s", user: "u", jsonSchema: { type: "object" } };
   const answering = (status: number, body: unknown): Fetch => async () => Response.json(body, { status });
 
   test("a 409 is signed out, a 401 is unauthorized; 5xx, a network error and a timeout are unavailable", async () => {
@@ -341,15 +343,14 @@ describe("box client", () => {
     expect(await boxClient(hang, { parseMs: 20, healthMs: 20 }).health("https://b", token)).toMatchObject({ kind: "unavailable" });
   });
 
-  test("a reply is parsed as the bridge's, and the default parse timeout is 120 s", async () => {
+  test("a reply is read as the bridge's, and the default parse timeout is 120 s", async () => {
     const ok = answering(200, { structured: { a: "hi" }, usage: { input_tokens: 5, output_tokens: 2 }, stop: "end" });
     expect(await boxClient(ok).parse("https://b", token, req)).toEqual({
-      kind: "ok",
-      value: { a: "hi" },
-      usage: { inputTokens: 5, outputTokens: 2, cacheWriteTokens: 0, cacheReadTokens: 0 },
+      kind: "reply",
+      reply: { kind: "reply", text: '{"a":"hi"}', stop: "end", usage: { inputTokens: 5, outputTokens: 2, cacheWriteTokens: 0, cacheReadTokens: 0 }, reportedMicro: null },
     });
-    const bad = answering(200, { structured: { a: 1 }, usage: null, stop: "end" });
-    expect(await boxClient(bad).parse("https://b", token, req)).toMatchObject({ kind: "failed" });
+    const bad = answering(200, { nonsense: true });
+    expect(await boxClient(bad).parse("https://b", token, req)).toMatchObject({ kind: "reply", reply: { text: "" } });
     let timeout: AbortSignal | undefined;
     await boxClient(async (_u, init) => {
       timeout = init?.signal ?? undefined;
@@ -510,9 +511,9 @@ describe("connecting a Claude plan", () => {
     ]);
   });
 
-  test("a box that answers signed_out mid-turn is marked, the person gets one fresh link, and the turn and the next run on the API", async () => {
+  test("a box that answers signed_out mid-turn is marked and the person gets one fresh link, and no other money answers for it", async () => {
     const box = fakeBox({ signedIn: true });
-    const model = scripted([chat("From the API."), chat("Still the API.")]);
+    const model = scripted([]);
     const c = await devChat("gus", { model, at: "2099-11-04T10:00", box: box.deps });
     await c.say("/claude");
     await c.received();
@@ -521,38 +522,33 @@ describe("connecting a Claude plan", () => {
 
     await c.say("hello");
 
-    const [notice, reply] = await c.received();
+    const [notice, ...rest] = await c.received();
+    expect(rest).toEqual([]);
     expect(notice.startsWith(say("signed_out_link").split("\n")[0])).toBe(true);
     expect((await linkIn(notice, "gus", local("2099-11-04T10:00"))).valid).toBe(true);
-    expect(reply).toBe("From the API.");
     expect((await c.snapshot()).box?.state).toBe("signed_out");
 
     await c.say("again");
-    expect(await c.received()).toEqual(["Still the API."]);
+    expect(await c.received()).toEqual([]);
     expect(box.parses).toHaveLength(1);
-    expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
-      ["box", "rejected"],
-      ["api", "settled"],
-      ["api", "settled"],
-    ]);
-    expect((await c.snapshot()).spendThisMonthMicro).toBeGreaterThan(0);
+    expect(model.calls).toHaveLength(0);
+    expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([["box", "rejected"]]);
+    expect(c.logs("turn").map((r) => r.outcome)).toEqual(["no_model", "no_access", "no_access"]);
+    expect((await c.snapshot()).spendThisMonthMicro).toBe(0);
   });
 
-  test("an unavailable box sends the turn to the API, turns for the next 5 minutes skip the box, and then it is tried again", async () => {
+  test("an unavailable box backs the turn off, never spends anyone's money, skips the box for 5 minutes, and then tries it again", async () => {
     const box = fakeBox({ signedIn: true });
-    const model = scripted([chat("From the API."), chat("Still the API.")]);
+    const model = scripted([]);
     const c = await devChat("hal", { model, at: "2099-11-04T10:00", box: box.deps });
     await c.say("/claude");
     await c.received();
 
     box.replies.push({ kind: "status", status: 503 });
     await c.say("hello");
-    expect(await c.received()).toEqual(["From the API."]);
+    await c.advanceTo("2099-11-04T10:04");
+    expect(await c.received()).toEqual([NOTICE.failed]);
     expect((await c.snapshot()).box?.state).toBe("signed_in");
-
-    c.clock.set(local("2099-11-04T10:04"));
-    await c.say("again");
-    expect(await c.received()).toEqual(["Still the API."]);
     expect(box.parses).toHaveLength(1);
 
     c.clock.set(local("2099-11-04T10:05"));
@@ -561,11 +557,36 @@ describe("connecting a Claude plan", () => {
     expect(await c.received()).toEqual(["Back on your plan."]);
     expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
       ["box", "unavailable"],
-      ["api", "settled"],
-      ["api", "settled"],
       ["box", "settled"],
     ]);
-    model.assertDone();
+    expect(model.calls).toHaveLength(0);
+    expect((await c.snapshot()).spendThisMonthMicro).toBe(0);
+  });
+
+  test("a person's own key backs up their box only after they said yes", async () => {
+    const box = fakeBox({ signedIn: true });
+    const provider = fakeProvider([{ kind: "output", value: { actions: [{ type: "send", text: "From your key." }], tasks: [], about: "" } }]);
+    const c = await devChat("hil", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+    await giveKey(c.agent);
+
+    box.replies.push({ kind: "status", status: 503 });
+    await c.say("hello");
+    await c.advanceTo("2099-11-04T10:04");
+    expect(await c.received()).toEqual([NOTICE.failed]);
+    expect(provider.seen).toHaveLength(0);
+
+    c.clock.set(local("2099-11-04T10:10"));
+    await giveKey(c.agent, { backup: true });
+    box.replies.push({ kind: "status", status: 503 });
+    await c.say("again");
+    expect(await c.received()).toEqual(["From your key."]);
+    expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
+      ["box", "unavailable"],
+      ["box", "unavailable"],
+      ["key", "settled"],
+    ]);
   });
 
   test("a new BOX_IMAGE brings a live box up to date on its next drain, once and without a word to the person", async () => {
@@ -585,22 +606,20 @@ describe("connecting a Claude plan", () => {
     expect((await c.snapshot()).box?.state).toBe("signed_in");
   });
 
-  test("a box that refuses its token is ensured again, silently, and the turn runs on the API", async () => {
+  test("a box that refuses its token is ensured again, silently, and the turn waits for it", async () => {
     const box = fakeBox({ signedIn: true });
-    const model = scripted([chat("From the API.")]);
+    const model = scripted([]);
     const c = await devChat("jo", { model, at: "2099-11-04T10:00", box: box.deps });
     await c.say("/claude");
     await c.received();
 
     box.replies.push({ kind: "status", status: 401 }, { kind: "reply", step: chat("Back on your plan.") });
     await c.say("hello");
-    expect(await c.received()).toEqual(["From the API."]);
-    expect(box.ensureCalls).toHaveLength(2);
-    expect((await c.snapshot()).box?.state).toBe("signed_in");
-
-    await c.say("again");
+    await c.advanceTo("2099-11-04T10:01");
     expect(await c.received()).toEqual(["Back on your plan."]);
     expect(box.ensureCalls).toHaveLength(2);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+    expect(model.calls).toHaveLength(0);
   });
 
   test("an ensure of a live box that fails every time retries every few minutes and never touches its state", async () => {

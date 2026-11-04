@@ -2,14 +2,17 @@ import { SELF } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { TURN } from "../src/agent/turn";
 import type { EpochMs, LocalDateTime, TimeZone } from "../src/domain";
-import { priceOf, routeOf } from "../src/model/model";
+import { DEV_CAP_MICRO } from "../src/access/access";
+import { HAIKU_5_5 } from "../src/model/providers";
+import { routeFor } from "../src/model/routes";
 import type { ScriptStep } from "../src/model/scripted";
 import { NOTICES } from "../src/notices";
-import { costOf, SPEND } from "../src/policy/spend";
+import { costOf } from "../src/policy/spend";
 import { fromLocal, toLocal } from "../src/policy/time";
 import { cancel, chat, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, throws, turn, wall } from "./testkit";
 
 const NOTICE = NOTICES.en;
+const inputThatSpendsTheCap = (DEV_CAP_MICRO * 1_000_000) / HAIKU_5_5.inputPerM;
 
 const until = async (done: () => boolean) => {
   for (let i = 0; i < 2000 && !done(); i++) await new Promise((r) => setTimeout(r, 1));
@@ -292,7 +295,6 @@ describe("requested reminders without a model", () => {
   });
 
   test("a reminder still arrives, written by code, when the person is over their monthly cap", async () => {
-    const inputThatSpendsTheCap = (SPEND.userCapMicro * 1_000_000) / priceOf(routeOf("turn").model).inputPerM;
     const model = scripted([setClinic({ inputTokens: inputThatSpendsTheCap })]);
     const c = await devChat("xia", { model, at: "2099-11-04T10:00" });
     await c.say("remind me at 6pm to call the clinic");
@@ -605,8 +607,8 @@ describe("spend", () => {
 
     const [call] = model.calls;
     const bytes = new TextEncoder().encode(call.system + call.user).length;
-    const route = routeOf("turn");
-    const worst = costOf(route.model, { inputTokens: 0, outputTokens: route.maxTokens, cacheWriteTokens: bytes, cacheReadTokens: 0 });
+    const route = routeFor({ kind: "dev", model: "claude-haiku-5-5" }, "turn");
+    const worst = costOf(route, { inputTokens: 0, outputTokens: route.maxTokens, cacheWriteTokens: bytes, cacheReadTokens: 0 }, null);
     expect(c.logs("model_call")[0].estimateMicro).toBeGreaterThanOrEqual(worst);
   });
 
@@ -643,7 +645,6 @@ describe("spend", () => {
   });
 
   test("an over-cap person is refused without a model call, told once a day, and logged", async () => {
-    const inputThatSpendsTheCap = (SPEND.userCapMicro * 1_000_000) / priceOf(routeOf("turn").model).inputPerM;
     const model = scripted([turn({ actions: [send("Here's a long answer.")], usage: { inputTokens: inputThatSpendsTheCap } })]);
     const c = await devChat("lea", { model, at: "2099-11-04T10:00" });
     await c.say("tell me everything");
@@ -652,7 +653,7 @@ describe("spend", () => {
     await c.say("are you there?");
     await c.say("hello?");
 
-    expect(await c.received()).toEqual([NOTICE.monthlyLimit]);
+    expect(await c.received()).toEqual([NOTICE.includedCapReached]);
     expect(model.calls).toHaveLength(1);
     expect(c.logs("turn").map((l) => [l.outcome, l.refusedForBudget])).toEqual([
       ["acted", false],
@@ -660,16 +661,6 @@ describe("spend", () => {
       ["refused_budget", true],
     ]);
     expect(c.logs("model_call").map((l) => l.status)).toEqual(["settled", "refused_user_cap", "refused_user_cap"]);
-  });
-
-  test("when the global ceiling has no lease left, the call is refused before the model", async () => {
-    const model = scripted([]);
-    const c = await devChat("max", { model, at: "2099-11-04T10:00", ledger: memoryLedger({ ceilingMicro: 0 }) });
-
-    await c.say("hello");
-
-    expect(await c.received()).toEqual([NOTICE.monthlyLimit]);
-    expect(c.logs("model_call").map((l) => l.status)).toEqual(["refused_global_ceiling"]);
   });
 });
 
@@ -795,7 +786,7 @@ describe("compaction", () => {
     const pages = model.calls.filter((call) => call.purpose === "compaction").slice(1);
     expect(pages.map((p) => foldedTurns(p.user))).toEqual([30, 30, 30]);
     expect(pages[0].user).toContain("Person: message 0\n");
-    expect(pages[1].user).toContain("Current summary:\nSummary 1.");
+    expect(pages[1].user).toContain("## Current summary\nSummary 1.");
     expect(pages[1].user).toContain("Person: message 15\n");
     expect(pages[2].user).toContain("Person: message 30\n");
     model.assertDone();

@@ -14,12 +14,16 @@ import type { BoxHost, HostResult } from "../src/box/host";
 import { boxName, type BoxName } from "../src/box/names";
 import type { ChannelAdapter } from "../src/channels/channel";
 import type { AdmissionMode } from "../src/agent/admission";
-import { eventKey, parseChoice, personAgentKey, type ChannelEvent, type EpochMs, type Identity, type LocalDateTime, type MicroUsd } from "../src/domain";
-import { d1Ledger, type LeaseAnswer, type Ledger, type LogRow } from "../src/ledger/ledger";
-import { scripted, type ScriptStep, type ScriptedModel } from "../src/model/scripted";
+import { eventKey, parseChoice, personAgentKey, type AgentKey, type ChannelEvent, type EpochMs, type Identity, type LocalDateTime, type MicroUsd } from "../src/domain";
+import { d1Ledger, type Ledger, type LogRow } from "../src/ledger/ledger";
+import { scripted, scriptedConnect, type ScriptStep, type ScriptedModel } from "../src/model/scripted";
 import type { QuotaReading } from "../src/policy/quota";
-import { SPEND } from "../src/policy/spend";
 import { DEFAULT_TIME_ZONE, fromLocal, toLocal } from "../src/policy/time";
+import { devLane, DEV_URL_SCRIPTED, type IncludedConfig, type KeysConfig } from "../src/access/access";
+import { seal } from "../src/access/key";
+import { AgentStore } from "../src/agent/store";
+import { connect, SecretKey, type Fetch, type SchemaMode } from "../src/model/client";
+import { PROVIDERS, type ProviderId } from "../src/model/providers";
 
 export { scripted };
 
@@ -45,13 +49,11 @@ export type MemoryLedger = Ledger & {
   readonly boxes: ReadonlyMap<string, { readonly name: string; readonly host: string }>;
 };
 
-export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): MemoryLedger {
-  const ceiling = opts.ceilingMicro ?? SPEND.globalCeilingMicro;
+export function memoryLedger(): MemoryLedger {
   const rows: LogRow[] = [];
   const seen = new Set<string>();
-  const leases = new Map<string, { month: string; micro: MicroUsd }>();
   const boxes = new Map<string, { name: string; host: string }>();
-  const seats = d1Ledger(env.LEDGER, SPEND.globalCeilingMicro);
+  const seats = d1Ledger(env.LEDGER);
   return {
     checkInvite: (req) => seats.checkInvite(req),
     claimSeat: (req) => seats.claimSeat(req),
@@ -82,16 +84,82 @@ export function memoryLedger(opts: { readonly ceilingMicro?: number } = {}): Mem
         seen.add(key);
       }
     },
-    async requestLease(req): Promise<LeaseAnswer> {
-      const key = `${req.agent}|${req.month}|${req.seq}`;
-      const existing = leases.get(key);
-      if (existing) return { kind: "granted", micro: existing.micro };
-      const used = [...leases.values()].filter((l) => l.month === req.month).reduce((sum, l) => sum + l.micro, 0);
-      if (used + req.micro > ceiling) return { kind: "ceiling" };
-      leases.set(key, { month: req.month, micro: req.micro });
-      return { kind: "granted", micro: req.micro };
-    },
   };
+}
+
+export const TEST_KEY_SECRET = "test-key-secret-0123456789abcdef0123";
+export const TEST_KEYS: Extract<KeysConfig, { on: true }> = {
+  on: true,
+  secrets: { current: TEST_KEY_SECRET, previous: null },
+  publicUrl: "https://giraffes.test",
+  defaultCapMicro: 5_000_000 as MicroUsd,
+};
+
+export const INCLUDED_VARS = {
+  INCLUDED: "on",
+  INCLUDED_PROVIDER: "anthropic",
+  INCLUDED_MODEL: "claude-haiku-5-5",
+  INCLUDED_API_KEY: "sk-ant-ours-0123456789",
+} as const;
+
+export type ProviderStep =
+  | { readonly kind: "output"; readonly value: unknown; readonly usage?: { readonly input?: number; readonly output?: number } }
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "status"; readonly status: number; readonly retryAfter?: string; readonly body?: unknown }
+  | { readonly kind: "network" };
+
+export type FakeProvider = Fetch & {
+  readonly steps: ProviderStep[];
+  readonly seen: { readonly url: string; readonly headers: Headers; readonly body: Record<string, unknown> }[];
+};
+
+/** A provider's HTTP API behind a fake fetch, answering in the protocol each request's path names. */
+export function fakeProvider(steps: readonly ProviderStep[] = []): FakeProvider {
+  const queue = [...steps];
+  const seen: FakeProvider["seen"] = [];
+  const f = async (input: string, init?: RequestInit): Promise<Response> => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    seen.push({ url: input, headers: new Headers(init?.headers), body });
+    const step = queue.shift();
+    if (!step) throw new Error(`the provider got a request the test didn't script: ${input}`);
+    if (step.kind === "network") throw new TypeError("fetch failed");
+    if (step.kind === "status") {
+      return Response.json(step.body ?? { error: "scripted" }, { status: step.status, headers: step.retryAfter ? { "retry-after": step.retryAfter } : {} });
+    }
+    const text = step.kind === "text" ? step.text : JSON.stringify(step.value);
+    const input_tokens = step.kind === "output" ? (step.usage?.input ?? 1000) : 1000;
+    const output_tokens = step.kind === "output" ? (step.usage?.output ?? 100) : 100;
+    if (input.endsWith("/chat/completions")) {
+      return Response.json({ choices: [{ message: { content: text }, finish_reason: "stop" }], usage: { prompt_tokens: input_tokens, completion_tokens: output_tokens } });
+    }
+    return Response.json({ content: [{ type: "text", text }], stop_reason: "end_turn", usage: { input_tokens, output_tokens } });
+  };
+  return Object.assign(f, { steps: queue, seen });
+}
+
+/** Stores a sealed key in the person's DO, as a key entered on the page would be after its probe. */
+export async function giveKey(
+  agent: AgentKey,
+  k: { readonly provider?: ProviderId; readonly model?: string; readonly key?: string; readonly mode?: SchemaMode; readonly capMicro?: number; readonly backup?: boolean; readonly baseUrl?: string } = {},
+): Promise<void> {
+  const provider = k.provider ?? "opencode-go";
+  const p = PROVIDERS[provider];
+  const baseUrl = k.baseUrl ?? p.baseUrl ?? "https://llm.example.com/v1";
+  const key = SecretKey.from(k.key ?? "oc_sk_test_0123456789")!;
+  const sealed = await seal(TEST_KEY_SECRET, agent, { provider, baseUrl, key });
+  const stub = env.AGENT.get(env.AGENT.idFromName(agent));
+  await runInDurableObject(stub, (_agent, state) => {
+    const store = new AgentStore(state.storage);
+    const saved = store.saveKey(
+      { provider, baseUrl, model: k.model ?? p.defaultModel ?? "custom-model", auth: p.auth, mode: k.mode ?? "strict", sealed, hint: key.hint, capMicro: (k.capMicro ?? 5_000_000) as MicroUsd, connectedAt: 0 as EpochMs },
+      store.keyRevision(),
+      null,
+      [],
+      0 as EpochMs,
+    );
+    if (!saved) throw new Error("giveKey: the key wasn't saved");
+    if (k.backup !== undefined) store.setBackup(k.backup, 0 as EpochMs);
+  });
 }
 
 export type DeliveryStep =
@@ -138,6 +206,7 @@ export function scriptedChannel(steps: readonly DeliveryStep[] = []): ScriptedCh
 }
 
 export type DevChat = {
+  readonly agent: AgentKey;
   readonly model: ScriptedModel;
   readonly clock: FakeClock;
   readonly channel: ScriptedChannel;
@@ -162,7 +231,13 @@ let messageIds = 0;
 export async function devChat(
   user: string,
   opts: {
-    readonly model: ScriptedModel;
+    /** The dev lane's script; null gives the person no access of ours, so only a key or a box can answer. */
+    readonly model: ScriptedModel | null;
+    /** Where a person's own key and the included tier send their requests. */
+    readonly provider?: Fetch;
+    readonly keys?: KeysConfig;
+    /** Our included tier, served through `provider`; it replaces the dev lane. */
+    readonly included?: IncludedConfig;
     readonly at: string;
     readonly ledger?: MemoryLedger;
     readonly deliveries?: readonly DeliveryStep[];
@@ -183,13 +258,19 @@ export async function devChat(
   const box = opts.box ? { box: opts.box } : {};
   const billing = opts.billing ? { billing: opts.billing } : {};
   const admission = opts.admission ?? "open";
-  await runInDurableObject<Agent, void>(stub, (agent) => agent.withDeps({ model: opts.model, clock, ledger, channels, admission, ...box, ...billing }));
+  const wire = connect(opts.provider ?? fakeProvider());
+  const access = opts.model
+    ? { connect: scriptedConnect(opts.model, wire), included: opts.included ?? devLane(DEV_URL_SCRIPTED) }
+    : { connect: wire, included: opts.included ?? ({ on: false } as const) };
+  const keys = opts.keys ?? TEST_KEYS;
+  await runInDurableObject<Agent, void>(stub, (agent) => agent.withDeps({ ...access, keys, clock, ledger, channels, admission, ...box, ...billing }));
   const keyOf = (id: string) => (identity.channel === "line" ? eventKey.line(id) : eventKey.telegram(++messageIds));
   let seen = 0;
   const nextAlarm = () => runInDurableObject(stub, (_agent, state) => state.storage.getAlarm());
 
   const chat: DevChat = {
-    model: opts.model,
+    agent: personAgentKey(identity),
+    model: opts.model ?? scripted([]),
     clock,
     channel,
     async post(text, o = {}) {

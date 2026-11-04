@@ -17,11 +17,13 @@ import {
   type WakeupId,
   type WakeupKey,
 } from "../src/domain";
-import { priceOf, routeOf } from "../src/model/model";
+import { bytesOf, renderPrompt } from "../src/model/prompt";
+import { HAIKU_5_5 } from "../src/model/providers";
+import { OUTPUT_TOKENS, PROMPT_OVERHEAD_TOKENS, routeFor } from "../src/model/routes";
 import { NOTICES } from "../src/notices";
 import { admitUnasked, quietUntil } from "../src/policy/outreach";
 import { fireAt, isLate, nextAlarm, planFiring, wakeupOrigin, type PendingWakeup } from "../src/policy/schedule";
-import { costOf, decideReservation, estimate, PROMPT_OVERHEAD_TOKENS, SPEND } from "../src/policy/spend";
+import { costOf, estimate, fits } from "../src/policy/spend";
 import { fromLocal, nextLocalTime, parseLocalDateTime, parseTimeZone, toLocal } from "../src/policy/time";
 
 const NOTICE = NOTICES.en;
@@ -471,39 +473,35 @@ describe("lifecycle order", () => {
 });
 
 describe("spend", () => {
-  test("estimates and costs are whole micro-dollars, rounded up", () => {
-    const haiku = priceOf("claude-haiku-5-5");
-    expect(estimate("claude-haiku-5-5", 3_000, 1_200)).toBe(((3_000 + PROMPT_OVERHEAD_TOKENS) * haiku.cacheWritePerM + 1_200 * haiku.outputPerM) / 1_000_000);
-    expect(costOf("claude-haiku-5-5", { inputTokens: 1, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 })).toBe(1);
-    expect(costOf("claude-sonnet-5-5", { inputTokens: 1_000, outputTokens: 100, cacheWriteTokens: 1_000, cacheReadTokens: 10_000 })).toBe(2_000 + 1_000 + 2_500 + 2_000);
+  const haiku = routeFor({ kind: "key", provider: "anthropic", model: "claude-haiku-5-5" }, "turn");
+  const usage = (o: Partial<{ inputTokens: number; outputTokens: number; cacheWriteTokens: number; cacheReadTokens: number }>) => ({
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheWriteTokens: 0,
+    cacheReadTokens: 0,
+    ...o,
+  });
+
+  test("the estimate prices every prompt byte and the overhead at the dearer input rate, plus the full output budget", () => {
+    expect(estimate(haiku, 3_000)).toBe(Math.ceil(((3_000 + PROMPT_OVERHEAD_TOKENS) * HAIKU_5_5.cacheWritePerM + haiku.maxTokens * HAIKU_5_5.outputPerM) / 1_000_000));
+    expect(costOf(haiku, usage({ inputTokens: 1 }), null)).toBe(1);
   });
 
   test("Haiku prompts over 100K tokens are billed on the long-context rate card", () => {
-    expect(costOf("claude-haiku-5-5", { inputTokens: 100_000, outputTokens: 1_000, cacheWriteTokens: 0, cacheReadTokens: 0 })).toBe(10_000 + 500);
-    expect(costOf("claude-haiku-5-5", { inputTokens: 120_000, outputTokens: 1_000, cacheWriteTokens: 0, cacheReadTokens: 0 })).toBe(60_000 + 2_500);
-    expect(costOf("claude-haiku-5-5", { inputTokens: 1_000, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 100_000 })).toBe(500 + 5_000);
+    expect(costOf(haiku, usage({ inputTokens: 100_000, outputTokens: 1_000 }), null)).toBe(10_000 + 500);
+    expect(costOf(haiku, usage({ inputTokens: 120_000, outputTokens: 1_000 }), null)).toBe(60_000 + 2_500);
   });
 
-  test("the estimate for a long prompt covers its bill on the long-context card", () => {
-    const worst = costOf("claude-haiku-5-5", { inputTokens: 0, outputTokens: 1_000, cacheWriteTokens: 150_000, cacheReadTokens: 0 });
-    expect(estimate("claude-haiku-5-5", 150_000, 1_000)).toBeGreaterThanOrEqual(worst);
-  });
-
-  test("within the lease, a call is reserved locally", () => {
-    expect(decideReservation({ spent: usd(1), reserved: usd(0.1), leased: usd(1.5) }, usd(0.002), SPEND.userCapMicro)).toEqual({ kind: "reserve" });
-  });
-
-  test("the user cap refuses before asking for a lease", () => {
-    expect(decideReservation({ spent: usd(14.999), reserved: usd(0), leased: usd(15) }, usd(0.002), SPEND.userCapMicro)).toEqual({ kind: "refuse", scope: "user_cap" });
+  test("a cost the provider reported wins over the card, and a provider's fee is added to either", () => {
+    expect(costOf(haiku, usage({ inputTokens: 1_000_000 }), 42 as MicroUsd)).toBe(42);
+    const openrouter = routeFor({ kind: "key", provider: "openrouter", model: "anthropic/claude-haiku-5.5" }, "turn");
+    expect(costOf(openrouter, usage({}), 1_000 as MicroUsd)).toBe(1_055);
+    expect(estimate(openrouter, 3_000)).toBe(Math.ceil(estimate(haiku, 3_000) * 1.055));
   });
 
   test("open reservations count against the cap", () => {
-    expect(decideReservation({ spent: usd(14), reserved: usd(0.999), leased: usd(15) }, usd(0.002), SPEND.userCapMicro)).toEqual({ kind: "refuse", scope: "user_cap" });
-  });
-
-  test("a short lease asks for a chunk, capped by what the user cap leaves", () => {
-    expect(decideReservation({ spent: usd(1), reserved: usd(0), leased: usd(1) }, usd(0.002), SPEND.userCapMicro)).toEqual({ kind: "need_lease", chunk: SPEND.leaseChunkMicro });
-    expect(decideReservation({ spent: usd(14.6), reserved: usd(0), leased: usd(14.6) }, usd(0.002), SPEND.userCapMicro)).toEqual({ kind: "need_lease", chunk: usd(0.4) });
+    expect(fits({ spent: usd(4), reserved: usd(0.5) }, usd(0.5), usd(5))).toBe(true);
+    expect(fits({ spent: usd(4), reserved: usd(0.999) }, usd(0.002), usd(5))).toBe(false);
   });
 });
 
@@ -532,14 +530,14 @@ describe("output budgets", () => {
     };
 
     expect(TurnOutputSchema.safeParse(output).success).toBe(true);
-    expect(bytes(output)).toBeLessThanOrEqual(routeOf("turn").maxTokens);
+    expect(bytes(output)).toBeLessThanOrEqual(OUTPUT_TOKENS.turn);
   });
 
   test("the longest summary the compaction schema accepts fits the compaction's output budget", () => {
     const output = { summary: mostBytes(CompactionOutputSchema.shape.summary.maxLength ?? 0) };
 
     expect(CompactionOutputSchema.safeParse(output).success).toBe(true);
-    expect(bytes(output)).toBeLessThanOrEqual(routeOf("compaction").maxTokens);
+    expect(bytes(output)).toBeLessThanOrEqual(OUTPUT_TOKENS.compaction);
   });
 });
 
@@ -556,8 +554,20 @@ describe("alarm and compaction", () => {
   test("compaction folds the oldest turns, keeping the newest 30, once there are more than 60", () => {
     const oldestTurns = Array.from({ length: 30 }, (_, i) => ({ seq: i + 1, role: "person" as const, text: `t${i + 1}`, at: NOW }));
     const input = { summary: "", throughSeq: 0, oldestTurns, noteCount: 0, oldestNotes: [] };
-    expect(planCompaction({ ...input, turnCount: 60 })).toBeNull();
-    expect(planCompaction({ ...input, turnCount: 61 })?.foldThroughSeq).toBe(30);
+    expect(planCompaction({ ...input, turnCount: 60 }, Infinity)).toBeNull();
+    expect(planCompaction({ ...input, turnCount: 61 }, Infinity)?.foldThroughSeq).toBe(30);
+  });
+
+  test("a compaction page folds only as many turns as its budget holds, at least one, so the model sees all it folds", () => {
+    const long = "ก".repeat(5_000);
+    const oldestTurns = Array.from({ length: 30 }, (_, i) => ({ seq: i + 1, role: "person" as const, text: `${i + 1} ${long}`, at: NOW }));
+    const plan = planCompaction({ summary: "", throughSeq: 0, oldestTurns, turnCount: 61, noteCount: 0, oldestNotes: [] }, 24_000);
+    const text = renderPrompt(plan!.prompt);
+    expect(bytesOf(text)).toBeLessThanOrEqual(24_000);
+    expect(plan?.foldThroughSeq).toBeGreaterThanOrEqual(1);
+    expect(text).toContain(`Person: ${plan?.foldThroughSeq} `);
+    expect(text).not.toContain(`Person: ${(plan?.foldThroughSeq ?? 0) + 1} `);
+    expect(planCompaction({ summary: "", throughSeq: 0, oldestTurns, turnCount: 61, noteCount: 0, oldestNotes: [] }, 10)?.foldThroughSeq).toBe(1);
   });
 
   test("the turn prompt asks only for what a model without tools can do", () => {

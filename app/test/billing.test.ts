@@ -8,7 +8,7 @@ import { formBody, STRIPE_EVENT_TYPES } from "../src/billing/wire";
 import { boxMessage } from "../src/box/machine";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs, MicroUsd } from "../src/domain";
-import { priceOf, routeOf } from "../src/model/model";
+import { HAIKU_5_5 } from "../src/model/providers";
 import { NOTICES } from "../src/notices";
 import {
   billingOn,
@@ -16,6 +16,8 @@ import {
   checkoutEvent,
   devChat,
   fakeBox,
+  fakeProvider,
+  INCLUDED_VARS,
   local,
   postStripe,
   quiet,
@@ -48,7 +50,7 @@ async function pay(kit: BillingKit, c: DevChat, user: string, plan: "standard" |
 }
 
 describe("plan rules", () => {
-  const rules: PlanRules = { trialDays: 14, plusSeats: 3, plusMaxSeats: 6, aiCapMicro: 1_000_000 as MicroUsd };
+  const rules: PlanRules = { trialDays: 14, plusSeats: 3, plusMaxSeats: 6 };
   const now = local("2099-11-04T10:00");
   const later = (days: number) => (now + days * 86_400_000) as EpochMs;
   const id = "sub_1" as SubscriptionId;
@@ -77,7 +79,7 @@ describe("configuration", () => {
   const load = (vars: Record<string, string>) => loadConfig({ MODEL_BACKEND: "scripted", DEV_MODE: "1", ...vars } as unknown as Env).billing;
 
   test("BILLING defaults to off with the default rules", () => {
-    expect(load({})).toEqual({ on: false, rules: { trialDays: 14, plusSeats: 3, plusMaxSeats: 6, aiCapMicro: 1_000_000 } });
+    expect(load({})).toEqual({ on: false, rules: { trialDays: 14, plusSeats: 3, plusMaxSeats: 6 } });
   });
 
   test.each(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_STANDARD", "STRIPE_PRICE_PLUS", "STRIPE_PRICE_SEAT", "STRIPE_PRICE_AI", "STRIPE_PORTAL_CONFIGURATION", "PUBLIC_URL"])(
@@ -90,8 +92,7 @@ describe("configuration", () => {
   );
 
   test("bad rule values fail at load", () => {
-    expect(load({ AI_CAP_USD: "2.5", TRIAL_DAYS: "30" }).rules).toMatchObject({ aiCapMicro: 2_500_000, trialDays: 30 });
-    expect(() => load({ AI_CAP_USD: "one" })).toThrow("AI_CAP_USD");
+    expect(load({ TRIAL_DAYS: "30" }).rules).toMatchObject({ trialDays: 30 });
     expect(() => load({ PLUS_SEATS: "4", PLUS_MAX_SEATS: "3" })).toThrow("PLUS_MAX_SEATS");
     expect(() => load({ ...STRIPE_VARS, PUBLIC_URL: "giraffes.test" })).toThrow("PUBLIC_URL");
     expect(() => load({ BILLING: "yes" })).toThrow("BILLING");
@@ -822,20 +823,41 @@ describe("the ai plan", () => {
     expect(box.parses).toEqual([]);
   });
 
-  test("AI_CAP_USD is the person's monthly API cap", async () => {
-    const kit = billingOn({ AI_CAP_USD: "1" });
-    const spendsTheCap = Math.ceil((1_000_000 * 1_000_000) / priceOf(routeOf("turn").model).inputPerM);
-    const model = scripted([turn({ actions: [{ type: "send", text: "Sure." }], usage: { inputTokens: spendsTheCap } })]);
-    const c = await devChat("wes", { model, at: "2099-11-04T10:00", billing: kit.deps });
+  test("with INCLUDED on, the ai plan runs on our key up to INCLUDED_CAP_USD, and the trial gets none of it", async () => {
+    const kit = billingOn();
+    const included = loadConfig({ MODEL_BACKEND: "scripted", DEV_MODE: "1", ...INCLUDED_VARS, INCLUDED_CAP_USD: "1" } as unknown as Env).included;
+    const spendsTheCap = Math.ceil((1_000_000 * 1_000_000) / HAIKU_5_5.inputPerM);
+    const provider = fakeProvider([{ kind: "output", value: { actions: [{ type: "send", text: "Sure." }], tasks: [], about: "" }, usage: { input: spendsTheCap } }]);
+    const c = await devChat("wes", { model: null, provider, included, at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("hello");
+    expect(await c.received()).toEqual([NOTICE.noAccess({ box: false, key: true, included: true })]);
+
     await pay(kit, c, "wes", "ai");
     await c.received();
-
     await c.say("hello");
     await c.say("again");
 
-    expect(await c.received()).toEqual(["Sure.", NOTICE.monthlyLimit]);
-    expect((await c.snapshot()).spendThisMonthMicro).toBeGreaterThanOrEqual(1_000_000);
-    expect(model.calls).toHaveLength(1);
+    expect(await c.received()).toEqual(["Sure.", NOTICE.includedCapReached]);
+    expect(provider.seen.map((s) => s.headers.get("x-api-key"))).toEqual([INCLUDED_VARS.INCLUDED_API_KEY]);
+    expect((await c.snapshot()).access.spentMicro.included).toBeGreaterThanOrEqual(1_000_000);
+    expect(c.logs("model_call").map((l) => [l.backend, l.status])).toEqual([
+      ["included", "settled"],
+      ["included", "refused_user_cap"],
+    ]);
+  });
+
+  test("our included key's provider out of credit is our ceiling: the person hears the monthly limit, and no key of theirs is touched", async () => {
+    const kit = billingOn();
+    const included = loadConfig({ MODEL_BACKEND: "scripted", DEV_MODE: "1", ...INCLUDED_VARS } as unknown as Env).included;
+    const provider = fakeProvider([{ kind: "status", status: 402 }]);
+    const c = await devChat("xan", { model: null, provider, included, at: "2099-11-04T10:00", billing: kit.deps });
+    await pay(kit, c, "xan", "ai");
+    await c.received();
+
+    await c.say("hello");
+
+    expect(await c.received()).toEqual([NOTICE.monthlyLimit]);
+    expect(c.logs("model_call").map((l) => [l.backend, l.status, l.costMicro])).toEqual([["included", "provider_refused", 0]]);
   });
 });
 

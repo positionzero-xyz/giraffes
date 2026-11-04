@@ -1,40 +1,21 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
-import { COHORTS, HALVES, TASK_KINDS, type TaskRef, type AgentKey, type EpochMs, type MicroUsd, type UtcMonth } from "../src/domain";
+import { COHORTS, HALVES, TASK_KINDS, type TaskRef, type AgentKey, type EpochMs, type MicroUsd } from "../src/domain";
 import type { BoxName } from "../src/box/names";
 import { BOX_HOST_KINDS } from "../src/box/host";
 import { ACTION_REJECTIONS, BACKENDS, d1Ledger, MODEL_CALL_STATUSES, TURN_OUTCOMES, UNASKED_STATUSES, type LogRow } from "../src/ledger/ledger";
-import { PURPOSES } from "../src/model/model";
+import { PURPOSES } from "../src/model/routes";
 import { UNASKED_PURPOSES } from "../src/agent/tasks";
 import { ADMISSION_CHANGES } from "../src/agent/admission";
 import { PAID_PLANS, SUBSCRIPTION_STATUSES } from "../src/billing/plan";
 
-const month = "2099-11" as UtcMonth;
 const at = 4_100_000_000_000 as EpochMs;
 const micro = (n: number) => n as MicroUsd;
 const agent = (name: string) => `p:dev:${name}` as AgentKey;
 
-describe("global ceiling leases", () => {
-  test("leases are granted until the ceiling, and a retried seq gets its original answer", async () => {
-    const ledger = d1Ledger(env.LEDGER, micro(1_000_000));
-
-    expect(await ledger.requestLease({ agent: agent("a"), month, seq: 1, micro: micro(600_000), at })).toEqual({ kind: "granted", micro: 600_000 });
-    expect(await ledger.requestLease({ agent: agent("b"), month, seq: 1, micro: micro(500_000), at })).toEqual({ kind: "ceiling" });
-    expect(await ledger.requestLease({ agent: agent("b"), month, seq: 1, micro: micro(400_000), at })).toEqual({ kind: "granted", micro: 400_000 });
-    expect(await ledger.requestLease({ agent: agent("a"), month, seq: 1, micro: micro(500_000), at })).toEqual({ kind: "granted", micro: 600_000 });
-    expect(await ledger.requestLease({ agent: agent("a"), month: "2099-12" as UtcMonth, seq: 1, micro: micro(600_000), at })).toEqual({
-      kind: "granted",
-      micro: 600_000,
-    });
-
-    const total = await env.LEDGER.prepare("SELECT SUM(micro) AS s FROM spend_lease WHERE month = ?").bind(month).first<{ s: number }>();
-    expect(total?.s).toBe(1_000_000);
-  });
-});
-
 describe("box inventory", () => {
   test("boxes are recorded until MAX_BOXES are live, and a retried claim for a recorded box is granted", async () => {
-    const ledger = d1Ledger(env.LEDGER, micro(1_000_000));
+    const ledger = d1Ledger(env.LEDGER);
     const claim = (who: string) => ledger.claimBox({ agent: agent(who), name: `gbox-${who}` as BoxName, host: "fly", at, max: 2 });
 
     expect(await claim("a")).toBe("granted");
@@ -50,7 +31,7 @@ describe("box inventory", () => {
   });
 
   test("a deleted box frees its slot", async () => {
-    const ledger = d1Ledger(env.LEDGER, micro(1_000_000));
+    const ledger = d1Ledger(env.LEDGER);
     const claim = (who: string) => ledger.claimBox({ agent: agent(who), name: `gbox-${who}` as BoxName, host: "fly", at, max: 1 });
     expect(await claim("a")).toBe("granted");
     expect(await claim("b")).toBe("full");
@@ -61,7 +42,7 @@ describe("box inventory", () => {
   });
 
   test("a released box frees its slot, a second release changes nothing, and its owner can claim again", async () => {
-    const ledger = d1Ledger(env.LEDGER, micro(1_000_000));
+    const ledger = d1Ledger(env.LEDGER);
     const claim = (who: string) => ledger.claimBox({ agent: agent(who), name: `gbox-${who}` as BoxName, host: "fly", at, max: 1 });
     expect(await claim("a")).toBe("granted");
 
@@ -79,7 +60,7 @@ describe("box inventory", () => {
 
 describe("log shipping", () => {
   test("re-shipping the same rows changes nothing", async () => {
-    const ledger = d1Ledger(env.LEDGER, micro(1_000_000));
+    const ledger = d1Ledger(env.LEDGER);
     const rows: LogRow[] = [
       { stream: "agent", id: "agent:p:dev:a", agent: agent("a"), channel: "dev", firstSeenAt: at },
       {
@@ -117,8 +98,8 @@ describe("log shipping", () => {
         id: "r-1",
         agent: agent("a"),
         purpose: "turn",
-        model: "claude-haiku-5-5",
-        backend: "api",
+        model: "opencode-go:claude-haiku-5-5",
+        backend: "key",
         status: "settled",
         estimateMicro: micro(900),
         costMicro: micro(700),
@@ -144,14 +125,14 @@ describe("log shipping", () => {
   });
 
   test("a row the ledger refuses fails the flush instead of vanishing", async () => {
-    const ledger = d1Ledger(env.LEDGER, micro(1_000_000));
+    const ledger = d1Ledger(env.LEDGER);
     const refused = {
       stream: "model_call",
       id: "r-refused",
       agent: agent("a"),
       purpose: "turn",
-      model: "claude-haiku-5-5",
-      backend: "api",
+      model: "opencode-go:claude-haiku-5-5",
+      backend: "key",
       status: "not_a_status",
       estimateMicro: micro(900),
       costMicro: micro(700),
@@ -183,7 +164,7 @@ describe("schema", () => {
       "enrollment.half": HALVES,
       "admission_log.change": ADMISSION_CHANGES,
       "turn_log.outcome": TURN_OUTCOMES,
-      "model_call.purpose": PURPOSES,
+      "model_call.purpose": [...PURPOSES, "probe", "planning"],
       "model_call.status": MODEL_CALL_STATUSES,
       "model_call.backend": BACKENDS,
       "boxes.host": BOX_HOST_KINDS,

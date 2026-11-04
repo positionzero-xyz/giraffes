@@ -203,7 +203,8 @@ export async function readTicket(secrets: KeySecrets, token: string, now: EpochM
 export const KEY_REMOVED = "<a key, removed>";
 
 const PREFIXED = /(?<![A-Za-z0-9_-])(?:sk-ant-|sk-or-|oc_sk_|sk-)[A-Za-z0-9_-]{16,}/g;
-const LONG_TOKEN = /(?<![A-Za-z0-9_\-/=.:@])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_\-/=.:@])/g;
+/** Not after a slash, dot or @, so a link's path, a host name or an address is left alone; after = or : it counts. */
+const LONG_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_\-/=.:@])/g;
 
 function entropyBits(s: string): number {
   const counts = new Map<string, number>();
@@ -213,22 +214,17 @@ function entropyBits(s: string): number {
   return h;
 }
 
-const keyLike = (t: string) => /[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) && entropyBits(t) >= 4;
+/** Mixed case and digits with some entropy, or 48 or more lowercase hex characters (a Git SHA is 40). */
+const keyLike = (t: string) => (/[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) && entropyBits(t) >= 3.5) || /^[0-9a-f]{48,}$/.test(t);
 
 /**
- * Pure. Removes anything that looks like an API key: a known key prefix, or a long, high-entropy token. Words in a
- * link are left alone, since a link's long token is usually an id, not a secret.
+ * Pure. Removes anything that looks like an API key: a known key prefix anywhere, links and query strings included,
+ * or a long token that looks random, unless it sits in a link's path or a host name, where it is usually an id.
  */
 export function redactSecrets(text: string): { readonly text: string; readonly found: boolean } {
   let found = false;
   const out = text
-    .split(/(\s+)/)
-    .map((word) => {
-      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(word)) return word;
-      return word
-        .replace(PREFIXED, (m) => (/\d/.test(m) ? ((found = true), KEY_REMOVED) : m))
-        .replace(LONG_TOKEN, (m) => (keyLike(m) ? ((found = true), KEY_REMOVED) : m));
-    })
-    .join("");
+    .replace(PREFIXED, () => ((found = true), KEY_REMOVED))
+    .replace(LONG_TOKEN, (m) => (keyLike(m) ? ((found = true), KEY_REMOVED) : m));
   return { text: out, found };
 }

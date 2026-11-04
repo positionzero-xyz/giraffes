@@ -38,7 +38,8 @@ connect one. `POST /dev/script` with `{"user": "<name>", "turns": [<turn output>
 [<summary output>...]}` gives that person a dev lane whose next model calls return these, in order, each
 checked against the real schema. It lasts until the Worker reloads. To try the key page locally, also set
 `KEY_SECRET` (32 or more characters) and `PUBLIC_URL=http://127.0.0.1:8787`; with `DEV_MODE=1` a custom
-provider's base URL may be a loopback `http` stub. Only a dev backend may run without `KEY_SECRET`.
+provider's base URL may be a loopback `http` stub, and so may a preset's, which then runs on that preset's own
+route and prompt budget against the stub. Only a dev backend may run without `KEY_SECRET`.
 
 ## Evaluate a model
 

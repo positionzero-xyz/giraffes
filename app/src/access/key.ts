@@ -135,7 +135,7 @@ export type DraftError = Extract<KeyPageError, "unknown_provider" | "bad_url" | 
 const MODEL_ID = /^[\x21-\x7e]{1,200}$/;
 const IP_HOST = /^(\d{1,3}(\.\d{1,3}){3}|\[[0-9a-f:.]+\])$/i;
 
-function baseUrlOf(raw: string, devMode: boolean): string | null {
+function baseUrlOf(raw: string, allow: "public" | "dev" | "loopback"): string | null {
   let url: URL;
   try {
     url = new URL(raw.trim());
@@ -143,16 +143,21 @@ function baseUrlOf(raw: string, devMode: boolean): string | null {
     return null;
   }
   const local = url.hostname === "localhost" || url.hostname.endsWith(".localhost") || IP_HOST.test(url.hostname);
-  const ok = devMode ? url.protocol === "https:" || (url.protocol === "http:" && local) : url.protocol === "https:" && !local;
+  const https = url.protocol === "https:";
+  const ok = allow === "public" ? https && !local : allow === "dev" ? https || (url.protocol === "http:" && local) : local && (https || url.protocol === "http:");
   if (!ok || url.username || url.password || url.search || url.hash) return null;
   return url.toString().replace(/\/+$/, "");
 }
 
-/** Pure. A custom base URL must be https and not a local or IP-literal host; DEV_MODE also allows a loopback http stub. */
+/**
+ * Pure. A custom base URL must be https and not a local or IP-literal host; DEV_MODE also allows a loopback http stub,
+ * and lets a preset point at one, so a dev run exercises that preset's own route without calling the provider.
+ */
 export function draftKey(f: KeyFields, opts: { readonly devMode: boolean }): { readonly ok: true; readonly value: KeyDraft } | { readonly ok: false; readonly error: DraftError } {
   if (!isProviderId(f.provider)) return { ok: false, error: "unknown_provider" };
   const p = PROVIDERS[f.provider];
-  const baseUrl = p.baseUrl ?? baseUrlOf(f.baseUrl, opts.devMode);
+  const stub = opts.devMode && p.baseUrl !== null && f.baseUrl.trim() !== "";
+  const baseUrl = stub ? baseUrlOf(f.baseUrl, "loopback") : (p.baseUrl ?? baseUrlOf(f.baseUrl, opts.devMode ? "dev" : "public"));
   if (baseUrl === null) return { ok: false, error: "bad_url" };
   const model = f.model.trim() || p.defaultModel || "";
   if (!MODEL_ID.test(model)) return { ok: false, error: "no_model" };

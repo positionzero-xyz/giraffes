@@ -39,7 +39,7 @@ The person texts "remind me tomorrow 9am to call the clinic".
 2. The drain recovers anything a dead instance left (rows in `processing` or `sending`, open reservations), then fires due wake-ups into the inbox, unless a message, follow or block is still waiting there.
 3. It claims a batch, starting with the oldest unfinished event, and claims nothing while that event waits out a model backoff. If that event is a message, the consecutive ready messages behind it join, up to 10 in all.
 4. `renderUser` builds the prompt after the byte-stable system prompt: local now in the person's zone, the memory summary and newest 50 notes, pending wake-ups with their keys, unasked messages left today, every turn not yet folded into the summary (up to 90), and the batch.
-5. `#callModel("turn", …)` reserves the estimate against the person's month in local SQLite, under the monthly cap their plan sets, asks D1 for a lease chunk only when the local lease is short, then calls the model once. A lapsed person gets no model call: the turn ends with one notice a day instead. The model returns:
+5. `ModelAccess.call({ purpose: "turn", … })` resolves the person's lanes (their box, then their own key, see call site 9) and, for a metered lane, reserves the estimate against that scope's month in local SQLite before it calls the model once. A lapsed person gets no model call: the turn ends with one notice a day instead. So does someone with nothing connected, whose notice offers `/claude` and `/key`. The model returns:
    ```json
    { "actions": [
        { "type": "schedule_wakeup", "key": "call-clinic", "at": "2026-11-05T09:00", "note": "Remind: call the clinic", "asked": true, "task": "" },
@@ -48,7 +48,7 @@ The person texts "remind me tomorrow 9am to call the clinic".
      "about": "" }
    ```
 6. `planTurn(output, view)` is pure. A `set_locale` action (an IANA zone and `th` or `en`) is applied first, so the turn's times are read in the new zone and its corrections are in the new language. It cuts over-long texts to their caps, applies cancels before schedules, converts the local time to an instant, admits or rejects each action, and returns one `TurnCommit`. Because a message started the turn and `asked` is true, the wake-up's origin is `person`. A rejected action adds a row to `action_rejection`. It also adds a code-written correction to any turn that sends text, and to any reply to a person even when the model sent none, unless it is a wake-up the agent set for itself.
-7. One transaction appends the person's text and the agent's text to `turn`, inserts the wake-up, inserts one outbox row (`intent = 'reply'`, both texts, the reply handle), marks the inbox row `done`, settles the reservation at the real cost, and appends log rows to `log_outbox`.
+7. The call settled its reservation at the real cost, with its `model_call` row, when the model answered. One transaction then appends the person's text and the agent's text to `turn`, inserts the wake-up, inserts one outbox row (`intent = 'reply'`, both texts, the reply handle), marks the inbox row `done`, and appends log rows to `log_outbox`.
 8. Delivery uses the free LINE reply API while the token is fresh and the row is not in doubt. Otherwise it pushes with `X-Line-Retry-Key = outbox.id`. An unasked LINE message is dropped instead once this month's latest quota reading is at 90% or more.
 9. After the batches, the drain delivers any deferred rows, flushes `log_outbox` to D1, compacts one page if due, prunes, and re-arms.
 
@@ -115,7 +115,7 @@ With `BOX_HOST` set to `fly` or `static`, the person sends `/claude`. `BOX.md` h
 1. The message is claimed as a batch of its own and never reaches the model. With no box, the agent claims a slot in D1's `boxes`, inserts the `box` row in `provisioning`, and replies that it is setting up. Past `MAX_BOXES` it says it can't connect another plan.
 2. The drain's box phase runs the host's `ensure` (Fly app, IPs, volume, machine) and then `GET /health` with the box token. When the box answers, the row becomes `signed_out` and the outbox gets `https://<box>/signin#t=<ticket>`, valid for 30 minutes.
 3. The drain polls `/health` every 30 s for 30 minutes. When `signedIn` turns true, the row becomes `signed_in` and the person is told.
-4. From then on, while the plan includes the box, `#callModel` sends each turn to the box's `/parse` first. No spend is reserved, and `model_call` logs it with `backend = 'box'` and cost 0.
+4. From then on, while the plan includes the box, `ModelAccess` sends each turn and compaction to the box's `/parse` first. No spend is reserved, and `model_call` logs it with `backend = 'box'` and cost 0. A box that can't answer falls back to the person's own key only if they said yes when asked.
 
 ```ts
 test("a signed-in person's turn runs on their box with their token, reserves no spend, and is logged as backend 'box'", async () => {
@@ -141,7 +141,7 @@ With `BILLING=on` and `ADMISSION=open` (`BOX.md`, "Plans and billing", has the c
 1. The command runs without the model. It reads the person's standing from D1, says the plan and the days left, expires the Checkout sessions an earlier `/plan` handed out, and adds one new Stripe Checkout link per plan, created with the idempotency key `<agent key>|<message key>|<plan>`. A person who already pays gets a customer portal link instead.
 2. The person pays. Stripe posts `checkout.session.completed` and `customer.subscription.created` to `/webhook/stripe`, in either order. The Worker checks the signature, reads only the subscription id and the owner from each, and calls the owner's `Agent.billingEvent`.
 3. The DO handles its events one at a time and skips an event id it has handled. Otherwise it reads the subscription from Stripe, stores that state in D1, refreshes the owner's projection and every seat holder's DO, checks for a second paying subscription, and records the event id last. A person whose plan moved gets one message, such as "Thanks. Your Standard plan is active."
-4. Every model turn from then on reads the plan from D1, and `planAllowsBox` and the plan's API cap decide the turn's path.
+4. Every model turn from then on reads the plan from D1, and `accessOf` decides the turn's lanes from it: `planAllowsBox` for the box, and the included plan for our quota while `INCLUDED=on`.
 
 ```ts
 test("a payment after the trial lapsed is announced and the model answers again", async () => {
@@ -191,6 +191,43 @@ test("a row admitted on an earlier day is admitted again against the day it goes
 	expect(admitUnasked({ ...input, admitted, now: at("2026-11-05T08:00+07:00"), sentToday: 3 })).toEqual({ verdict: "drop", reason: "budget" });
 });
 ```
+
+## Call site 9: a person adds their own API key
+
+With `KEY_SECRET` and `PUBLIC_URL` set, the person sends `/key`.
+
+1. The command runs without the model. The DO issues a ticket, keeps only its nonce's hash and the current access revision in `key_ticket`, and replies with `PUBLIC_URL/key#t=<ticket>&l=<language>`, valid for 15 minutes. The history keeps `<key link>`.
+2. The page (`GET /key`, static, `no-store`, no referrer) reads the ticket from the fragment. The person picks a provider, which fills in the model, pastes the key and taps **Connect**.
+3. `POST /key` checks the ticket's MAC and expiry in the Worker, then calls the person's DO, `connectKey(nonceHash, fields)`. `draftKey` checks the form without using the ticket. The ticket moves to `validating`, `ModelAccess.probe` sends one tiny call charged to the person's own spend, and the key is sealed and saved compare-and-set on the revision, with "Connected: OpenCode Go (claude-haiku-5-5)." in the outbox. A repeat submission gets the stored outcome.
+4. The next message runs on the key: `opencode-go:claude-haiku-5-5` on Go's Anthropic path, fitted to that route's budget, reserved against the person's `byok` month, logged with `backend = 'key'`.
+
+```ts
+test("a turn runs on their OpenCode Go key, is reserved and charged to their own spend, and the key appears nowhere in clear", async () => {
+	const provider = fakeProvider([reply("Hi from your key.")]);
+	const c = await devChat("bea", { model: null, provider, at: "2099-11-04T10:00" });
+	await giveKey(c.agent, { key: KEY });
+
+	await c.say("hello");
+
+	expect(await c.received()).toEqual(["Hi from your key."]);
+	expect(c.logs("model_call").map((l) => [l.backend, l.model, l.status])).toEqual([["key", "opencode-go:claude-haiku-5-5", "settled"]]);
+	expect(await doDump(c.agent)).not.toContain(KEY);
+});
+```
+
+`/key` later shows the key, this month's spend against its limit and a replacement link; `/key cap <dollars>`, `/key remove` and `/key backup on|off` change it. With a Claude plan connected too, the person is asked once, with a button, whether the key may back the plan up. A key pasted into the chat never reaches the inbox as written: `enqueue` replaces it with `<a key, removed>`, and code answers with a fresh link and advice to revoke it.
+
+## Call site 10: a group's call runs on its owner's access
+
+Groups arrive in week 3. The seam exists now: a group DO asks its owner's DO to serve the call, naming the ownership version it was told.
+
+```ts
+const owner = env.AGENT.get(env.AGENT.idFromName(group.owner));
+const served = await owner.serve({ group: group.key, ownershipVersion, purpose: "turn", system: GROUP_SYSTEM, prompt: renderGroup(view) });
+// { kind: "not_owner" } unless the owner's DO recorded this group at that version; otherwise the same Served union.
+```
+
+The owner's key, cap and fault notices stay with the owner's DO.
 
 ## Querying across users
 

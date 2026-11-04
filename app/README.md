@@ -13,8 +13,8 @@ npm test
 ```
 
 Tests run inside the Workers runtime (`@cloudflare/vitest-pool-workers`) against the real Worker route,
-Durable Object and a local D1, with a scripted model, a fake clock and fixed channel fixtures. Nothing
-reaches the network.
+Durable Object and a local D1, with a scripted model, fake providers behind a fake fetch, a fake clock and
+fixed channel fixtures. Nothing reaches the network.
 
 ## Run locally
 
@@ -32,10 +32,29 @@ npm run dev                           # terminal 2: wrangler dev on http://local
 Open http://localhost:8787/dev, pick a user name and chat. Send `/follow` or `/block` to exercise
 those events. The side panel shows each delivery's intent and status and the pending wake-ups.
 
-With `MODEL_BACKEND=scripted` instead, no model runs, and `POST /dev/script` with
-`{"user": "<name>", "turns": [<turn output>...], "compaction": [<summary output>...]}` sets what that
-person's next model calls return, in order, each checked against the real schema. It lasts until the
-Worker reloads.
+The bridge is a dev lane every dev person shares, behind `DEV_MODE=1`. With `MODEL_BACKEND=scripted`
+instead, no model runs and a dev person has no access at all, so they get the code-written offer to
+connect one. `POST /dev/script` with `{"user": "<name>", "turns": [<turn output>...], "compaction":
+[<summary output>...]}` gives that person a dev lane whose next model calls return these, in order, each
+checked against the real schema. It lasts until the Worker reloads. To try the key page locally, also set
+`KEY_SECRET` (32 or more characters) and `PUBLIC_URL=http://127.0.0.1:8787`; with `DEV_MODE=1` a custom
+provider's base URL may be a loopback `http` stub.
+
+## Evaluate a model
+
+`scripts/eval.ts` replays the fixtures in `eval/fixtures` through any route with the Worker's own adapters,
+prompt and `planTurn`, and reports schema validity, rule checks and cost per turn. Without `--yes` it
+prints the plan and an upper bound on the cost:
+
+```sh
+OPENROUTER_API_KEY=sk-or-... node scripts/eval.ts --yes \
+  --routes openrouter:anthropic/claude-haiku-5.5,deepinfra:deepseek-ai/DeepSeek-V4-Flash-0731 \
+  --repeat 3 --max-usd 2 --gate valid=0.98,checks=0.9,month_usd=0.6
+```
+
+Keys come from `<PROVIDER>_API_KEY` (`OPENCODE_GO_API_KEY`, `DEEPINFRA_API_KEY`, ...), and a custom
+provider also needs `<PROVIDER>_BASE_URL`. Each row lands in `eval/out/<time>.json`. Costs are list
+price plus the provider's fee from our price cards, not an invoice.
 
 ## Deploy
 
@@ -45,7 +64,11 @@ Worker reloads.
    npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
    ```
 2. Set the secrets with `npx wrangler secret put <NAME>`:
-   - `ANTHROPIC_API_KEY` (required; the deployed backend is `anthropic`)
+   - `KEY_SECRET` (32 or more random characters) and `PUBLIC_URL` (the Worker's https URL), which turn on
+     `/key` and the key page. Every saved key is sealed under `KEY_SECRET`; to rotate it, set
+     `KEY_SECRET_PREVIOUS` to the old value, and each key is resealed on its next use. Changing it without
+     that makes every key unreadable, and each person is told once to enter theirs again.
+     `OWN_KEY_CAP_USD` (default 5) is the monthly limit a new key starts with.
    - `LINE_CHANNEL_SECRET` and `LINE_CHANNEL_ACCESS_TOKEN`
    - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`
 
@@ -71,6 +94,15 @@ Worker reloads.
      node -e 'console.log(require("crypto").createHmac("sha256", process.env.BOX_SECRET).update("box:gbox-static").digest("base64url"))'
      ```
 
+   We hold no model key. `MODEL_BACKEND` is `live` (the default): each turn runs on the person's own
+   access, their box first, then their own key if they have no box or said it may back the box up. With
+   neither they get a code-written offer to connect one, once a day. `MODEL_BACKEND=anthropic` was removed
+   and fails at load. Our own quota for a paid plan is off unless `INCLUDED=on`, which needs
+   `INCLUDED_PROVIDER` (a preset with a fixed base URL), `INCLUDED_MODEL` (one of its priced models),
+   `INCLUDED_API_KEY` (set a hard monthly spend limit on that key at the provider; it is the only global
+   ceiling) and, with `BILLING=on`, `STRIPE_PRICE_INCLUDED`. `INCLUDED_CAP_USD` (default 1) caps each
+   person. It serves only people on the included plan who have no access of their own.
+
    Before turning on `fly`, check the account with a throwaway box. It creates billable resources for a
    few minutes and deletes them:
    ```sh
@@ -92,18 +124,18 @@ Worker reloads.
    - `BILLING=off` (the default): nobody pays, nobody lapses and no trial clock runs. `/plan` says it is
      the free beta.
    - `BILLING=on` needs `ADMISSION=open`, the secrets `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`, and the vars
-     `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`, `STRIPE_PRICE_AI`,
+     `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`,
      `STRIPE_PORTAL_CONFIGURATION` and `PUBLIC_URL` (the Worker's https URL; Checkout and the billing
      portal send people back to `PUBLIC_URL/billing/done`). Optional vars: `TRIAL_DAYS` (default 14,
      counted from a person's first message with billing on, so people from the beta get a full trial
-     too), `PLUS_SEATS` (default 3 people,
-     the owner included), `PLUS_MAX_SEATS` (default 6) and `AI_CAP_USD` (the AI plan's monthly model
-     cost cap, default 1).
+     too), `PLUS_SEATS` (default 3 people, the owner included) and `PLUS_MAX_SEATS` (default 6). `/plan`
+     sells the included plan only while `INCLUDED=on`.
 
    Create the Stripe side with a test key first. It makes the products, THB monthly prices, the customer
    portal configuration and the webhook endpoint for `PUBLIC_URL/webhook/stripe`, and prints the values
-   above. Run it again and it creates nothing. Amounts are satang flags (`--standard 29900 --plus 69900 --seat 19900 --ai 17900`
-   are the defaults), and a live key also needs `--live`:
+   above. Run it again and it creates nothing. Amounts are satang flags (`--standard 29900 --plus 69900 --seat 19900`
+   are the defaults). `--with-included` also makes the included plan's product and price (`--included 17900`
+   sets its amount), and a live key also needs `--live`:
    ```sh
    STRIPE_SECRET_KEY=sk_test_... PUBLIC_URL=https://<worker> node scripts/stripe-setup.ts --yes
    ```
@@ -124,6 +156,22 @@ npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_s
 Safety incidents and survey answers are operator rows in `safety_incident` and `survey_response`.
 
 ### Update an existing ledger
+
+Per-person model access adds the backends `key` and `included`, the purpose `probe`, the status
+`provider_refused` and the turn outcome `no_access`, and renames the plan `ai` to `included`. Old CHECKs on
+`model_call`, `turn_log` and `billing_subscription` refuse those, so rebuild the three tables before
+deploying it. The copies name their columns, because a ledger that added `model_call.backend` with
+`ALTER` has it last:
+
+```sh
+npx wrangler d1 execute giraffes-ledger --remote --command "DROP VIEW weekly_active; DROP VIEW retention; DROP VIEW gate_cost; DROP INDEX turn_log_agent_time; DROP INDEX model_call_agent_time; DROP INDEX billing_subscription_owner; ALTER TABLE turn_log RENAME TO turn_log_old; ALTER TABLE model_call RENAME TO model_call_old; ALTER TABLE billing_subscription RENAME TO billing_subscription_old"
+npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
+npx wrangler d1 execute giraffes-ledger --remote --command "INSERT INTO turn_log (id, agent_key, event_kind, batch_size, outcome, refused_for_budget, cost_micro, attempts, started_at, finished_at) SELECT id, agent_key, event_kind, batch_size, outcome, refused_for_budget, cost_micro, attempts, started_at, finished_at FROM turn_log_old; DROP TABLE turn_log_old; INSERT INTO model_call (id, agent_key, purpose, model, backend, status, estimate_micro, cost_micro, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at) SELECT id, agent_key, purpose, model, backend, status, estimate_micro, cost_micro, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at FROM model_call_old; DROP TABLE model_call_old; INSERT INTO billing_subscription (id, owner_key, plan, customer_id, status, seats, past_due_since, updated_at) SELECT id, owner_key, CASE plan WHEN 'ai' THEN 'included' ELSE plan END, customer_id, status, seats, past_due_since, updated_at FROM billing_subscription_old; DROP TABLE billing_subscription_old"
+```
+
+After deploying it, nothing writes `spend_lease`, the global ceiling's old table. Drop it then with
+`DROP TABLE spend_lease`. Old `model_call` rows keep `backend = 'api'` and models without a provider
+prefix, and old `turn_log` rows keep `refused_budget` for the old $15 cap.
 
 Re-running `src/ledger/d1-schema.sql` adds new tables and views, such as `action_rejection`. Do that
 before you deploy code that writes to them, or log shipping backs off until the table exists. Re-running

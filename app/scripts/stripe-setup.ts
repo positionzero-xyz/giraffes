@@ -24,7 +24,7 @@ for (const name of PRICE_NAMES) {
   amounts[name] = n;
 }
 
-const included = args.includes("--included");
+const included = args.includes("--with-included");
 const result = await stripeSetup({ secretKey, publicUrl, amounts, included, fetch });
 for (const line of result.log) console.log(line);
 console.log("\nSet these on the Worker (vars or `npx wrangler secret put <NAME>`):");

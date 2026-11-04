@@ -1,6 +1,6 @@
 # Bring your own subscription: the per-person box
 
-A person who has a Claude plan can connect it. Their turns then run on the unmodified Claude Code CLI, in a small machine of their own (a "box"), signed in to their own Claude account. Everyone else stays on the API path in the Worker. This file is the contract between the Worker and the box. The code is the authority.
+A person who has a Claude plan can connect it. Their turns then run on the unmodified Claude Code CLI, in a small machine of their own (a "box"), signed in to their own Claude account. Everyone else brings their own API key (`/key`), or gets a code-written offer to connect one; we hold no model key. This file is the contract between the Worker and the box. The code is the authority.
 
 ## Shape
 
@@ -12,7 +12,7 @@ chat ──► Worker ──► Agent DO ──(HTTPS, bearer)──► box  htt
 
 - One box per person. On Fly it is one app, in its own private network, holding one machine (shared-cpu-1x, 2 GB) and one volume mounted at `/data`. The person's Claude login and the CLI's state live on that volume.
 - The machine suspends when idle. Fly's proxy resumes it on the next request, so the Worker has no wake code. Suspend needs 2 GB of memory or less.
-- `static` host: one box at a fixed URL, signed in to one Claude account. It is used for local development (`box/up.sh`) and for self-hosting by one person. Outside `DEV_MODE=1` it needs `BOX_STATIC_OWNER`, the one agent key that may claim it; anyone else's `/claude` says the feature isn't available, and their turns stay on the API path.
+- `static` host: one box at a fixed URL, signed in to one Claude account. It is used for local development (`box/up.sh`) and for self-hosting by one person. Outside `DEV_MODE=1` it needs `BOX_STATIC_OWNER`, the one agent key that may claim it; anyone else's `/claude` says the feature isn't available.
 - The Worker never sees the person's Claude credentials or the sign-in code. The code goes from the person's browser straight to their box.
 
 ## Names and secrets
@@ -66,16 +66,16 @@ The table also keeps `attempts` (provisioning or reclaim attempts so far) and `n
   - `signed_out`: send a fresh sign-in link.
   - `signed_in`: say it is connected.
   - `reclaiming`: say the old box is being removed and to send `/claude` again in a few minutes.
-  - A plan without the box (`ai`, `lapsed`): say the plan doesn't include it and point at `/plan`.
+  - A plan without the box (`included`, `lapsed`): say the plan doesn't include it and point at `/plan`.
   - The D1 claim fails: say setup can't start right now and to try again in a few minutes. The turn's outcome is `no_model`, as for every command; it is not retried and not logged as a model failure.
 - After a link goes out, the drain polls `/health` every 30 s for 30 minutes. When `signedIn` turns true, the state becomes `signed_in` and the person is told their turns now use their Claude plan.
 - Reclaim of an unused box: the first link sets `reclaimAt` to 48 hours later. Each later link moves it to at least that link's ticket expiry plus 2 minutes (a code posted just before expiry can take the box's 60 s exit wait to land), so every outstanding ticket is dead by then: `reclaimAt = max(first link + 48 h, latest link + 30 min + 2 min)`. A box that has ever been signed in has `reclaimAt` null and is never removed for being unused. When `reclaimAt` passes, the drain takes one last look at `/health`, still in `signed_out`. Signed in: it becomes `signed_in` as above. Answered and signed out: it moves to `reclaiming` with reason `unused`. No answer: nothing is destroyed, and the last look runs again 5 minutes later.
 - Reclaiming, for any reason, skips `/health` and runs the reclaim: the host destroys the box (Fly `DELETE /apps/{app}?force=true`; on `static` there is nothing to destroy), the D1 `boxes` row gets `deleted_at`, and the DO row goes, together with one message for the reason. `unused`: nobody signed in for 2 days, and `/claude` sets it up again. `failed`: setup failed, and `/claude` starts over. `retired`: the plan doesn't include it, and `/plan` shows the plans. The steps run in that order and each is done when repeated, so a crash between them resumes from the top on the retry. A failed destroy retries from 15 s, doubling to an hour, and tells the person nothing.
 - Retire: with `BILLING=on`, when the drain sees a box (in any state but `reclaiming`) whose person's plan no longer allows one (`planAllowsBox` false), it sets `retireAt` to 14 days later and tells the person once, with the date, that the box will be removed unless their plan resumes. If the plan allows a box again before then, `retireAt` is cleared silently. At `retireAt` the box moves to `reclaiming` with reason `retired`, even if it was signed in, since it holds only their Claude login. With `BILLING=off` this never fires. The drain runs on the person's messages and daily check-in, so a lapse is seen within a day.
-- Keeping machines current: the row keeps `image`, the `BOX_IMAGE` the box was last ensured with. When the drain sees a live box (`signed_out` or `signed_in`) whose `image` differs from `BOX_IMAGE`, or a box answers `401` to `/health` or `/parse` (a token from another `BOX_SECRET`), it sets `ensureAt` and runs the host's `ensure` for that box, with the same retries every 5 minutes until it succeeds. The box's state doesn't change and the person hears nothing. A turn whose `/parse` got `401` runs on the API path.
-- Turns: if the box is `signed_in` and `planAllowsBox` says yes (`trial`, `standard`, `plus`), `#callModel` sends the turn to the box and reserves no API spend, since the person's own plan pays. The ledger logs the call with `backend = 'box'` and cost 0.
-  - `signed_out` from the box: set `signed_out`, tell the person once with a new link, and run this turn on the API path.
-  - unavailable (timeout 120 s, 5xx, network): run this turn on the API path, and send every turn for the next 5 minutes straight to the API path too. That skip is kept in memory, so a restart of the DO costs at most one more try. The usual per-person cap and the global ceiling apply.
+- Keeping machines current: the row keeps `image`, the `BOX_IMAGE` the box was last ensured with. When the drain sees a live box (`signed_out` or `signed_in`) whose `image` differs from `BOX_IMAGE`, or a box answers `401` to `/health` or `/parse` (a token from another `BOX_SECRET`), it sets `ensureAt` and runs the host's `ensure` for that box, with the same retries every 5 minutes until it succeeds. The box's state doesn't change and the person hears nothing. A turn whose `/parse` got `401` backs off and tries the box again.
+- Turns and compaction: if the box is `signed_in` and `planAllowsBox` says yes (`trial`, `standard`, `plus`), `ModelAccess` sends the call to the box's `/parse` and reserves nothing, since the person's own plan pays. The ledger logs the call with `backend = 'box'` and cost 0. A box that can't answer never falls back to money: not ours, and not the person's own key unless they said yes to it as a backup (see "Model access" in `RATIONALE.md`).
+  - `signed_out` from the box: set `signed_out` and tell the person once with a new link. The turn ends there. Later turns get one code-written line a day saying the plan isn't signed in, until polling sees the sign-in.
+  - unavailable (timeout 120 s, 5xx, network): the turn backs off like an unavailable model and ends in the fixed apology after three attempts, five for a requested reminder. For the next 5 minutes turns skip the box. That skip is kept in memory, so a restart of the DO costs at most one more try.
 - `BOX_HOST=none` (the default) turns all of this off. `/claude` then says the feature isn't available yet.
 - `MAX_BOXES` caps boxes across everyone. The D1 table `boxes` is the inventory, used to count boxes and to find orphans. A reclaimed box frees its slot, and the same person can claim it again.
 
@@ -97,15 +97,15 @@ Delete is `DELETE /apps/{app}?force=true`, which removes the person's data. A 40
 
 Prices live in Stripe, never in code. `app/src/billing/` holds the plan rules (`plan.ts`), the texts (`say.ts`), the D1 store (`store.ts`) and the Stripe boundary (`stripe.ts`).
 
-| Plan | Box | API path | Who |
-|---|---|---|---|
-| `trial` | yes | `SPEND.userCapMicro` a month, as before billing | everyone for `TRIAL_DAYS` (default 14) from their first message with `BILLING=on`, people from the beta included |
-| `standard` | yes | as trial, when the box is out | a person with their own Standard subscription |
-| `plus` | yes | as trial | the owner of a Plus subscription, and each person holding one of its seats |
-| `ai` | no | `AI_CAP_USD` (default 1) a month | a person with their own AI subscription |
-| `lapsed` | no | no model call at all, compaction included | `BILLING=on`, no paid plan or seat, trial over |
+| Plan | Box | Own API key | Our quota | Who |
+|---|---|---|---|---|
+| `trial` | yes | yes | no | everyone for `TRIAL_DAYS` (default 14) from their first message with `BILLING=on`, people from the beta included |
+| `standard` | yes | yes | no | a person with their own Standard subscription |
+| `plus` | yes | yes | no | the owner of a Plus subscription, and each person holding one of its seats |
+| `included` | no | yes | `INCLUDED_CAP_USD` a month, only with `INCLUDED=on` and no access of their own | a person with their own included subscription |
+| `lapsed` | no | no | no | `BILLING=on`, no paid plan or seat, trial over; no model call at all, compaction included |
 
-A person with more than one picks in that order: their own Plus or Standard, then a seat, then their own AI, then the trial. A paid plan applies from the moment Stripe says it is paying, even mid-trial.
+A person with more than one picks in that order: their own Plus or Standard, then a seat, then their own included plan, then the trial. A paid plan applies from the moment Stripe says it is paying, even mid-trial. `/plan` sells `included` only while `INCLUDED=on`, and a subscription on the old `giraffes_ai` product reads as `included`.
 
 - `BILLING=off` (the default): nobody lapses, no trial clock runs, no payment text goes out, and `/webhook/stripe` answers 404. The plan row exists with no trial end. `/plan` says the free beta has nothing to pay, and `/invite`, `/join` and `/leave` say plans aren't available yet.
 - Lapsed: a message gets one notice a local day, "You have no active plan, so I can't answer messages for now. Send /plan to pick one." Later messages that day get nothing. A reminder the person asked for still goes out as the code-written `Reminder: <note>`. Check-ins and the agent's own wake-ups send nothing. The turn's outcome is `lapsed`.
@@ -115,7 +115,7 @@ A person with more than one picks in that order: their own Plus or Standard, the
 D1 is the truth, because a Plus seat crosses Durable Objects:
 
 ```
-billing_subscription: { id (Stripe sub_…), owner_key, customer_id (cus_…), plan: standard|plus|ai, status, seats, past_due_since }
+billing_subscription: { id (Stripe sub_…), owner_key, customer_id (cus_…), plan: standard|plus|included, status, seats, past_due_since }
 billing_seat:         { agent_key (one seat per person), subscription_id, joined_at, left_at }
 billing_invite:       { code, subscription_id, created_at, expires_at, used_by, used_at }
 billing_duplicate:    { owner_key, subscription_ids (space-separated), found_at }
@@ -168,16 +168,16 @@ Extra Plus places are an optional item the buyer adds at checkout. Stripe's port
 
 Reading the state instead of trusting the payload means no ordering rule: an `unpaid` after `past_due`, a shortened period or a checkout arriving after its Plus subscription all store what Stripe holds now. Handling one event at a time per owner keeps a slow read of an older state from landing after a newer one.
 
-The plan is the item whose price's product, or else lookup key, is `giraffes_standard`, `giraffes_plus` or `giraffes_ai`, else `metadata.plan`; extra places are the quantity on `giraffes_seat`. Price ids don't matter, so a price that `stripe-setup.ts` replaced still counts for the people on it.
+The plan is the item whose price's product, or else lookup key, is `giraffes_standard`, `giraffes_plus` or `giraffes_included` (or the old `giraffes_ai`), else `metadata.plan`; extra places are the quantity on `giraffes_seat`. Price ids don't matter, so a price that `stripe-setup.ts` replaced still counts for the people on it.
 
 A refresh re-reads the person's standing. When it moves their plan, the person is told once: "Thanks. Your Standard plan is active.", "The Plus plan you joined is active.", their trial days left, or the lapsed notice.
 
 If the owner ends up with more than one paying subscription, nothing is cancelled or refunded automatically. The event logs an error naming the ids, inserts a `billing_duplicate` row, and tells the person once, "It looks like you're paying for more than one plan at once. We'll sort out the duplicate for you." An operator finds them with `SELECT * FROM billing_duplicate`.
 
-`scripts/stripe-setup.ts --yes` creates the products (ids `giraffes_standard`, `giraffes_plus`, `giraffes_seat`, `giraffes_ai`), the THB monthly prices with the same lookup keys (amounts in satang as flags), a customer portal configuration tagged `metadata[giraffes]=portal` (card updates, invoices, cancel at period end, switching between the Standard, Plus and AI prices), and the webhook endpoint for those four event types, then prints the values to set. A second run creates nothing and brings the portal configuration up to date. A live key also needs `--live`.
+`scripts/stripe-setup.ts --yes` creates the products (ids `giraffes_standard`, `giraffes_plus`, `giraffes_seat`, and `giraffes_included` only with `--with-included`), the THB monthly prices with the same lookup keys (amounts in satang as flags), a customer portal configuration tagged `metadata[giraffes]=portal` (card updates, invoices, cancel at period end, switching between the plan prices it made), and the webhook endpoint for those four event types, then prints the values to set. A second run creates nothing and brings the portal configuration up to date. A live key also needs `--live`.
 
 ## Configuration
 
 Box: `BOX_HOST` (`none` | `fly` | `static`), `BOX_SECRET`, `BOX_APP_PREFIX`, `BOX_IMAGE`, `BOX_REGION` (default `sin`), `BOX_VOLUME_GB` (default 5), `MAX_BOXES`, `BOX_STATIC_URL`, `BOX_STATIC_OWNER` (an agent key such as `p:telegram:12345`; `static` needs it unless `DEV_MODE=1`), `FLY_API_TOKEN`, `FLY_ORG`.
 
-Billing: `BILLING` (`off` | `on`), `TRIAL_DAYS` (default 14), `PLUS_SEATS` (default 3), `PLUS_MAX_SEATS` (default 6), `AI_CAP_USD` (default 1). `BILLING=on` also needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`, `STRIPE_PRICE_AI`, `STRIPE_PORTAL_CONFIGURATION` and `PUBLIC_URL`.
+Billing: `BILLING` (`off` | `on`), `TRIAL_DAYS` (default 14), `PLUS_SEATS` (default 3), `PLUS_MAX_SEATS` (default 6). `BILLING=on` also needs `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`, `STRIPE_PORTAL_CONFIGURATION` and `PUBLIC_URL`, and with `INCLUDED=on` also `STRIPE_PRICE_INCLUDED`.

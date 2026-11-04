@@ -47,7 +47,8 @@ if [ -f .launch.env ]; then
 else
   org=$(ask "Fly organization slug" personal)
   region=$(ask "Fly region for boxes" sin)
-  prefix=$(ask "Prefix for box app names (globally unique on Fly; never change it later)" "gx$(node -e 'console.log(require("crypto").randomBytes(2).toString("hex"))')-")
+  if [ $dry = 1 ]; then suggested="gx<random>-"; else suggested="gx$(node -e 'console.log(require("crypto").randomBytes(2).toString("hex"))')-"; fi
+  prefix=$(ask "Prefix for box app names (globally unique on Fly; never change it later)" "$suggested")
   max_boxes=$(ask "Most boxes to create in total" 20)
   [ $dry = 1 ] || printf 'org=%s\nregion=%s\nprefix=%s\nmax_boxes=%s\n' "$org" "$region" "$prefix" "$max_boxes" > .launch.env
 fi
@@ -80,13 +81,8 @@ echo "   worker $url"
 
 say "Secrets"
 if [ $dry = 1 ]; then existing="[]"; else existing=$(npx wrangler secret list 2>/dev/null || echo "[]"); fi
-if has ANTHROPIC_API_KEY; then
-  key=$(ask_secret "Anthropic API key (already set; Enter keeps it)")
-else
-  key=$(ask_secret "Anthropic API key, used for people without a connected Claude plan and as fallback (required)")
-  [ -n "$key" ] || [ $dry = 1 ] || { echo "an Anthropic API key is required while MODEL_BACKEND=anthropic" >&2; exit 1; }
-fi
-[ -n "$key" ] && put ANTHROPIC_API_KEY "$key"
+put_once KEY_SECRET "$(random)"
+put PUBLIC_URL "$url"
 if has FLY_API_TOKEN || [ $dry = 1 ]; then put_once FLY_API_TOKEN dry; else put FLY_API_TOKEN "$(fly tokens create org --org "$org" --name giraffes-worker --expiry 8760h)"; fi
 put_once BOX_SECRET "$(random)"
 put_once BOX_HOST fly
@@ -97,6 +93,7 @@ put_once BOX_APP_PREFIX "$prefix"
 put_once MAX_BOXES "$max_boxes"
 put_once BILLING off
 echo "   BOX_SECRET is generated once and never shown. Changing it orphans every box, so this script never does."
+echo "   KEY_SECRET seals every API key people save. It is generated once and never shown, and this script never changes it."
 
 tg=$(ask_secret "Telegram bot token from @BotFather")
 if [ -n "$tg" ]; then
@@ -123,4 +120,5 @@ if [ "$(ask "Run it now? y/n" y)" = y ] && [ $dry = 0 ]; then
 fi
 
 say "Done"
-echo "   Text your bot /claude. You get a sign-in link to your own box; sign in with your Claude plan."
+echo "   Text your bot. With no AI connected it offers /claude, to sign in with a Claude plan in your own box,"
+echo "   and /key, to add your own API key (such as OpenCode Go) on a one-time page."

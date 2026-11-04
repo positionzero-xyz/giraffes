@@ -85,6 +85,36 @@ describe("reminders", () => {
     expect(reminders.map((w) => [w.key, wall(w.dueAt)])).toEqual([["dentist", "2099-11-05T09:00"]]);
   });
 
+  test("a move that frees a slot for a new reminder still leaves at most 20 pending", async () => {
+    const five = (from: number) =>
+      turn({
+        actions: [...Array.from({ length: 5 }, (_, i) => schedule(`r${from + i}`, "2099-11-06T09:00", `Reminder ${from + i}`)), send("Set.")],
+        task: ["reminder", "batch", "started"],
+      });
+    const model = scripted([
+      five(0),
+      five(5),
+      five(10),
+      five(15),
+      turn({
+        actions: [cancel("r0"), schedule("rent", "2099-11-07T09:00", "Pay rent"), schedule("r0", "2099-11-08T09:00", "Reminder 0"), send("Moved it and added rent.")],
+        task: ["reminder", "rent", "started"],
+      }),
+    ]);
+    const c = await devChat("ida", { model, at: "2099-11-04T10:00" });
+    for (let i = 0; i < 4; i++) await c.say(`set five more (${i})`);
+    await c.received();
+
+    await c.say("move r0 to the 8th and remind me to pay rent on the 7th");
+
+    const reminders = (await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder");
+    expect(reminders).toHaveLength(20);
+    expect(reminders.find((w) => w.key === "r0")?.dueAt).toBe(local("2099-11-08T09:00"));
+    expect(await c.received()).toEqual([["Moved it and added rent.", NOTICE.reminderLimit].join("\n")]);
+    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([["schedule_wakeup:rent", "limit"]]);
+    model.assertDone();
+  });
+
   test("a send past the length cap is cut to fit and logged, and the reminder in the same answer is set", async () => {
     const model = scripted([
       turn({ actions: [schedule("call-mom", "2099-11-04T18:00", "Call mom"), send("x".repeat(TURN.maxTextChars + 1))], task: ["reminder", "call-mom", "started"] }),

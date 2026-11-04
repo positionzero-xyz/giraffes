@@ -686,7 +686,6 @@ export class Agent extends DurableObject<Env> {
     const t = NOTICES[view.language];
     const now = this.#deps.clock.now();
     const k = this.#store.key();
-    const dollars = (micro: MicroUsd) => usd(micro);
     switch (command.kind) {
       case "pasted_key": {
         const link = await this.#keyLink(view.language);
@@ -704,8 +703,8 @@ export class Agent extends DurableObject<Env> {
               provider: PROVIDERS[k.provider].label,
               model: k.model,
               hint: k.hint,
-              spentUsd: dollars(this.#store.spend("byok", utcMonth(now)).spent),
-              capUsd: dollars(k.capMicro),
+              spentUsd: usd(this.#store.spend("byok", utcMonth(now)).spent),
+              capUsd: usd(k.capMicro),
               approximate: !routeFor({ kind: "key", provider: k.provider, model: k.model }, "turn").priced,
               backup: planConnected ? k.backup : null,
               link: l,
@@ -723,7 +722,7 @@ export class Agent extends DurableObject<Env> {
         }
         const micro = Math.round(command.usd * 1_000_000) as MicroUsd;
         this.#store.setKeyCap(micro);
-        return this.#reply(view, agent, t.keyCapSet(dollars(micro)));
+        return this.#reply(view, agent, t.keyCapSet(usd(micro)));
       }
       case "key_backup":
         if (!this.#store.setBackup(command.on, now)) return this.#reply(view, agent, t.noKey);

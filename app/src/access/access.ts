@@ -111,7 +111,6 @@ export type BoxAnswer = { readonly kind: "reply"; readonly reply: Extract<WireRe
 
 /** The box as access sees it; the agent implements it, because the box's state machine lives there. */
 export interface BoxLane {
-  /** The state of the box that serves this person, or null when none does. */
   state(): BoxState | null;
   parse(req: { readonly purpose: CallPurpose; readonly model: string; readonly system: string; readonly user: string; readonly jsonSchema: JsonSchema }): Promise<BoxAnswer>;
 }
@@ -271,9 +270,9 @@ export class ModelAccess {
     return a.key;
   }
 
-  #log(route: Route, backend: Backend, status: ModelCallStatus, est: MicroUsd, cost: MicroUsd, usage: Attempt<unknown> | null): void {
+  #log(route: Route, backend: Backend, status: ModelCallStatus, est: MicroUsd, cost: MicroUsd, attempt: Attempt<unknown> | null): void {
     const now = this.deps.clock.now();
-    const u = usage && "usage" in usage ? usage.usage : null;
+    const u = attempt && "usage" in attempt ? attempt.usage : null;
     this.deps.store.appendLogs(
       [modelCallRow({ id: crypto.randomUUID(), agent: this.#agent(), purpose: route.purpose, model: route.ref, backend, status, estimate: est, cost, usage: u, at: now })],
       now,

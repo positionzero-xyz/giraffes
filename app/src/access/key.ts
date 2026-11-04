@@ -16,7 +16,6 @@ export type StoredKey = {
   readonly provider: ProviderId;
   /** The preset's, or the person's for a custom provider. */
   readonly baseUrl: string;
-  /** The provider's own model id. */
   readonly model: string;
   readonly auth: Auth;
   /** Decided by the connect probe. */

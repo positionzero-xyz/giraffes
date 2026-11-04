@@ -692,6 +692,24 @@ describe("compaction", () => {
     model.assertDone();
   });
 
+  test("every earlier message is either folded into the summary or shown in the next turn's prompt", async () => {
+    const replies = Array.from({ length: 45 }, (_, i) => chat(`Reply ${i}.`));
+    const model = scripted(replies, { compaction: [summary("Summary 1.")] });
+    const c = await devChat("noa", { model, at: "2099-11-04T10:00" });
+
+    for (let i = 0; i < 45; i++) {
+      await c.say(`message ${i}`);
+      const folded = model.calls.filter((call) => call.purpose === "compaction").map((call) => call.user).join("\n");
+      const prompt = model.calls.filter((call) => call.purpose === "turn").at(-1)!.user;
+      for (let j = 0; j < i; j++) {
+        const line = `Person: message ${j}\n`;
+        expect(folded.includes(line) || prompt.includes(line), `message ${j} in the prompt of turn ${i}`).toBe(true);
+      }
+    }
+    expect(model.calls.filter((call) => call.purpose === "compaction")).toHaveLength(1);
+    model.assertDone();
+  });
+
   test("while compaction is backing off, a turn's prompt carries at most the newest 50 notes", async () => {
     const facts = (from: number) => Array.from({ length: 6 }, (_, i) => ({ type: "remember", note: `fact ${from + i}` }));
     const replies = Array.from({ length: 11 }, (_, i) => turn({ actions: facts(i * 6), task: ["chat", "facts", "none"] }));

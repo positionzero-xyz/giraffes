@@ -1,4 +1,4 @@
-import type { AgentKey, EpochMs, MicroUsd } from "../domain";
+import type { AgentKey, EpochMs, LocalDate, MicroUsd } from "../domain";
 import { SecretKey, type Endpoint, type KeyFault, type SchemaMode } from "../model/client";
 import { isProviderId, PROVIDERS, type Auth, type ProviderId } from "../model/providers";
 import type { KeyPageError } from "../notices";
@@ -9,7 +9,8 @@ export type KeySecrets = { readonly current: string; readonly previous: string |
 
 export type KeyHealth =
   | { readonly kind: "ok" }
-  | { readonly kind: "resting"; readonly fault: KeyFault; readonly until: EpochMs | null; readonly failures: number; readonly toldAt: EpochMs | null };
+  /** `toldOn`: the person's local date of the last notice, so they hear about it at most once a day. */
+  | { readonly kind: "resting"; readonly fault: KeyFault; readonly until: EpochMs | null; readonly failures: number; readonly toldOn: LocalDate | null };
 
 export type StoredKey = {
   readonly provider: ProviderId;

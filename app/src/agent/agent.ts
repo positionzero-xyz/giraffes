@@ -353,7 +353,7 @@ export class Agent extends DurableObject<Env> {
   async serve(req: ServeRequest): Promise<Served<Purpose> | { readonly kind: "not_owner" }> {
     if (!this.#store.ownsGroup(req.group, req.ownershipVersion)) return { kind: "not_owner" };
     const plan = await this.#planNow(this.#agent().key, this.#deps.clock.now());
-    if (plan.kind === "lapsed") return { kind: "no_access", why: "nothing", told: false };
+    if (plan.kind === "lapsed") return { kind: "no_access", why: "nothing", told: false, notice: null };
     return this.#access().call({ purpose: req.purpose, system: req.system, prompt: req.prompt, plan });
   }
 
@@ -554,8 +554,9 @@ export class Agent extends DurableObject<Env> {
         return this.#commit(planWithoutModel(view, { kind: "over_cap", scope: served.scope, capUsd, alreadyToldToday }), view, a.key, { kind: "none" });
       }
       case "no_access": {
-        const alreadyToldToday = served.told || this.#store.toldToday("no_access", startOfLocalDay(view.now, view.tz));
-        const text = served.why === "box_not_ready" ? NOTICES[view.language].boxNotReady : this.#onboarding(view.language, plan, a.key);
+        const offer = served.why === "box_not_ready" ? NOTICES[view.language].boxNotReady : this.#onboarding(view.language, plan, a.key);
+        const text = served.notice ?? offer;
+        const alreadyToldToday = served.told || (served.notice === null && this.#store.toldToday("no_access", startOfLocalDay(view.now, view.tz)));
         return this.#commit(planWithoutModel(view, { kind: "no_access", text, alreadyToldToday }), view, a.key, { kind: "none" });
       }
       case "unavailable":

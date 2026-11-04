@@ -394,6 +394,37 @@ export const MIGRATIONS: readonly string[] = [
     CHECK ((status IN ('saved', 'failed')) = (outcome IS NOT NULL))
   );
   `,
+  `
+  CREATE TABLE model_key_next (
+    one              INTEGER PRIMARY KEY CHECK (one = 1),
+    provider         TEXT NOT NULL,
+    base_url         TEXT NOT NULL,
+    model            TEXT NOT NULL,
+    auth             TEXT NOT NULL CHECK (auth IN ('x-api-key', 'bearer')),
+    mode             TEXT NOT NULL CHECK (mode IN ('strict', 'loose')),
+    kid              TEXT NOT NULL,
+    iv               BLOB NOT NULL,
+    ciphertext       BLOB NOT NULL,
+    hint             TEXT NOT NULL,
+    cap_micro        INTEGER NOT NULL,
+    backup           INTEGER NOT NULL DEFAULT 0 CHECK (backup IN (0, 1)),
+    backup_asked_at  INTEGER,
+    revision         INTEGER NOT NULL,
+    connected_at     INTEGER NOT NULL,
+    fault            TEXT CHECK (fault IN ('credential', 'payment', 'model', 'rate', 'unreadable')),
+    failures         INTEGER NOT NULL DEFAULT 0,
+    rest_until       INTEGER,
+    told_on          TEXT,
+    CHECK ((fault IS NULL) = (failures = 0)),
+    CHECK (fault IS NOT NULL OR (rest_until IS NULL AND told_on IS NULL))
+  );
+  INSERT INTO model_key_next (one, provider, base_url, model, auth, mode, kid, iv, ciphertext, hint, cap_micro, backup, backup_asked_at, revision,
+                              connected_at, fault, failures, rest_until)
+    SELECT one, provider, base_url, model, auth, mode, kid, iv, ciphertext, hint, cap_micro, backup, backup_asked_at, revision,
+           connected_at, fault, failures, rest_until FROM model_key;
+  DROP TABLE model_key;
+  ALTER TABLE model_key_next RENAME TO model_key;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

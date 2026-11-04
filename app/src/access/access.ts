@@ -101,8 +101,11 @@ export type Served<P extends Purpose> =
   /** Some lane is down for now; retry the batch later. */
   | { readonly kind: "unavailable" }
   | { readonly kind: "over_cap"; readonly scope: OverCap }
-  /** Nothing is connected, the plan's box isn't signed in, or every lane rests on a fault the person was told about. */
-  | { readonly kind: "no_access"; readonly why: Access["whenEmpty"]; readonly told: boolean };
+  /**
+   * Nothing is connected, the plan's box isn't signed in, or every lane rests on a fault. `told`: this call already sent
+   * the person a notice. `notice`: a resting key's problem, which the reply names.
+   */
+  | { readonly kind: "no_access"; readonly why: Access["whenEmpty"]; readonly told: boolean; readonly notice: string | null };
 
 export type BoxAnswer = { readonly kind: "reply"; readonly reply: Extract<WireResult, { kind: "reply" }> } | { readonly kind: "moved_on"; readonly transient: boolean; readonly told: boolean };
 
@@ -126,7 +129,7 @@ export type AccessDeps = {
 
 export type CallRequest<P extends Purpose> = { readonly purpose: P; readonly system: string; readonly prompt: PromptParts; readonly plan: Plan };
 
-type Next = { readonly kind: "next"; readonly transient?: boolean; readonly overCap?: OverCap; readonly told?: boolean };
+type Next = { readonly kind: "next"; readonly transient?: boolean; readonly overCap?: OverCap; readonly told?: boolean; readonly notice?: string };
 type LaneResult<P extends Purpose> = { readonly kind: "served"; readonly served: Served<P> } | Next;
 
 export type ProbeResult = { readonly ok: true; readonly mode: SchemaMode } | { readonly ok: false; readonly error: Extract<KeyPageError, ProbeError> };
@@ -205,17 +208,19 @@ export class ModelAccess {
     let transient = false;
     let overCap: OverCap | null = null;
     let told = false;
+    let notice: string | null = null;
     for (const lane of access.lanes) {
       const r = await this.#lane(lane, req);
       if (r.kind === "served") return r.served;
       transient ||= r.transient ?? false;
       told ||= r.told ?? false;
+      notice ??= r.notice ?? null;
       overCap ??= r.overCap ?? null;
     }
     if (transient) return { kind: "unavailable" };
     if (overCap) return { kind: "over_cap", scope: overCap };
     const boxWaiting = access.whenEmpty === "box_not_ready" || (access.lanes.length > 0 && access.lanes.every((l) => l.kind === "box"));
-    return { kind: "no_access", why: boxWaiting ? "box_not_ready" : "nothing", told };
+    return { kind: "no_access", why: boxWaiting ? "box_not_ready" : "nothing", told, notice };
   }
 
   /**
@@ -294,13 +299,11 @@ export class ModelAccess {
     const { store, clock, keys } = this.deps;
     const now = clock.now();
     if (k.health.kind === "resting" && (k.health.until === null || k.health.until > now)) {
-      return { kind: "next", told: k.health.toldAt !== null, transient: k.health.fault === "rate" };
+      return { kind: "next", notice: this.#faultText(k, k.health.fault, k.health.until), transient: k.health.fault === "rate" };
     }
     const agent = this.#agent();
     const opened = keys.on ? await open(keys.secrets, agent, k) : ({ kind: "unreadable" } as const);
-    if (opened.kind === "unreadable") {
-      return this.#rest(k, "unreadable", null) === "stale" ? { kind: "next", transient: true } : { kind: "next", told: true };
-    }
+    if (opened.kind === "unreadable") return this.#rested(k, "unreadable", null, false);
     if (opened.kind === "resealed" && !store.reseal(opened.again, k.revision)) return { kind: "next", transient: true };
     const route = routeFor({ kind: "key", provider: k.provider, model: k.model }, req.purpose);
     const user = this.#fit(route, k.mode, req);
@@ -309,10 +312,7 @@ export class ModelAccess {
     const meter = this.#meter("byok", k.capMicro, "key");
     const out = await runParse(client, { route, mode: k.mode, system: req.system, user, schema: outputOf(req.purpose) }, meter);
     const last = out.last;
-    if (last?.kind === "fault") {
-      if (this.#rest(k, last.fault, last.retryAfterMs) === "stale") return { kind: "next", transient: true };
-      return { kind: "next", told: true, transient: last.fault === "rate" };
-    }
+    if (last?.kind === "fault") return this.#rested(k, last.fault, last.retryAfterMs, last.fault === "rate");
     if (last?.kind === "ok" || last?.kind === "invalid" || last?.kind === "refused_by_model") store.keyHealthy(k.revision);
     return this.#outcome(out, route, "key", "byok", meter.spent);
   }
@@ -351,29 +351,41 @@ export class ModelAccess {
     }
   }
 
-  /** "stale": the key was replaced or removed while this call ran, so nothing rested and nobody was told. */
-  #rest(k: StoredKey, fault: KeyFault, retryAfterMs: number | null): "stale" | "rested" | "told" {
+  /**
+   * Rests the key and says what the lane did: nothing when the key was replaced or removed while this call ran (the
+   * batch retries on the new key), else the notice went out now, or the reply names the problem.
+   */
+  #rested(k: StoredKey, fault: KeyFault, retryAfterMs: number | null, transient: boolean): Next {
     const { store, clock } = this.deps;
     const now = clock.now();
     const failures = k.health.kind === "resting" ? k.health.failures : 0;
     const rest = restFor(fault, failures, retryAfterMs);
     const until = rest === null ? null : ((now + rest) as EpochMs);
-    const a = store.agent();
-    const lang = a?.language ?? "en";
-    const t = NOTICES[lang];
+    const text = this.#faultText(k, fault, until);
+    const today = localDate(now, store.agent()?.tz ?? DEFAULT_TIME_ZONE);
+    const r = store.restKey(fault, until, { key: eventKey.access(`fault:${now}`), message: { texts: [text], note: text } }, today, now, k.revision);
+    if (r === "stale") return { kind: "next", transient: true };
+    return r === "told" ? { kind: "next", told: true, transient } : { kind: "next", notice: text, transient };
+  }
+
+  #faultText(k: StoredKey, fault: KeyFault, until: EpochMs | null): string {
+    const a = this.deps.store.agent();
+    const t = NOTICES[a?.language ?? "en"];
     const label = PROVIDERS[k.provider].label;
-    const text =
-      fault === "credential"
-        ? t.keyRefused(label)
-        : fault === "payment"
-          ? t.keyNoCredit(label)
-          : fault === "model"
-            ? t.keyNoModel(label, k.model)
-            : fault === "rate"
-              ? t.keyRateLimited(label, until === null || !a ? "" : toLocal(until, a.tz).slice(11))
-              : t.keyUnreadable;
-    const today = localDate(now, a?.tz ?? DEFAULT_TIME_ZONE);
-    return store.restKey(fault, until, { key: eventKey.access(`fault:${now}`), message: { texts: [text], note: text } }, today, now, k.revision);
+    switch (fault) {
+      case "credential":
+        return t.keyRefused(label);
+      case "payment":
+        return t.keyNoCredit(label);
+      case "model":
+        return t.keyNoModel(label, k.model);
+      case "rate":
+        return t.keyRateLimited(label, until === null || !a ? "" : toLocal(until, a.tz).slice(11));
+      case "unreadable":
+        return t.keyUnreadable;
+      default:
+        return assertNever(fault);
+    }
   }
 
   #meter(scope: SpendScope, cap: MicroUsd, backend: "key" | "included"): Meter & { readonly spent: () => MicroUsd } {

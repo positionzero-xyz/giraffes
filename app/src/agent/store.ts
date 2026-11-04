@@ -209,10 +209,10 @@ type KeyCols = {
   fault: KeyFault | null;
   failures: number;
   rest_until: EpochMs | null;
-  told_at: EpochMs | null;
+  told_on: LocalDate | null;
 };
 const KEY_COLS =
-  "provider, base_url, model, auth, mode, kid, iv, ciphertext, hint, cap_micro, backup, backup_asked_at, revision, connected_at, fault, failures, rest_until, told_at";
+  "provider, base_url, model, auth, mode, kid, iv, ciphertext, hint, cap_micro, backup, backup_asked_at, revision, connected_at, fault, failures, rest_until, told_on";
 
 function toKey(r: KeyCols): StoredKey {
   return {
@@ -228,7 +228,7 @@ function toKey(r: KeyCols): StoredKey {
     backupAskedAt: r.backup_asked_at,
     revision: r.revision,
     connectedAt: r.connected_at,
-    health: r.fault === null ? { kind: "ok" } : { kind: "resting", fault: r.fault, until: r.rest_until, failures: r.failures, toldAt: r.told_at },
+    health: r.fault === null ? { kind: "ok" } : { kind: "resting", fault: r.fault, until: r.rest_until, failures: r.failures, toldOn: r.told_on },
   };
 }
 
@@ -1216,7 +1216,7 @@ export class AgentStore {
          ON CONFLICT (one) DO UPDATE SET provider = excluded.provider, base_url = excluded.base_url, model = excluded.model,
            auth = excluded.auth, mode = excluded.mode, kid = excluded.kid, iv = excluded.iv, ciphertext = excluded.ciphertext,
            hint = excluded.hint, revision = excluded.revision, connected_at = excluded.connected_at,
-           fault = NULL, failures = 0, rest_until = NULL, told_at = NULL`,
+           fault = NULL, failures = 0, rest_until = NULL, told_on = NULL`,
         k.provider,
         k.baseUrl,
         k.model,
@@ -1311,25 +1311,25 @@ export class AgentStore {
     return this.sql.exec("UPDATE model_key SET kid = ?, iv = ?, ciphertext = ? WHERE revision = ?", again.kid, again.iv, again.ciphertext, expectRevision).rowsWritten > 0;
   }
 
-  /** The key rests after a provider fault. The person hears about it once a streak, so the notice goes out only if none did. */
+  /** The key rests after a provider fault. The notice goes out at most once on the person's local date `today`. */
   restKey(
     fault: KeyFault,
     until: EpochMs | null,
     notice: { readonly key: EventKey; readonly message: NoteMessage },
-    _today: LocalDate,
+    today: LocalDate,
     now: EpochMs,
     expectRevision: number,
   ): "stale" | "rested" | "told" {
     return this.tx(() => {
       const current = this.key();
       if (current === null || current.revision !== expectRevision) return "stale";
-      const tell = current.health.kind === "ok" || current.health.toldAt === null;
+      const tell = current.health.kind === "ok" || current.health.toldOn !== today;
       this.sql.exec(
-        "UPDATE model_key SET fault = ?, failures = MIN(failures + 1, ?), rest_until = ?, told_at = COALESCE(told_at, ?) WHERE revision = ?",
+        "UPDATE model_key SET fault = ?, failures = MIN(failures + 1, ?), rest_until = ?, told_on = ? WHERE revision = ?",
         fault,
         KEY_MAX_FAILURES,
         until,
-        now,
+        today,
         expectRevision,
       );
       if (tell) this.insertMessage(notice.key, notice.message, now);
@@ -1338,7 +1338,7 @@ export class AgentStore {
   }
 
   keyHealthy(expectRevision: number): void {
-    this.sql.exec("UPDATE model_key SET fault = NULL, failures = 0, rest_until = NULL, told_at = NULL WHERE fault IS NOT NULL AND revision = ?", expectRevision);
+    this.sql.exec("UPDATE model_key SET fault = NULL, failures = 0, rest_until = NULL, told_on = NULL WHERE fault IS NOT NULL AND revision = ?", expectRevision);
   }
 
   recordGroup(group: AgentKey, version: number): void {

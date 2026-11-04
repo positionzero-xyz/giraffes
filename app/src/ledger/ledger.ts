@@ -161,7 +161,7 @@ export const ACTION_REJECTIONS = [
 ] as const;
 export type ActionRejection = (typeof ACTION_REJECTIONS)[number];
 
-export const UNASKED_STATUSES = ["sent", "dropped_budget", "dropped_blocked", "dropped_quota", "failed"] as const;
+export const UNASKED_STATUSES = ["sent", "dropped_budget", "dropped_blocked", "dropped_quota", "dropped_removed", "failed"] as const;
 export type UnaskedStatus = (typeof UNASKED_STATUSES)[number];
 
 export function modelCallRow(input: {

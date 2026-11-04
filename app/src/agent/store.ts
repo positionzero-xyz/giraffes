@@ -576,11 +576,40 @@ export class AgentStore {
     this.insertLogs([{ stream: "admission", id, agent: a.key, change, reason, channel: a.identity.channel, at: now }], now);
   }
 
-  /** The operator takes a person out of the beta. Their seat stays used. */
+  /**
+   * The operator takes a person out of the beta. Their seat stays used, their key links stop working, and every
+   * pending push is dropped with reason removed.
+   */
   remove(now: EpochMs): void {
     this.tx(() => {
       if (this.admission().state === "removed") return;
       this.writeAdmission({ next: { state: "removed", at: now }, change: "removed", ensureCheckin: null }, now);
+      this.sql.exec("DELETE FROM key_ticket");
+      const agent = this.agent()?.key;
+      const unasked = this.sql
+        .exec<{ id: OutboxId; trigger_kind: AgentEventKind; texts: string; task_id: TaskId | null; purpose: UnaskedPurpose | null }>(
+          "SELECT id, trigger_kind, texts, task_id, purpose FROM outbox WHERE status = 'pending' AND intent = 'unasked'",
+        )
+        .toArray();
+      this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'removed', closed_at = ? WHERE status = 'pending'", now);
+      if (!agent) return;
+      this.insertLogs(
+        unasked.map(
+          (r): LogRow => ({
+            stream: "unasked",
+            id: r.id,
+            agent,
+            triggerKind: r.trigger_kind,
+            text: fromJson<string[]>(r.texts).join("\n"),
+            status: "dropped_removed",
+            day: null,
+            at: now,
+            taskId: r.task_id === null ? null : globalTaskId(agent, r.task_id),
+            purpose: r.purpose ?? "unlinked",
+          }),
+        ),
+        now,
+      );
     });
   }
 
@@ -1124,7 +1153,7 @@ export class AgentStore {
     this.sql.exec("UPDATE outbox SET status = 'pending', ready_at = ?, in_doubt = 1 WHERE id = ?", readyAt, id);
   }
 
-  drop(id: OutboxId, reason: "budget" | "blocked" | "quota" | "failed", now: EpochMs, logs: readonly LogRow[]): void {
+  drop(id: OutboxId, reason: "budget" | "blocked" | "quota" | "failed" | "removed", now: EpochMs, logs: readonly LogRow[]): void {
     this.tx(() => {
       this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = ?, closed_at = ? WHERE id = ?", reason, now, id);
       this.insertLogs(logs, now);

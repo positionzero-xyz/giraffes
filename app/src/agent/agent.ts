@@ -368,7 +368,7 @@ export class Agent extends DurableObject<Env> {
     const keys = this.#deps.keys;
     const t = this.#store.ticket(nonceHash);
     const a = this.#store.agent();
-    if (!keys.on || !a || !t || t.expiresAt <= now) return { ok: false, error: "expired" };
+    if (!keys.on || !a || !t || t.expiresAt <= now || !mayspend(this.#store.admission())) return { ok: false, error: "expired" };
     if (t.status === "validating") return { ok: false, error: "busy" };
     if (t.status !== "issued") return this.#storedOutcome(t.outcome);
     const draft = draftKey(fields, { devMode: loadConfig(this.env).devMode });
@@ -910,7 +910,7 @@ export class Agent extends DurableObject<Env> {
   async #advanceBox(): Promise<void> {
     const deps = this.#deps.box;
     const box = this.#store.box();
-    if (!deps || !box) return;
+    if (!deps || !box || !mayspend(this.#store.admission())) return;
     const now = this.#deps.clock.now();
     const planned = onPlan(box, !this.#deps.billing.config.on || planAllowsBox(this.#plan(now).kind), now);
     const current = deps.host.image !== null && planned.box.image !== deps.host.image ? needsEnsure(planned.box, now) : planned.box;
@@ -1035,6 +1035,7 @@ export class Agent extends DurableObject<Env> {
           ]
         : [];
 
+    if (!row.replyOnly && !mayspend(this.#store.admission())) return this.#store.drop(row.id, "removed", now, unaskedLog("dropped_removed", null));
     if (row.attempts >= MAX_DELIVERY_ATTEMPTS) return this.#store.drop(row.id, "failed", now, unaskedLog("failed", row.admittedDay));
     if (a.status === "blocked") return this.#store.drop(row.id, "blocked", now, unaskedLog("dropped_blocked", null));
 
@@ -1145,7 +1146,7 @@ export class Agent extends DurableObject<Env> {
       outboxReadyAt: r.outboxReadyAt,
       logsReadyAt: r.logsReadyAt,
       compactionRetryAt: r.compactionRetryAt,
-      boxAt: this.#deps.box ? r.boxAt : null,
+      boxAt: this.#deps.box && mayspend(this.#store.admission()) ? r.boxAt : null,
     });
     if (t === null) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(t);

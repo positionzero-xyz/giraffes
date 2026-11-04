@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS unasked_message (
   agent_key    TEXT NOT NULL,
   trigger_kind TEXT NOT NULL,
   text         TEXT NOT NULL,
-  status       TEXT NOT NULL CHECK (status IN ('sent', 'dropped_budget', 'dropped_blocked', 'dropped_quota', 'failed')),
+  status       TEXT NOT NULL CHECK (status IN ('sent', 'dropped_budget', 'dropped_blocked', 'dropped_quota', 'dropped_removed', 'failed')),
   day          TEXT,
   at           INTEGER NOT NULL,
   task_id      TEXT,

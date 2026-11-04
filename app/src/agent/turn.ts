@@ -26,6 +26,7 @@ import type { ModelId, Usage } from "../model/model";
 import {
   admitReminder,
   checkinWakeup,
+  remindersOverCap,
   isLate,
   wakeupOrigin,
   type NewReminder,
@@ -322,6 +323,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
   const notes: string[] = [];
   const cancelled = new Map<WakeupKey, NewWakeup>();
   const adds = new Map<WakeupKey, NewReminder>();
+  const askedFor = new Set<WakeupKey>();
   const rejected: { action: string; reason: ActionRejection }[] = [];
   const notices = new Set<string>();
   const reject = (action: string, reason: ActionRejection, tellPerson: boolean) => {
@@ -353,6 +355,7 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
         if (admission.ok) {
           adds.set(admission.wakeup.key, admission.wakeup);
           pending.set(admission.wakeup.key, admission.wakeup);
+          if (a.asked) askedFor.add(admission.wakeup.key);
         } else {
           reject(actionLabel(a), admission.reason, a.asked);
           const key = parseWakeupKey(a.key);
@@ -384,6 +387,12 @@ export function planTurn(out: TurnOutput, view: TurnView): TurnCommit {
       default:
         assertNever(a);
     }
+  }
+  const fresh = [...adds.keys()].filter((key) => !cancelled.has(key));
+  for (const key of fresh.slice(fresh.length - remindersOverCap(pending.values()))) {
+    adds.delete(key);
+    pending.delete(key);
+    reject(`schedule_wakeup:${key}`, "limit", askedFor.has(key));
   }
 
   const agentTexts = [...sends];

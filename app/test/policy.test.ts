@@ -219,6 +219,20 @@ describe("reminders", () => {
     expect(commit.wakeupsAdd.map((w) => w.key)).toEqual(["new"]);
   });
 
+  test("with 20 pending, a failed move takes back its slot from a new reminder in the same turn", () => {
+    const twenty = Array.from({ length: 20 }, (_, i) => reminder(`r${i}`, local("2026-11-06T09:00")));
+    const commit = planTurn(
+      output([{ type: "cancel_wakeup", key: "r0" }, schedule("rent", "2026-11-07T09:00"), schedule("r0", "2026-11-04T09:00"), send("Done.")]),
+      view({ pending: twenty }),
+    );
+    expect(commit.wakeupsCancel).toEqual([]);
+    expect(commit.wakeupsAdd).toEqual([]);
+    expect(commit.rejected).toEqual([
+      { action: "schedule_wakeup:r0", reason: "past" },
+      { action: "schedule_wakeup:rent", reason: "limit" },
+    ]);
+  });
+
   test("the check-in can't be cancelled or scheduled by the model", () => {
     const pending = [checkin(local("2026-11-05T09:00"))];
     const commit = planTurn(output([{ type: "cancel_wakeup", key: CHECKIN_KEY }, schedule(CHECKIN_KEY, "2026-11-05T10:00")]), view({ pending }));

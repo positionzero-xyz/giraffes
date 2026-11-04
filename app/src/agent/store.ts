@@ -34,7 +34,7 @@ import {
 } from "../domain";
 import { modelCallRow, type LogRow } from "../ledger/ledger";
 import type { ModelId, Purpose } from "../model/model";
-import type { Firing, NewWakeup, PendingWakeup } from "../policy/schedule";
+import { SCHEDULE, type Firing, type NewWakeup, type PendingWakeup } from "../policy/schedule";
 import type { MonthSpend } from "../policy/spend";
 import { COMPACTION, compactionDue, type CompactionCommit, type CompactionInput } from "./compaction";
 import { TURN, type Batch, type InboxItem, type Outbound, type TurnCommit, type TurnRow } from "./turn";
@@ -381,6 +381,9 @@ export class AgentStore {
           key,
         );
       }
+      if (commit.wakeupsAdd.length > 0 && this.pendingReminders() + commit.wakeupsAdd.length > SCHEDULE.maxPendingReminders) {
+        throw new Error("a turn would leave more pending reminders than the cap");
+      }
       for (const w of commit.wakeupsAdd) this.insertWakeup(w, firstKey, now);
       if (commit.ensureCheckin) this.insertWakeup(commit.ensureCheckin, "system", now);
       for (const text of commit.notes) {
@@ -550,6 +553,10 @@ export class AgentStore {
       now,
       createdBy,
     );
+  }
+
+  private pendingReminders(): number {
+    return this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM wakeup WHERE status = 'pending' AND kind = 'reminder'").one().n;
   }
 
   dueWakeups(now: EpochMs): readonly PendingWakeup[] {

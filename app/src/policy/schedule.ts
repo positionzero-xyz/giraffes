@@ -64,9 +64,14 @@ export function admitReminder(
   if (dueAt < earliest) return { ok: false, reason: "past" };
   if (dueAt > ctx.now + SCHEDULE.maxHorizonMs) return { ok: false, reason: "too_far" };
   if (ctx.pending.has(key)) return { ok: false, reason: "duplicate" };
-  const reminders = [...ctx.pending.values()].filter((w) => w.kind === "reminder").length;
-  if (reminders >= SCHEDULE.maxPendingReminders) return { ok: false, reason: "limit" };
   return { ok: true, wakeup: { key, kind: "reminder", origin: req.origin, note: req.note, dueAt } };
+}
+
+/** How many reminders past the cap a turn's final pending set holds; the check-in doesn't count. */
+export function remindersOverCap(pending: Iterable<NewWakeup>): number {
+  let reminders = 0;
+  for (const w of pending) if (w.kind === "reminder") reminders++;
+  return Math.max(0, reminders - SCHEDULE.maxPendingReminders);
 }
 
 export function checkinWakeup(after: EpochMs, tz: TimeZone, checkinLocal: TimeOfDay): NewWakeup {

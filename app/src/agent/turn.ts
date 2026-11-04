@@ -2,8 +2,8 @@ import { z } from "zod";
 import {
   CHECKIN_KEY,
   LANGUAGES,
-  TASK_KINDS,
-  TASK_STATUSES,
+  LABEL_KINDS,
+  LABEL_STATUSES,
   WAKEUP_KEY_PATTERN,
   assertNever,
   intentOf,
@@ -81,9 +81,9 @@ export const TurnOutputSchema = z.object({
   actions: z.array(ActionSchema).describe(`At most ${TURN.maxActions} actions.`),
   lateNotice: z.string().describe(atMost(TURN.maxLateNoticeChars)).optional(),
   task: z.object({
-    kind: z.enum(TASK_KINDS),
+    kind: z.enum(LABEL_KINDS),
     key: Slug,
-    status: z.enum(TASK_STATUSES),
+    status: z.enum(LABEL_STATUSES),
   }),
 });
 export type TurnOutput = z.infer<typeof TurnOutputSchema>;
@@ -134,6 +134,10 @@ function renderEvent(e: AgentEvent, tz: TimeZone): string {
       return e.change === "follow"
         ? "The person just added you (or came back). Greet briefly; say what you can do."
         : "The person blocked you.";
+    case "choice":
+      return e.choice.kind === "accept"
+        ? `The person tapped Accept on plan ${e.choice.proposal}.`
+        : "The person agreed to the privacy notice.";
     case "wakeup": {
       const asked = e.origin === "person" ? " The person asked for this reminder." : "";
       return `Your wake-up "${e.key}" fired: ${e.note}. Due ${human(e.dueAt, tz)}.${asked}${lateLine(e, tz)}`;
@@ -275,7 +279,8 @@ function lifecycleEffects(view: TurnView): Pick<TurnCommit, "reachability" | "en
     ensureCheckin: checkinWakeup(view.now, view.tz, view.checkinLocal),
   });
   switch (e.kind) {
-    case "message": {
+    case "message":
+    case "choice": {
       const at = Math.max(...view.batch.items.map((i) => i.receivedAt)) as EpochMs;
       return view.status === "blocked" && at >= view.statusAt ? reachable(at) : none;
     }
@@ -303,6 +308,7 @@ function triggerNote(e: AgentEvent, tz: TimeZone): string | null {
       return "Daily check-in";
     case "message":
     case "lifecycle":
+    case "choice":
       return null;
     default:
       return assertNever(e);

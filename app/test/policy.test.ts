@@ -4,8 +4,8 @@ import { COMPACTION_SYSTEM, TURN_SYSTEM } from "../src/agent/prompt";
 import { planTurn, planWithoutModel, TURN, TurnOutputSchema, type Batch, type InboxItem, type TurnOutput, type TurnView } from "../src/agent/turn";
 import {
   CHECKIN_KEY,
-  TASK_KINDS,
-  TASK_STATUSES,
+  LABEL_KINDS,
+  LABEL_STATUSES,
   eventKey,
   intentOf,
   type AgentEvent,
@@ -157,19 +157,21 @@ const send = (text: string) => ({ type: "send", text }) as const;
 
 let nextId = 1;
 function reminder(key: string, dueAt: EpochMs, origin: "person" | "agent" = "person"): PendingWakeup {
-  return { id: nextId++ as WakeupId, key: key as WakeupKey, kind: "reminder", origin, note: `note ${key}`, dueAt };
+  return { id: nextId++ as WakeupId, key: key as WakeupKey, kind: "reminder", origin, note: `note ${key}`, dueAt, task: null, bookkeeping: false };
 }
 function checkin(dueAt: EpochMs): PendingWakeup {
   return { id: nextId++ as WakeupId, key: CHECKIN_KEY, kind: "checkin", origin: "system", note: "Daily check-in", dueAt };
 }
 function wakeupEvent(dueAt: EpochMs, firedAt: EpochMs, origin: "person" | "agent" = "person"): AgentEvent {
-  return { kind: "wakeup", wakeupId: 7 as WakeupId, key: "bins" as WakeupKey, origin, note: "Take the bins out", dueAt, firedAt };
+  return { kind: "wakeup", wakeupId: 7 as WakeupId, key: "bins" as WakeupKey, origin, note: "Take the bins out", dueAt, firedAt, task: null, bookkeeping: false };
 }
 
 describe("reminders", () => {
   test("a reminder is admitted in the person's zone", () => {
     const commit = planTurn(output([schedule("bins", "2026-11-04T23:00"), send("Will do.")]), view());
-    expect(commit.wakeupsAdd).toEqual([{ key: "bins", kind: "reminder", origin: "person", note: "note bins", dueAt: at("2026-11-04T23:00+07:00") }]);
+    expect(commit.wakeupsAdd).toEqual([
+      { key: "bins", kind: "reminder", origin: "person", note: "note bins", dueAt: at("2026-11-04T23:00+07:00"), bookkeeping: false },
+    ]);
     expect(commit.outbound?.texts).toEqual(["Will do."]);
   });
 
@@ -519,7 +521,7 @@ describe("output budgets", () => {
     const output = {
       actions: Array.from({ length: TURN.maxActions }, () => biggest),
       lateNotice: mostBytes(TURN.maxLateNoticeChars),
-      task: { kind: longest(TASK_KINDS), key, status: longest(TASK_STATUSES) },
+      task: { kind: longest(LABEL_KINDS), key, status: longest(LABEL_STATUSES) },
     };
 
     expect(TurnOutputSchema.safeParse(output).success).toBe(true);

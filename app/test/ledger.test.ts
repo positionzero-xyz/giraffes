@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
-import { TASK_KINDS, TASK_STATUSES, type AgentEventKind, type AgentKey, type EpochMs, type MicroUsd, type UtcMonth } from "../src/domain";
+import { LABEL_KINDS, LABEL_STATUSES, type AgentKey, type EpochMs, type MicroUsd, type UtcMonth } from "../src/domain";
 import type { BoxName } from "../src/box/names";
 import { BOX_HOST_KINDS } from "../src/box/host";
 import { ACTION_REJECTIONS, BACKENDS, d1Ledger, MODEL_CALL_STATUSES, TURN_OUTCOMES, UNASKED_STATUSES, type LogRow } from "../src/ledger/ledger";
@@ -161,11 +161,9 @@ describe("schema", () => {
         [...sql.matchAll(/CHECK \((\w+) IN \(([^)]*)\)\)/g)].map(([, column, list]) => [`${name}.${column}`, [...list.matchAll(/'(\w+)'/g)].map(([, v]) => v).sort()]),
       ),
     );
-    const eventKinds = Object.keys({ message: true, lifecycle: true, wakeup: true, checkin: true } satisfies Record<AgentEventKind, true>);
     const expected: Record<string, readonly string[]> = {
-      "turn_log.event_kind": eventKinds,
-      "turn_log.task_kind": TASK_KINDS,
-      "turn_log.task_status": TASK_STATUSES,
+      "turn_log.task_kind": LABEL_KINDS,
+      "turn_log.task_status": LABEL_STATUSES,
       "turn_log.outcome": TURN_OUTCOMES,
       "model_call.purpose": PURPOSES,
       "model_call.status": MODEL_CALL_STATUSES,

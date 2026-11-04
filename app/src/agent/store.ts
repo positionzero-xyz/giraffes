@@ -150,7 +150,7 @@ const placeholders = (n: number) => Array.from({ length: n }, () => "?").join(",
 function toWakeup(r: WakeupCols): PendingWakeup {
   const base = { id: r.id, key: r.key, note: r.note, dueAt: r.due_at };
   if (r.kind === "checkin") return { ...base, kind: "checkin", origin: "system" };
-  return { ...base, kind: "reminder", origin: r.origin === "person" ? "person" : "agent" };
+  return { ...base, kind: "reminder", origin: r.origin === "person" ? "person" : "agent", task: null, bookkeeping: false };
 }
 
 function toInboxItem(r: InboxCols): InboxItem {

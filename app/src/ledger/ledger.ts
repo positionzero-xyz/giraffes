@@ -6,8 +6,8 @@ import {
   type EpochMs,
   type LocalDate,
   type MicroUsd,
-  type TaskKind,
-  type TaskStatus,
+  type LabelKind,
+  type LabelStatus,
   type UtcMonth,
 } from "../domain";
 import type { BoxHostKind } from "../box/host";
@@ -30,9 +30,9 @@ export type LogRow =
       readonly agent: AgentKey;
       readonly eventKind: AgentEventKind;
       readonly batchSize: number;
-      readonly taskKind: TaskKind | null;
+      readonly taskKind: LabelKind | null;
       readonly taskKey: string | null;
-      readonly taskStatus: TaskStatus;
+      readonly taskStatus: LabelStatus;
       readonly outcome: TurnOutcome;
       readonly refusedForBudget: boolean;
       readonly costMicro: MicroUsd;

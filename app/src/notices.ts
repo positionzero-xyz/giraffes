@@ -1,6 +1,6 @@
 import type { JoinResult } from "./billing/store";
 import type { BoxSay } from "./box/machine";
-import type { Language } from "./domain";
+import type { Language, WaitlistReason } from "./domain";
 
 /** Every text code writes to a person. Each language must fill every entry, so a missing translation fails the build. */
 export type Notices = {
@@ -51,6 +51,19 @@ export type Notices = {
   readonly planEnded: (daysLeft: number) => string;
 
   readonly box: Readonly<Record<BoxSay, (link: string, until: string) => string>>;
+
+  readonly planAccepted: (title: string) => string;
+  readonly planChanged: string;
+  readonly acceptButton: string;
+  readonly consentButton: string;
+  readonly privacy: string;
+  readonly welcome: string;
+  readonly waitlist: Readonly<Record<WaitlistReason, string>>;
+  readonly alreadyIn: string;
+  readonly removed: string;
+  readonly betaInvite: (code: string) => string;
+  readonly inviteLimit: (max: number) => string;
+  readonly inviteNotEnrolled: string;
 };
 
 /** The entries that take no argument, which a rejection reason can name. */
@@ -135,6 +148,26 @@ const en: Notices = {
       `Your plan doesn't include connecting your own Claude plan, so I'll remove your Claude connection on ${until} unless your plan resumes. Send /plan to see the plans.`,
     retired: () => "Your plan doesn't include connecting your own Claude plan, so I removed your Claude connection. Send /plan to see the plans.",
   },
+
+  planAccepted: (title) => `(Plan accepted: ${title}.)`,
+  planChanged: "(That plan has changed since, so I didn't accept it. Tap Accept on the newest one.)",
+  acceptButton: "Accept plan",
+  consentButton: "I'm 18+ and agree",
+  privacy:
+    "Before we start: I keep our chat and the notes I make about you so I can help you over time. Nobody else reads them, and you can ask me to forget something at any time. You need to be 18 or over. Tap the button to agree.",
+  welcome: "You're in. Tell me what you'd like a hand with, and I'll check in with you each morning.",
+  waitlist: {
+    no_code: "Hi! I'm in a small invite-only beta for now. If you have an invite code, send it here.",
+    bad_code: "That code doesn't work. Check it and send it again.",
+    used: "That code has already been used. Ask the person who gave it to you for a new one.",
+    full: "The beta is full right now, so I've put you on the waiting list.",
+  },
+  alreadyIn: "You're already in the beta.",
+  removed: "You're no longer in the beta, so I can't answer messages.",
+  betaInvite: (code) => `Send this to a friend. They add me and send it to me. It works once.
+/join ${code}`,
+  inviteLimit: (max) => `You've already made all ${max} of your invites.`,
+  inviteNotEnrolled: "Only people in the beta can invite someone.",
 };
 
 const th: Notices = {
@@ -214,6 +247,26 @@ const th: Notices = {
       `แพ็กเกจของคุณไม่รวมการเชื่อมแพ็กเกจ Claude ของตัวเอง เลยจะลบการเชื่อม Claude ในวันที่ ${until} ถ้าแพ็กเกจไม่กลับมาใช้งานค่ะ ส่ง /plan เพื่อดูแพ็กเกจ`,
     retired: () => "แพ็กเกจของคุณไม่รวมการเชื่อมแพ็กเกจ Claude ของตัวเอง เลยลบการเชื่อม Claude ออกแล้วค่ะ ส่ง /plan เพื่อดูแพ็กเกจ",
   },
+
+  planAccepted: (title) => `(รับแผนแล้วค่ะ: ${title})`,
+  planChanged: "(แผนนั้นเปลี่ยนไปแล้ว เลยยังไม่ได้รับไว้ค่ะ กดยอมรับที่แผนล่าสุดได้เลยนะคะ)",
+  acceptButton: "ยอมรับแผนนี้",
+  consentButton: "อายุ 18+ และยอมรับ",
+  privacy:
+    "ก่อนเริ่มนะคะ: เราจะเก็บแชตและโน้ตเกี่ยวกับคุณไว้เพื่อช่วยคุณได้ต่อเนื่อง ไม่มีใครอื่นอ่าน และขอให้ลืมเรื่องไหนก็ได้ทุกเมื่อ ต้องมีอายุ 18 ปีขึ้นไป กดปุ่มด้านล่างเพื่อยอมรับค่ะ",
+  welcome: "เรียบร้อยค่ะ อยากให้ช่วยเรื่องไหนบอกได้เลย แล้วทุกเช้าจะทักมาถามนะคะ",
+  waitlist: {
+    no_code: "สวัสดีค่ะ ตอนนี้เปิดให้ใช้เฉพาะคนที่ได้รับเชิญก่อน ถ้ามีรหัสเชิญ ส่งมาที่นี่ได้เลยค่ะ",
+    bad_code: "รหัสนี้ใช้ไม่ได้ค่ะ ลองตรวจดูแล้วส่งมาใหม่อีกครั้งนะคะ",
+    used: "รหัสนี้ถูกใช้ไปแล้วค่ะ ขอรหัสใหม่จากคนที่ให้มาได้เลยนะคะ",
+    full: "ตอนนี้ที่เต็มแล้วค่ะ เลยใส่ชื่อไว้ในรายชื่อรอให้แล้วนะคะ",
+  },
+  alreadyIn: "ตอนนี้ใช้งานอยู่แล้วค่ะ",
+  removed: "ตอนนี้ไม่ได้อยู่ในรุ่นทดลองแล้ว เลยตอบข้อความไม่ได้ค่ะ",
+  betaInvite: (code) => `ส่งข้อความนี้ให้เพื่อนได้เลยค่ะ ให้เพื่อนเพิ่มเราเป็นเพื่อนแล้วส่งข้อความนี้มา ใช้ได้ครั้งเดียว
+/join ${code}`,
+  inviteLimit: (max) => `ใช้สิทธิ์เชิญครบ ${max} คนแล้วค่ะ`,
+  inviteNotEnrolled: "เฉพาะคนที่อยู่ในรุ่นทดลองเท่านั้นที่เชิญคนอื่นได้ค่ะ",
 };
 
 export const NOTICES: { readonly [L in Language]: Notices } = { en, th };

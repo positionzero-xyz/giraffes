@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS agent (
 CREATE TABLE IF NOT EXISTS turn_log (
   id                 TEXT PRIMARY KEY,
   agent_key          TEXT NOT NULL,
-  event_kind         TEXT NOT NULL CHECK (event_kind IN ('message', 'lifecycle', 'wakeup', 'checkin')),
+  event_kind         TEXT NOT NULL,
   batch_size         INTEGER NOT NULL,
   task_kind          TEXT CHECK (task_kind IN ('chat', 'reminder', 'plan', 'booking', 'site', 'group', 'other')),
   task_key           TEXT,

@@ -7,6 +7,7 @@ import {
   type EpochMs,
   type EventKey,
   type PersonStatus,
+  type TaskId,
   type TimeOfDay,
   type TimeZone,
   type WakeupId,
@@ -31,12 +32,13 @@ export type PendingWakeup = {
   readonly note: string;
   readonly dueAt: EpochMs;
 } & (
-  | { readonly kind: "reminder"; readonly origin: "person" | "agent" }
+  | { readonly kind: "reminder"; readonly origin: "person" | "agent"; readonly task: TaskId | null; readonly bookkeeping: boolean }
   | { readonly kind: "checkin"; readonly origin: "system" }
 );
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
-export type NewWakeup = DistributiveOmit<PendingWakeup, "id">;
+/** A wake-up before it has an id. A reminder's task is linked when it is stored, since it may name a task opened in the same turn. */
+export type NewWakeup = DistributiveOmit<PendingWakeup, "id" | "task">;
 export type NewReminder = Extract<NewWakeup, { kind: "reminder" }>;
 
 export function wakeupOrigin(trigger: AgentEventKind, askedFor: boolean): "person" | "agent" {
@@ -64,7 +66,7 @@ export function admitReminder(
   if (dueAt < earliest) return { ok: false, reason: "past" };
   if (dueAt > ctx.now + SCHEDULE.maxHorizonMs) return { ok: false, reason: "too_far" };
   if (ctx.pending.has(key)) return { ok: false, reason: "duplicate" };
-  return { ok: true, wakeup: { key, kind: "reminder", origin: req.origin, note: req.note, dueAt } };
+  return { ok: true, wakeup: { key, kind: "reminder", origin: req.origin, note: req.note, dueAt, bookkeeping: false } };
 }
 
 export function remindersOverCap(pending: Iterable<NewWakeup>): number {
@@ -123,7 +125,17 @@ export function planFiring(
           kind: "fire",
           wakeup: w,
           key: eventKey.wakeup(w.id),
-          event: { kind: "wakeup", wakeupId: w.id, key: w.key, origin: w.origin, note: w.note, dueAt: w.dueAt, firedAt: now },
+          event: {
+            kind: "wakeup",
+            wakeupId: w.id,
+            key: w.key,
+            origin: w.origin,
+            note: w.note,
+            dueAt: w.dueAt,
+            firedAt: now,
+            task: w.task,
+            bookkeeping: w.bookkeeping,
+          },
           next: null,
         });
         break;

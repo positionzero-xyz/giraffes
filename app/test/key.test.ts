@@ -1,6 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
-import { KEY_REMOVED, redactSecrets } from "../src/access/key";
+import { draftKey, KEY_REMOVED, redactSecrets } from "../src/access/key";
 import { AgentStore } from "../src/agent/store";
 import { eventKey, type AgentKey, type LocalDate, type MicroUsd } from "../src/domain";
 import { NOTICES } from "../src/notices";
@@ -462,5 +462,15 @@ describe("every key write is compare-and-set on the key's revision", () => {
 
     expect(await c.received()).toEqual([NOTICE.backupOn]);
     expect((await c.snapshot()).access.key?.backup).toBe(true);
+  });
+});
+
+describe("a dev run's stub provider", () => {
+  test("with DEV_MODE a preset may point at a loopback stub, so its own route is exercised; without it the preset's URL stands", () => {
+    const fields = { provider: "alibaba", model: "", baseUrl: "http://127.0.0.1:18801/v1", key: "sk-alibaba-0123456789" };
+    expect(draftKey(fields, { devMode: true })).toMatchObject({ ok: true, value: { provider: "alibaba", baseUrl: "http://127.0.0.1:18801/v1", model: "qwen3.7-flash" } });
+    expect(draftKey(fields, { devMode: false })).toMatchObject({ ok: true, value: { baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" } });
+    expect(draftKey({ ...fields, baseUrl: "https://elsewhere.example.com/v1" }, { devMode: true })).toEqual({ ok: false, error: "bad_url" });
+    expect(draftKey({ ...fields, baseUrl: "" }, { devMode: true })).toMatchObject({ ok: true, value: { baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" } });
   });
 });

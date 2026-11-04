@@ -13,7 +13,7 @@ import { boxClient } from "../src/box/client";
 import type { BoxHost, HostResult } from "../src/box/host";
 import { boxName, type BoxName } from "../src/box/names";
 import type { ChannelAdapter } from "../src/channels/channel";
-import { eventKey, personAgentKey, type EpochMs, type Identity, type LocalDateTime, type MicroUsd } from "../src/domain";
+import { eventKey, parseChoice, personAgentKey, type EpochMs, type Identity, type LocalDateTime, type MicroUsd } from "../src/domain";
 import type { LeaseAnswer, Ledger, LogRow } from "../src/ledger/ledger";
 import { scripted, type ScriptStep, type ScriptedModel } from "../src/model/scripted";
 import type { QuotaReading } from "../src/policy/quota";
@@ -95,7 +95,12 @@ export type DeliveryStep =
   | { readonly kind: "throw" }
   | { readonly kind: "gone" };
 
-export type Delivered = { readonly at: EpochMs; readonly text: string; readonly via: "reply" | "push" };
+export type Delivered = {
+  readonly at: EpochMs;
+  readonly text: string;
+  readonly via: "reply" | "push";
+  readonly button?: { readonly label: string; readonly data: string };
+};
 
 export type ScriptedChannel = ChannelAdapter & { readonly delivered: readonly Delivered[] };
 
@@ -112,7 +117,7 @@ export function scriptedChannel(steps: readonly DeliveryStep[] = []): ScriptedCh
       switch (step.kind) {
         case "sent": {
           const via = msg.reply !== undefined && now < msg.reply.expiresAt ? "reply" : "push";
-          delivered.push({ at: now, text: msg.texts.join("\n"), via });
+          delivered.push({ at: now, text: msg.texts.join("\n"), via, ...(msg.button ? { button: msg.button } : {}) });
           return { kind: "sent", via };
         }
         case "retry":
@@ -133,6 +138,8 @@ export type DevChat = {
   readonly channel: ScriptedChannel;
   post(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<Response>;
   say(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<void>;
+  /** The person taps a button whose data is `data`, such as "a:1.1". */
+  tap(data: string): Promise<void>;
   settle(): Promise<void>;
   alarm(): Promise<void>;
   advanceTo(local: string): Promise<void>;
@@ -184,6 +191,14 @@ export async function devChat(
       if (!res.ok) throw new Error(`webhook answered ${res.status}`);
       await chat.settle();
     },
+    async tap(data) {
+      const choice = parseChoice(data);
+      if (!choice) throw new Error(`not a button: ${data}`);
+      const at = clock.now();
+      const key = identity.channel === "line" ? eventKey.line(`tap${++messageIds}`) : eventKey.dev(`tap${++messageIds}`);
+      await stub.enqueue({ agent: personAgentKey(identity), identity, key, receivedAt: at, event: { kind: "choice", choice, at } });
+      await chat.settle();
+    },
     async settle() {
       for (let i = 0; i < 50; i++) {
         await chat.alarm();
@@ -218,17 +233,22 @@ export async function devChat(
 export function turn(o: {
   readonly actions: unknown[];
   readonly lateNotice?: string;
-  readonly task: readonly [kind: string, key: string, status: string];
+  readonly task?: readonly [kind: string, key: string, status: string];
+  readonly tasks?: unknown[];
+  readonly about?: string;
   readonly usage?: Extract<ScriptStep, { kind: "output" }>["usage"];
 }): ScriptStep {
-  const task = { kind: o.task[0], key: o.task[1], status: o.task[2] };
-  const value = o.lateNotice === undefined ? { actions: o.actions, task } : { actions: o.actions, lateNotice: o.lateNotice, task };
+  const [kind, key, status] = o.task ?? ["chat", "chat", "none"];
+  const base = { actions: o.actions, task: { kind, key, status }, tasks: o.tasks ?? [], about: o.about ?? "" };
+  const value = o.lateNotice === undefined ? base : { ...base, lateNotice: o.lateNotice };
   return o.usage ? { kind: "output", value, usage: o.usage } : { kind: "output", value };
 }
 export const send = (text: string) => ({ type: "send", text });
-export const schedule = (key: string, at: string, note: string, asked = true) => ({ type: "schedule_wakeup", key, at, note, asked });
+export const schedule = (key: string, at: string, note: string, asked = true, task = "") => ({ type: "schedule_wakeup", key, at, note, asked, task });
 export const cancel = (key: string) => ({ type: "cancel_wakeup", key });
 export const quiet = () => ({ type: "quiet" });
+export const propose = (ref: string, title: string, plan: string, kind = "plan") => ({ op: "propose", ref, kind, title, plan });
+export const openTask = (ref: string, title: string, kind = "other") => ({ op: "open", ref, kind, title, plan: "" });
 export const throws = (): ScriptStep => ({ kind: "throw" });
 export const hold = (then: ScriptStep): ScriptStep => ({ kind: "hold", then });
 export const chat = (text: string): ScriptStep => turn({ actions: [send(text)], task: ["chat", "chat", "none"] });

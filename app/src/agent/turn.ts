@@ -233,17 +233,20 @@ export function renderUser(view: TurnView): PromptParts {
 
 export type NewTurn = TurnRow & { readonly eventKey: EventKey };
 
-export type Outbound = {
+/** Why a message goes out. Only an unasked one carries a purpose, the reason code had to send it. */
+export type Asked = { readonly intent: Exclude<Intent, "unasked"> } | { readonly intent: "unasked"; readonly purpose: UnaskedPurpose };
+
+export type Outbound = Asked & {
   readonly texts: readonly [string, ...string[]];
-  readonly intent: Intent;
   readonly triggerKind: AgentEventKind;
   readonly reply?: ReplyHandle;
   readonly link: TaskTarget | null;
-  readonly purpose: UnaskedPurpose | null;
   /** The store binds an accept to the proposal it creates in the same transaction. */
   readonly choice: "accept_pending" | "consent" | null;
   readonly replyOnly: boolean;
 };
+
+const askedOf = (intent: Intent, purpose: UnaskedPurpose | null): Asked => (intent === "unasked" ? { intent, purpose: purpose ?? "unlinked" } : { intent });
 
 /** A reminder the turn adds, with the task it follows up, which may be one opened in the same turn. */
 export type ReminderAdd = NewReminder & { readonly task: TaskTarget | null };
@@ -319,13 +322,13 @@ function newestReply(view: TurnView): ReplyHandle | undefined {
   return reply;
 }
 
-type OutboundTask = Pick<Outbound, "link" | "purpose" | "choice">;
+type OutboundTask = Pick<Outbound, "link" | "choice">;
 
-function outbound(texts: readonly string[], intent: Intent, view: TurnView, task: OutboundTask): Outbound | null {
+function outbound(texts: readonly string[], asked: Asked, view: TurnView, task: OutboundTask): Outbound | null {
   const ts = nonEmpty(texts);
   if (ts === null) return null;
-  const base = { texts: ts, intent, triggerKind: trigger(view).kind, ...task, replyOnly: false };
-  const reply = intent === "reply" ? newestReply(view) : undefined;
+  const base = { ...asked, texts: ts, triggerKind: trigger(view).kind, ...task, replyOnly: false };
+  const reply = asked.intent === "reply" ? newestReply(view) : undefined;
   return reply ? { ...base, reply } : base;
 }
 
@@ -539,7 +542,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
     batchKeys: batchKeys(view),
     outcome: acted ? "acted" : "quiet",
     turns,
-    outbound: outbound(texts, intent, view, { link, purpose: purposeOf(view, tasks, link), choice: plan === null ? null : "accept_pending" }),
+    outbound: outbound(texts, askedOf(intent, purposeOf(view, tasks, link)), view, { link, choice: plan === null ? null : "accept_pending" }),
     wakeupsCancel: [...cancelled.keys()],
     wakeupsAdd: [...adds.values()],
     wakeupsRetime,
@@ -643,11 +646,7 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     batchKeys: batchKeys(view),
     outcome,
     turns,
-    outbound: outbound(said === null ? [] : [said], intentOf(trigger(view)), view, {
-      link: null,
-      purpose: purposeOf(view, fx.commit, null),
-      choice: null,
-    }),
+    outbound: outbound(said === null ? [] : [said], askedOf(intentOf(trigger(view)), purposeOf(view, fx.commit, null)), view, { link: null, choice: null }),
     wakeupsCancel: [],
     wakeupsAdd: [],
     wakeupsRetime: [],
@@ -662,7 +661,7 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
 }
 
 function planAdmissionTurn(view: TurnView, why: Extract<NoModelReason, { kind: "admission" }>): TurnCommit {
-  const out = outbound(why.text === null ? [] : [why.text], "reply", view, { link: null, purpose: null, choice: why.consent ? "consent" : null });
+  const out = outbound(why.text === null ? [] : [why.text], { intent: "reply" }, view, { link: null, choice: why.consent ? "consent" : null });
   return {
     batchKeys: batchKeys(view),
     outcome: "not_admitted",

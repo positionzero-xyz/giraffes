@@ -71,7 +71,7 @@ import {
   type UnaskedPurpose,
 } from "./tasks";
 import type { AdmissionChange, AdmissionCommit } from "./admission";
-import { TURN, type Batch, type InboxItem, type Outbound, type TurnCommit, type TurnRow } from "./turn";
+import { TURN, type Asked, type Batch, type InboxItem, type Outbound, type TurnCommit, type TurnRow } from "./turn";
 
 export type AgentRow = {
   readonly key: AgentKey;
@@ -879,7 +879,7 @@ export class AgentStore {
   private insertOutbox(
     id: OutboxId,
     key: EventKey,
-    out: Pick<Outbound, "texts" | "intent" | "triggerKind" | "reply" | "purpose" | "replyOnly"> & { readonly taskId: TaskId | null; readonly choice: string | null },
+    out: Asked & Pick<Outbound, "texts" | "triggerKind" | "reply" | "replyOnly"> & { readonly taskId: TaskId | null; readonly choice: string | null },
     now: EpochMs,
   ): void {
     this.sql.exec(
@@ -895,7 +895,7 @@ export class AgentStore {
       now,
       now,
       out.taskId,
-      out.purpose,
+      out.intent === "unasked" ? out.purpose : null,
       out.choice,
       out.replyOnly ? 1 : 0,
     );
@@ -975,7 +975,7 @@ export class AgentStore {
     this.insertOutbox(
       crypto.randomUUID() as OutboxId,
       key,
-      { texts: message.texts, intent: "requested", triggerKind: "message", purpose: null, replyOnly: false, taskId: null, choice },
+      { texts: message.texts, intent: "requested", triggerKind: "message", replyOnly: false, taskId: null, choice },
       now,
     );
   }

@@ -70,7 +70,9 @@ export type WireResult =
       readonly reportedMicro: MicroUsd | null;
     }
   | { readonly kind: "status"; readonly status: number; readonly retryAfterMs: number | null; readonly billing: boolean }
-  | { readonly kind: "network" };
+  | { readonly kind: "network" }
+  /** The dev bridge didn't answer or answered with an error: nothing ran on anyone's account. */
+  | { readonly kind: "unreachable" };
 
 export interface ModelClient {
   send(req: WireRequest): Promise<WireResult>;
@@ -274,14 +276,13 @@ export function readBridgeReply(raw: unknown): Extract<WireResult, { kind: "repl
   };
 }
 
-const BRIDGE_DOWN: WireResult = { kind: "status", status: 529, retryAfterMs: null, billing: false };
 
 function bridge(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): ModelClient {
   return {
     async send(req) {
       const body = bridgeBody({ model: req.route.model, system: req.system, user: req.user, jsonSchema: req.schema });
       const res = await post(fetch, `${e.baseUrl}/parse`, {}, body, timeouts[req.route.purpose]);
-      if (res === null || !res.ok) return BRIDGE_DOWN;
+      if (res === null || !res.ok) return { kind: "unreachable" };
       return readBridgeReply(jsonOf(res.body)) ?? UNREADABLE_REPLY;
     },
   };
@@ -391,8 +392,9 @@ export type Attempt<T> =
 
 const SHORT_RETRY_MS = 60_000;
 
-export function classify(r: Extract<WireResult, { kind: "status" | "network" }>): Attempt<never> {
+export function classify(r: Exclude<WireResult, { kind: "reply" }>): Attempt<never> {
   if (r.kind === "network") return { kind: "in_doubt" };
+  if (r.kind === "unreachable") return { kind: "turned_away" };
   const { status } = r;
   if (status === 529) return { kind: "turned_away" };
   if (status === 429) {

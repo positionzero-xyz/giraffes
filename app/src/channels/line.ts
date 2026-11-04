@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { eventKey, personAgentKey, type ChannelEvent, type EpochMs, type InboundEnvelope, type OutboundMessage } from "../domain";
+import { eventKey, parseChoice, personAgentKey, type ChannelEvent, type EpochMs, type InboundEnvelope, type OutboundMessage } from "../domain";
 import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
 
 const API = "https://api.line.me/v2/bot/message";
@@ -20,6 +20,7 @@ const WebhookEvent = z.object({
   source: z.object({ type: z.string(), userId: z.string().regex(/^U[0-9a-f]{32}$/).optional() }),
   replyToken: z.string().optional(),
   message: z.object({ type: z.string(), text: z.string().optional() }).optional(),
+  postback: z.object({ data: z.string() }).optional(),
 });
 type WebhookEvent = z.infer<typeof WebhookEvent>;
 
@@ -42,6 +43,11 @@ function toEvent(e: WebhookEvent): ChannelEvent | null {
       return reply ? { kind: "lifecycle", change: "follow", at, reply } : { kind: "lifecycle", change: "follow", at };
     case "unfollow": // on LINE, unfollowing is blocking
       return { kind: "lifecycle", change: "block", at };
+    case "postback": {
+      const choice = e.postback ? parseChoice(e.postback.data) : null;
+      if (!choice) return null;
+      return reply ? { kind: "choice", choice, at, reply } : { kind: "choice", choice, at };
+    }
     default:
       return null;
   }
@@ -116,16 +122,31 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
     },
 
     async deliver(msg: OutboundMessage, now: EpochMs): Promise<Delivery> {
-      const messages = msg.texts.slice(0, MAX_MESSAGES).map((text) => ({ type: "text", text: text.slice(0, MAX_TEXT) }));
+      const messages = toMessages(msg);
       if (msg.reply && now < msg.reply.expiresAt - REPLY_TOKEN_SAFETY_MS) {
         const replied = await reply(msg.reply.token, messages);
         if (replied !== null) return replied;
+        if (msg.replyOnly) return { kind: "failed", detail: "reply_only: the reply token was refused" };
         const pushed = await push(msg, messages);
         return pushed.kind === "retry" ? { ...pushed, kind: "in_doubt" } : pushed;
       }
+      if (msg.replyOnly) return { kind: "failed", detail: "reply_only: no fresh reply token" };
       return push(msg, messages);
     },
   };
+}
+
+/** LINE caps a quick reply's label at 20 characters; a button rides on the last text. */
+const MAX_LABEL = 20;
+
+function toMessages(msg: OutboundMessage): object[] {
+  const texts = msg.texts.slice(0, MAX_MESSAGES);
+  return texts.map((text, i) => {
+    const message = { type: "text", text: text.slice(0, MAX_TEXT) };
+    if (!msg.button || i !== texts.length - 1) return message;
+    const label = msg.button.label.slice(0, MAX_LABEL);
+    return { ...message, quickReply: { items: [{ type: "action", action: { type: "postback", label, data: msg.button.data, displayText: msg.button.label } }] } };
+  });
 }
 
 function classify(status: number, body: string): Delivery {

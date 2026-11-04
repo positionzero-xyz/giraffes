@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { eventKey, personAgentKey, type ChannelEvent, type EpochMs, type Identity, type OutboundMessage } from "../domain";
+import { eventKey, parseChoice, personAgentKey, type ChannelEvent, type EpochMs, type Identity, type OutboundMessage } from "../domain";
 import { disabledChannel, type ChannelAdapter, type Delivery, type Received } from "./channel";
 
 const REPLY_TTL_MS = 60_000;
@@ -25,12 +25,15 @@ export function devChannel(devMode: boolean): ChannelAdapter {
       const { user, text, id } = parsed.data;
       const at = (parsed.data.at ?? Date.now()) as EpochMs;
       const reply = { token: `dev:${id}`, expiresAt: (at + REPLY_TTL_MS) as EpochMs };
+      const choice = text.startsWith("/tap ") ? parseChoice(text.slice("/tap ".length).trim()) : null;
       const event: ChannelEvent =
         text === "/block"
           ? { kind: "lifecycle", change: "block", at }
           : text === "/follow"
             ? { kind: "lifecycle", change: "follow", at, reply }
-            : { kind: "message", text, reply };
+            : choice
+              ? { kind: "choice", choice, at, reply }
+              : { kind: "message", text, reply };
       const identity: Identity = { channel: "dev", channelUserId: user };
       return {
         kind: "accepted",

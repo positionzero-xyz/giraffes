@@ -135,18 +135,19 @@ export function taskEffects(view: TaskView): TaskEffects {
     }
   }
 
-  const [only, ...rest] = view.batch.items;
+  const [first, ...rest] = view.batch.items;
   const a = view.acceptable;
+  const second = (t: EpochMs) => Math.floor(t / 1000);
   if (
     a !== null &&
-    rest.length === 0 &&
-    only.event.kind === "message" &&
+    first.event.kind === "message" &&
     !decided.has(a.id) &&
-    a.sentAt <= only.receivedAt &&
-    only.receivedAt - a.sentAt <= TASKS.typedAcceptWithinMs &&
-    isPlainAccept(only.event.text)
+    second(a.sentAt) <= second(first.receivedAt) &&
+    first.receivedAt - a.sentAt <= TASKS.typedAcceptWithinMs &&
+    isPlainAccept(first.event.text) &&
+    !rest.some((i) => i.event.kind === "message" && rejectsOrAmends(i.event.text))
   ) {
-    accept(a, "typed", { key: only.key, kind: "message", at: only.receivedAt });
+    accept(a, "typed", { key: first.key, kind: "message", at: first.receivedAt });
     replies.push({ kind: "accepted", title: titleOf(a.task) });
   }
   return { commit: { ...NO_TASKS, facts }, replies };
@@ -284,6 +285,15 @@ const ACCEPT_WORDS: ReadonlySet<string> = new Set([
 ]);
 const ROMAN_PARTICLES: ReadonlySet<string> = new Set(["ka", "kha", "krub", "krab", "khrap", "na", "naa", "ja", "jaa", "please", "pls", "thanks", "thx"]);
 const THAI_PARTICLES = ["นะคะ", "นะครับ", "ค่ะ", "คะ", "ค่า", "ค้า", "ครับ", "คับ", "จ้ะ", "จ้า", "ฮะ", "นะ"] as const;
+
+const AMEND_WORDS: ReadonlySet<string> = new Set(["but", "no", "not", "change", "instead"]);
+const THAI_AMEND = ["แต่", "ไม่", "เปลี่ยน"] as const;
+
+/** A later message in an accepting batch that takes the yes back or changes the plan: one closed list in both languages. */
+export function rejectsOrAmends(text: string): boolean {
+  const words = text.toLowerCase().split(/[^\p{L}\p{M}\p{N}]+/u);
+  return words.some((w) => AMEND_WORDS.has(w)) || THAI_AMEND.some((w) => text.includes(w));
+}
 
 /** Typed acceptance: a closed vocabulary in English and Thai, after polite particles and punctuation are stripped. */
 export function isPlainAccept(text: string): boolean {

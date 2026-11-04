@@ -1,3 +1,4 @@
+import { SELF } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { TURN } from "../src/agent/turn";
 import type { EpochMs, LocalDateTime, TimeZone } from "../src/domain";
@@ -837,5 +838,22 @@ describe("compaction", () => {
     expect(notes).toHaveLength(50);
     expect(notes.at(-1)).toBe("- fact 59");
     model.assertDone();
+  });
+});
+
+describe("dev runs", () => {
+  test("a scripted dev run answers from the outputs posted to /dev/script", async () => {
+    const output = { actions: [{ type: "send", text: "Scripted hello." }], task: { kind: "chat", key: "hi", status: "none" } };
+    expect((await SELF.fetch("https://agent.test/dev/script", { method: "POST", body: JSON.stringify({ user: "sia", turns: [output] }) })).status).toBe(200);
+
+    await SELF.fetch("https://agent.test/webhook/dev", { method: "POST", body: JSON.stringify({ user: "sia", text: "hello", id: "sia-1" }) });
+
+    const snapshot = async () => (await SELF.fetch("https://agent.test/dev/transcript?user=sia")).json<{ outbox: { texts: string[]; status: string }[] }>();
+    let outbox = (await snapshot()).outbox;
+    for (let i = 0; i < 100 && outbox[0]?.status !== "sent"; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      outbox = (await snapshot()).outbox;
+    }
+    expect(outbox).toEqual([expect.objectContaining({ texts: ["Scripted hello."], status: "sent" })]);
   });
 });

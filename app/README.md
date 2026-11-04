@@ -32,6 +32,11 @@ npm run dev                           # terminal 2: wrangler dev on http://local
 Open http://localhost:8787/dev, pick a user name and chat. Send `/follow` or `/block` to exercise
 those events. The side panel shows each delivery's intent and status and the pending wake-ups.
 
+With `MODEL_BACKEND=scripted` instead, no model runs, and `POST /dev/script` with
+`{"user": "<name>", "turns": [<turn output>...], "compaction": [<summary output>...]}` sets what that
+person's next model calls return, in order, each checked against the real schema. It lasts until the
+Worker reloads.
+
 ## Deploy
 
 1. Create the ledger and load its schema:

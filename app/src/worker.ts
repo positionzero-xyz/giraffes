@@ -1,3 +1,4 @@
+import { z } from "zod";
 import chatPage from "../dev/chat.html";
 import { DONE_PATH, parseEvent, verifySignature } from "./billing/stripe";
 import { makeChannels } from "./channels/channel";
@@ -42,6 +43,7 @@ export default {
       if (url.pathname === "/dev") return new Response(chatPage, { headers: { "content-type": "text/html; charset=utf-8" } });
       if (url.pathname === "/dev/transcript") return transcript(env, url);
     }
+    if (config.devMode && config.model.backend === "scripted" && req.method === "POST" && url.pathname === "/dev/script") return script(req, env);
     return new Response("not found", { status: 404 });
   },
 
@@ -100,6 +102,16 @@ async function stripeWebhook(req: Request, env: Env, billing: Extract<Config["bi
     case "event":
       return new Response(await agentStub(env, parsed.event.owner).billingEvent(parsed.event));
   }
+}
+
+const Script = z.object({ user: z.string(), turns: z.array(z.unknown()), compaction: z.array(z.unknown()).default([]) });
+
+async function script(req: Request, env: Env): Promise<Response> {
+  const body = Script.safeParse(await req.json().catch(() => null));
+  const identity = body.success ? devIdentity(body.data.user) : null;
+  if (!body.success || !identity) return new Response("body must be {user, turns, compaction?}", { status: 400 });
+  await agentStub(env, personAgentKey(identity)).script(body.data.turns, body.data.compaction);
+  return new Response("ok");
 }
 
 async function transcript(env: Env, url: URL): Promise<Response> {

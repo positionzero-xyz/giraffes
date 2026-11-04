@@ -35,6 +35,7 @@ import { loadConfig, type BillingConfig, type BoxConfig, type Env } from "../con
 import { assertNever, CHANNEL_LANGUAGE, eventKey, intentOf, type AgentKey, type EpochMs, type EventKey, type InboundEnvelope, type Language, type MicroUsd, type PersonStatus, type TimeZone } from "../domain";
 import { d1Ledger, modelCallRow, type LeaseAnswer, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
 import { NOTICES } from "../notices";
+import { scripted, type ScriptStep } from "../model/scripted";
 import { makeModelClient, routeOf, type ModelClient, type ModelId, type ModelResult, type Purpose, type Usage } from "../model/model";
 import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach";
 import { inLineReserve, type QuotaReading } from "../policy/quota";
@@ -267,6 +268,12 @@ export class Agent extends DurableObject<Env> {
   withDeps(over: Partial<AgentDeps>): void {
     if (loadConfig(this.env).model.backend !== "scripted") throw new Error("withDeps is test-only");
     this.#deps = { ...this.#deps, ...over };
+  }
+
+  /** Dev only: the next turns and compactions return these outputs, so a `wrangler dev` run can prove model-driven paths without a model. */
+  script(turns: readonly unknown[], compaction: readonly unknown[]): void {
+    const output = (value: unknown): ScriptStep => ({ kind: "output", value });
+    this.withDeps({ model: scripted(turns.map(output), { compaction: compaction.map(output) }) });
   }
 
   async #runDrain(): Promise<void> {

@@ -109,6 +109,8 @@ export type ProviderStep =
   | { readonly kind: "raw"; readonly body: unknown }
   /** Never answers; only the request's abort signal ends it, as a real stalled endpoint would. */
   | { readonly kind: "hang" }
+  /** Runs `run` while the request is in flight, then answers with the step it returns. */
+  | { readonly kind: "call"; readonly run: () => Promise<ProviderStep> }
   | { readonly kind: "network" };
 
 export type FakeProvider = Fetch & {
@@ -123,8 +125,9 @@ export function fakeProvider(steps: readonly ProviderStep[] = []): FakeProvider 
   const f = async (input: string, init?: RequestInit): Promise<Response> => {
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
     seen.push({ url: input, headers: new Headers(init?.headers), body });
-    const step = queue.shift();
-    if (!step) throw new Error(`the provider got a request the test didn't script: ${input}`);
+    const next = queue.shift();
+    if (!next) throw new Error(`the provider got a request the test didn't script: ${input}`);
+    const step = next.kind === "call" ? await next.run() : next;
     if (step.kind === "network") throw new TypeError("fetch failed");
     if (step.kind === "raw") return new Response(typeof step.body === "string" ? step.body : JSON.stringify(step.body), { headers: { "content-type": "application/json" } });
     if (step.kind === "hang") {

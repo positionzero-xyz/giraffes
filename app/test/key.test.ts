@@ -1,7 +1,8 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
 import { KEY_REMOVED, redactSecrets } from "../src/access/key";
-import type { AgentKey } from "../src/domain";
+import { AgentStore } from "../src/agent/store";
+import { eventKey, type AgentKey, type LocalDate, type MicroUsd } from "../src/domain";
 import { NOTICES } from "../src/notices";
 import { chat, devChat, fakeBox, fakeProvider, giveKey, local, scripted, send, type DevChat, type ProviderStep } from "./testkit";
 
@@ -270,5 +271,94 @@ describe("a key pasted into the chat", () => {
     ["sk-learning is fun", false],
   ])("%s is %s", (text, found) => {
     expect(redactSecrets(text).found).toBe(found);
+  });
+});
+
+describe("every key write is compare-and-set on the key's revision", () => {
+  const OTHER = "oc_sk_replacement_key_9876543210";
+
+  test("a provider fault on a key replaced while its call was in flight rests nothing, tells nothing, and the turn retries on the new key", async () => {
+    let agent = "" as AgentKey;
+    const provider = fakeProvider([
+      {
+        kind: "call",
+        run: async () => {
+          await giveKey(agent, { key: OTHER });
+          return { kind: "status", status: 401 };
+        },
+      },
+      reply("From the new key."),
+    ]);
+    const c = await devChat("oli", { model: null, provider, at: "2099-11-04T10:00" });
+    agent = c.agent;
+    await giveKey(c.agent, { key: KEY });
+
+    await c.say("hello");
+    await c.advanceTo("2099-11-04T10:02");
+
+    expect(await c.received()).toEqual(["From the new key."]);
+    expect(provider.seen[1].headers.get("authorization")).toBe(`Bearer ${OTHER}`);
+    expect((await c.snapshot()).access.key).toMatchObject({ hint: OTHER.slice(-4), health: "ok" });
+  });
+
+  test("a reseal, rest, heal, backup answer, cap or removal made for an older revision changes nothing", async () => {
+    const c = await devChat("pam", { model: null, at: "2099-11-04T10:00" });
+    await giveKey(c.agent, { key: KEY });
+    await giveKey(c.agent, { key: OTHER });
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+
+    const after = await runInDurableObject(stub, (_a, state) => {
+      const store = new AgentStore(state.storage);
+      const current = store.key()!;
+      const stale = current.revision - 1;
+      const now = local("2099-11-04T10:00");
+      const writes = [
+        store.reseal({ kid: "stale", iv: new Uint8Array(12), ciphertext: new Uint8Array(4) }, stale),
+        store.restKey("credential", null, { key: eventKey.access("stale"), message: { texts: ["stale"], note: "stale" } }, "2099-11-04" as LocalDate, now, stale),
+        store.setBackup(true, now, stale),
+        store.setKeyCap(1 as MicroUsd, stale),
+        store.removeKey(stale),
+      ];
+      return { writes, key: store.key(), revision: current.revision };
+    });
+
+    expect(after.writes).toEqual([false, "stale", "stale", false, false]);
+    expect(after.key).toMatchObject({ hint: OTHER.slice(-4), revision: after.revision, backup: false, capMicro: 5_000_000, health: { kind: "ok" } });
+    expect(after.key?.sealed.kid).not.toBe("stale");
+    expect(await c.received()).toEqual([]);
+  });
+
+  test("the backup button names the key it asked about: a tap after that key was replaced changes nothing and says so", async () => {
+    const box = fakeBox({ signedIn: true });
+    const c = await devChat("quin", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await giveKey(c.agent, { key: KEY });
+    await c.say("/claude");
+    await c.received();
+    const asked = c.channel.delivered.at(-1)?.button?.data;
+    expect(asked).toMatch(/^b:\d+$/);
+
+    await giveKey(c.agent, { key: OTHER });
+    await c.tap(asked!);
+    expect(await c.received()).toEqual([NOTICE.backupStale]);
+    expect((await c.snapshot()).access.key?.backup).toBe(false);
+
+    await c.tap("b");
+    expect(await c.received()).toEqual([NOTICE.backupStale]);
+    expect((await c.snapshot()).access.key?.backup).toBe(false);
+  });
+
+  test("a tap on the button for the current key turns backup on", async () => {
+    const box = fakeBox({ signedIn: true });
+    const c = await devChat("ros", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await giveKey(c.agent, { key: KEY });
+    await c.say("/claude");
+    await c.received();
+
+    await c.tap(c.channel.delivered.at(-1)!.button!.data);
+
+    expect(await c.received()).toEqual([NOTICE.backupOn]);
+    expect((await c.snapshot()).access.key?.backup).toBe(true);
   });
 });

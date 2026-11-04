@@ -6,6 +6,7 @@ import {
   LABEL_STATUSES,
   WAKEUP_KEY_PATTERN,
   assertNever,
+  clip,
   intentOf,
   parseWakeupKey,
   type AgentEvent,
@@ -221,11 +222,6 @@ const REJECTION_NOTICE: Readonly<Record<ActionRejection, FixedNotice | null>> = 
   too_many_actions: "tooManyActions",
   too_long: null,
 };
-
-function clip(text: string, max: number): string {
-  const cut = text.slice(0, max - 1);
-  return `${/[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut}…`;
-}
 
 function actionLabel(a: TurnOutput["actions"][number]): string {
   return a.type === "schedule_wakeup" || a.type === "cancel_wakeup" ? `${a.type}:${a.key}` : a.type;

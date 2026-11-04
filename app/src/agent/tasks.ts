@@ -1,12 +1,18 @@
-import type {
-  EpochMs,
-  FactCause,
-  ProposalId,
-  TaskFact,
-  TaskId,
-  TaskKind,
-  TaskRef,
-  TaskStatus,
+import {
+  FACTS,
+  assertNever,
+  clip,
+  intentOf,
+  parseTaskRef,
+  type EpochMs,
+  type FactCause,
+  type FactKind,
+  type ProposalId,
+  type TaskFact,
+  type TaskId,
+  type TaskKind,
+  type TaskRef,
+  type TaskStatus,
 } from "../domain";
 import type { Batch } from "./turn";
 
@@ -96,9 +102,76 @@ export type UnaskedPurpose = (typeof UNASKED_PURPOSES)[number];
  * the model answers, so a refused, failed or poisoned turn still records them.
  */
 export function taskEffects(view: TaskView): TaskEffects {
-  void view;
-  throw new Error("not implemented");
+  const facts: TaskFactInput[] = [];
+  const replies: AcceptReply[] = [];
+  const decided = new Set<ProposalId>();
+  const titleOf = (task: TaskId) => view.openTasks.find((t) => t.id === task)?.title ?? "";
+  const accept = (p: { readonly id: ProposalId; readonly task: TaskId; readonly version: number }, via: "tap" | "typed", cause: FactCause) => {
+    decided.add(p.id);
+    facts.push({ target: { id: p.task }, fact: { kind: "plan_accepted", ref: p.id, detail: { via, version: p.version }, cause } });
+  };
+
+  for (const item of view.batch.items) {
+    const e = item.event;
+    if (e.kind !== "choice" || e.choice.kind !== "accept") continue;
+    const named = e.choice.proposal;
+    const p = view.tapped.find((x) => x.id === named);
+    if (!p || decided.has(p.id)) continue;
+    const cause: FactCause = { key: item.key, kind: "choice", at: e.at };
+    switch (p.status) {
+      case "open":
+        accept(p, "tap", cause);
+        replies.push({ kind: "accepted", title: titleOf(p.task) });
+        break;
+      case "closed":
+        accept(p, "tap", cause);
+        break;
+      case "superseded":
+        decided.add(p.id);
+        replies.push({ kind: "plan_changed" });
+        break;
+      case "accepted":
+        break;
+      default:
+        assertNever(p.status);
+    }
+  }
+
+  const [only, ...rest] = view.batch.items;
+  const a = view.acceptable;
+  if (
+    a !== null &&
+    rest.length === 0 &&
+    only.event.kind === "message" &&
+    !decided.has(a.id) &&
+    a.sentAt < only.receivedAt &&
+    only.receivedAt - a.sentAt <= TASKS.typedAcceptWithinMs &&
+    isPlainAccept(only.event.text)
+  ) {
+    accept(a, "typed", { key: only.key, kind: "message", at: only.receivedAt });
+    replies.push({ kind: "accepted", title: titleOf(a.task) });
+  }
+  return { commit: { ...NO_TASKS, facts }, replies };
 }
+
+type Finished = { readonly ids: ReadonlySet<TaskId>; readonly refs: ReadonlySet<TaskRef> };
+
+function finishedBy(tasks: TaskCommit): Finished {
+  const ids = new Set<TaskId>();
+  const refs = new Set<TaskRef>();
+  for (const { target, fact } of tasks.facts) {
+    if (nextStatus("open", fact.kind) === "open") continue;
+    if ("id" in target) ids.add(target.id);
+    else refs.add(target.ref);
+  }
+  return { ids, refs };
+}
+
+const isFinished = (f: Finished, t: { readonly id: TaskId; readonly ref: TaskRef }) => f.ids.has(t.id) || f.refs.has(t.ref);
+
+const isThin = (plan: string) => plan.length < TASKS.minPlanChars || plan.split("\n").filter((l) => l.trim() !== "").length < TASKS.minPlanLines;
+
+export type TaskOpRejection = { readonly action: string; readonly reason: TaskRejection | "too_long" };
 
 /** Checks the model's task ops against the open tasks after `taskEffects`, and returns both merged. */
 export function planTasks(
@@ -106,42 +179,131 @@ export function planTasks(
   view: TaskView,
   cause: FactCause,
   after: TaskCommit,
-): { readonly commit: TaskCommit; readonly rejected: readonly { readonly action: string; readonly reason: TaskRejection | "too_long" }[] } {
-  void ops;
-  void view;
-  void cause;
-  void after;
-  throw new Error("not implemented");
+): { readonly commit: TaskCommit; readonly rejected: readonly TaskOpRejection[] } {
+  const rejected: TaskOpRejection[] = [];
+  const reject = (o: TaskOp, reason: TaskOpRejection["reason"]) => rejected.push({ action: `task_${o.op}:${o.ref}`, reason });
+  const finished = finishedBy(after);
+  const open = new Set(view.openTasks.filter((t) => !isFinished(finished, t)).map((t) => t.ref));
+  const done = new Set(view.openTasks.filter((t) => isFinished(finished, t)).map((t) => t.ref));
+  const opened = [...after.open];
+  const facts = [...after.facts];
+  let propose = after.propose;
+
+  const ensureOpen = (o: TaskOp, ref: TaskRef): boolean => {
+    if (done.has(ref)) {
+      reject(o, "task_done");
+      return false;
+    }
+    if (open.has(ref) || opened.some((t) => t.ref === ref)) return true;
+    if (open.size + opened.length >= TASKS.maxOpen) {
+      reject(o, "task_limit");
+      return false;
+    }
+    const title = o.title.trim() || ref;
+    opened.push({ ref, kind: o.kind, title: title.length > TASKS.maxTitleChars ? clip(title, TASKS.maxTitleChars) : title });
+    return true;
+  };
+
+  ops.forEach((o, i) => {
+    if (i >= TASKS.maxOps) return reject(o, "too_many_task_ops");
+    const ref = parseTaskRef(o.ref);
+    if (ref === null) return reject(o, "task_unknown");
+    switch (o.op) {
+      case "open":
+        ensureOpen(o, ref);
+        return;
+      case "propose": {
+        if (propose !== null) return reject(o, "too_many_proposals");
+        if (!ensureOpen(o, ref)) return;
+        const plan = o.plan.trim();
+        if (plan === "") return reject(o, "plan_empty");
+        if (isThin(plan)) return reject(o, "plan_too_thin");
+        if (plan.length > TASKS.maxPlanChars) reject(o, "too_long");
+        propose = { ref, text: plan.length > TASKS.maxPlanChars ? clip(plan, TASKS.maxPlanChars) : plan };
+        return;
+      }
+      case "close":
+        if (done.has(ref)) return reject(o, "task_done");
+        if (!open.has(ref) && !opened.some((t) => t.ref === ref)) return reject(o, "task_unknown");
+        facts.push({ target: { ref }, fact: { kind: "closed", ref: "", detail: {}, cause } });
+        return;
+      default:
+        return assertNever(o.op);
+    }
+  });
+  return { commit: { open: opened, propose, facts }, rejected };
 }
 
 /**
  * The outbound message's task, by fixed precedence: the task proposed this turn, then the firing wake-up's task
- * if still open, then the model's `about` if it names an open task, one opened this turn or one completed this turn.
+ * if still open, then the model's `about` if it names an open task, one opened this turn or one finished this turn.
  */
 export function linkOf(view: TaskView, tasks: TaskCommit, about: string): TaskTarget | null {
-  void view;
-  void tasks;
-  void about;
-  throw new Error("not implemented");
+  if (tasks.propose) return { ref: tasks.propose.ref };
+  const finished = finishedBy(tasks);
+  const e = view.batch.items[0].event;
+  if (e.kind === "wakeup" && e.task !== null) {
+    const task = view.openTasks.find((t) => t.id === e.task);
+    if (task && !isFinished(finished, task)) return { id: task.id };
+  }
+  const ref = parseTaskRef(about);
+  if (ref === null) return null;
+  if (tasks.open.some((t) => t.ref === ref)) return { ref };
+  const known = view.openTasks.find((t) => t.ref === ref);
+  if (!known) return null;
+  return isFinished(finished, known) ? { id: known.id } : { ref };
 }
 
-/** Code decides purpose; the model never labels it. */
+/**
+ * Code decides purpose; the model never labels it. Only an unasked message has one: a check code scheduled is
+ * bookkeeping, a message on a task still open after this turn is a follow-up, one on a task that finished is
+ * bookkeeping, and one with no task is unlinked.
+ */
 export function purposeOf(view: TaskView, tasks: TaskCommit, link: TaskTarget | null): UnaskedPurpose | null {
-  void view;
-  void tasks;
-  void link;
-  throw new Error("not implemented");
+  const e = view.batch.items[0].event;
+  if (intentOf(e) !== "unasked") return null;
+  if (e.kind === "wakeup" && e.bookkeeping) return "bookkeeping";
+  if (link === null) return "unlinked";
+  if ("ref" in link && tasks.open.some((t) => t.ref === link.ref)) return "task_followup";
+  const finished = finishedBy(tasks);
+  const task = view.openTasks.find((t) => ("id" in link ? t.id === link.id : t.ref === link.ref));
+  return task && !isFinished(finished, task) ? "task_followup" : "bookkeeping";
 }
+
+const ACCEPT_WORDS: ReadonlySet<string> = new Set([
+  ...["ok", "okay", "okey", "oke", "k", "kk", "yes", "yep", "yeah", "yup", "sure", "good", "great", "perfect", "deal", "agreed"],
+  ...["accept", "accepted", "sounds good", "looks good", "go", "go ahead", "do it", "lets do it", "lets go", "👍", "👌"],
+  ...["โอเค", "โอเคเลย", "ตกลง", "ได้", "ได้เลย", "เอา", "เอาเลย", "ใช่", "จัดไป", "ดีเลย"],
+]);
+const ROMAN_PARTICLES: ReadonlySet<string> = new Set(["ka", "kha", "krub", "krab", "khrap", "na", "naa", "ja", "jaa", "please", "pls", "thanks", "thx"]);
+const THAI_PARTICLES = ["นะคะ", "นะครับ", "ค่ะ", "คะ", "ค่า", "ค้า", "ครับ", "คับ", "จ้ะ", "จ้า", "ฮะ", "นะ"] as const;
 
 /** Typed acceptance: a closed vocabulary in English and Thai, after polite particles and punctuation are stripped. */
 export function isPlainAccept(text: string): boolean {
-  void text;
-  throw new Error("not implemented");
+  const tokens = text
+    .toLowerCase()
+    .replace(/['’]/g, "")
+    .replace(/[.,!?~…:;"()-]+/g, " ")
+    .split(/\s+/)
+    .filter((w) => w !== "");
+  while (tokens.length > 1 && ROMAN_PARTICLES.has(tokens[tokens.length - 1])) tokens.pop();
+  let s = tokens.join(" ");
+  for (let stripped = true; stripped; ) {
+    stripped = false;
+    for (const p of THAI_PARTICLES) {
+      if (s.length > p.length && s.endsWith(p)) {
+        s = s.slice(0, -p.length).trim();
+        stripped = true;
+      }
+    }
+  }
+  return ACCEPT_WORDS.has(s);
 }
 
 /** The status transition, in one place. completed, closed and expired are final. */
-export function nextStatus(s: TaskStatus, f: TaskFact["kind"]): TaskStatus {
-  void s;
-  void f;
-  throw new Error("not implemented");
+export function nextStatus(s: TaskStatus, f: FactKind): TaskStatus {
+  if (s !== "open") return s;
+  if (FACTS[f].completes) return "completed";
+  return f === "closed" || f === "expired" ? f : "open";
 }
+

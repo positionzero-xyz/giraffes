@@ -574,7 +574,7 @@ describe("connecting a Claude plan", () => {
     box.replies.push({ kind: "status", status: 503 });
     await c.say("hello");
     await c.advanceTo("2099-11-04T10:04");
-    expect(await c.received()).toEqual([NOTICE.failed]);
+    expect(await c.received()).toEqual([NOTICE.backupAsk("OpenCode Go"), NOTICE.failed]);
     expect(provider.seen).toHaveLength(0);
 
     c.clock.set(local("2099-11-04T10:10"));

@@ -20,7 +20,7 @@ export default defineConfig(async () => ({
         compatibilityFlags: ["nodejs_compat"],
         durableObjects: { AGENT: { className: "Agent", useSQLite: true } },
         d1Databases: ["LEDGER"],
-        bindings: { MODEL_BACKEND: "scripted", DEV_MODE: "1" },
+        bindings: { MODEL_BACKEND: "scripted", DEV_MODE: "1", KEY_SECRET: "test-key-secret-0123456789abcdef0123", PUBLIC_URL: "https://giraffes.test" },
       },
     }),
   ],

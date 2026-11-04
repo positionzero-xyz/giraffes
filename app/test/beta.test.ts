@@ -1,10 +1,11 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { ADMISSION } from "../src/agent/admission";
 import { loadConfig, type Env } from "../src/config";
-import type { InviteCode } from "../src/domain";
+import { AgentStore } from "../src/agent/store";
+import { eventKey, type AgentKey, type InviteCode } from "../src/domain";
 import { NOTICES } from "../src/notices";
-import { chat, devChat, memoryLedger, type DevChat, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
+import { chat, devChat, fakeBox, fakeProvider, local, memoryLedger, type DevChat, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
 
 const t = NOTICES.en;
 const CODE = "K7P3QZ" as InviteCode;
@@ -25,6 +26,10 @@ async function fillRecruits(): Promise<void> {
   )
     .bind(ADMISSION.caps.recruit)
     .run();
+}
+
+function doRows(agent: AgentKey, sql: string): Promise<unknown[]> {
+  return runInDurableObject(env.AGENT.get(env.AGENT.idFromName(agent)), (_a, state) => state.storage.sql.exec(sql).toArray());
 }
 
 const follow = (c: DevChat, code?: InviteCode) =>
@@ -171,6 +176,59 @@ describe("admission to the beta", () => {
     expect(model.calls).toHaveLength(1);
     expect((await c.snapshot()).admission).toMatchObject({ state: "removed" });
     expect(c.logs("admission").map((r) => r.change)).toEqual(["consented", "removed"]);
+  });
+
+  test("a removed person's key link no longer validates, and their tickets are gone", async () => {
+    const provider = fakeProvider([{ kind: "output", value: { ok: true } }]);
+    const c = await devChat("rem1", { model: null, provider, at: "2099-11-04T10:00", admission: "beta" });
+    await c.say("/key");
+    const ticket = /#t=([^&\s]+)/.exec((await c.received()).join("\n"))![1];
+
+    await c.remove();
+    const res = await SELF.fetch("https://giraffes.test/key", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket, provider: "opencode-go", model: "", baseUrl: "", key: "oc_sk_live_abcdefghijklmnop0123456789" }),
+    });
+
+    expect(await res.json()).toEqual({ ok: false, error: "expired" });
+    expect(provider.seen).toHaveLength(0);
+    expect((await c.snapshot()).access.key).toBeNull();
+    expect(await doRows(c.agent, "SELECT * FROM key_ticket")).toEqual([]);
+  });
+
+  test("a removed person's box is neither provisioned further nor advanced", async () => {
+    const retry = { retryable: true, detail: "503" };
+    const box = fakeBox({ host: [retry, retry, retry, retry, retry] });
+    const c = await devChat("rem2", { model: scripted([]), at: "2099-11-04T10:00", admission: "beta", box: box.deps });
+    await c.say("/claude");
+    const calls = box.ensureCalls.length;
+    expect((await c.snapshot()).box?.state).toBe("provisioning");
+
+    await c.remove();
+    await c.advanceTo("2099-11-04T11:00");
+
+    expect(box.ensureCalls).toHaveLength(calls);
+    expect(box.healthCalls).toEqual([]);
+  });
+
+  test("removal drops pending pushes with reason removed, nothing queued later is pushed, and the fixed reply still arrives", async () => {
+    const c = await devChat("rem3", { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", admission: "beta", deliveries: [{ kind: "retry", afterMs: 10 * 60_000 }] });
+    await c.say("hi");
+    expect(await doRows(c.agent, "SELECT status FROM outbox")).toEqual([{ status: "pending" }]);
+
+    await c.remove();
+    expect(await doRows(c.agent, "SELECT status, drop_reason FROM outbox")).toEqual([{ status: "dropped", drop_reason: "removed" }]);
+
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_a, state) =>
+      new AgentStore(state.storage).notifyOnce("late", eventKey.billing("late"), { texts: ["A late push."], note: "A late push." }, local("2099-11-04T10:01")),
+    );
+    c.clock.set(local("2099-11-04T10:30"));
+    await c.settle();
+    await c.say("hello?");
+
+    expect(await c.received()).toEqual([t.removed]);
+    expect(await doRows(c.agent, "SELECT drop_reason FROM outbox WHERE status = 'dropped' ORDER BY rowid")).toEqual([{ drop_reason: "removed" }, { drop_reason: "removed" }]);
   });
 
   test("beta admission can't run with billing on, and is the default", () => {

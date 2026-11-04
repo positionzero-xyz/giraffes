@@ -172,14 +172,17 @@ Each attempt settles in its own transaction, with its `model_call` row, the mome
 | Outcome | Charged | `model_call.status` |
 |---|---|---|
 | a response, valid or not | its usage, or the cost the provider reported | `settled` |
+| a response with no usage and no reported cost, or a 200 whose body doesn't parse | the estimate | `usage_missing` |
 | a short 429 or a 529, or the dev bridge is down | $0 | `unavailable` |
 | the provider refused the key or the model | $0 | `provider_refused` |
 | another 4xx, rejected before it ran | $0 | `rejected` |
-| no response, a 408, or another 5xx | the estimate | `in_doubt` |
+| no response, a 408, another 5xx, or no full answer within the timeout | the estimate | `in_doubt` |
 | over the cap, so not sent | $0 | `refused_user_cap` |
 | the instance died mid-call | the estimate, charged by `recover()` | `recovered_after_crash` |
 
 `recover()` settles only reservations another instance made, so a group's call served while this instance drains is left alone.
+
+Every provider attempt has a timeout through `AbortSignal` that covers the headers and the body: 60 s for a turn or a compaction, 20 s for the key page's probe. A timeout is `in_doubt`, since the provider may have run and billed it, and the batch backs off like any unavailable model, so a stalled endpoint can't hold the person's drain. An endpoint that answers without usage is charged at the estimate, so a person's own cap binds on an endpoint that never reports what it used.
 
 ## Failure cases
 
@@ -207,7 +210,7 @@ No turn runs inside the webhook request. There are no lock rows, no stored alarm
 - **A box outage ends a box-only person's message in "say it again"** after the usual three attempts, in exchange for never spending anyone's money they didn't agree to.
 - **A signed-out box is not a fallback either.** A person whose plan is connected but signed out gets a line a day saying so, rather than their key being used without a yes.
 - **The provider's own spend limit is the included tier's only ceiling.** It holds only if the operator sets it on `INCLUDED_API_KEY`, in exchange for deleting the D1 lease table, its protocol and a cross-user hop. The included tier is off and may never ship.
-- **Nominal pricing for unpriced models.** A custom endpoint or an unlisted model is priced on Haiku's card, so its cap bounds tokens rather than dollars, and `/key` says "about".
+- **Ceiling pricing for unpriced models.** A custom endpoint or an unlisted model is priced on the dearest card any preset on its protocol publishes (Haiku's today, on both protocols), so its cap is never looser than a listed model's and bounds tokens rather than dollars, and `/key` says "about".
 - **Route-specific prompt budgets.** A cheaper route may see less of the conversation than Haiku does, in exchange for no route ever reaching its long-prompt tier.
 - **The operator can decrypt saved keys,** since it holds `KEY_SECRET`. The key page says the key is kept only for the person's assistant; envelope encryption under a key the operator can't reach isn't available on Workers.
 - **A failed probe uses up its link.** A mistyped key needs a fresh `/key`, in exchange for tickets that are single use and replay-safe.

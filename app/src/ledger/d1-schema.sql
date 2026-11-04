@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS model_call (
   purpose            TEXT NOT NULL CHECK (purpose IN ('turn', 'compaction', 'probe', 'planning')),
   model              TEXT NOT NULL,
   backend            TEXT NOT NULL DEFAULT 'api' CHECK (backend IN ('api', 'box', 'key', 'included')),
-  status             TEXT NOT NULL CHECK (status IN ('settled', 'refused_user_cap', 'refused_global_ceiling', 'recovered_after_crash', 'unavailable', 'rejected', 'in_doubt', 'provider_refused')),
+  status             TEXT NOT NULL CHECK (status IN ('settled', 'refused_user_cap', 'refused_global_ceiling', 'recovered_after_crash', 'unavailable', 'rejected', 'in_doubt', 'provider_refused', 'usage_missing')),
   estimate_micro     INTEGER NOT NULL,
   cost_micro         INTEGER NOT NULL,
   input_tokens       INTEGER NOT NULL,

@@ -21,7 +21,7 @@ export type Route = {
   readonly maxTokens: number;
   readonly effort: Effort | null;
   readonly card: RateCard;
-  /** False: priced at NOMINAL, so a cap bounds tokens rather than dollars, and the person is told it is approximate. */
+  /** False: priced at its protocol's dearest card, so a cap bounds tokens rather than dollars, and the person is told it is approximate. */
   readonly priced: boolean;
   readonly feeBps: number;
   /** UTF-8 bytes of system plus user that keep the prompt under the card's long-prompt tier and its context. */

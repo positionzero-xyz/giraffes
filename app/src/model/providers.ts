@@ -30,7 +30,7 @@ export type Provider = {
   readonly keyShape: RegExp | null;
   /** Null: the person types one. */
   readonly defaultModel: string | null;
-  /** Models whose every price is published; any other model is priced at NOMINAL and shown as approximate. */
+  /** Models whose every price is published; any other model is priced at its protocol's dearest card and shown as approximate. */
   readonly models: Readonly<Record<string, ProviderModel>>;
   /** "probe": the connect probe decides between strict and loose. */
   readonly schema: "strict" | "probe" | "loose";
@@ -64,9 +64,6 @@ const openaiCard = (input: number, cacheRead: number, output: number, longPrompt
   longPrompt,
   contextTokens: null,
 });
-
-/** Prices a model nobody published a card for (a custom endpoint, an unlisted model), so a cap still means something. */
-export const NOMINAL: ProviderModel = { card: HAIKU_5_5, effort: false };
 
 const none = () => ({});
 
@@ -171,7 +168,23 @@ export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
   },
 };
 
-export function modelOf(provider: ProviderId, model: string): { readonly model: ProviderModel; readonly priced: boolean } {
-  const known = PROVIDERS[provider].models[model];
-  return known ? { model: known, priced: true } : { model: NOMINAL, priced: false };
+const dearness = (c: RateCard) => c.inputPerM + c.outputPerM;
+
+/**
+ * A model nobody published a card for (a custom endpoint, an unlisted model) is priced at the dearest card any preset
+ * on its protocol publishes, so a cap on it is never looser than on a listed model.
+ */
+export function modelOf(
+  provider: ProviderId,
+  model: string,
+  table: Readonly<Record<ProviderId, Provider>> = PROVIDERS,
+): { readonly model: ProviderModel; readonly priced: boolean } {
+  const known = table[provider].models[model];
+  if (known) return { model: known, priced: true };
+  const protocol = table[provider].protocol;
+  const cards = Object.values(table)
+    .filter((p) => p.protocol === protocol)
+    .flatMap((p) => Object.values(p.models).map((m) => m.card));
+  const card = cards.reduce((a, b) => (dearness(b) > dearness(a) ? b : a), cards[0] ?? HAIKU_5_5);
+  return { model: { card, effort: false }, priced: false };
 }

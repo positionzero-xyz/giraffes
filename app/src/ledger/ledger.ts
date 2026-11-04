@@ -139,6 +139,7 @@ export const MODEL_CALL_STATUSES = [
   "rejected",
   "in_doubt",
   "provider_refused",
+  "usage_missing",
 ] as const;
 export type ModelCallStatus = (typeof MODEL_CALL_STATUSES)[number];
 

@@ -34,9 +34,11 @@ export function estimate(route: Route, promptBytes: number): MicroUsd {
   return withFee(Math.ceil((tokens * Math.max(p.inputPerM, p.cacheWritePerM) + route.maxTokens * p.outputPerM) / 1_000_000), route);
 }
 
+const NO_TOKENS: Usage = { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 };
+
 /** A cost the provider reported wins over our card. */
-export function costOf(route: Route, usage: Usage, reported: MicroUsd | null): MicroUsd {
-  return withFee(reported ?? Math.ceil(priced(route, usage)), route);
+export function costOf(route: Route, usage: Usage | null, reported: MicroUsd | null): MicroUsd {
+  return withFee(reported ?? Math.ceil(priced(route, usage ?? NO_TOKENS)), route);
 }
 
 export const fits = (month: MonthSpend, est: MicroUsd, cap: MicroUsd): boolean => month.spent + month.reserved + est <= cap;

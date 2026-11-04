@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { MicroUsd } from "../domain";
 import type { Auth, Protocol, ProviderId } from "./providers";
-import type { Route } from "./routes";
+import type { CallPurpose, Route } from "./routes";
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -14,7 +14,6 @@ export type Usage = {
   readonly cacheWriteTokens: number;
   readonly cacheReadTokens: number;
 };
-export const NO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0 };
 
 /** A credential that a log line or a JSON dump prints as a placeholder. */
 export class SecretKey {
@@ -66,7 +65,8 @@ export type WireResult =
       readonly kind: "reply";
       readonly text: string;
       readonly stop: "end" | "max_tokens" | "refusal";
-      readonly usage: Usage;
+      /** Null: the provider ran the call but said nothing about what it used. */
+      readonly usage: Usage | null;
       readonly reportedMicro: MicroUsd | null;
     }
   | { readonly kind: "status"; readonly status: number; readonly retryAfterMs: number | null; readonly billing: boolean }
@@ -76,6 +76,10 @@ export interface ModelClient {
   send(req: WireRequest): Promise<WireResult>;
 }
 export type Connect = (e: Endpoint) => ModelClient;
+
+/** How long one attempt may take, headers and body together, before it counts as in doubt. */
+export type ProviderTimeouts = Readonly<Record<CallPurpose, number>>;
+export const PROVIDER_TIMEOUT_MS: ProviderTimeouts = { turn: 60_000, compaction: 60_000, probe: 20_000 };
 
 export const LOOSE_INSTRUCTION = "Reply with only one JSON object that matches this JSON Schema:";
 const REPAIR_INSTRUCTION = "That reply didn't match the schema. Reply with only the corrected JSON object.";
@@ -92,9 +96,18 @@ function retryAfterMs(h: string | null): number | null {
   return Number.isNaN(at) ? null : Math.min(Math.max(0, at - Date.now()), MAX_RETRY_AFTER_MS);
 }
 
-async function failed(res: Response): Promise<WireResult> {
-  const body = await res.text().catch(() => "");
-  return { kind: "status", status: res.status, retryAfterMs: retryAfterMs(res.headers.get("retry-after")), billing: res.status === 402 || BILLING_ERROR.test(body) };
+type Answer = { readonly status: number; readonly ok: boolean; readonly retryAfter: string | null; readonly body: string };
+
+function failed(res: Answer): WireResult {
+  return { kind: "status", status: res.status, retryAfterMs: retryAfterMs(res.retryAfter), billing: res.status === 402 || BILLING_ERROR.test(res.body) };
+}
+
+function jsonOf(body: string): unknown {
+  try {
+    return JSON.parse(body);
+  } catch {
+    return null;
+  }
 }
 
 function authHeaders(e: Endpoint): Record<string, string> {
@@ -102,13 +115,17 @@ function authHeaders(e: Endpoint): Record<string, string> {
   return e.auth === "x-api-key" ? { "x-api-key": e.key.reveal() } : { authorization: `Bearer ${e.key.reveal()}` };
 }
 
-async function post(fetch: Fetch, url: string, headers: Record<string, string>, body: unknown): Promise<Response | null> {
+/** Null when the request or its body fails or outlasts `timeoutMs`: the provider may have run it. */
+async function post(fetch: Fetch, url: string, headers: Record<string, string>, body: string, timeoutMs: number): Promise<Answer | null> {
   try {
-    return await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+    const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body, signal: AbortSignal.timeout(timeoutMs) });
+    return { status: res.status, ok: res.ok, retryAfter: res.headers.get("retry-after"), body: await res.text() };
   } catch {
     return null;
   }
 }
+
+const UNREADABLE_REPLY: WireResult = { kind: "reply", text: "", stop: "end", usage: null, reportedMicro: null };
 
 const AnthropicReply = z.object({
   content: z.array(z.object({ type: z.string(), text: z.string().optional() })),
@@ -121,7 +138,7 @@ const AnthropicReply = z.object({
   }),
 });
 
-function anthropic(fetch: Fetch, e: Endpoint): ModelClient {
+function anthropic(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): ModelClient {
   return {
     async send(req) {
       const user = req.mode === "loose" ? looseUser(req.user, req.schema) : req.user;
@@ -133,7 +150,7 @@ function anthropic(fetch: Fetch, e: Endpoint): ModelClient {
           ]
         : [{ role: "user", content: user }];
       const output = req.mode === "strict" ? { format: { type: "json_schema", schema: req.schema }, ...(req.route.effort ? { effort: req.route.effort } : {}) } : null;
-      const res = await post(fetch, `${e.baseUrl}/v1/messages`, { "anthropic-version": "2023-06-01", ...authHeaders(e), ...e.headers }, {
+      const body = JSON.stringify({
         ...e.body,
         model: req.route.model,
         max_tokens: req.route.maxTokens,
@@ -141,10 +158,11 @@ function anthropic(fetch: Fetch, e: Endpoint): ModelClient {
         messages,
         ...(output ? { output_config: output } : {}),
       });
+      const res = await post(fetch, `${e.baseUrl}/v1/messages`, { "anthropic-version": "2023-06-01", ...authHeaders(e), ...e.headers }, body, timeouts[req.route.purpose]);
       if (res === null) return { kind: "network" };
       if (!res.ok) return failed(res);
-      const parsed = AnthropicReply.safeParse(await res.json().catch(() => null));
-      if (!parsed.success) return { kind: "reply", text: "", stop: "end", usage: NO_USAGE, reportedMicro: null };
+      const parsed = AnthropicReply.safeParse(jsonOf(res.body));
+      if (!parsed.success) return UNREADABLE_REPLY;
       const r = parsed.data;
       return {
         kind: "reply",
@@ -176,7 +194,7 @@ const OpenAIReply = z.object({
     .nullish(),
 });
 
-function openai(fetch: Fetch, e: Endpoint): ModelClient {
+function openai(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): ModelClient {
   return {
     async send(req) {
       const user = req.mode === "loose" ? looseUser(req.user, req.schema) : req.user;
@@ -194,7 +212,7 @@ function openai(fetch: Fetch, e: Endpoint): ModelClient {
         req.mode === "strict"
           ? { type: "json_schema", json_schema: { name: req.route.purpose, strict: true, schema: req.schema } }
           : { type: "json_object" };
-      const res = await post(fetch, `${e.baseUrl}/chat/completions`, { ...authHeaders(e), ...e.headers }, {
+      const body = JSON.stringify({
         ...e.body,
         model: req.route.model,
         max_tokens: req.route.maxTokens,
@@ -202,10 +220,11 @@ function openai(fetch: Fetch, e: Endpoint): ModelClient {
         response_format: format,
         ...(req.route.effort ? { reasoning_effort: req.route.effort } : {}),
       });
+      const res = await post(fetch, `${e.baseUrl}/chat/completions`, { ...authHeaders(e), ...e.headers }, body, timeouts[req.route.purpose]);
       if (res === null) return { kind: "network" };
       if (!res.ok) return failed(res);
-      const parsed = OpenAIReply.safeParse(await res.json().catch(() => null));
-      if (!parsed.success) return { kind: "reply", text: "", stop: "end", usage: NO_USAGE, reportedMicro: null };
+      const parsed = OpenAIReply.safeParse(jsonOf(res.body));
+      if (!parsed.success) return UNREADABLE_REPLY;
       const [choice] = parsed.data.choices;
       const u = parsed.data.usage;
       const cached = u?.prompt_tokens_details?.cached_tokens ?? 0;
@@ -214,7 +233,7 @@ function openai(fetch: Fetch, e: Endpoint): ModelClient {
         kind: "reply",
         text: choice.message.content ?? "",
         stop: refused ? "refusal" : choice.finish_reason === "length" ? "max_tokens" : "end",
-        usage: u ? { inputTokens: u.prompt_tokens - cached, outputTokens: u.completion_tokens, cacheWriteTokens: 0, cacheReadTokens: cached } : NO_USAGE,
+        usage: u ? { inputTokens: u.prompt_tokens - cached, outputTokens: u.completion_tokens, cacheWriteTokens: 0, cacheReadTokens: cached } : null,
         reportedMicro: typeof u?.cost === "number" ? (Math.ceil(u.cost * 1_000_000) as MicroUsd) : null,
       };
     },
@@ -250,42 +269,34 @@ export function readBridgeReply(raw: unknown): Extract<WireResult, { kind: "repl
     stop: reply.data.stop,
     usage: u
       ? { inputTokens: u.input_tokens, outputTokens: u.output_tokens, cacheWriteTokens: u.cache_creation_input_tokens ?? 0, cacheReadTokens: u.cache_read_input_tokens ?? 0 }
-      : NO_USAGE,
+      : null,
     reportedMicro: null,
   };
 }
 
 const BRIDGE_DOWN: WireResult = { kind: "status", status: 529, retryAfterMs: null, billing: false };
 
-function bridge(fetch: Fetch, e: Endpoint): ModelClient {
+function bridge(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): ModelClient {
   return {
     async send(req) {
-      let res: Response;
-      try {
-        res = await fetch(`${e.baseUrl}/parse`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: bridgeBody({ model: req.route.model, system: req.system, user: req.user, jsonSchema: req.schema }),
-        });
-      } catch {
-        return BRIDGE_DOWN;
-      }
-      if (!res.ok) return BRIDGE_DOWN;
-      return readBridgeReply(await res.json().catch(() => null)) ?? { kind: "reply", text: "", stop: "end", usage: NO_USAGE, reportedMicro: null };
+      const body = bridgeBody({ model: req.route.model, system: req.system, user: req.user, jsonSchema: req.schema });
+      const res = await post(fetch, `${e.baseUrl}/parse`, {}, body, timeouts[req.route.purpose]);
+      if (res === null || !res.ok) return BRIDGE_DOWN;
+      return readBridgeReply(jsonOf(res.body)) ?? UNREADABLE_REPLY;
     },
   };
 }
 
 /** Anthropic Messages (native or any compatible base URL), OpenAI chat completions, or the dev bridge. */
-export function connect(fetch: Fetch): Connect {
+export function connect(fetch: Fetch, timeouts: ProviderTimeouts = PROVIDER_TIMEOUT_MS): Connect {
   return (e) => {
     switch (e.protocol) {
       case "anthropic":
-        return anthropic(fetch, e);
+        return anthropic(fetch, e, timeouts);
       case "openai":
-        return openai(fetch, e);
+        return openai(fetch, e, timeouts);
       case "bridge":
-        return bridge(fetch, e);
+        return bridge(fetch, e, timeouts);
     }
   };
 }
@@ -366,9 +377,9 @@ export type KeyFault =
 
 /** What one attempt meant. The single table from HTTP to meaning, shared by every protocol. */
 export type Attempt<T> =
-  | { readonly kind: "ok"; readonly value: T; readonly usage: Usage; readonly reported: MicroUsd | null }
-  | { readonly kind: "invalid"; readonly text: string; readonly issues: string; readonly usage: Usage; readonly reported: MicroUsd | null }
-  | { readonly kind: "refused_by_model"; readonly usage: Usage; readonly reported: MicroUsd | null }
+  | { readonly kind: "ok"; readonly value: T; readonly usage: Usage | null; readonly reported: MicroUsd | null }
+  | { readonly kind: "invalid"; readonly text: string; readonly issues: string; readonly usage: Usage | null; readonly reported: MicroUsd | null }
+  | { readonly kind: "refused_by_model"; readonly usage: Usage | null; readonly reported: MicroUsd | null }
   /** 429 with a short Retry-After, or 529: it did not run. */
   | { readonly kind: "turned_away" }
   /** The provider refused this key or model; it did not run. */

@@ -399,18 +399,16 @@ export class ModelAccess {
         if (!r) throw new Error("settled a reservation this meter didn't make");
         open.delete(reserved.id);
         const now = clock.now();
-        const cost =
-          outcome.kind === "ok" || outcome.kind === "invalid" || outcome.kind === "refused_by_model"
-            ? costOf(route, outcome.usage, outcome.reported)
-            : outcome.kind === "in_doubt"
-              ? r.estimate
-              : (0 as MicroUsd);
+        const ran = outcome.kind === "ok" || outcome.kind === "invalid" || outcome.kind === "refused_by_model";
+        const unmetered = ran && outcome.usage === null && outcome.reported === null;
+        const cost = ran && !unmetered ? costOf(route, outcome.usage, outcome.reported) : unmetered || outcome.kind === "in_doubt" ? r.estimate : (0 as MicroUsd);
         spent += cost;
         const usage = "usage" in outcome ? outcome.usage : null;
+        const status = unmetered ? "usage_missing" : STATUS[outcome.kind];
         store.settle(
           r,
           cost,
-          [modelCallRow({ id: r.id, agent: this.#agent(), purpose: r.purpose, model: r.model, backend, status: STATUS[outcome.kind], estimate: r.estimate, cost, usage, at: now })],
+          [modelCallRow({ id: r.id, agent: this.#agent(), purpose: r.purpose, model: r.model, backend, status, estimate: r.estimate, cost, usage, at: now })],
           now,
         );
       },

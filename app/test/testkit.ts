@@ -43,7 +43,6 @@ export function fakeClock(start: EpochMs): FakeClock {
 }
 
 export type MemoryLedger = Ledger & {
-  /** The latest LINE quota reading, as the hourly check would have recorded it. */
   lineQuotaReading: { readonly at: EpochMs; readonly month: string; readonly limit: number | null; readonly used: number } | null;
   readonly rows: readonly LogRow[];
   readonly boxes: ReadonlyMap<string, { readonly name: string; readonly host: string }>;
@@ -216,7 +215,6 @@ export type DevChat = {
   tap(data: string): Promise<void>;
   /** Any channel event, past the webhook, such as a Telegram follow with its start code. */
   event(e: ChannelEvent): Promise<void>;
-  /** The operator removes the person from the beta. */
   remove(): Promise<void>;
   settle(): Promise<void>;
   alarm(): Promise<void>;

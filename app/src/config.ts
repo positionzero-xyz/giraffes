@@ -84,7 +84,6 @@ export type Config = {
   readonly devMode: boolean;
   /** `live` serves each person on their own access; `bridge` and `scripted` add a dev lane for everyone, behind DEV_MODE. */
   readonly model: { readonly backend: "live" } | { readonly backend: "bridge"; readonly bridgeUrl: string } | { readonly backend: "scripted" };
-  /** People's own API keys: the /key page and the secret that seals them. */
   readonly keys: KeysConfig;
   /** Our own quota on a paid plan; off unless INCLUDED=on. */
   readonly included: IncludedConfig;
@@ -296,7 +295,6 @@ function operatorChat(raw: string | undefined, configured: Readonly<Record<Opera
   return chat;
 }
 
-/** Defaults to beta, so a deploy that forgets it stays closed. */
 function admissionMode(raw: string | undefined, billing: BillingConfig): AdmissionMode {
   const mode = present(raw) ? raw : "beta";
   if (!ADMISSION_MODES.some((m) => m === mode)) throw new Error(`unknown ADMISSION: ${mode}`);

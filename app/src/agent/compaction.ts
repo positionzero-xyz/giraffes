@@ -35,7 +35,6 @@ export type CompactionPlan = {
   readonly expectThroughSeq: number;
   readonly foldThroughSeq: number;
   readonly foldNoteIds: readonly number[];
-  /** Every section is kept whole: the page was sized to the budget, so the model sees exactly what is folded. */
   readonly prompt: PromptParts;
 };
 

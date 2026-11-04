@@ -118,7 +118,6 @@ export type BoxDeps = {
 const boxServes = (deps: BoxDeps | null, agent: AgentKey): deps is BoxDeps => deps !== null && (deps.onlyFor === null || deps.onlyFor === agent);
 
 export type AgentDeps = {
-  /** Builds a wire client for an endpoint: a person's key, our included tier, or the dev bridge. */
   readonly connect: Connect;
   readonly keys: KeysConfig;
   readonly included: IncludedConfig;
@@ -151,7 +150,6 @@ export type ConnectResult = { readonly ok: true; readonly provider: string; read
 
 export type AccessView = {
   readonly lanes: readonly ("box" | "key" | "included")[];
-  /** What the person's key is, never the key: the snapshot proves it stays sealed. */
   readonly key: {
     readonly provider: string;
     readonly model: string;
@@ -190,7 +188,6 @@ export class Agent extends DurableObject<Env> {
   #billing: Promise<unknown> = Promise.resolve();
   /** In memory on purpose: losing it on a restart costs one more try of a box that may still be wedged. */
   #skipBoxUntil = 0;
-  /** Marks this instance's reservations, so recovery settles only those a dead instance left. */
   readonly #instance = crypto.randomUUID();
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -353,7 +350,6 @@ export class Agent extends DurableObject<Env> {
     };
   }
 
-  /** Runs one model call for a group this person owns, on this person's access and limits. Groups arrive in week 3. */
   async serve(req: ServeRequest): Promise<Served<Purpose> | { readonly kind: "not_owner" }> {
     if (!this.#store.ownsGroup(req.group, req.ownershipVersion)) return { kind: "not_owner" };
     const plan = await this.#planNow(this.#agent().key, this.#deps.clock.now());
@@ -414,7 +410,6 @@ export class Agent extends DurableObject<Env> {
     return { ok: false, error: (outcome as KeyPageError | null) ?? "used" };
   }
 
-  /** A fresh one-time link to the key page; only the newest works. Null while keys are off. */
   async #keyLink(lang: Language): Promise<string | null> {
     const keys = this.#deps.keys;
     if (!keys.on) return null;
@@ -424,7 +419,6 @@ export class Agent extends DurableObject<Env> {
     return `${keys.publicUrl}/key#t=${t.token}&l=${lang}`;
   }
 
-  /** Asks once per key, when the person has both their own key and a connected Claude plan, whether the key may back it up. */
   #askBackupIfDue(now: EpochMs): void {
     const k = this.#store.key();
     const box = this.#store.box();
@@ -435,7 +429,6 @@ export class Agent extends DurableObject<Env> {
     this.#store.askBackup({ texts: [text], note: text }, choiceToken({ kind: "backup" }), eventKey.access(`backup:${now}`), now);
   }
 
-  /** Records that this person owns `group` at `version`; the group DO that week 3 adds is its only caller. */
   async recordGroup(group: AgentKey, version: number): Promise<void> {
     this.#store.recordGroup(group, version);
   }
@@ -572,7 +565,6 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
-  /** What someone with no access is offered: only what this deploy can give them. */
   #onboarding(lang: Language, plan: Plan, agent: AgentKey): string {
     const box = boxServes(this.#deps.box, agent) && planAllowsBox(plan.kind);
     const included = this.#deps.included.on && this.#deps.included.who === "plan" && this.#deps.billing.config.on;
@@ -607,10 +599,6 @@ export class Agent extends DurableObject<Env> {
     this.#store.commitTurn(commit, logsForTurn({ agent, commit, view, call, startedAt: view.now, now }), now, box);
   }
 
-  /**
-   * Everything for someone not admitted runs here, and nothing here spends: a code is checked in D1, the seat is
-   * claimed at consent, and every reply goes out only on the reply token.
-   */
   async #admission(view: TurnView, a: AgentRow): Promise<void> {
     if (this.#deps.admission === "open") {
       const now = this.#deps.clock.now();
@@ -638,7 +626,6 @@ export class Agent extends DurableObject<Env> {
     this.#commit(planWithoutModel(view, why), view, a.key, { kind: "none" });
   }
 
-  /** D1 is out: retry on the model's backoff, then say to try again, changing nothing. */
   #admissionUnavailable(view: TurnView, agent: AgentKey): void {
     const now = this.#deps.clock.now();
     const attempts = Math.max(...view.batch.items.map((i) => i.attempts));
@@ -732,7 +719,6 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
-  /** The beta's two commands. Joining is admission's job, so someone already in is told so without asking D1. */
   async #betaCommand(command: Extract<Command, { kind: "invite" | "join" }>, view: TurnView, agent: AgentKey): Promise<void> {
     const t = NOTICES[view.language];
     if (command.kind === "join") return this.#reply(view, agent, t.alreadyIn);
@@ -956,7 +942,6 @@ export class Agent extends DurableObject<Env> {
     return health.kind === "unavailable" ? { kind: "down", retryable: true, detail: health.detail } : health;
   }
 
-  /** The box lane: the person's own plan pays, so nothing is reserved. A box that can't answer moves the call on. */
   async #parseOnBox(req: Parameters<BoxLane["parse"]>[0]): Promise<BoxAnswer> {
     const deps = this.#deps.box;
     const box = this.#store.box();
@@ -1085,7 +1070,6 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
-  /** An unreadable reading holds nothing back: the reserve is a margin, and the person's message matters more. */
   async #lineQuota(): Promise<QuotaReading | null> {
     try {
       return await this.#deps.ledger.lineQuota();
@@ -1161,7 +1145,6 @@ const DROPPED: Readonly<Record<Extract<UnaskedVerdict, { verdict: "drop" }>["rea
 
 const usd = (micro: MicroUsd): string => (micro / 1_000_000).toFixed(2);
 
-/** A message that looks like it carries an API key is never stored as written, not even in the inbox. */
 function withoutSecrets(envelope: InboundEnvelope): InboundEnvelope {
   const e = envelope.event;
   if (e.kind !== "message") return envelope;

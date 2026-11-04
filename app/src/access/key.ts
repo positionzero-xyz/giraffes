@@ -11,14 +11,11 @@ export type KeyHealth =
   | { readonly kind: "ok" }
   | { readonly kind: "resting"; readonly fault: KeyFault; readonly until: EpochMs | null; readonly failures: number; readonly toldAt: EpochMs | null };
 
-/** What the DO holds about a person's own key, still sealed. */
 export type StoredKey = {
   readonly provider: ProviderId;
-  /** The preset's, or the person's for a custom provider. */
   readonly baseUrl: string;
   readonly model: string;
   readonly auth: Auth;
-  /** Decided by the connect probe. */
   readonly mode: SchemaMode;
   readonly sealed: Sealed;
   /** The key's last 4 characters, for /key. */
@@ -61,7 +58,6 @@ async function aesKey(secret: string, agent: AgentKey): Promise<CryptoKey> {
   ]);
 }
 
-/** Binds the key to where it may be sent, so a row edited to point at another host fails to open. */
 const aad = (provider: ProviderId, baseUrl: string) => utf8.encode(`${provider}\n${baseUrl}`);
 
 /** AES-256-GCM under a key derived from the secret and this person's agent key, so a row copied into another DO fails to open. */
@@ -195,7 +191,6 @@ function entropyBits(s: string): number {
   return h;
 }
 
-/** A long token that mixes cases and digits like a generated key, and not hex, a UUID or part of a link. */
 const keyLike = (t: string) => /[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) && entropyBits(t) >= 4;
 
 /**

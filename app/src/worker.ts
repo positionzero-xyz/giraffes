@@ -73,7 +73,6 @@ async function checkLineQuota(config: Config, accessToken: string, env: Env, now
   }
 }
 
-/** Null when the alert didn't go out, so the next hour tries again. */
 async function tellOperator(config: Config, text: string, now: EpochMs): Promise<OperatorChat["channel"] | "log" | null> {
   const to = config.operatorChat;
   if (to === null) {
@@ -86,7 +85,6 @@ async function tellOperator(config: Config, text: string, now: EpochMs): Promise
   return null;
 }
 
-/** The key page carries no secret and no person's data, so it is the same for everyone; the ticket stays in the URL fragment. */
 const KEY_PAGE = keyPage.replace(
   "__DATA__",
   JSON.stringify({
@@ -119,7 +117,6 @@ const KeyForm = z.object({
   key: z.string().max(600),
 });
 
-/** Never logs the body: it carries the person's key. The ticket is checked here before any DO wakes. */
 async function keyForm(req: Request, env: Env, keys: Extract<KeysConfig, { on: true }>): Promise<Response> {
   const body = await req.text();
   if (body.length > MAX_KEY_FORM_BYTES) return Response.json({ ok: false, error: "bad_form" }, { status: 413 });
@@ -175,7 +172,6 @@ async function script(req: Request, env: Env): Promise<Response> {
 
 const Removal = z.object({ agent: z.string().regex(/^p:(line|telegram|dev):[^:]+$/) });
 
-/** Takes a person out of the beta, by agent key. Dev only until there is an operator route with its own auth. */
 async function remove(req: Request, env: Env): Promise<Response> {
   const body = Removal.safeParse(await req.json().catch(() => null));
   if (!body.success) return new Response("body must be {agent: p:<channel>:<id>}", { status: 400 });

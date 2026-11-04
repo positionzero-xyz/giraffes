@@ -231,7 +231,6 @@ export type Outbound = {
   readonly triggerKind: AgentEventKind;
   readonly reply?: ReplyHandle;
   readonly link: TaskTarget | null;
-  /** Non-null exactly when intent is unasked. */
   readonly purpose: UnaskedPurpose | null;
   /** The store binds an accept to the proposal it creates in the same transaction. */
   readonly choice: "accept_pending" | "consent" | null;
@@ -644,10 +643,6 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
   };
 }
 
-/**
- * A turn for someone not admitted. It keeps nothing of what they wrote, never pushes, and starts no check-in
- * until they are admitted.
- */
 function planAdmissionTurn(view: TurnView, why: Extract<NoModelReason, { kind: "admission" }>): TurnCommit {
   const out = outbound(why.text === null ? [] : [why.text], "reply", view, { link: null, purpose: null, choice: why.consent ? "consent" : null });
   return {

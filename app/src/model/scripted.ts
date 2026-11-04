@@ -20,7 +20,6 @@ export type ScriptedModel = ModelClient & {
 
 const DEFAULT_USAGE: Usage = { inputTokens: 1000, outputTokens: 100, cacheWriteTokens: 0, cacheReadTokens: 0 };
 
-/** Each failure as the wire would show it, so the real classification decides what it means. */
 const FAILURE: Readonly<Record<ScriptFailure, WireResult>> = {
   invalid_output: { kind: "reply", text: "not json", stop: "end", usage: DEFAULT_USAGE, reportedMicro: null },
   refused_by_model: { kind: "reply", text: "", stop: "refusal", usage: DEFAULT_USAGE, reportedMicro: null },

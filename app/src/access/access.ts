@@ -44,9 +44,7 @@ export type IncludedOn = {
 };
 export type IncludedConfig = { readonly on: false } | IncludedOn;
 
-/** The dev lane's monthly cap, the size of the old per-person cap, so a dev run doesn't hit it by accident. */
 export const DEV_CAP_MICRO = 15_000_000 as MicroUsd;
-/** Where a scripted dev run's lane points; the scripted client answers it instead of a fetch. */
 export const DEV_URL_SCRIPTED = "scripted:";
 
 /** The dev lane: everyone's calls go to the bridge at `baseUrl`, or to a script, metered like our included tier. Behind DEV_MODE only. */
@@ -67,7 +65,6 @@ export type Lane = { readonly kind: "box" } | { readonly kind: "key"; readonly k
 export type AccessFacts = {
   readonly admitted: boolean;
   readonly plan: Plan;
-  /** The state of the box that serves this person, or null when none does. */
   readonly box: BoxState | null;
   readonly key: StoredKey | null;
   readonly included: IncludedConfig;
@@ -109,7 +106,6 @@ export type Served<P extends Purpose> =
 
 export type BoxAnswer = { readonly kind: "reply"; readonly reply: Extract<WireResult, { kind: "reply" }> } | { readonly kind: "moved_on"; readonly transient: boolean; readonly told: boolean };
 
-/** The box as access sees it; the agent implements it, because the box's state machine lives there. */
 export interface BoxLane {
   state(): BoxState | null;
   parse(req: { readonly purpose: CallPurpose; readonly model: string; readonly system: string; readonly user: string; readonly jsonSchema: JsonSchema }): Promise<BoxAnswer>;
@@ -162,7 +158,6 @@ function probeError(a: Attempt<unknown> | null): ProbeError {
 const HOUR_MS = 60 * 60_000;
 const MIN_MS = 60_000;
 
-/** How long a key rests after a fault, before it is tried again; null rests it until the person replaces it. */
 function restFor(fault: KeyFault, failures: number, retryAfterMs: number | null): number | null {
   const doubling = (base: number, max: number) => Math.min(base * 2 ** Math.min(failures, 10), max);
   switch (fault) {
@@ -256,7 +251,6 @@ export class ModelAccess {
     }
   }
 
-  /** The prompt fitted to the route, or null when even the kept parts don't fit, which a renderer bug would cause. */
   #fit(route: Route, mode: SchemaMode, req: CallRequest<Purpose>): string | null {
     const schemaBytes = mode === "loose" ? bytesOf(looseUser("", jsonSchemaOf(OUTPUTS[req.purpose]))) : 0;
     const budget = route.promptBytes - bytesOf(req.system) - schemaBytes;
@@ -279,7 +273,6 @@ export class ModelAccess {
     );
   }
 
-  /** A guard against a renderer bug: a prompt that can't fit is never sent, so no route reaches its long-prompt tier. */
   #oversized<P extends Purpose>(route: Route, backend: Backend, lane: Lane["kind"]): LaneResult<P> {
     this.#log(route, backend, "rejected", 0 as MicroUsd, 0 as MicroUsd, null);
     return { kind: "served", served: { kind: "failed", call: { lane, model: route.ref, costMicro: 0 as MicroUsd } } };
@@ -382,7 +375,6 @@ export class ModelAccess {
     store.restKey(fault, until, { key: eventKey.access(`fault:${now}`), message: { texts: [text], note: text } }, now);
   }
 
-  /** Every billed attempt passes through its own reservation, and is settled and logged the moment it returns. */
   #meter(scope: SpendScope, cap: MicroUsd, backend: "key" | "included"): Meter & { readonly spent: () => MicroUsd } {
     const { store, clock, instance } = this.deps;
     const open = new Map<string, Reservation>();

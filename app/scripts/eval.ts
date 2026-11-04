@@ -160,7 +160,6 @@ if (fixtures.length === 0) fail(`no fixtures in ${fixturesDir}${only ? ` tagged 
 const tzOf = (f: Fixture) => parseTimeZone(f.tz) as TimeZone;
 const at = (s: string, tz: TimeZone) => fromLocal(s as LocalDateTime, tz);
 
-/** A real TurnView, so the prompt is byte for byte what production renders. */
 function viewOf(f: TurnFixture): TurnView {
   const tz = tzOf(f);
   const now = at(f.now, tz);

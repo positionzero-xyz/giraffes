@@ -22,7 +22,6 @@ export const ADMISSION = { caps: { recruit: 40, joiner: 60 }, invitesPerPerson: 
 export const ADMISSION_MODES = ["beta", "open"] as const;
 export type AdmissionMode = (typeof ADMISSION_MODES)[number];
 
-/** Presenting a code only reads D1, so nobody holds a seat they never consented to. */
 export type InviteCheck = { readonly kind: "ok"; readonly cohort: Cohort; readonly half: Half | null } | { readonly kind: "bad_code" | "used" | "full" };
 export type SeatAnswer = { readonly kind: "granted"; readonly seat: Seat } | { readonly kind: "bad_code" | "used" | "full" };
 
@@ -91,7 +90,6 @@ export function planAdmission(view: AdmissionView, answer: AdmissionAnswer | nul
   return say({ state: "waitlisted", reason, toldOn: today }, a.state === "stranger" ? "waitlisted" : null, t.waitlist[reason]);
 }
 
-/** The last code in the batch: a follow's start payload, `/join CODE`, or a message that is only a code. */
 function codeIn(batch: Batch): InviteCode | null {
   let code: InviteCode | null = null;
   for (const { event: e } of batch.items) {

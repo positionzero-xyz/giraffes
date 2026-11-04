@@ -61,8 +61,6 @@ CREATE TABLE IF NOT EXISTS task (
 );
 CREATE INDEX IF NOT EXISTS task_agent ON task (agent_key, opened_at);
 
--- No CHECK on kind: a new kind of evidence arrives as data. completes is set once, by the DO, on the fact that moved
--- the task to completed, so no view keeps a list of kinds.
 CREATE TABLE IF NOT EXISTS task_fact (
   id              TEXT PRIMARY KEY,
   agent_key       TEXT NOT NULL,

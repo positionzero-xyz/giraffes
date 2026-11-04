@@ -241,7 +241,6 @@ export type KeyTicket = {
   readonly outcome: string | null;
 };
 
-/** A key as the store saves it: sealed, with the schema mode its provider's probe decided. */
 export type NewKey = Omit<StoredKey, "backup" | "backupAskedAt" | "revision" | "health">;
 
 type BoxCols = {
@@ -297,7 +296,6 @@ function fromJson<T>(text: string): T {
   return JSON.parse(text);
 }
 
-/** Rows queued before a field existed: model calls before the box path were API calls, and unasked messages before tasks had none. */
 function queuedLog(row: LogRow): LogRow {
   if (row.stream === "model_call" && row.backend === undefined) return { ...row, backend: "api" };
   if (row.stream === "unasked" && (row as { purpose?: unknown }).purpose === undefined) return { ...row, taskId: null, purpose: "unlinked" };
@@ -342,7 +340,6 @@ function toBox(r: BoxCols): Box {
   }
 }
 
-/** The button an outbox row carries, labelled in the person's language. */
 function button(choice: string | null, language: Language): Pick<OutboundMessage, "button"> {
   const c = choice === null ? null : parseChoice(choice);
   if (c === null || choice === null) return {};
@@ -546,7 +543,6 @@ export class AgentStore {
     );
   }
 
-  /** The only writer of the admission row; it logs each change and creates the check-in when someone is admitted. */
   private writeAdmission(c: AdmissionCommit, now: EpochMs): void {
     const a = c.next;
     if (a.state === "stranger") return;
@@ -737,11 +733,6 @@ export class AgentStore {
     });
   }
 
-  /**
-   * Applies a turn's task changes in the caller's transaction: opens first, then facts, then the proposal, which is bound
-   * to the outbox row the turn is about to insert. Returns how to resolve a task the turn named by ref, and the
-   * accept button's data when a plan was proposed.
-   */
   private applyTasks(
     c: TaskCommit,
     cause: FactCause,
@@ -794,10 +785,6 @@ export class AgentStore {
     return id;
   }
 
-  /**
-   * The only writer of task status. The same evidence twice is one fact. A fact that moves an open task to completed
-   * is the one with completes = 1; on a task already final it is recorded and changes nothing.
-   */
   private recordFact(agent: AgentKey, task: TaskId, fact: TaskFact, now: EpochMs): void {
     const current = this.sql.exec<{ status: TaskStatus }>("SELECT status FROM task WHERE id = ?", task).toArray()[0]?.status;
     if (current === undefined) return;

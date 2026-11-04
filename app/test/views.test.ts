@@ -30,7 +30,6 @@ async function enroll(p: Person, inviter: string | null = null): Promise<void> {
   await run("INSERT INTO admission_log (id, agent_key, change, reason, channel, at) VALUES (?, ?, 'consented', ?, 'telegram', ?)", `${p.agent}|a`, p.agent, p.cohort, p.consentedAt);
 }
 
-/** A task that the person completed by accepting its plan at `at`, by tap or typed. */
 async function completed(agent: string, at: number, via: "tap" | "typed" = "tap"): Promise<string> {
   const task = `${agent}|t${next()}`;
   await run("INSERT INTO task (id, agent_key, ref, kind, title, cause_kind, opened_at) VALUES (?, ?, 'trip', 'plan', 'A trip', 'checkin', ?)", task, agent, at - DAY);

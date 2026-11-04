@@ -214,7 +214,6 @@ export type Seat = { readonly cohort: Cohort; readonly half: Half | null; readon
 export const WAITLIST_REASONS = ["no_code", "bad_code", "used", "full"] as const;
 export type WaitlistReason = (typeof WAITLIST_REASONS)[number];
 
-/** A code is only checked when it is presented; the seat is claimed when the person consents. */
 export type Admission =
   | { readonly state: "stranger" }
   | { readonly state: "waitlisted"; readonly reason: WaitlistReason; readonly toldOn: LocalDate | null }
@@ -222,7 +221,6 @@ export type Admission =
   | { readonly state: "admitted"; readonly seat: Seat; readonly at: EpochMs }
   | { readonly state: "removed"; readonly at: EpochMs };
 
-/** The one test every spend path uses. */
 export const mayspend = (a: Admission): a is Extract<Admission, { state: "admitted" }> => a.state === "admitted";
 
 export type PersonStatus = "active" | "blocked";

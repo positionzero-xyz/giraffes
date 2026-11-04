@@ -26,7 +26,6 @@ export const TASKS = {
   typedAcceptWithinMs: 48 * 60 * 60 * 1000,
 } as const;
 
-/** One task op as the model returns it. Every field is always present, so the schema stays plain. */
 export type TaskOp = {
   readonly op: "open" | "propose" | "close";
   readonly ref: string;
@@ -49,7 +48,6 @@ export type AcceptableProposal = { readonly id: ProposalId; readonly task: TaskI
 export const PROPOSAL_STATUSES = ["open", "accepted", "superseded", "closed"] as const;
 export type ProposalStatus = (typeof PROPOSAL_STATUSES)[number];
 
-/** A proposal an accept tap in the batch names, as the store holds it. */
 export type TappedProposal = {
   readonly id: ProposalId;
   readonly task: TaskId;
@@ -78,7 +76,6 @@ export type TaskCommit = {
 
 export const NO_TASKS: TaskCommit = { open: [], propose: null, facts: [] };
 
-/** What code tells the person about a tap or a typed accept, in the same reply. */
 export type AcceptReply = { readonly kind: "accepted"; readonly title: string } | { readonly kind: "plan_changed" };
 
 export type TaskEffects = { readonly commit: TaskCommit; readonly replies: readonly AcceptReply[] };

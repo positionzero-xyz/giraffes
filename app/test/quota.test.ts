@@ -9,7 +9,6 @@ const TELEGRAM_VARS = { TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_WEBHOOK_SECRET: 
 
 type FakeLine = { quota: unknown; used: number; readonly alerts: string[]; readonly lineCalls: string[] };
 
-/** LINE's quota endpoints and Telegram's sendMessage, answered in process; nothing reaches the network. */
 function fakeApis(): FakeLine {
   const fake: FakeLine = { quota: { type: "limited", value: 1000 }, used: 0, alerts: [], lineCalls: [] };
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {

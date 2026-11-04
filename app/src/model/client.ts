@@ -27,7 +27,6 @@ export class SecretKey {
     const v = raw.trim();
     return /^[\x21-\x7e]{8,512}$/.test(v) ? new SecretKey(v) : null;
   }
-  /** Only the wire's header builder and the sealer call this. */
   reveal(): string {
     return this.#value;
   }
@@ -256,7 +255,6 @@ export function readBridgeReply(raw: unknown): Extract<WireResult, { kind: "repl
   };
 }
 
-/** A bridge that is down never ran the call, so it reads as a turned-away request. */
 const BRIDGE_DOWN: WireResult = { kind: "status", status: 529, retryAfterMs: null, billing: false };
 
 function bridge(fetch: Fetch, e: Endpoint): ModelClient {

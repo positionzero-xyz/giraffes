@@ -322,7 +322,6 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
 
 type InviteCols = { cohort: Cohort; half: Half | null; used: number; taken: number };
 
-/** A joiner's half is the half of whoever invited them. */
 const INVITE_STATE = `SELECT c.cohort,
          CASE c.cohort WHEN 'joiner' THEN (SELECT half FROM enrollment WHERE agent_key = c.issuer) ELSE c.half END AS half,
          EXISTS (SELECT 1 FROM enrollment e WHERE e.code = c.code AND e.agent_key != ?2) AS used,

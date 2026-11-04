@@ -27,5 +27,17 @@ export function renderPrompt(parts: PromptParts, cuts: readonly number[] = []): 
 
 /** Pure. Keeps every kept line, then drops trimmable lines oldest first, lowest rank first, until the prompt fits. */
 export function fitPrompt(parts: PromptParts, budgetBytes: number): string {
-  throw new Error("not implemented");
+  const cuts = parts.sections.map(() => 0);
+  let size = bytesOf(renderPrompt(parts));
+  if (size <= budgetBytes) return renderPrompt(parts);
+  const order = parts.sections.map((s, i) => ({ s, i })).sort((a, b) => a.s.dropRank - b.s.dropRank);
+  for (const { s, i } of order) {
+    while (size > budgetBytes && cuts[i] < s.trim.length) {
+      const before = cuts[i] === 0 ? 0 : bytesOf(cutLine(cuts[i])) + 1;
+      cuts[i]++;
+      size += bytesOf(cutLine(cuts[i])) + 1 - before - (bytesOf(s.trim[cuts[i] - 1]) + 1);
+    }
+    if (size <= budgetBytes) break;
+  }
+  return renderPrompt(parts, cuts);
 }

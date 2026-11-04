@@ -59,7 +59,17 @@ function route(ref: ModelRef, model: string, purpose: CallPurpose, card: RateCar
 }
 
 export function routeFor(source: Source, purpose: CallPurpose): Route {
-  throw new Error("not implemented");
+  switch (source.kind) {
+    case "box":
+      return route(`claude-plan:${BOX_MODEL}`, BOX_MODEL, purpose, HAIKU_5_5, true, true, 0);
+    case "dev":
+      return route(`bridge:${source.model}`, source.model, purpose, HAIKU_5_5, true, true, 0);
+    case "key":
+    case "included": {
+      const { model, priced } = modelOf(source.provider, source.model);
+      return route(`${source.provider}:${source.model}`, source.model, purpose, model.card, priced, model.effort, PROVIDERS[source.provider].feeBps);
+    }
+  }
 }
 
 /** The smallest prompt budget over every priced model, per purpose. Compaction plans its page against it. */

@@ -280,7 +280,16 @@ function bridge(fetch: Fetch, e: Endpoint): ModelClient {
 
 /** Anthropic Messages (native or any compatible base URL), OpenAI chat completions, or the dev bridge. */
 export function connect(fetch: Fetch): Connect {
-  throw new Error("not implemented");
+  return (e) => {
+    switch (e.protocol) {
+      case "anthropic":
+        return anthropic(fetch, e);
+      case "openai":
+        return openai(fetch, e);
+      case "bridge":
+        return bridge(fetch, e);
+    }
+  };
 }
 
 const LIMITS = ["maxLength", "maxItems", "minItems"] as const;
@@ -338,7 +347,11 @@ const SCHEMAS = new WeakMap<z.ZodType, JsonSchema>();
  * into descriptions. The box and the bridge get the same object.
  */
 export function jsonSchemaOf(schema: z.ZodType): JsonSchema {
-  throw new Error("not implemented");
+  const cached = SCHEMAS.get(schema);
+  if (cached) return cached;
+  const made = normalize(z.toJSONSchema(schema)) as JsonSchema;
+  SCHEMAS.set(schema, made);
+  return made;
 }
 
 export type KeyFault =
@@ -370,11 +383,33 @@ export type Attempt<T> =
 const SHORT_RETRY_MS = 60_000;
 
 export function classify(r: Extract<WireResult, { kind: "status" | "network" }>): Attempt<never> {
-  throw new Error("not implemented");
+  if (r.kind === "network") return { kind: "in_doubt" };
+  const { status } = r;
+  if (status === 529) return { kind: "turned_away" };
+  if (status === 429) {
+    return r.retryAfterMs !== null && r.retryAfterMs <= SHORT_RETRY_MS ? { kind: "turned_away" } : { kind: "fault", fault: "rate", retryAfterMs: r.retryAfterMs };
+  }
+  if (status === 402 || (r.billing && status >= 400 && status < 500 && status !== 408)) return { kind: "fault", fault: "payment", retryAfterMs: null };
+  if (status === 401 || status === 403) return { kind: "fault", fault: "credential", retryAfterMs: null };
+  if (status === 404) return { kind: "fault", fault: "model", retryAfterMs: null };
+  if (status === 408 || status >= 500) return { kind: "in_doubt" };
+  return { kind: "rejected" };
 }
 
 export function readAttempt<T>(r: WireResult, schema: z.ZodType<T>): Attempt<T> {
-  throw new Error("not implemented");
+  if (r.kind !== "reply") return classify(r);
+  const { usage, reportedMicro: reported } = r;
+  if (r.stop === "refusal") return { kind: "refused_by_model", usage, reported };
+  if (r.stop === "max_tokens") return { kind: "invalid", text: r.text, issues: "The reply was cut off at the output limit.", usage, reported };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(r.text);
+  } catch {
+    return { kind: "invalid", text: r.text, issues: "The reply was not valid JSON.", usage, reported };
+  }
+  const parsed = schema.safeParse(raw);
+  if (parsed.success) return { kind: "ok", value: parsed.data, usage, reported };
+  return { kind: "invalid", text: r.text, issues: parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("\n"), usage, reported };
 }
 
 export type Reserved = { readonly id: string; readonly estimate: MicroUsd };
@@ -400,5 +435,28 @@ const utf8 = new TextEncoder();
 
 /** Strict: one attempt. Loose: one attempt, then one repair when the JSON or its shape is wrong. */
 export async function runParse<T>(client: ModelClient, req: ParseRequest<T>, meter: Meter): Promise<Parsed<T>> {
-  throw new Error("not implemented");
+  const schema = jsonSchemaOf(req.schema);
+  let repair: WireRequest["repair"] = null;
+  let last: Attempt<T> | null = null;
+  const tries = req.mode === "loose" ? 2 : 1;
+  let sent = 0;
+  for (let i = 0; i < tries; i++) {
+    const user = req.mode === "loose" ? looseUser(req.user, schema) : req.user;
+    const extra = repair ? repair.previous + repair.issues + REPAIR_INSTRUCTION : "";
+    const reserved = meter.reserve(req.route, utf8.encode(req.system + user + extra).length);
+    if (!reserved) return { last, overCap: true, attempts: sent };
+    sent++;
+    let wire: WireResult;
+    try {
+      wire = await client.send({ route: req.route, mode: req.mode, system: req.system, user: req.user, schema, repair });
+    } catch (err) {
+      meter.settle(reserved, req.route, { kind: "in_doubt" });
+      throw err;
+    }
+    last = readAttempt(wire, req.schema);
+    meter.settle(reserved, req.route, last);
+    if (last.kind !== "invalid") break;
+    repair = { previous: last.text, issues: last.issues };
+  }
+  return { last, overCap: false, attempts: sent };
 }

@@ -105,7 +105,7 @@ const TaskOpSchema = z.object({
 
 export const TurnOutputSchema = z.object({
   actions: z.array(ActionSchema).describe(`At most ${TURN.maxActions} actions.`),
-  lateNotice: z.string().describe(atMost(TURN.maxLateNoticeChars)).optional(),
+  lateNotice: z.string().describe(atMost(TURN.maxLateNoticeChars)).nullish(),
   tasks: z.array(TaskOpSchema).describe(`At most ${TASKS.maxOps}. Use [] when the turn is chat or a reminder.`),
   about: z.string().describe('The ref of the open task your messages this turn are about, or "".'),
 });

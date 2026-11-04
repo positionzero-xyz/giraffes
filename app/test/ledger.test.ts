@@ -1,11 +1,12 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
-import { TASK_KINDS, type TaskRef, type AgentKey, type EpochMs, type MicroUsd, type UtcMonth } from "../src/domain";
+import { COHORTS, HALVES, TASK_KINDS, type TaskRef, type AgentKey, type EpochMs, type MicroUsd, type UtcMonth } from "../src/domain";
 import type { BoxName } from "../src/box/names";
 import { BOX_HOST_KINDS } from "../src/box/host";
 import { ACTION_REJECTIONS, BACKENDS, d1Ledger, MODEL_CALL_STATUSES, TURN_OUTCOMES, UNASKED_STATUSES, type LogRow } from "../src/ledger/ledger";
 import { PURPOSES } from "../src/model/model";
 import { UNASKED_PURPOSES } from "../src/agent/tasks";
+import { ADMISSION_CHANGES } from "../src/agent/admission";
 import { PAID_PLANS, SUBSCRIPTION_STATUSES } from "../src/billing/plan";
 
 const month = "2099-11" as UtcMonth;
@@ -176,6 +177,11 @@ describe("schema", () => {
     const expected: Record<string, readonly string[]> = {
       "task.kind": TASK_KINDS,
       "unasked_message.purpose": UNASKED_PURPOSES,
+      "invite_code.cohort": COHORTS,
+      "invite_code.half": HALVES,
+      "enrollment.cohort": COHORTS,
+      "enrollment.half": HALVES,
+      "admission_log.change": ADMISSION_CHANGES,
       "turn_log.outcome": TURN_OUTCOMES,
       "model_call.purpose": PURPOSES,
       "model_call.status": MODEL_CALL_STATUSES,

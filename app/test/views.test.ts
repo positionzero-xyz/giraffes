@@ -188,6 +188,39 @@ describe("gate views", () => {
     expect(summary.find((r) => r.gate === "gate_survey")?.passed).toBe(1);
   });
 
+  test("the safety gate needs at least one red-team attempt before it can pass", async () => {
+    const safety = async () => (await rows("SELECT gate, passed FROM gate_summary")).find((r) => r.gate === "gate_safety")?.passed;
+    expect(await safety()).toBe(0);
+    await run("INSERT INTO safety_incident (id, agent_key, kind, detail, at) VALUES ('s2', NULL, 'red_team_fail', 'tried', ?)", START);
+    expect(await safety()).toBe(1);
+  });
+
+  test("the survey counts each person's latest answer only", async () => {
+    await beta();
+    await enroll(ana);
+    await wrote(ana.agent, START + DAY);
+    await run("INSERT INTO survey_response (agent_key, answered_at, answer) VALUES (?, ?, 'very')", ana.agent, START + 20 * DAY);
+    await run("INSERT INTO survey_response (agent_key, answered_at, answer) VALUES (?, ?, 'not')", ana.agent, START + 30 * DAY);
+
+    expect(await rows("SELECT active, very FROM gate_survey")).toEqual([{ active: 1, very: 0 }]);
+    expect((await rows("SELECT gate, passed FROM gate_summary")).find((r) => r.gate === "gate_survey")?.passed).toBe(0);
+  });
+
+  test("tasks_by_type counts every task opened once, with completions broken down by evidence", async () => {
+    await beta();
+    await enroll(ana);
+    const open = async () => {
+      const task = `${ana.agent}|t${next()}`;
+      await run("INSERT INTO task (id, agent_key, ref, kind, title, cause_kind, opened_at) VALUES (?, ?, 'trip', 'plan', 'A trip', 'checkin', ?)", task, ana.agent, START);
+    };
+    await open();
+    await open();
+    await completed(ana.agent, START + DAY);
+
+    expect(await rows("SELECT task_kind, opened, completed FROM tasks_by_type")).toEqual([{ task_kind: "plan", opened: 3, completed: 1 }]);
+    expect(await rows("SELECT task_kind, evidence, completed FROM tasks_by_evidence")).toEqual([{ task_kind: "plan", evidence: "plan_accepted", completed: 1 }]);
+  });
+
   test("every view reads", async () => {
     const views = (await rows("SELECT name FROM sqlite_master WHERE type = 'view'")).map((r) => r.name as string);
     expect(views.length).toBeGreaterThan(15);

@@ -2,6 +2,7 @@ import type { AgentEvent } from "../domain";
 
 export type Command =
   | { readonly kind: "claude" }
+  | { readonly kind: "claude_remove" }
   | { readonly kind: "key" }
   | { readonly kind: "key_remove" }
   | { readonly kind: "key_cap"; readonly usd: number }
@@ -18,6 +19,7 @@ const EXACT: ReadonlyMap<string, Command> = new Map(
 );
 
 const KEY: ReadonlyMap<string, Command> = new Map<string, Command>([
+  ["/claude remove", { kind: "claude_remove" }],
   ["/key", { kind: "key" }],
   ["/key remove", { kind: "key_remove" }],
   ["/key backup on", { kind: "key_backup", on: true }],

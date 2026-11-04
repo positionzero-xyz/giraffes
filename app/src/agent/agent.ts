@@ -21,6 +21,7 @@ import {
   newBox,
   onCommand,
   onPlan,
+  onRemove,
   onSignedOut,
   type Box,
   type BoxSay,
@@ -331,6 +332,7 @@ export class Agent extends DurableObject<Env> {
       admitted: mayspend(this.#store.admission()),
       plan,
       box: this.#boxLane().state(),
+      claudePlan: this.#store.claudePlan(),
       key: k,
       included: this.#deps.included,
     }).lanes.map((l) => l.kind);
@@ -419,14 +421,13 @@ export class Agent extends DurableObject<Env> {
     return `${keys.publicUrl}/key#t=${t.token}&l=${lang}`;
   }
 
-  #askBackupIfDue(now: EpochMs): void {
+  /** `again`: the plan's box was just reclaimed, so a key that wasn't a backup is asked about once more. */
+  #askBackupIfDue(now: EpochMs, again: boolean = false): void {
     const k = this.#store.key();
-    const box = this.#store.box();
     const a = this.#store.agent();
-    if (!k || k.backupAskedAt !== null || !box || !a || !boxServes(this.#deps.box, a.key)) return;
-    if (box.state !== "signed_in" && box.state !== "signed_out") return;
+    if (!k || k.backup || (k.backupAskedAt !== null && !again) || !a || !this.#store.claudePlan()) return;
     const text = NOTICES[a.language].backupAsk(PROVIDERS[k.provider].label);
-    this.#store.askBackup({ texts: [text], note: text }, choiceToken({ kind: "backup", revision: k.revision }), eventKey.access(`backup:${now}`), now, k.revision);
+    this.#store.askBackup({ texts: [text], note: text }, choiceToken({ kind: "backup", revision: k.revision }), eventKey.access(`backup:${now}`), now, k.revision, again);
   }
 
   async recordGroup(group: AgentKey, version: number): Promise<void> {
@@ -644,6 +645,8 @@ export class Agent extends DurableObject<Env> {
     switch (command.kind) {
       case "claude":
         return this.#boxCommand(view, agent);
+      case "claude_remove":
+        return this.#claudeRemove(view, agent);
       case "key":
       case "key_remove":
       case "key_cap":
@@ -683,8 +686,7 @@ export class Agent extends DurableObject<Env> {
         const link = await this.#keyLink(view.language);
         if (link === null) return this.#reply(view, agent, t.keysOff);
         if (!k) return this.#reply(view, agent, t.keyLink(link), t.keyLink(KEY_LINK_NOTE));
-        const box = this.#store.box();
-        const planConnected = box !== null && boxServes(this.#deps.box, agent) && (box.state === "signed_in" || box.state === "signed_out");
+        const claudePlan = this.#store.claudePlan();
         const status = (l: string) =>
           [
             t.keyStatus({
@@ -694,7 +696,7 @@ export class Agent extends DurableObject<Env> {
               spentUsd: usd(this.#store.spend("byok", utcMonth(now)).spent),
               capUsd: usd(k.capMicro),
               approximate: !routeFor({ kind: "key", provider: k.provider, model: k.model }, "turn").priced,
-              backup: planConnected ? k.backup : null,
+              backup: claudePlan ? k.backup : null,
               link: l,
             }),
             ...(k.health.kind === "resting" ? [t.keyResting] : []),
@@ -869,6 +871,15 @@ export class Agent extends DurableObject<Env> {
     return this.#boxReply(view, agent, deps, { box: newBox(name, deps.host.kind, deps.host.urlOf(name), deps.host.image, now), say: "setting_up" });
   }
 
+  /** The person takes their plan away: its box is removed, if there is one, and from then on their key needs no yes. */
+  #claudeRemove(view: TurnView, agent: AgentKey): void {
+    this.#store.forgetClaudePlan();
+    const current = this.#store.box();
+    const t = current ? onRemove(current, this.#deps.clock.now()) : { box: null, say: "removed" as const };
+    const m = boxMessage(t.say, view.language, null);
+    this.#commit(planWithoutModel(view, { kind: "command", text: m.text, note: m.note }), view, agent, { kind: "none" }, t.box);
+  }
+
   async #boxReply(view: TurnView, agent: AgentKey, deps: BoxDeps | null, t: { readonly box: Box | null; readonly say: BoxSay }): Promise<void> {
     const message = deps && t.box ? await this.#boxMessage(deps, t.box, t.say) : boxMessage(t.say, view.language, null);
     const commit = planWithoutModel(view, { kind: "command", text: message.text, note: message.note });
@@ -932,6 +943,7 @@ export class Agent extends DurableObject<Env> {
     await this.#deps.ledger.releaseBox(this.#agent().key, this.#deps.clock.now());
     const m = goneMessage(step.box, this.#agent().language);
     this.#store.removeBox(step.box.name, { texts: [m.text], note: m.note }, this.#deps.clock.now());
+    if (step.box.reason !== "removed") this.#askBackupIfDue(this.#deps.clock.now(), true);
   }
 
   async #ensure(deps: BoxDeps, step: EnsureStep): Promise<void> {

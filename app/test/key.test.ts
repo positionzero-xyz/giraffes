@@ -218,7 +218,7 @@ describe("a key alongside a Claude plan", () => {
     expect(await c.received()).toEqual(["From your key."]);
   });
 
-  test("a box connected after the key brings the same question once", async () => {
+  test("a box set up after the key brings the same question once, as soon as the box exists", async () => {
     const box = fakeBox({ signedIn: true });
     const c = await devChat("lee", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
     await c.say("hi");
@@ -230,8 +230,8 @@ describe("a key alongside a Claude plan", () => {
 
     expect(await c.received()).toEqual([
       NOTICES.en.box.setting_up("", ""),
-      NOTICES.en.box.connected("", ""),
       NOTICE.backupAsk("OpenCode Go"),
+      NOTICES.en.box.connected("", ""),
       NOTICES.en.box.already_connected("", ""),
     ]);
   });

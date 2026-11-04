@@ -217,6 +217,8 @@ const en: Notices = {
     retiring: (_, until) =>
       `Your plan doesn't include connecting your own Claude plan, so I'll remove your Claude connection on ${until} unless your plan resumes. Send /plan to see the plans.`,
     retired: () => "Your plan doesn't include connecting your own Claude plan, so I removed your Claude connection. Send /plan to see the plans.",
+    removing: () => "I'm removing your Claude connection now.",
+    removed: () => "Your Claude connection is removed. If you added an API key, it answers from now on. Send /claude to connect your plan again.",
   },
 
   planAccepted: (title) => `(Plan accepted: ${title}.)`,
@@ -391,6 +393,8 @@ const th: Notices = {
     retiring: (_, until) =>
       `แพ็กเกจของคุณไม่รวมการเชื่อมแพ็กเกจ Claude ของตัวเอง เลยจะลบการเชื่อม Claude ในวันที่ ${until} ถ้าแพ็กเกจไม่กลับมาใช้งานค่ะ ส่ง /plan เพื่อดูแพ็กเกจ`,
     retired: () => "แพ็กเกจของคุณไม่รวมการเชื่อมแพ็กเกจ Claude ของตัวเอง เลยลบการเชื่อม Claude ออกแล้วค่ะ ส่ง /plan เพื่อดูแพ็กเกจ",
+    removing: () => "กำลังลบการเชื่อม Claude ของคุณค่ะ",
+    removed: () => "ลบการเชื่อม Claude แล้วค่ะ ถ้าใส่ API key ไว้ จากนี้จะใช้ key นั้นตอบ ส่ง /claude ถ้าอยากเชื่อมแพ็กเกจอีกครั้ง",
   },
 
   planAccepted: (title) => `(รับแผนแล้วค่ะ: ${title})`,

@@ -23,7 +23,7 @@ export const BOX = {
 export const BOX_STATES = ["provisioning", "signed_out", "signed_in", "reclaiming"] as const;
 export type BoxState = (typeof BOX_STATES)[number];
 
-export const RECLAIM_REASONS = ["unused", "failed", "retired"] as const;
+export const RECLAIM_REASONS = ["unused", "failed", "retired", "removed"] as const;
 export type ReclaimReason = (typeof RECLAIM_REASONS)[number];
 
 export type BoxStatus =
@@ -76,6 +76,8 @@ export const BOX_SAYS = [
   "not_in_plan",
   "retiring",
   "retired",
+  "removing",
+  "removed",
 ] as const;
 export type BoxSay = (typeof BOX_SAYS)[number];
 
@@ -104,7 +106,7 @@ export function boxMessage(say: BoxSay, lang: Language, link: string | null, unt
   return { text: text(link ?? LINK_NOTE, until), note: text(LINK_NOTE, until) };
 }
 
-const GONE: Readonly<Record<ReclaimReason, BoxSay>> = { unused: "reclaimed", failed: "setup_failed", retired: "retired" };
+const GONE: Readonly<Record<ReclaimReason, BoxSay>> = { unused: "reclaimed", failed: "setup_failed", retired: "retired", removed: "removed" };
 
 export const goneMessage = (b: Reclaiming, lang: Language) => boxMessage(GONE[b.reason], lang, null);
 
@@ -217,6 +219,11 @@ export function onCommand(b: Box, now: EpochMs): Reply {
     case "reclaiming":
       return { box: b, say: "resetting" };
   }
+}
+
+/** `/claude remove`: the person takes their plan's box away. */
+export function onRemove(b: Box, now: EpochMs): Reply {
+  return { box: b.state === "reclaiming" ? b : reclaimNow(b, "removed", now), say: "removing" };
 }
 
 /** With billing on, a box outlives the plan that allowed it by `retireAfterMs`, and the person is told once when that starts. */

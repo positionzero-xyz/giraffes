@@ -66,6 +66,8 @@ export type AccessFacts = {
   readonly admitted: boolean;
   readonly plan: Plan;
   readonly box: BoxState | null;
+  /** The person has their Claude plan's box in any state, or had one and never removed it. */
+  readonly claudePlan: boolean;
   readonly key: StoredKey | null;
   readonly included: IncludedConfig;
 };
@@ -75,8 +77,9 @@ export type Access = { readonly lanes: readonly Lane[]; readonly whenEmpty: "not
 
 /**
  * Pure. Access is computed from facts that already have owners (the box row, the key row, the plan), never stored.
- * The person's own plan comes first. Their key backs it up only if they said yes, so their metered money is never a
- * silent fallback. Our included tier serves only someone with no access of their own.
+ * The person's own plan comes first. While they have or had their plan's box, in any state, their key backs it up
+ * only if they said yes, so their metered money is never a silent fallback. Our included tier serves only someone
+ * with no access of their own.
  */
 export function accessOf(f: AccessFacts): Access {
   if (!f.admitted || f.plan.kind === "lapsed") return { lanes: [], whenEmpty: "nothing" };
@@ -84,10 +87,10 @@ export function accessOf(f: AccessFacts): Access {
   const planConnected = boxAllowed && (f.box === "signed_in" || f.box === "signed_out");
   const lanes: Lane[] = [];
   if (boxAllowed && f.box === "signed_in") lanes.push({ kind: "box" });
-  if (f.key && (!planConnected || f.key.backup)) lanes.push({ kind: "key", key: f.key });
+  if (f.key && (!f.claudePlan || f.key.backup)) lanes.push({ kind: "key", key: f.key });
   const own = planConnected || f.key !== null;
   if (!own && f.included.on && (f.included.who === "everyone" || f.plan.kind === "included")) lanes.push({ kind: "included", included: f.included });
-  return { lanes, whenEmpty: planConnected ? "box_not_ready" : "nothing" };
+  return { lanes, whenEmpty: f.claudePlan ? "box_not_ready" : "nothing" };
 }
 
 export type CallRecord = { readonly lane: Lane["kind"]; readonly model: ModelRef; readonly costMicro: MicroUsd };
@@ -202,6 +205,7 @@ export class ModelAccess {
       admitted: mayspend(store.admission()),
       plan: req.plan,
       box: this.deps.box.state(),
+      claudePlan: store.claudePlan(),
       key: store.key(),
       included: this.deps.included,
     });

@@ -215,7 +215,7 @@ test("a turn runs on their OpenCode Go key, is reserved and charged to their own
 });
 ```
 
-`/key` later shows the key, this month's spend against its limit and a replacement link; `/key cap <dollars>`, `/key remove` and `/key backup on|off` change it. With a Claude plan connected too, the person is asked once, with a button, whether the key may back the plan up. A key pasted into the chat never reaches the inbox as written: `enqueue` replaces it with `<a key, removed>`, and code answers with a fresh link and advice to revoke it.
+`/key` later shows the key, this month's spend against its limit and a replacement link; `/key cap <dollars>`, `/key remove` and `/key backup on|off` change it. While the person has their Claude plan's box, in any state, or had one that a reclaim removed, the key answers only after they said yes: they are asked once, with a button, and asked again when a reclaim removes the box. `/claude remove` takes the plan away, and from then on the key answers without asking. A key pasted into the chat never reaches the inbox as written: `enqueue` replaces it with `<a key, removed>`, and code answers with a fresh link and advice to revoke it.
 
 ## Call site 10: a group's call runs on its owner's access
 

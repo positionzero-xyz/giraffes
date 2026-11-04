@@ -780,7 +780,7 @@ describe("a box row written by the code before reclaim reasons", () => {
         `https://${name}.box.test`,
         local("2099-11-04T09:00"),
       );
-      sql.exec(MIGRATIONS[MIGRATIONS.findLastIndex((m) => m.includes("CREATE TABLE box_next"))]);
+      sql.exec(MIGRATIONS[MIGRATIONS.findIndex((m) => m.includes("CASE state WHEN 'failed' THEN 'reclaiming'"))]);
     });
 
     await c.alarm();

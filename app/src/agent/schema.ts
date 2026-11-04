@@ -428,6 +428,34 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE model_key ADD COLUMN unreadable_under TEXT;
   `,
+  `
+  CREATE TABLE box_next (
+    one                INTEGER PRIMARY KEY CHECK (one = 1),
+    name               TEXT NOT NULL,
+    host               TEXT NOT NULL CHECK (host IN ('fly', 'static')),
+    url                TEXT NOT NULL,
+    state              TEXT NOT NULL CHECK (state IN ('provisioning', 'signed_out', 'signed_in', 'reclaiming')),
+    state_at           INTEGER NOT NULL,
+    link_sent_at       INTEGER,
+    signin_poll_until  INTEGER,
+    attempts           INTEGER NOT NULL DEFAULT 0,
+    next_at            INTEGER,
+    poll_at            INTEGER,
+    reclaim_at         INTEGER,
+    reclaim_reason     TEXT CHECK (reclaim_reason IN ('unused', 'failed', 'retired', 'removed')),
+    retire_at          INTEGER,
+    image              TEXT,
+    ensure_at          INTEGER,
+    CHECK ((state = 'reclaiming') = (reclaim_reason IS NOT NULL))
+  );
+  INSERT INTO box_next SELECT one, name, host, url, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at,
+                              reclaim_reason, retire_at, image, ensure_at FROM box;
+  DROP TABLE box;
+  ALTER TABLE box_next RENAME TO box;
+
+  ALTER TABLE agent ADD COLUMN claude_plan_at INTEGER;
+  UPDATE agent SET claude_plan_at = (SELECT state_at FROM box) WHERE EXISTS (SELECT 1 FROM box);
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

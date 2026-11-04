@@ -876,6 +876,7 @@ export class AgentStore {
 
   private writeBox(b: Box): void {
     const out = b.state === "signed_out" ? b : null;
+    this.sql.exec("UPDATE agent SET claude_plan_at = COALESCE(claude_plan_at, ?) WHERE NOT EXISTS (SELECT 1 FROM box)", b.stateAt);
     this.sql.exec(
       `INSERT INTO box (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at,
          reclaim_reason, retire_at, image, ensure_at)
@@ -908,6 +909,22 @@ export class AgentStore {
       if (message) this.insertMessage(eventKey.box(b.name), message, now);
       this.insertLogs(logs, now);
     });
+  }
+
+  /**
+   * The person has their Claude plan's box in any state, or had one and never removed it with /claude remove. Their
+   * key then answers only if they said yes to it as a backup.
+   */
+  claudePlan(): boolean {
+    return (
+      this.sql
+        .exec("SELECT 1 FROM agent WHERE claude_plan_at IS NOT NULL UNION ALL SELECT 1 FROM box WHERE reclaim_reason IS NOT 'removed'")
+        .toArray().length > 0
+    );
+  }
+
+  forgetClaudePlan(): void {
+    this.sql.exec("UPDATE agent SET claude_plan_at = NULL");
   }
 
   removeBox(name: BoxName, message: NoteMessage, now: EpochMs): void {
@@ -1299,10 +1316,16 @@ export class AgentStore {
     return "set";
   }
 
-  /** Asks the backup question once per key; true when this call is the one that asked. */
-  askBackup(message: NoteMessage, choice: string, key: EventKey, now: EpochMs, expectRevision: number): boolean {
+  /** Asks the backup question once per key, or `again` when the plan's box went away; true when this call asked. */
+  askBackup(message: NoteMessage, choice: string, key: EventKey, now: EpochMs, expectRevision: number, again: boolean = false): boolean {
     return this.tx(() => {
-      const asked = this.sql.exec("UPDATE model_key SET backup_asked_at = ? WHERE backup_asked_at IS NULL AND revision = ?", now, expectRevision).rowsWritten > 0;
+      const asked =
+        this.sql.exec(
+          "UPDATE model_key SET backup_asked_at = ? WHERE revision = ? AND backup = 0 AND (backup_asked_at IS NULL OR ?)",
+          now,
+          expectRevision,
+          again ? 1 : 0,
+        ).rowsWritten > 0;
       if (asked) this.insertMessage(key, message, now, choice);
       return asked;
     });

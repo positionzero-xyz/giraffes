@@ -321,11 +321,11 @@ describe("Telegram delivery", () => {
       "badZone",
     ];
     const corrections = [...rejections.map((k) => t[k]), ...Array.from({ length: TURN.maxActions }, () => t.reminderKept(due))].join("\n");
-    const requestedReminder = `${t.lateFallback(due)}\n${t.reminder("x".repeat(TURN.maxNoteChars))}`;
+    const requestedReminder = `${t.lateFallback(due)}\n${t.reminder("x".repeat(TURN.maxNoteBytes))}`;
     const longestSend = TURN.maxLateNoticeChars + "\n".length + TURN.maxTextChars;
     const longestText = Math.max(longestSend, corrections.length, requestedReminder.length);
     expect(TURN.maxSendsPerTurn * longestText + "\n\n".length * (TURN.maxSendsPerTurn - 1)).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);
-    const withPlan = (TURN.maxSendsPerTurn - 1) * longestSend + corrections.length + t.planAccepted("x".repeat(TASKS.maxTitleChars)).length + TASKS.maxPlanChars;
+    const withPlan = (TURN.maxSendsPerTurn - 1) * longestSend + corrections.length + t.planAccepted("x".repeat(TASKS.maxTitleBytes)).length + TASKS.maxPlanChars;
     expect(withPlan + "\n\n".length * TURN.maxSendsPerTurn).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);
   });
 

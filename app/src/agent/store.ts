@@ -621,21 +621,28 @@ export class AgentStore {
     readonly summary: string;
     readonly notes: readonly string[];
     readonly recent: readonly TurnRow[];
+    readonly historyLeftOut: number;
     readonly pending: readonly PendingWakeup[];
     readonly openTasks: readonly OpenTask[];
     readonly acceptable: AcceptableProposal | null;
     readonly tapped: readonly TappedProposal[];
   } {
-    const summary = this.sql.exec<{ summary: string }>("SELECT summary FROM memory").one().summary;
+    const memory = this.sql.exec<{ summary: string; through: number }>("SELECT summary, through_turn_seq AS through FROM memory").one();
     const notes = this.sql
       .exec<{ text: string }>("SELECT text FROM memory_note ORDER BY id DESC LIMIT ?", limitNotes)
       .toArray()
       .reverse()
       .map((n) => n.text);
+    const recent = this.sql
+      .exec<{ role: TurnRow["role"]; text: string; at: EpochMs }>("SELECT role, text, at FROM turn WHERE seq > ? ORDER BY seq DESC LIMIT ?", memory.through, limitTurns)
+      .toArray()
+      .reverse();
+    const unsummarized = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM turn WHERE seq > ?", memory.through).one().n;
     return {
-      summary,
+      summary: memory.summary,
       notes,
-      recent: this.recentTurns(limitTurns),
+      recent,
+      historyLeftOut: unsummarized - recent.length,
       pending: this.pendingWakeups(),
       openTasks: this.openTasks(),
       acceptable: this.acceptable(),
@@ -1413,18 +1420,16 @@ export class AgentStore {
 
   compactionInput(): CompactionInput {
     const memory = this.sql.exec<{ summary: string; through_turn_seq: number }>("SELECT summary, through_turn_seq FROM memory").one();
-    const count = (table: "turn" | "memory_note") => this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM ${table}`).one().n;
+    const through = memory.through_turn_seq;
+    const kept = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM turn WHERE seq <= ?", through).one().n;
     return {
       summary: memory.summary,
-      throughSeq: memory.through_turn_seq,
-      turnCount: count("turn"),
+      throughSeq: through,
+      turnCount: this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM turn WHERE seq > ?", through).one().n,
       oldestTurns: this.sql
-        .exec<{ seq: number; role: TurnRow["role"]; text: string; at: EpochMs }>(
-          "SELECT seq, role, text, at FROM turn ORDER BY seq LIMIT ?",
-          COMPACTION.foldTurns,
-        )
+        .exec<{ seq: number; role: TurnRow["role"]; text: string; at: EpochMs }>("SELECT seq, role, text, at FROM turn ORDER BY seq LIMIT ?", kept + COMPACTION.foldTurns)
         .toArray(),
-      noteCount: count("memory_note"),
+      noteCount: this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM memory_note").one().n,
       oldestNotes: this.sql
         .exec<{ id: number; text: string }>("SELECT id, text FROM memory_note ORDER BY id LIMIT ?", COMPACTION.foldNotes)
         .toArray(),
@@ -1442,7 +1447,7 @@ export class AgentStore {
         c.expectThroughSeq,
       ).rowsWritten;
       if (swapped === 0) return false;
-      this.sql.exec("DELETE FROM turn WHERE seq <= ?", c.throughSeq);
+      if (c.deleteSeqs.length > 0) this.sql.exec(`DELETE FROM turn WHERE seq IN (${placeholders(c.deleteSeqs.length)})`, ...c.deleteSeqs);
       if (c.deleteNoteIds.length > 0) {
         this.sql.exec(`DELETE FROM memory_note WHERE id IN (${placeholders(c.deleteNoteIds.length)})`, ...c.deleteNoteIds);
       }
@@ -1507,7 +1512,8 @@ export class AgentStore {
     const min = (query: string) => this.sql.exec<{ t: EpochMs | null }>(query).one().t;
     const compaction = this.sql
       .exec<{ retry_at: EpochMs; turns: number; notes: number }>(
-        `SELECT compaction_retry_at AS retry_at, (SELECT COUNT(*) FROM turn) AS turns, (SELECT COUNT(*) FROM memory_note) AS notes
+        `SELECT compaction_retry_at AS retry_at, (SELECT COUNT(*) FROM turn WHERE seq > memory.through_turn_seq) AS turns,
+           (SELECT COUNT(*) FROM memory_note) AS notes
          FROM memory`,
       )
       .one();

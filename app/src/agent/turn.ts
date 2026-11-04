@@ -6,6 +6,7 @@ import {
   WAKEUP_KEY_PATTERN,
   assertNever,
   clip,
+  clipBytes,
   intentOf,
   mayspend,
   parseWakeupKey,
@@ -27,7 +28,7 @@ import {
 } from "../domain";
 import type { ActionRejection, LogRow, TurnOutcome } from "../ledger/ledger";
 import { NOTICES, type FixedNotice, type Notices } from "../notices";
-import type { PromptParts, PromptSection } from "../model/prompt";
+import { bytesOf, type PromptParts, type PromptSection } from "../model/prompt";
 import {
   admitReminder,
   checkinWakeup,
@@ -61,7 +62,10 @@ export const TURN = {
   maxBatchMessages: 10,
   maxSendsPerTurn: 3,
   maxTextChars: 600,
-  maxNoteChars: 300,
+  maxNoteBytes: 300,
+  /** The newest message is always shown whole; the earlier ones in its batch are cut to these. */
+  messageBytes: 2_000,
+  batchBytes: 4_000,
   maxLateNoticeChars: 200,
   maxActions: 6,
   maxClaimAttempts: 3,
@@ -74,6 +78,7 @@ const Slug = z.string().regex(WAKEUP_KEY_PATTERN);
 // The API doesn't enforce string length limits (the SDK moves them into descriptions), so a .max() here
 // would fail the whole turn on one long text.
 const atMost = (n: number) => `At most ${n} characters.`;
+const atMostBytes = (n: number) => `At most ${n} bytes of UTF-8: about ${n} English or ${Math.floor(n / 3)} Thai characters.`;
 
 const ActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("send"), text: z.string().min(1).describe(atMost(TURN.maxTextChars)) }),
@@ -81,12 +86,12 @@ const ActionSchema = z.discriminatedUnion("type", [
     type: z.literal("schedule_wakeup"),
     key: Slug,
     at: z.string().describe("Local wall time, YYYY-MM-DDTHH:mm"),
-    note: z.string().min(1).describe(`What your future self should do. ${atMost(TURN.maxNoteChars)}`),
+    note: z.string().min(1).describe(`What your future self should do. ${atMostBytes(TURN.maxNoteBytes)}`),
     asked: z.boolean().describe("True only when the person explicitly asked you to remind them"),
     task: z.string().describe('The ref of the open task this wake-up follows up, or ""'),
   }),
   z.object({ type: z.literal("cancel_wakeup"), key: Slug }),
-  z.object({ type: z.literal("remember"), note: z.string().min(1).describe(atMost(TURN.maxNoteChars)) }),
+  z.object({ type: z.literal("remember"), note: z.string().min(1).describe(atMostBytes(TURN.maxNoteBytes)) }),
   z.object({ type: z.literal("quiet") }),
   z.object({
     type: z.literal("set_locale"),
@@ -99,7 +104,7 @@ const TaskOpSchema = z.object({
   op: z.enum(["open", "propose", "close"]),
   ref: Slug,
   kind: z.enum(TASK_KINDS),
-  title: z.string().min(1).describe(atMost(TASKS.maxTitleChars)),
+  title: z.string().min(1).describe(atMostBytes(TASKS.maxTitleBytes)),
   plan: z.string().describe(`The whole plan, one step or time per line, when op is propose; otherwise "". ${atMost(TASKS.maxPlanChars)}`),
 });
 
@@ -131,7 +136,10 @@ export type TurnView = TaskView & {
   readonly checkinLocal: TimeOfDay;
   readonly summary: string;
   readonly notes: readonly string[];
+  /** The newest turns not yet in the summary. */
   readonly recent: readonly TurnRow[];
+  /** Turns not yet in the summary that are older than `recent` and so not shown. */
+  readonly historyLeftOut: number;
   readonly pending: readonly PendingWakeup[];
   readonly unaskedLeftToday: number;
 };
@@ -192,15 +200,15 @@ function renderTask(t: TurnView["openTasks"][number]): string {
   return `- ${t.ref} (${t.kind}): ${t.title}.${t.proposal ? ` Plan ${t.proposal} offered.` : ""}`;
 }
 
-/** What a turn prompt always keeps whole, so every route's budget can hold it. */
-export const PROMPT_CAPS = { messageChars: 2_000, batchChars: 8_000 } as const;
-
+/** The newest event whole; earlier ones cut so they share `batchBytes`. A batch too long for a route is never sent. */
 function renderBatch(view: TurnView): string[] {
-  let left: number = PROMPT_CAPS.batchChars;
-  return view.batch.items.map((i) => {
+  const items = view.batch.items;
+  let left: number = TURN.batchBytes;
+  return items.map((i, at) => {
     const line = renderEvent(i.event, view.tz);
-    const cut = line.length > Math.min(PROMPT_CAPS.messageChars, left) ? clip(line, Math.max(1, Math.min(PROMPT_CAPS.messageChars, left))) : line;
-    left = Math.max(0, left - cut.length);
+    if (at === items.length - 1) return line;
+    const cut = clipBytes(line, Math.max(4, Math.min(TURN.messageBytes, left)));
+    left = Math.max(0, left - bytesOf(cut));
     return cut;
   });
 }
@@ -217,7 +225,7 @@ export function renderUser(view: TurnView): PromptParts {
       keep("Pending wake-ups", view.pending.length ? view.pending.map((w) => renderPending(w, view.tz)) : ["(none)"]),
       keep("Open tasks", view.openTasks.length ? view.openTasks.map(renderTask) : ["(none)"]),
       keep(`Unasked messages left today: ${view.unaskedLeftToday}`, []),
-      conversation.length ? { title: "Conversation", keep: [], trim: conversation, dropRank: 1 } : keep("Conversation", ["(no earlier messages)"]),
+      conversation.length ? { title: "Conversation", keep: [], trim: conversation, dropRank: 1, history: true } : keep("Conversation", ["(no earlier messages)"]),
       keep("New", renderBatch(view)),
     ],
   };
@@ -418,6 +426,11 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
     reject(action, "too_long", false);
     return clip(text, max);
   };
+  const fitBytes = (text: string, max: number, action: string): string => {
+    const cut = clipBytes(text, max);
+    if (cut !== text) reject(action, "too_long", false);
+    return cut;
+  };
 
   const fx = taskEffects(view);
   for (const r of fx.replies) notices.add(acceptNotice(t, r));
@@ -439,7 +452,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
         break;
       case "schedule_wakeup": {
         const origin = wakeupOrigin(first.kind, a.asked);
-        const note = fit(a.note, TURN.maxNoteChars, actionLabel(a));
+        const note = fitBytes(a.note, TURN.maxNoteBytes, actionLabel(a));
         const admission = admitReminder({ key: a.key, at: a.at, note, origin }, { now: view.now, tz: view.tz, pending });
         if (admission.ok) {
           adds.set(admission.wakeup.key, { ...admission.wakeup, task: taskOf(view, tasks, a.task) });
@@ -469,7 +482,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
         break;
       }
       case "remember":
-        notes.push(fit(a.note, TURN.maxNoteChars, "remember"));
+        notes.push(fitBytes(a.note, TURN.maxNoteBytes, "remember"));
         break;
       case "quiet":
       case "set_locale":
@@ -548,6 +561,7 @@ export type NoModelReason =
   | { readonly kind: "no_access"; readonly text: string; readonly alreadyToldToday: boolean }
   | { readonly kind: "lapsed"; readonly alreadyToldToday: boolean }
   | { readonly kind: "model_failed" }
+  | { readonly kind: "too_long" }
   | { readonly kind: "poison" }
   | { readonly kind: "command"; readonly text: string; readonly note: string }
   | { readonly kind: "admission"; readonly commit: AdmissionCommit; readonly text: string | null; readonly consent: boolean };
@@ -604,6 +618,10 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     case "poison":
       outcome = why.kind;
       text = textWithoutModel(view, t.failed);
+      break;
+    case "too_long":
+      outcome = "too_long";
+      text = textWithoutModel(view, t.tooLong);
       break;
     case "command":
       outcome = "no_model";
@@ -664,8 +682,11 @@ function planAdmissionTurn(view: TurnView, why: Extract<NoModelReason, { kind: "
   };
 }
 
-/** What a turn's model call cost; its model_call rows were written when each attempt settled. */
-export type TurnCall = { readonly kind: "served"; readonly costMicro: MicroUsd } | { readonly kind: "none" };
+/**
+ * What a turn's model call cost; its model_call rows were written when each attempt settled. `historyTrimmed`: some
+ * turn not yet in the summary was left out of the prompt.
+ */
+export type TurnCall = { readonly kind: "served"; readonly costMicro: MicroUsd; readonly historyTrimmed: boolean } | { readonly kind: "none" };
 
 export function logsForTurn(input: {
   readonly agent: AgentKey;
@@ -687,6 +708,7 @@ export function logsForTurn(input: {
       outcome: commit.outcome,
       refusedForBudget: commit.outcome === "refused_budget",
       costMicro: call.kind === "served" ? call.costMicro : NO_COST,
+      historyTrimmed: call.kind === "served" && call.historyTrimmed,
       attempts: Math.max(...view.batch.items.map((i) => i.attempts)),
       startedAt: input.startedAt,
       finishedAt: input.now,

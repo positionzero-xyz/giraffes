@@ -20,7 +20,7 @@ import {
   type SchemaMode,
   type WireResult,
 } from "../model/client";
-import { bytesOf, fitPrompt, type PromptParts } from "../model/prompt";
+import { bytesOf, fitSections, type PromptParts } from "../model/prompt";
 import { PROVIDERS, type ModelRef } from "../model/providers";
 import { routeFor, type CallPurpose, type Purpose, type Route, type Source } from "../model/routes";
 import { costOf, estimate, fits, type SpendScope } from "../policy/spend";
@@ -97,10 +97,13 @@ export type CallRecord = { readonly lane: Lane["kind"]; readonly model: ModelRef
 
 export type OverCap = SpendScope | "included_ceiling";
 
+/** `trimmed`: lines of the conversation not yet in the summary were left out to fit the route. */
 export type Served<P extends Purpose> =
-  | { readonly kind: "ok"; readonly value: Output<P>; readonly call: CallRecord }
+  | { readonly kind: "ok"; readonly value: Output<P>; readonly call: CallRecord; readonly trimmed: boolean }
   /** Invalid output or a refusal, after the one repair in loose mode. */
-  | { readonly kind: "failed"; readonly call: CallRecord }
+  | { readonly kind: "failed"; readonly call: CallRecord; readonly trimmed: boolean }
+  /** What the prompt keeps whole, the newest message with it, doesn't fit the route; nothing was sent. */
+  | { readonly kind: "too_long" }
   /** Some lane is down for now; retry the batch later. */
   | { readonly kind: "unavailable" }
   | { readonly kind: "over_cap"; readonly scope: OverCap }
@@ -132,7 +135,14 @@ export type AccessDeps = {
 
 export type CallRequest<P extends Purpose> = { readonly purpose: P; readonly system: string; readonly prompt: PromptParts; readonly plan: Plan };
 
-type Next = { readonly kind: "next"; readonly transient?: boolean; readonly overCap?: OverCap; readonly told?: boolean; readonly notice?: string };
+type Next = {
+  readonly kind: "next";
+  readonly transient?: boolean;
+  readonly overCap?: OverCap;
+  readonly told?: boolean;
+  readonly notice?: string;
+  readonly tooLong?: boolean;
+};
 type LaneResult<P extends Purpose> = { readonly kind: "served"; readonly served: Served<P> } | Next;
 
 export type ProbeResult = { readonly ok: true; readonly mode: SchemaMode } | { readonly ok: false; readonly error: Extract<KeyPageError, ProbeError> };
@@ -159,6 +169,12 @@ function probeError(a: Attempt<unknown> | null): ProbeError {
     default:
       return assertNever(a);
   }
+}
+
+/** What a route takes for the user prompt: its budget less the system prompt and, in loose mode, the inlined schema. */
+function userBudget(route: Route, mode: SchemaMode, purpose: Purpose, system: string): number {
+  const schemaBytes = mode === "loose" ? bytesOf(looseUser("", jsonSchemaOf(OUTPUTS[purpose]))) : 0;
+  return route.promptBytes - bytesOf(system) - schemaBytes;
 }
 
 const HOUR_MS = 60 * 60_000;
@@ -200,28 +216,23 @@ export class ModelAccess {
   constructor(private readonly deps: AccessDeps) {}
 
   async call<P extends Purpose>(req: CallRequest<P>): Promise<Served<P>> {
-    const { store } = this.deps;
-    const access = accessOf({
-      admitted: mayspend(store.admission()),
-      plan: req.plan,
-      box: this.deps.box.state(),
-      claudePlan: store.claudePlan(),
-      key: store.key(),
-      included: this.deps.included,
-    });
+    const access = this.#access(req.plan);
     let transient = false;
     let overCap: OverCap | null = null;
     let told = false;
+    let tooLong = false;
     let notice: string | null = null;
     for (const lane of access.lanes) {
       const r = await this.#lane(lane, req);
       if (r.kind === "served") return r.served;
       transient ||= r.transient ?? false;
       told ||= r.told ?? false;
+      tooLong ||= r.tooLong ?? false;
       notice ??= r.notice ?? null;
       overCap ??= r.overCap ?? null;
     }
     if (transient) return { kind: "unavailable" };
+    if (tooLong) return { kind: "too_long" };
     if (overCap) return { kind: "over_cap", scope: overCap };
     const boxWaiting = access.whenEmpty === "box_not_ready" || (access.lanes.length > 0 && access.lanes.every((l) => l.kind === "box"));
     return { kind: "no_access", why: boxWaiting ? "box_not_ready" : "nothing", told, notice };
@@ -260,11 +271,41 @@ export class ModelAccess {
     }
   }
 
-  #fit(route: Route, mode: SchemaMode, req: CallRequest<Purpose>): string | null {
-    const schemaBytes = mode === "loose" ? bytesOf(looseUser("", jsonSchemaOf(OUTPUTS[req.purpose]))) : 0;
-    const budget = route.promptBytes - bytesOf(req.system) - schemaBytes;
-    const user = fitPrompt(req.prompt, budget);
-    return bytesOf(user) <= budget ? user : null;
+  /**
+   * The user-prompt bytes every lane that would serve this person can take for `purpose`, so a caller can tell whether
+   * a prompt fits before it calls; null when the person has no lane.
+   */
+  budget(purpose: Purpose, system: string, plan: Plan): number | null {
+    const budgets = this.#access(plan).lanes.map((lane) => {
+      const { route, mode } = this.#routeOf(lane, purpose);
+      return userBudget(route, mode, purpose, system);
+    });
+    return budgets.length === 0 ? null : Math.min(...budgets);
+  }
+
+  #access(plan: Plan): Access {
+    const { store } = this.deps;
+    return accessOf({ admitted: mayspend(store.admission()), plan, box: this.deps.box.state(), claudePlan: store.claudePlan(), key: store.key(), included: this.deps.included });
+  }
+
+  #routeOf(lane: Lane, purpose: Purpose): { readonly route: Route; readonly mode: SchemaMode } {
+    switch (lane.kind) {
+      case "box":
+        return { route: routeFor({ kind: "box", provider: "claude" }, purpose), mode: "strict" };
+      case "key":
+        return { route: routeFor({ kind: "key", provider: lane.key.provider, model: lane.key.model }, purpose), mode: lane.key.mode };
+      case "included":
+        return { route: routeFor(lane.included.source, purpose), mode: lane.included.mode };
+      default:
+        return assertNever(lane);
+    }
+  }
+
+  /** Null: even with every trimmable line dropped, the prompt doesn't fit the route. */
+  #fit(route: Route, mode: SchemaMode, req: CallRequest<Purpose>): { readonly user: string; readonly trimmed: boolean } | null {
+    const budget = userBudget(route, mode, req.purpose, req.system);
+    const fitted = fitSections(req.prompt, budget);
+    return bytesOf(fitted.text) <= budget ? { user: fitted.text, trimmed: fitted.historyCut > 0 } : null;
   }
 
   #agent(): AgentKey {
@@ -282,21 +323,17 @@ export class ModelAccess {
     );
   }
 
-  #oversized<P extends Purpose>(route: Route, backend: Backend, lane: Lane["kind"]): LaneResult<P> {
-    this.#log(route, backend, "rejected", 0 as MicroUsd, 0 as MicroUsd, null);
-    return { kind: "served", served: { kind: "failed", call: { lane, model: route.ref, costMicro: 0 as MicroUsd } } };
-  }
-
   async #box<P extends Purpose>(req: CallRequest<P>): Promise<LaneResult<P>> {
     const route = routeFor({ kind: "box", provider: "claude" }, req.purpose);
-    const user = this.#fit(route, "strict", req);
-    if (user === null) return this.#oversized(route, "box", "box");
-    const answer = await this.deps.box.parse({ purpose: req.purpose, model: route.model, system: req.system, user, jsonSchema: jsonSchemaOf(OUTPUTS[req.purpose]) });
+    const fitted = this.#fit(route, "strict", req);
+    if (fitted === null) return { kind: "next", tooLong: true };
+    const answer = await this.deps.box.parse({ purpose: req.purpose, model: route.model, system: req.system, user: fitted.user, jsonSchema: jsonSchemaOf(OUTPUTS[req.purpose]) });
     if (answer.kind === "moved_on") return { kind: "next", transient: answer.transient, told: answer.told };
     const attempt = readAttempt(answer.reply, outputOf(req.purpose));
     this.#log(route, "box", "settled", 0 as MicroUsd, 0 as MicroUsd, attempt);
     const call: CallRecord = { lane: "box", model: route.ref, costMicro: 0 as MicroUsd };
-    return { kind: "served", served: attempt.kind === "ok" ? { kind: "ok", value: attempt.value, call } : { kind: "failed", call } };
+    const trimmed = fitted.trimmed;
+    return { kind: "served", served: attempt.kind === "ok" ? { kind: "ok", value: attempt.value, call, trimmed } : { kind: "failed", call, trimmed } };
   }
 
   async #key<P extends Purpose>(k: StoredKey, req: CallRequest<P>): Promise<LaneResult<P>> {
@@ -312,41 +349,41 @@ export class ModelAccess {
     if (opened.kind === "unreadable") return this.#rested(k, "unreadable", null, false, secrets);
     if (opened.kind === "resealed" && !store.reseal(opened.again, k.revision)) return { kind: "next", transient: true };
     const route = routeFor({ kind: "key", provider: k.provider, model: k.model }, req.purpose);
-    const user = this.#fit(route, k.mode, req);
-    if (user === null) return this.#oversized(route, "key", "key");
+    const fitted = this.#fit(route, k.mode, req);
+    if (fitted === null) return { kind: "next", tooLong: true };
     const client = this.deps.connect(endpointOf(k, opened.key, await sessionOf(agent)));
     const meter = this.#meter("byok", k.capMicro, "key");
-    const out = await runParse(client, { route, mode: k.mode, system: req.system, user, schema: outputOf(req.purpose) }, meter);
+    const out = await runParse(client, { route, mode: k.mode, system: req.system, user: fitted.user, schema: outputOf(req.purpose) }, meter);
     const last = out.last;
     if (last?.kind === "fault") return this.#rested(k, last.fault, last.retryAfterMs, last.fault === "rate");
     if (last?.kind === "ok" || last?.kind === "invalid" || last?.kind === "refused_by_model") store.keyHealthy(k.revision);
-    return this.#outcome(out, route, "key", "byok", meter.spent);
+    return this.#outcome(out, route, "key", "byok", meter.spent, fitted.trimmed);
   }
 
   async #included<P extends Purpose>(inc: IncludedOn, req: CallRequest<P>): Promise<LaneResult<P>> {
     const route = routeFor(inc.source, req.purpose);
-    const user = this.#fit(route, inc.mode, req);
-    if (user === null) return this.#oversized(route, "included", "included");
+    const fitted = this.#fit(route, inc.mode, req);
+    if (fitted === null) return { kind: "next", tooLong: true };
     const meter = this.#meter("included", inc.capMicro, "included");
-    const out = await runParse(this.deps.connect(inc.endpoint), { route, mode: inc.mode, system: req.system, user, schema: outputOf(req.purpose) }, meter);
+    const out = await runParse(this.deps.connect(inc.endpoint), { route, mode: inc.mode, system: req.system, user: fitted.user, schema: outputOf(req.purpose) }, meter);
     const last = out.last;
     if (last?.kind === "fault") {
       console.error("the included tier's provider refused our key", inc.endpoint.provider, last.fault);
       return last.fault === "payment" ? { kind: "next", overCap: "included_ceiling" } : { kind: "next", transient: true };
     }
-    return this.#outcome(out, route, "included", "included", meter.spent);
+    return this.#outcome(out, route, "included", "included", meter.spent, fitted.trimmed);
   }
 
-  #outcome<P extends Purpose>(out: Parsed<Output<P>>, route: Route, lane: Lane["kind"], scope: SpendScope, spent: () => MicroUsd): LaneResult<P> {
+  #outcome<P extends Purpose>(out: Parsed<Output<P>>, route: Route, lane: Lane["kind"], scope: SpendScope, spent: () => MicroUsd, trimmed: boolean): LaneResult<P> {
     const last = out.last;
     const call: CallRecord = { lane, model: route.ref, costMicro: spent() };
     if (last === null) return { kind: "next", overCap: scope };
     switch (last.kind) {
       case "ok":
-        return { kind: "served", served: { kind: "ok", value: last.value, call } };
+        return { kind: "served", served: { kind: "ok", value: last.value, call, trimmed } };
       case "invalid":
       case "refused_by_model":
-        return { kind: "served", served: { kind: "failed", call } };
+        return { kind: "served", served: { kind: "failed", call, trimmed } };
       case "turned_away":
       case "in_doubt":
       case "rejected":

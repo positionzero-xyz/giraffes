@@ -34,6 +34,7 @@ function view(over: Partial<TurnView> = {}): TurnView {
     summary: "",
     notes: [],
     recent: [],
+    historyLeftOut: 0,
     pending: [],
     batch: { items: [{ key: eventKey.dev(`b${++n}`), event: { kind: "message", text: "hi" }, attempts: 1, receivedAt: NOW }] },
     unaskedLeftToday: 3,
@@ -77,7 +78,7 @@ describe("every cap that guards a prompt budget is in UTF-8 bytes", () => {
         actions: [
           { type: "remember", note: thai },
           { type: "schedule_wakeup", key: "bins", at: "2099-11-04T23:00", note: thai, asked: true, task: "" },
-          send("ok"),
+          { type: "send", text: "ok" },
         ],
         tasks: [],
         about: "",
@@ -94,7 +95,7 @@ describe("every cap that guards a prompt budget is in UTF-8 bytes", () => {
   });
 
   test("a task title is cut to its cap in bytes", () => {
-    const commit = planTurn({ actions: [send("ok")], tasks: [{ op: "open", ref: "trip", kind: "plan", title: THAI.repeat(200), plan: "" }], about: "" }, view());
+    const commit = planTurn({ actions: [{ type: "send", text: "ok" }], tasks: [{ op: "open", ref: "trip", kind: "plan", title: THAI.repeat(200), plan: "" }], about: "" }, view());
     expect(bytesOf(commit.tasks.open[0].title)).toBeLessThanOrEqual(TASKS.maxTitleBytes);
   });
 
@@ -139,12 +140,12 @@ describe("every cap that guards a prompt budget is in UTF-8 bytes", () => {
 describe("a message too long for the route", () => {
   test("gets a code-written notice in the person's language, and no model is called", async () => {
     const provider = answering();
-    const c = await devChat("tla", { model: null, provider, at: "2099-11-04T10:00" });
+    const c = await devChat("U00000000000000000000000000000b01", { model: null, provider, at: "2099-11-04T10:00", channel: "line" });
     await giveKey(c.agent, ALIBABA_KEY);
 
     await c.say(THAI.repeat(8_000));
 
-    expect(await c.received()).toEqual([NOTICES.en.tooLong]);
+    expect(await c.received()).toEqual([NOTICES.th.tooLong]);
     expect(provider.seen).toEqual([]);
     expect(c.logs("turn").map((l) => l.outcome)).toEqual(["too_long"]);
   });
@@ -155,7 +156,7 @@ describe("compaction folds only what it saw", () => {
 
   test("a turn is sent whole or not at all, and the fold ends at the last turn sent", () => {
     const fact = "the clinic code is 4471";
-    const oldestTurns = [turn(1, "short"), turn(2, `${"x".repeat(2_100)} ${fact}`), turn(3, "y".repeat(30_000))];
+    const oldestTurns = [turn(1, "short"), turn(2, `${"x".repeat(2_100)} ${fact}`), turn(3, "y".repeat(18_000))];
     const plan = planCompaction({ summary: "", throughSeq: 0, oldestTurns, turnCount: 61, noteCount: 0, oldestNotes: [] }, 20_000)!;
     const text = renderPrompt(plan.prompt);
     expect(text).toContain(fact);

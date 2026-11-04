@@ -452,7 +452,9 @@ export async function runParse<T>(client: ModelClient, req: ParseRequest<T>, met
   for (let i = 0; i < tries; i++) {
     const user = req.mode === "loose" ? looseUser(req.user, schema) : req.user;
     const extra = repair ? repair.previous + repair.issues + REPAIR_INSTRUCTION : "";
-    const reserved = meter.reserve(req.route, utf8.encode(req.system + user + extra).length);
+    const bytes = utf8.encode(req.system + user + extra).length;
+    if (repair && bytes > req.route.promptBytes) break;
+    const reserved = meter.reserve(req.route, bytes);
     if (!reserved) return { last, overCap: true, attempts: sent };
     sent++;
     let wire: WireResult;

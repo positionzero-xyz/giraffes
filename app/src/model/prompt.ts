@@ -7,6 +7,8 @@ export type PromptSection = {
   readonly trim: readonly string[];
   /** Lower ranks lose lines first. */
   readonly dropRank: number;
+  /** The conversation not yet in the summary, whose cut lines a turn log reports. */
+  readonly history?: boolean;
 };
 export type PromptParts = { readonly sections: readonly PromptSection[] };
 
@@ -27,9 +29,19 @@ export function renderPrompt(parts: PromptParts, cuts: readonly number[] = []): 
 
 /** Pure. Keeps every kept line, then drops trimmable lines oldest first, lowest rank first, until the prompt fits. */
 export function fitPrompt(parts: PromptParts, budgetBytes: number): string {
+  return fitSections(parts, budgetBytes).text;
+}
+
+/** `historyCut`: lines dropped from a history section. */
+export function fitSections(parts: PromptParts, budgetBytes: number): { readonly text: string; readonly historyCut: number } {
+  const cuts = fitCuts(parts, budgetBytes);
+  return { text: renderPrompt(parts, cuts), historyCut: parts.sections.reduce((sum, s, i) => sum + (s.history ? cuts[i] : 0), 0) };
+}
+
+function fitCuts(parts: PromptParts, budgetBytes: number): number[] {
   const cuts = parts.sections.map(() => 0);
   let size = bytesOf(renderPrompt(parts));
-  if (size <= budgetBytes) return renderPrompt(parts);
+  if (size <= budgetBytes) return cuts;
   const order = parts.sections.map((s, i) => ({ s, i })).sort((a, b) => a.s.dropRank - b.s.dropRank);
   for (const { s, i } of order) {
     while (size > budgetBytes && cuts[i] < s.trim.length) {
@@ -39,5 +51,5 @@ export function fitPrompt(parts: PromptParts, budgetBytes: number): string {
     }
     if (size <= budgetBytes) break;
   }
-  return renderPrompt(parts, cuts);
+  return cuts;
 }

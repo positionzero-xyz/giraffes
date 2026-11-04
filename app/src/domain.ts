@@ -240,6 +240,22 @@ export function clip(text: string, max: number): string {
   return `${/[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut}…`;
 }
 
+const utf8 = new TextEncoder();
+
+/** Cuts `text` to at most `maxBytes` of UTF-8, ending in "…", on a character boundary. */
+export function clipBytes(text: string, maxBytes: number): string {
+  if (utf8.encode(text).length <= maxBytes) return text;
+  let used = utf8.encode("…").length;
+  let out = "";
+  for (const ch of text) {
+    const n = utf8.encode(ch).length;
+    if (used + n > maxBytes) break;
+    used += n;
+    out += ch;
+  }
+  return `${out}…`;
+}
+
 export function assertNever(x: never): never {
   throw new Error(`unreachable: ${JSON.stringify(x)}`);
 }

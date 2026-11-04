@@ -59,9 +59,9 @@ import { d1Ledger, modelCallRow, type Ledger, type LogRow, type UnaskedStatus } 
 import { NOTICES, type KeyPageError } from "../notices";
 import { scripted, scriptedConnect, type ScriptStep } from "../model/scripted";
 import { connect, type Connect } from "../model/client";
-import type { PromptParts } from "../model/prompt";
+import { bytesOf, renderPrompt, type PromptParts } from "../model/prompt";
 import { PROVIDERS } from "../model/providers";
-import { PROMPT_FLOOR_BYTES, routeFor, type Purpose } from "../model/routes";
+import { routeFor, type Purpose } from "../model/routes";
 import { devLane, DEV_URL_SCRIPTED } from "../access/access";
 import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach";
 import { inLineReserve, type QuotaReading } from "../policy/quota";
@@ -543,12 +543,16 @@ export class Agent extends DurableObject<Env> {
       return this.#commit(planWithoutModel(view, { kind: "lapsed", alreadyToldToday }), view, a.key, { kind: "none" });
     }
 
-    const served = await this.#access().call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(view), plan });
+    const shown = await this.#historyThatFits(batch, a, view, plan);
+    const served = await this.#access().call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan });
+    const historyTrimmed = shown.historyLeftOut > 0 || ((served.kind === "ok" || served.kind === "failed") && served.trimmed);
     switch (served.kind) {
       case "ok":
-        return this.#commit(planTurn(served.value, view), view, a.key, { kind: "served", costMicro: served.call.costMicro });
+        return this.#commit(planTurn(served.value, shown), shown, a.key, { kind: "served", costMicro: served.call.costMicro, historyTrimmed });
       case "failed":
-        return this.#commit(planWithoutModel(view, { kind: "model_failed" }), view, a.key, { kind: "served", costMicro: served.call.costMicro });
+        return this.#commit(planWithoutModel(shown, { kind: "model_failed" }), shown, a.key, { kind: "served", costMicro: served.call.costMicro, historyTrimmed });
+      case "too_long":
+        return this.#commit(planWithoutModel(shown, { kind: "too_long" }), shown, a.key, { kind: "none" });
       case "over_cap": {
         const alreadyToldToday = this.#store.toldToday("refused_budget", startOfLocalDay(view.now, view.tz));
         const capUsd = usd(this.#store.key()?.capMicro ?? (0 as MicroUsd));
@@ -565,6 +569,23 @@ export class Agent extends DurableObject<Env> {
       default:
         return assertNever(served);
     }
+  }
+
+  /**
+   * When the history not yet in the summary doesn't fit the smallest budget among the person's lanes, one compaction
+   * step runs first, in this drain. If compaction is backing off or fails, the turn shows the newest history that fits.
+   */
+  async #historyThatFits(batch: Batch, a: AgentRow, view: TurnView, plan: Plan): Promise<TurnView> {
+    const budget = this.#access().budget("turn", TURN_SYSTEM, plan);
+    const fits = view.historyLeftOut === 0 && bytesOf(renderPrompt(renderUser(view))) <= (budget ?? Infinity);
+    if (fits || view.recent.length === 0) return view;
+    try {
+      if (!(await this.#compactStep(plan, true))) return view;
+    } catch (err) {
+      console.error("compaction before a turn failed", err);
+      return view;
+    }
+    return this.#view(batch, a);
   }
 
   #onboarding(lang: Language, plan: Plan, agent: AgentKey): string {
@@ -1102,11 +1123,22 @@ export class Agent extends DurableObject<Env> {
 
   async #compactIfDue(): Promise<void> {
     const a = this.#store.agent();
-    if (!a || !mayspend(this.#store.admission()) || this.#store.compactionRetryAt() > this.#deps.clock.now()) return;
+    if (!a || !mayspend(this.#store.admission())) return;
     const person = this.#plan(this.#deps.clock.now());
     if (person.kind === "lapsed") return;
-    const plan = planCompaction(this.#store.compactionInput(), PROMPT_FLOOR_BYTES.compaction - new TextEncoder().encode(COMPACTION_SYSTEM).length);
-    if (!plan) return;
+    await this.#compactStep(person, false);
+  }
+
+  /**
+   * One compaction page sized to the smallest budget among the person's lanes; true when it was committed. `force`:
+   * the next turn's history doesn't fit, so fold even below the count that otherwise triggers it.
+   */
+  async #compactStep(person: Plan, force: boolean): Promise<boolean> {
+    if (this.#store.compactionRetryAt() > this.#deps.clock.now()) return false;
+    const budget = this.#access().budget("compaction", COMPACTION_SYSTEM, person);
+    if (budget === null) return false;
+    const plan = planCompaction(this.#store.compactionInput(), budget, force);
+    if (!plan) return false;
     let served: Served<"compaction">;
     try {
       served = await this.#access().call({ purpose: "compaction", system: COMPACTION_SYSTEM, prompt: plan.prompt, plan: person });
@@ -1115,8 +1147,9 @@ export class Agent extends DurableObject<Env> {
       throw err;
     }
     const now = this.#deps.clock.now();
-    if (served.kind === "ok") this.#store.commitCompaction(compactionCommit(plan, served.value), now);
-    else if (served.kind !== "no_access") this.#store.compactionFailed(now);
+    if (served.kind === "ok") return this.#store.commitCompaction(compactionCommit(plan, served.value), now);
+    if (served.kind !== "no_access") this.#store.compactionFailed(now);
+    return false;
   }
 
   async #flushLogs(): Promise<void> {

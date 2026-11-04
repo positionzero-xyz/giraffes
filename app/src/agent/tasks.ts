@@ -2,6 +2,7 @@ import {
   FACTS,
   assertNever,
   clip,
+  clipBytes,
   intentOf,
   parseTaskRef,
   type EpochMs,
@@ -19,7 +20,7 @@ import type { Batch } from "./turn";
 export const TASKS = {
   maxOps: 3,
   maxOpen: 20,
-  maxTitleChars: 80,
+  maxTitleBytes: 80,
   maxPlanChars: 1500,
   minPlanLines: 2,
   minPlanChars: 80,
@@ -197,7 +198,7 @@ export function planTasks(
       return false;
     }
     const title = o.title.trim() || ref;
-    opened.push({ ref, kind: o.kind, title: title.length > TASKS.maxTitleChars ? clip(title, TASKS.maxTitleChars) : title });
+    opened.push({ ref, kind: o.kind, title: clipBytes(title, TASKS.maxTitleBytes) });
     return true;
   };
 

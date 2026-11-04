@@ -199,6 +199,7 @@ function viewOf(f: TurnFixture): TurnView {
     summary: f.memory?.summary ?? "",
     notes: f.memory?.notes ?? [],
     recent: (f.history ?? []).map((h) => ({ role: h.role, text: h.text, at: at(h.at, tz) })),
+    historyLeftOut: 0,
     pending: pending.filter((p) => !f.batch.some((b) => b.kind === "wakeup" && b.key === p.key)),
     openTasks: [],
     acceptable: null,

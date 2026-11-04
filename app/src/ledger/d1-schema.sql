@@ -10,12 +10,13 @@ CREATE TABLE IF NOT EXISTS turn_log (
   agent_key          TEXT NOT NULL,
   event_kind         TEXT NOT NULL,
   batch_size         INTEGER NOT NULL,
-  outcome            TEXT NOT NULL CHECK (outcome IN ('acted', 'quiet', 'refused_budget', 'lapsed', 'no_access', 'model_failed', 'poison', 'no_model', 'stale', 'not_admitted')),
+  outcome            TEXT NOT NULL CHECK (outcome IN ('acted', 'quiet', 'refused_budget', 'lapsed', 'no_access', 'model_failed', 'too_long', 'poison', 'no_model', 'stale', 'not_admitted')),
   refused_for_budget INTEGER NOT NULL CHECK (refused_for_budget IN (0, 1)),
   cost_micro         INTEGER NOT NULL,
   attempts           INTEGER NOT NULL,
   started_at         INTEGER NOT NULL,
-  finished_at        INTEGER NOT NULL
+  finished_at        INTEGER NOT NULL,
+  history_trimmed    INTEGER NOT NULL DEFAULT 0 CHECK (history_trimmed IN (0, 1))
 );
 CREATE INDEX IF NOT EXISTS turn_log_agent_time ON turn_log (agent_key, finished_at);
 

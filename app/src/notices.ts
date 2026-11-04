@@ -20,6 +20,7 @@ export type Notices = {
   readonly monthlyLimit: string;
   readonly lapsed: string;
   readonly failed: string;
+  readonly tooLong: string;
   readonly reminder: (note: string) => string;
 
   readonly billingOff: string;
@@ -158,6 +159,7 @@ const en: Notices = {
   monthlyLimit: "I've reached my usage limit for this month, so I can't help until it resets on the 1st.",
   lapsed: "You have no active plan, so I can't answer messages for now. Send /plan to pick one.",
   failed: "Sorry, I couldn't process that. Could you say it again?",
+  tooLong: "That's too long for me to read in one go. Could you split it into a few shorter messages?",
   reminder: (note) => `Reminder: ${note}`,
 
   billingOff: "Plans aren't available yet.",
@@ -334,6 +336,7 @@ const th: Notices = {
   monthlyLimit: "เดือนนี้ใช้งานครบโควตาแล้วค่ะ จะช่วยได้อีกครั้งเมื่อขึ้นเดือนใหม่วันที่ 1",
   lapsed: "ตอนนี้ยังไม่มีแพ็กเกจที่ใช้งานอยู่ เลยยังตอบข้อความไม่ได้ค่ะ ส่ง /plan เพื่อเลือกแพ็กเกจนะคะ",
   failed: "ขอโทษค่ะ ตอนนี้ยังตอบข้อความนั้นไม่ได้ ช่วยส่งมาใหม่อีกครั้งได้ไหมคะ",
+  tooLong: "ข้อความนี้ยาวเกินกว่าจะอ่านในครั้งเดียวค่ะ ช่วยแบ่งเป็นข้อความสั้นๆ หลายข้อความได้ไหมคะ",
   reminder: (note) => `เตือนความจำ: ${note}`,
 
   billingOff: "ตอนนี้ยังไม่มีแพ็กเกจให้เลือกค่ะ",

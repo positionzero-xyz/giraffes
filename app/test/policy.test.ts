@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { CompactionOutputSchema, planCompaction } from "../src/agent/compaction";
+import { COMPACTION, CompactionOutputSchema, planCompaction } from "../src/agent/compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "../src/agent/prompt";
 import { TASKS } from "../src/agent/tasks";
 import { planTurn, planWithoutModel, TURN, TurnOutputSchema, type Batch, type InboxItem, type TurnOutput, type TurnView } from "../src/agent/turn";
@@ -141,6 +141,7 @@ function view(over: Partial<TurnView> & { readonly batch?: Batch } = {}): TurnVi
     summary: "",
     notes: [],
     recent: [],
+    historyLeftOut: 0,
     pending: [],
     batch: { items: [item(message("hi"))] },
     unaskedLeftToday: 3,
@@ -335,14 +336,14 @@ describe("caps", () => {
     const commit = planTurn(
       output([
         send(over(TURN.maxTextChars)),
-        { type: "schedule_wakeup", key: "bins", at: "2026-11-04T23:00", note: over(TURN.maxNoteChars), asked: true, task: "" },
-        { type: "remember", note: over(TURN.maxNoteChars) },
+        { type: "schedule_wakeup", key: "bins", at: "2026-11-04T23:00", note: over(TURN.maxNoteBytes), asked: true, task: "" },
+        { type: "remember", note: over(TURN.maxNoteBytes) },
       ]),
       view(),
     );
     expect(commit.outbound?.texts.map((t) => t.length)).toEqual([TURN.maxTextChars]);
-    expect(commit.wakeupsAdd.map((w) => w.note.length)).toEqual([TURN.maxNoteChars]);
-    expect(commit.notes.map((n) => n.length)).toEqual([TURN.maxNoteChars]);
+    expect(commit.wakeupsAdd.map((w) => bytesOf(w.note) <= TURN.maxNoteBytes && w.note.endsWith("…"))).toEqual([true]);
+    expect(commit.notes.map((n) => bytesOf(n) <= TURN.maxNoteBytes && n.endsWith("…"))).toEqual([true]);
     expect(commit.rejected).toEqual([
       { action: "send", reason: "too_long" },
       { action: "schedule_wakeup:bins", reason: "too_long" },
@@ -514,17 +515,17 @@ describe("output budgets", () => {
     const key = "k".repeat(40);
     const actions = [
       { type: "send", text: mostBytes(TURN.maxTextChars) },
-      { type: "schedule_wakeup", key, at: "2099-11-04T10:00", note: mostBytes(TURN.maxNoteChars), asked: false, task: key },
+      { type: "schedule_wakeup", key, at: "2099-11-04T10:00", note: mostBytes(TURN.maxNoteBytes / 3), asked: false, task: key },
       { type: "cancel_wakeup", key },
-      { type: "remember", note: mostBytes(TURN.maxNoteChars) },
+      { type: "remember", note: mostBytes(TURN.maxNoteBytes / 3) },
     ];
     const biggest = actions.reduce((a, b) => (bytes(b) > bytes(a) ? b : a));
     const output = {
       actions: Array.from({ length: TURN.maxActions }, () => biggest),
       lateNotice: mostBytes(TURN.maxLateNoticeChars),
       tasks: [
-        { op: "propose", ref: key, kind: longest(TASK_KINDS), title: mostBytes(TASKS.maxTitleChars), plan: mostBytes(TASKS.maxPlanChars) },
-        ...Array.from({ length: TASKS.maxOps - 1 }, () => ({ op: "open", ref: key, kind: longest(TASK_KINDS), title: mostBytes(TASKS.maxTitleChars), plan: "" })),
+        { op: "propose", ref: key, kind: longest(TASK_KINDS), title: mostBytes(TASKS.maxTitleBytes / 3), plan: mostBytes(TASKS.maxPlanChars) },
+        ...Array.from({ length: TASKS.maxOps - 1 }, () => ({ op: "open", ref: key, kind: longest(TASK_KINDS), title: mostBytes(TASKS.maxTitleBytes / 3), plan: "" })),
       ],
       about: key,
     };
@@ -534,7 +535,7 @@ describe("output budgets", () => {
   });
 
   test("the longest summary the compaction schema accepts fits the compaction's output budget", () => {
-    const output = { summary: mostBytes(CompactionOutputSchema.shape.summary.maxLength ?? 0) };
+    const output = { summary: mostBytes(Math.floor(COMPACTION.maxSummaryBytes / 3)) };
 
     expect(CompactionOutputSchema.safeParse(output).success).toBe(true);
     expect(bytes(output)).toBeLessThanOrEqual(OUTPUT_TOKENS.compaction);
@@ -558,7 +559,7 @@ describe("alarm and compaction", () => {
     expect(planCompaction({ ...input, turnCount: 61 }, Infinity)?.foldThroughSeq).toBe(30);
   });
 
-  test("a compaction page folds only as many turns as its budget holds, at least one, so the model sees all it folds", () => {
+  test("a compaction page folds only as many whole turns as its budget holds, and a turn too big for any page as a placeholder", () => {
     const long = "ก".repeat(5_000);
     const oldestTurns = Array.from({ length: 30 }, (_, i) => ({ seq: i + 1, role: "person" as const, text: `${i + 1} ${long}`, at: NOW }));
     const plan = planCompaction({ summary: "", throughSeq: 0, oldestTurns, turnCount: 61, noteCount: 0, oldestNotes: [] }, 24_000);
@@ -567,7 +568,10 @@ describe("alarm and compaction", () => {
     expect(plan?.foldThroughSeq).toBeGreaterThanOrEqual(1);
     expect(text).toContain(`Person: ${plan?.foldThroughSeq} `);
     expect(text).not.toContain(`Person: ${(plan?.foldThroughSeq ?? 0) + 1} `);
-    expect(planCompaction({ summary: "", throughSeq: 0, oldestTurns, turnCount: 61, noteCount: 0, oldestNotes: [] }, 10)?.foldThroughSeq).toBe(1);
+    const tiny = planCompaction({ summary: "", throughSeq: 0, oldestTurns, turnCount: 61, noteCount: 0, oldestNotes: [] }, 300);
+    expect(tiny?.foldThroughSeq).toBeGreaterThanOrEqual(1);
+    expect(tiny?.foldSeqs).toEqual([]);
+    expect(renderPrompt(tiny!.prompt)).toContain("[long message on");
   });
 
   test("the turn prompt asks only for what a model without tools can do", () => {

@@ -42,6 +42,8 @@ export type LogRow =
       readonly outcome: TurnOutcome;
       readonly refusedForBudget: boolean;
       readonly costMicro: MicroUsd;
+      /** A turn not yet in the summary was left out of the prompt; absent on rows queued before it was logged. */
+      readonly historyTrimmed?: boolean;
       readonly attempts: number;
       readonly startedAt: EpochMs;
       readonly finishedAt: EpochMs;
@@ -147,7 +149,7 @@ export type ModelCallStatus = (typeof MODEL_CALL_STATUSES)[number];
 export const BACKENDS = ["api", "box", "key", "included"] as const;
 export type Backend = (typeof BACKENDS)[number];
 
-export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "lapsed", "no_access", "model_failed", "poison", "no_model", "stale", "not_admitted"] as const;
+export const TURN_OUTCOMES = ["acted", "quiet", "refused_budget", "lapsed", "no_access", "model_failed", "too_long", "poison", "no_model", "stale", "not_admitted"] as const;
 export type TurnOutcome = (typeof TURN_OUTCOMES)[number];
 
 export const ACTION_REJECTIONS = [
@@ -230,8 +232,9 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
     case "turn":
       return db
         .prepare(
-          `INSERT INTO turn_log (id, agent_key, event_kind, batch_size, outcome, refused_for_budget, cost_micro, attempts, started_at, finished_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO turn_log (id, agent_key, event_kind, batch_size, outcome, refused_for_budget, cost_micro, attempts, started_at, finished_at,
+                                 history_trimmed)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         )
         .bind(
@@ -245,6 +248,7 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
           row.attempts,
           row.startedAt,
           row.finishedAt,
+          row.historyTrimmed ? 1 : 0,
         );
     case "model_call":
       return db

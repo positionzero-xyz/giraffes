@@ -67,7 +67,6 @@ export function admitReminder(
   return { ok: true, wakeup: { key, kind: "reminder", origin: req.origin, note: req.note, dueAt } };
 }
 
-/** How many reminders past the cap a turn's final pending set holds; the check-in doesn't count. */
 export function remindersOverCap(pending: Iterable<NewWakeup>): number {
   let reminders = 0;
   for (const w of pending) if (w.kind === "reminder") reminders++;

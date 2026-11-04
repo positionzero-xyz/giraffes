@@ -47,7 +47,6 @@ export default {
     return new Response("not found", { status: 404 });
   },
 
-  /** The hourly cron in wrangler.jsonc. */
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
     const config = loadConfig(env);
     if (config.line) await checkLineQuota(config, config.line.accessToken, env, controller.scheduledTime as EpochMs);

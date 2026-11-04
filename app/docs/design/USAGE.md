@@ -38,7 +38,7 @@ The person texts "remind me tomorrow 9am to call the clinic".
 1. `enqueue(envelope)` inserts `event_key = 'line:<webhookEventId>'` with `ready_at = now`, arms the alarm no later than now, starts a drain, and returns `"queued"`. A redelivery returns `"duplicate"`.
 2. The drain recovers anything a dead instance left (rows in `processing` or `sending`, open reservations), then fires due wake-ups into the inbox, unless a message, follow or block is still waiting there.
 3. It claims a batch, starting with the oldest unfinished event, and claims nothing while that event waits out a model backoff. If that event is a message, the consecutive ready messages behind it join, up to 10 in all.
-4. `renderUser` builds the prompt after the byte-stable system prompt: local now in the person's zone, the memory summary and newest 50 notes, pending wake-ups with their keys, unasked messages left today, the last 30 turns, and the batch.
+4. `renderUser` builds the prompt after the byte-stable system prompt: local now in the person's zone, the memory summary and newest 50 notes, pending wake-ups with their keys, unasked messages left today, every turn not yet folded into the summary (up to 90), and the batch.
 5. `#callModel("turn", …)` reserves the estimate against the person's month in local SQLite, under the monthly cap their plan sets, asks D1 for a lease chunk only when the local lease is short, then calls the model once. A lapsed person gets no model call: the turn ends with one notice a day instead. The model returns:
    ```json
    { "actions": [

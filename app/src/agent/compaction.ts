@@ -1,10 +1,18 @@
 import { z } from "zod";
-import { TURN, type TurnRow } from "./turn";
+import type { TurnRow } from "./turn";
 
+const KEEP_TURNS = 30;
+const FOLD_TURNS = 30;
+
+/**
+ * Compaction folds one page of the oldest turns once more than keep + fold are unfolded, and a turn prompt shows
+ * every unfolded turn up to one page more than that, so a drain can add a page of turns before its compaction runs
+ * without any turn falling between the summary and the prompt.
+ */
 export const COMPACTION = {
-  triggerTurns: 60,
-  keepTurns: TURN.recentTurns,
-  foldTurns: 30,
+  foldTurns: FOLD_TURNS,
+  triggerTurns: KEEP_TURNS + FOLD_TURNS,
+  promptTurns: KEEP_TURNS + 2 * FOLD_TURNS,
   maxNotes: 40,
   foldNotes: 40,
   maxSummaryChars: 4_000,

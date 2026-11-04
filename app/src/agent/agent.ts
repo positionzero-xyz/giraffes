@@ -58,7 +58,7 @@ import { admitUnasked, OUTREACH } from "../policy/outreach";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
 import { costOf, decideReservation, estimate, SPEND } from "../policy/spend";
 import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../policy/time";
-import { compactionCommit, CompactionOutputSchema, planCompaction } from "./compaction";
+import { COMPACTION, compactionCommit, CompactionOutputSchema, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import { migrate } from "./schema";
 import { AgentStore, type AgentRow, type NoteMessage, type OutboxRow, type OutboxView, type Reservation, type Settlement } from "./store";
@@ -343,7 +343,7 @@ export class Agent extends DurableObject<Env> {
       statusAt: a.statusAt,
       checkinLocal: a.checkinLocal,
       batch,
-      ...this.#store.turnContext(TURN.recentTurns, TURN.recentNotes),
+      ...this.#store.turnContext(COMPACTION.promptTurns, TURN.recentNotes),
       unaskedLeftToday: Math.max(0, OUTREACH.dailyUnaskedBudget - admitted),
     };
   }

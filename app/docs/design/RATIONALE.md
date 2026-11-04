@@ -33,7 +33,7 @@ While a turn awaits the model, the only operations that can interleave are an in
 | Table | Holds | Key invariant |
 |---|---|---|
 | `inbox` | the durable queue, all event kinds | `event_key UNIQUE`; `pending → processing → done/failed`; `attempts` bounds retries |
-| `turn` | verbatim recent conversation | a turn prompt reads the newest 30 |
+| `turn` | verbatim conversation not yet in the summary | a turn prompt reads all of it, up to 90 rows |
 | `memory` (1 row) + `memory_note` | compacted summary, model notes | compaction is compare-and-set on `through_turn_seq`; a turn prompt reads the newest 50 notes |
 | `wakeup` | reminders and the check-in | partial `UNIQUE(key) WHERE status = 'pending'`; `origin` is `person`, `agent` or `system` |
 | `outbox` | everything leaving | one row per turn with all its texts; `id` is a UUID and the LINE retry key; `intent` is set by code; `admitted_day` charges the budget once per local day; `in_doubt` bars the reply token |
@@ -145,7 +145,7 @@ The Anthropic client runs with `maxRetries: 0`, so every billed attempt passes t
 - **Webhook enqueue fails.** The Worker answers 200 only after every envelope is in its inbox. Otherwise the request fails with 500, and the channel's redelivery is the retry. LINE redelivery is off by default and must be turned on.
 - **Alarm fires twice.** A concurrent call joins the in-flight drain. A sequential call finds nothing due, because a wake-up is closed in the transaction that inserts `wake:<id>`, and check-ins are keyed `checkin:<local date>`.
 - **Message during a model call.** `enqueue` inserts it. The in-flight turn commits as planned, and the next batch's prompt contains the previous reply. Consecutive messages already pending when a batch is claimed (up to 10) become one turn. There is no debounce.
-- **Compaction fails.** Compaction runs when there are more than 60 turns or 40 notes. Each call folds one page: up to the oldest 30 turns, always keeping the newest 30, and up to 40 notes, folding toward 20. Any outcome other than success backs off 5 minutes, doubling to a day. The backoff is stored on the `memory` row, is part of the alarm time, and is reset on success. A backlog shrinks one page per drain.
+- **Compaction fails.** Compaction runs when there are more than 60 turns or 40 notes. Each call folds one page: up to the oldest 30 turns, always keeping the newest 30, and up to 40 notes, folding toward 20. The trigger (keep 30 plus a page of 30) and the prompt window (one page more, 90) derive from one pair of constants in `compaction.ts`, so in steady operation every turn is either in the summary or in the prompt: a drain can add a page of turns before its own compaction runs. Any outcome other than success backs off 5 minutes, doubling to a day. The backoff is stored on the `memory` row, is part of the alarm time, and is reset on success. A backlog shrinks one page per drain.
 - **D1 down.** Logs wait in `log_outbox` and ship later with deterministic ids, backing off from 10 s, doubling to an hour. Only a duplicate id is skipped. A row D1 refuses, such as one an old CHECK doesn't allow, fails the flush the same way until the ledger is migrated.
 
 ### What it does not do
@@ -158,7 +158,7 @@ No turn runs inside the webhook request. There are no lock rows, no stored alarm
 - **Charging the estimate when the bill is unknown.** Spend is never under-counted after a crash or a lost response, at the cost of over-charging some calls.
 - **Unused leases.** Up to $0.50 per active person of unused global lease at month end ($50 at 100 people), in exchange for no cross-user hop per call and no global hot row.
 - **Duplicate sends.** A crash in the send window can duplicate a Telegram message or an in-doubt LINE reply, in exchange for never losing a reminder.
-- **Lossy compaction lag.** While compaction lags, turns between the summary and the 30-turn window are missing from the prompt. In exchange, the prompt is bounded and a reply never waits on compaction.
+- **Lossy compaction lag.** While compaction lags by more than a page (it is failing, or one drain added more than 30 rows), the oldest unfolded turns fall outside the 90-row prompt window until it catches up, one page per drain. In exchange, the prompt is bounded and a reply never waits on compaction.
 - **English notices.** Code-written text is English: corrections, the monthly limit, the late-notice fallback and the requested-reminder floor. The model writes its own late notice in the person's language.
 - **One coarse DO class.** One `Agent` holds everything for a person, which gives one transaction per turn. The store and the pure planners keep each file single-purpose.
 

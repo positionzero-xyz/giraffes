@@ -133,7 +133,9 @@ export const AGENT_TOOLS: readonly AgentTool[] = ActionSchema.options.flatMap((o
   return [{ name: o.shape.type.value, description, inputSchema: { ...rest, properties: fields, required: required.filter((k) => k !== "type") } }];
 });
 
-const AgentReply = z.object({ text: z.string(), calls: z.array(z.object({ name: z.string(), input: z.record(z.string(), z.unknown()) })) });
+const AgentCall = z.object({ name: z.string(), input: z.record(z.string(), z.unknown()) });
+const RefusedCalls = z.array(AgentCall.extend({ problems: z.array(z.string()) })).optional();
+const AgentReply = z.object({ text: z.string(), calls: z.array(AgentCall), refusedCalls: RefusedCalls });
 
 /** An agent session's reply as a turn output, for the same checks as any other; null when the box sent something else. */
 export function turnFromAgent(raw: unknown): unknown {
@@ -142,6 +144,7 @@ export function turnFromAgent(raw: unknown): unknown {
   const text = reply.data.text.trim();
   return {
     actions: [...reply.data.calls.map((c) => ({ ...c.input, type: c.name })), text ? { type: "send", text } : { type: "quiet" }],
+    refusedCalls: reply.data.refusedCalls,
     tasks: [],
     about: "",
   };
@@ -153,7 +156,8 @@ export const TurnOutputSchema = z.object({
   tasks: z.array(TaskOpSchema).describe(`At most ${TASKS.maxOps}. Use [] when the turn is chat or a reminder.`),
   about: z.string().describe('The ref of the open task your messages this turn are about, or "".'),
 });
-export type TurnOutput = z.infer<typeof TurnOutputSchema>;
+export const BoxTurnOutputSchema = TurnOutputSchema.extend({ refusedCalls: RefusedCalls });
+export type TurnOutput = z.infer<typeof BoxTurnOutputSchema>;
 
 export type InboxItem = {
   readonly key: EventKey;
@@ -321,6 +325,7 @@ const REJECTION_NOTICE: Readonly<Record<ActionRejection, FixedNotice | null>> = 
   too_far: "reminderTooFar",
   bad_time: "reminderBadTime",
   bad_key: "reminderNotSet",
+  tool_refused: "reminderNotSet",
   reserved_key: "checkinReserved",
   not_pending: "cancelNotFound",
   bad_zone: "badZone",
@@ -465,6 +470,14 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
     const notice = REJECTION_NOTICE[reason];
     if (tellPerson && notice !== null) notices.add(t[notice]);
   };
+  const keepCancelled = (key: WakeupKey | null, asked: boolean) => {
+    if (key === null || adds.has(key)) return;
+    const original = cancelled.get(key);
+    if (original === undefined) return;
+    cancelled.delete(key);
+    pending.set(key, original);
+    if (asked) notices.add(t.reminderKept(human(original.dueAt, given.tz)));
+  };
   const fit = (text: string, max: number, action: string): string => {
     if (text.length <= max) return text;
     reject(action, "too_long", false);
@@ -504,13 +517,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
           if (a.asked) askedFor.add(admission.wakeup.key);
         } else {
           reject(actionLabel(a), admission.reason, a.asked);
-          const key = parseWakeupKey(a.key);
-          const original = key === null ? undefined : cancelled.get(key);
-          if (key !== null && original !== undefined && !adds.has(key)) {
-            cancelled.delete(key);
-            pending.set(key, original);
-            if (a.asked) notices.add(t.reminderKept(human(original.dueAt, given.tz)));
-          }
+          keepCancelled(parseWakeupKey(a.key), a.asked);
         }
         break;
       }
@@ -534,6 +541,15 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
       default:
         assertNever(a);
     }
+  }
+  for (const { name, input } of out.refusedCalls ?? []) {
+    const isSchedule = name === "schedule_wakeup";
+    const key = (isSchedule || name === "cancel_wakeup") && typeof input.key === "string" ? parseWakeupKey(input.key) : null;
+    const asked = isSchedule && input.asked === true;
+    const replacement = key !== null && adds.has(key);
+    reject(key === null ? name : `${name}:${key}`, "tool_refused", asked && !replacement);
+    if (asked && replacement) notices.add(t.reminderAttemptFailed);
+    if (isSchedule) keepCancelled(key, asked);
   }
   const fresh = [...adds.keys()].filter((key) => !cancelled.has(key));
   for (const key of fresh.slice(Math.max(0, fresh.length - remindersOverCap(pending.values())))) {

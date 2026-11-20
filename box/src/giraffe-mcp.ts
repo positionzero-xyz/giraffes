@@ -1,6 +1,6 @@
 // Giraffe's tool server for the box's Claude Code session, over stdio: `node giraffe-mcp.ts <tools.json>`.
 // It applies nothing. It answers "noted" to a call whose arguments fit the tool's schema, so the model can fix a bad
-// call in the same turn, and the box hands the accepted calls to the Worker, which checks and applies them.
+// call in the same turn. The Worker checks and applies accepted calls and records refusals.
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
@@ -38,6 +38,9 @@ function problems(schema: Json, args: Json): string[] {
 
 const send = (msg: Json) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...msg })}\n`);
 
+// The CLI exposes error content as text in its tool result. Keep each problem intact through that encoding.
+const refused = (problems: string[]): Json => ({ content: [{ type: "text", text: JSON.stringify({ problems }) }], isError: true });
+
 function answer(method: string, params: Json): Json {
   switch (method) {
     case "initialize":
@@ -46,9 +49,9 @@ function answer(method: string, params: Json): Json {
       return { tools };
     case "tools/call": {
       const tool = tools.find((t) => t.name === params.name);
-      if (!tool) return { content: [{ type: "text", text: `No tool named ${String(params.name)}.` }], isError: true };
+      if (!tool) return refused([`No tool named ${String(params.name)}.`]);
       const wrong = problems(tool.inputSchema, isObject(params.arguments) ? params.arguments : {});
-      if (wrong.length > 0) return { content: [{ type: "text", text: `Not noted: ${wrong.join("; ")}.` }], isError: true };
+      if (wrong.length > 0) return refused(wrong);
       return { content: [{ type: "text", text: "Noted. Giraffe applies it when your reply is sent, and tells the person if code refuses it." }] };
     }
     default:

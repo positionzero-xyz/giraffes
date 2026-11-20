@@ -396,6 +396,64 @@ describe("a turn on the person's own Claude Code session", () => {
     expect(box.parses[0].agent?.tools).toEqual(["schedule_wakeup", "cancel_wakeup", "remember", "set_locale"]);
   });
 
+  test("a refused box reminder is corrected in the same reply and every refusal is logged", async () => {
+    const { box, c } = await signedIn("refused");
+    box.replies.push({
+      kind: "reply",
+      step: chat("Got it, set for Friday."),
+      refusedCalls: [
+        { name: "schedule_wakeup", input: { key: "call-clinic", asked: true }, problems: ["missing at", "missing note", "missing task"] },
+        { name: "schedule_wakeup", input: { key: "check-in", asked: false }, problems: ["missing at", "missing note", "missing task"] },
+        { name: "remember", input: { note: "Call the clinic.", extra: true }, problems: ["unknown field extra"] },
+      ],
+    });
+
+    await c.say("Remind me Friday to call the clinic");
+
+    expect(await c.received()).toEqual(["Got it, set for Friday.\n" + NOTICE.reminderNotSet]);
+    const s = await c.snapshot();
+    expect(s.pendingWakeups.filter((w) => w.kind === "reminder")).toEqual([]);
+    expect(s.memoryNotes).toEqual([]);
+    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([
+      ["schedule_wakeup:call-clinic", "tool_refused"],
+      ["schedule_wakeup:check-in", "tool_refused"],
+      ["remember", "tool_refused"],
+    ]);
+  });
+
+  test("a refused box reminder move keeps the original reminder", async () => {
+    const { box, c } = await signedIn("refused-move");
+    box.replies.push({ kind: "reply", step: turn({ actions: [schedule("clinic", "2099-11-06T09:00", "Call the clinic"), send("Friday at 9.")] }) });
+    await c.say("Remind me Friday at 9 to call the clinic");
+    await c.received();
+    box.replies.push({
+      kind: "reply",
+      step: turn({ actions: [{ type: "cancel_wakeup", key: "clinic" }, send("Moved it to Saturday.")] }),
+      refusedCalls: [{ name: "schedule_wakeup", input: { key: "clinic", asked: true }, problems: ["missing at", "missing note", "missing task"] }],
+    });
+
+    await c.say("Move that reminder to Saturday");
+
+    const reminders = (await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder");
+    expect(reminders.map((w) => [w.key, w.dueAt])).toEqual([["clinic", local("2099-11-06T09:00")]]);
+    expect(await c.received()).toEqual(["Moved it to Saturday.\n" + NOTICE.reminderNotSet + "\n" + NOTICE.reminderKept("2099-11-06 09:00")]);
+  });
+
+  test("a successful retry after a box refusal still sets the reminder and reports the failed attempt", async () => {
+    const { box, c } = await signedIn("refused-retry");
+    box.replies.push({
+      kind: "reply",
+      step: turn({ actions: [schedule("clinic", "2099-11-06T09:00", "Call the clinic"), send("Set for Friday at 9.")] }),
+      refusedCalls: [{ name: "schedule_wakeup", input: { key: "clinic", asked: true }, problems: ["missing at", "missing note", "missing task"] }],
+    });
+
+    await c.say("Remind me Friday at 9 to call the clinic");
+
+    expect(await c.received()).toEqual(["Set for Friday at 9.\n(One attempt to set that reminder failed.)"]);
+    expect((await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder").map((w) => w.key)).toEqual(["clinic"]);
+    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([["schedule_wakeup:clinic", "tool_refused"]]);
+  });
+
   test("the session holds the conversation, so a turn sends only the context and what is new", async () => {
     const { box, c } = await signedIn("ctx");
     box.replies.push({ kind: "reply", step: chat("Hi!") }, { kind: "reply", step: chat("Fine, thanks.") });

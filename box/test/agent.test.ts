@@ -87,6 +87,20 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.deepEqual(r.body.calls, [{ name: "schedule_wakeup", input: { key: "water", at: "2026-11-20T15:00", note: "Drink water", asked: true, task: "" } }]);
   });
 
+  it("returns refused tool calls with their original input and validation problems", async () => {
+    const input = { key: "water", at: 15, asked: true, task: "" };
+    writeFileSync(script, JSON.stringify({
+      calls: [{ name: "schedule_wakeup", input }, { name: "remember", input: { note: "Prefers morning reminders." } }],
+      text: "Water at 3.",
+    }));
+    writeFileSync(sessionFile, "");
+    const r = await agent("New\nPerson: remind me at 3 to drink water");
+    assert.equal(r.status, 200);
+    assert.equal(r.body.text, "Water at 3.");
+    assert.deepEqual(r.body.refusedCalls, [{ name: "schedule_wakeup", input, problems: ["missing note", "at has the wrong type or value"] }]);
+    assert.deepEqual(r.body.calls, [{ name: "remember", input: { note: "Prefers morning reminders." } }]);
+  });
+
   it("resumes the same session on the next turn, so the model sees the earlier turns", async () => {
     writeFileSync(script, JSON.stringify({ calls: [], text: "First." }));
     writeFileSync(sessionFile, "");

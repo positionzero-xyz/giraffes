@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS action_rejection (
   agent_key TEXT NOT NULL,
   turn_id   TEXT NOT NULL,
   action    TEXT NOT NULL,
-  reason    TEXT NOT NULL CHECK (reason IN ('duplicate', 'limit', 'past', 'too_far', 'bad_time', 'bad_key', 'reserved_key', 'task_limit', 'task_unknown', 'task_done', 'plan_empty', 'plan_too_thin', 'too_many_proposals', 'too_many_task_ops', 'not_pending', 'bad_zone', 'too_many_sends', 'too_many_actions', 'too_long')),
+  reason    TEXT NOT NULL CHECK (reason IN ('duplicate', 'limit', 'past', 'too_far', 'bad_time', 'bad_key', 'reserved_key', 'task_limit', 'task_unknown', 'task_done', 'plan_empty', 'plan_too_thin', 'too_many_proposals', 'too_many_task_ops', 'not_pending', 'bad_zone', 'too_many_sends', 'too_many_actions', 'too_long', 'tool_refused')),
   at        INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS action_rejection_agent_time ON action_rejection (agent_key, at);

@@ -160,6 +160,7 @@ export const ACTION_REJECTIONS = [
   "too_many_sends",
   "too_many_actions",
   "too_long",
+  "tool_refused",
 ] as const;
 export type ActionRejection = (typeof ACTION_REJECTIONS)[number];
 

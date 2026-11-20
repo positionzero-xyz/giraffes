@@ -150,8 +150,9 @@ export type AgentTool = { readonly name: string; readonly description: string; r
 /** `append` follows Claude Code's own system prompt; `turn` is the context and the new message for this turn. */
 export type AgentRequest = { readonly model: string; readonly append: string; readonly turn: string; readonly tools: readonly AgentTool[] };
 export type AgentCall = { readonly name: string; readonly input: Json };
+type ToolCalls = { readonly calls: AgentCall[]; readonly refusedCalls: (AgentCall & { readonly problems: string[] })[] };
 export type AgentReply =
-  | { readonly status: 200; readonly body: { text: string; calls: AgentCall[]; usage: Usage | null; stop: "end" | "refusal" | "max_tokens"; costUsd: number | null } }
+  | { readonly status: 200; readonly body: ToolCalls & { text: string; usage: Usage | null; stop: "end" | "refusal" | "max_tokens"; costUsd: number | null } }
   | { readonly status: 409; readonly body: { error: "signed_out" } }
   | { readonly status: 502; readonly body: { error: "claude_failed" } };
 
@@ -173,24 +174,35 @@ export function readAgentRequest(body: unknown): AgentRequest | null {
   return { model, append, turn, tools };
 }
 
-/** The calls Giraffe's tool server accepted, in order; a call it refused was already answered to the model as an error. */
-function acceptedCalls(events: readonly Json[]): AgentCall[] {
-  const asked = new Map<string, AgentCall>();
-  const order: string[] = [];
-  const accepted = new Set<string>();
+function toolProblems(content: unknown): string[] {
+  if (typeof content !== "string") return ["Tool call failed"];
+  const result = parseJson(content);
+  if (isObject(result) && Array.isArray(result.problems) && result.problems.every((problem) => typeof problem === "string")) return result.problems;
+  return [content];
+}
+
+function toolCalls(events: readonly Json[]): ToolCalls {
+  const byId = new Map<string, AgentCall>();
+  const results = new Map<string, Json>();
   for (const e of events) {
     const message = isObject(e.message) ? e.message : null;
     const content = Array.isArray(message?.content) ? message.content : [];
     for (const block of content) {
       if (!isObject(block)) continue;
       if (e.type === "assistant" && block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string" && block.name.startsWith(TOOL_PREFIX)) {
-        asked.set(block.id, { name: block.name.slice(TOOL_PREFIX.length), input: isObject(block.input) ? block.input : {} });
-        order.push(block.id);
+        byId.set(block.id, { name: block.name.slice(TOOL_PREFIX.length), input: isObject(block.input) ? block.input : {} });
       }
-      if (e.type === "user" && block.type === "tool_result" && typeof block.tool_use_id === "string" && block.is_error !== true) accepted.add(block.tool_use_id);
+      if (e.type === "user" && block.type === "tool_result" && typeof block.tool_use_id === "string") results.set(block.tool_use_id, block);
     }
   }
-  return order.filter((id) => accepted.has(id)).map((id) => asked.get(id) as AgentCall);
+  const out: ToolCalls = { calls: [], refusedCalls: [] };
+  for (const [id, call] of byId) {
+    const result = results.get(id);
+    if (!result) continue;
+    if (result.is_error === true) out.refusedCalls.push({ ...call, problems: toolProblems(result.content) });
+    else out.calls.push(call);
+  }
+  return out;
 }
 
 function agentArgs(req: AgentRequest, toolsFile: string, session: { readonly id: string; readonly resume: boolean }): string[] {
@@ -248,7 +260,7 @@ export async function agentTurn(cli: Cli, req: AgentRequest, sessions: SessionSt
     status: 200,
     body: {
       text: typeof result.result === "string" ? result.result : "",
-      calls: acceptedCalls(events),
+      ...toolCalls(events),
       usage: usageOf(result.usage),
       stop: result.stop_reason === "refusal" ? "refusal" : result.stop_reason === "max_tokens" ? "max_tokens" : "end",
       costUsd,

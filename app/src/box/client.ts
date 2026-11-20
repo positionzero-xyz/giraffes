@@ -22,14 +22,14 @@ export type BoxReply =
 export interface BoxClient {
   health(url: string, token: BoxToken): Promise<BoxHealth>;
   parse(url: string, token: BoxToken, req: BoxRequest): Promise<BoxReply>;
-  /** The reply's text is the JSON `{text, calls}`: the session's answer and the tool calls it made. */
+  /** The reply's text is JSON containing the session's answer and its accepted and refused tool calls. */
   agent(url: string, token: BoxToken, req: BoxAgentRequest): Promise<BoxReply>;
 }
 
 export const BOX_TIMEOUTS = { parseMs: 120_000, healthMs: 15_000 } as const;
 
 const Health = z.object({ ok: z.literal(true), signedIn: z.boolean() });
-const AgentBody = z.object({ text: z.string(), calls: z.array(z.unknown()), usage: z.unknown(), stop: z.unknown() });
+const AgentBody = z.object({ text: z.string(), calls: z.array(z.unknown()), refusedCalls: z.unknown().optional(), usage: z.unknown(), stop: z.unknown() });
 
 function jsonOrNull(text: string): unknown {
   try {
@@ -61,7 +61,9 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
     agent: (url, token, req) =>
       post(url, token, "agent", JSON.stringify(req), (raw) => {
         const body = AgentBody.safeParse(raw);
-        return body.success ? readBridgeReply({ structured: { text: body.data.text, calls: body.data.calls }, usage: body.data.usage, stop: body.data.stop }) : null;
+        if (!body.success) return null;
+        const { usage, stop, ...structured } = body.data;
+        return readBridgeReply({ structured, usage, stop });
       }),
   };
 

@@ -3,7 +3,7 @@ import { planAllowsBox, type Plan } from "../billing/plan";
 import type { BoxAgentRequest } from "../box/client";
 import type { BoxState } from "../box/machine";
 import { AGENT_SYSTEM } from "../agent/prompt";
-import { AGENT_TOOLS, turnFromAgent } from "../agent/turn";
+import { AGENT_TOOLS, BoxTurnOutputSchema, turnFromAgent } from "../agent/turn";
 import { assertNever, eventKey, mayspend, type AgentKey, type EpochMs, type MicroUsd } from "../domain";
 import { modelCallRow, type Backend, type ModelCallStatus } from "../ledger/ledger";
 import { NOTICES, type KeyPageError } from "../notices";
@@ -345,7 +345,7 @@ export class ModelAccess {
     const answer = await this.deps.box.agent({ model: route.model, append: AGENT_SYSTEM, turn: fitted.user, tools: AGENT_TOOLS });
     if (answer.kind === "moved_on") return { kind: "next", transient: answer.transient, told: answer.told };
     const output = turnFromAgent(jsonOrNull(answer.reply.text));
-    const attempt = readAttempt(output === null ? answer.reply : { ...answer.reply, text: JSON.stringify(output) }, outputOf("turn"));
+    const attempt = readAttempt(output === null ? answer.reply : { ...answer.reply, text: JSON.stringify(output) }, BoxTurnOutputSchema);
     this.#log(route, "box", "settled", 0 as MicroUsd, 0 as MicroUsd, attempt);
     const call: CallRecord = { lane: "box", model: route.ref, costMicro: 0 as MicroUsd };
     return { kind: "served", served: attempt.kind === "ok" ? { kind: "ok", value: attempt.value, call, trimmed: false } : { kind: "failed", call, trimmed: false } };

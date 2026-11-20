@@ -12,6 +12,7 @@ export type Notices = {
   readonly reminderDuplicate: string;
   readonly reminderKept: (dueLocal: string) => string;
   readonly reminderNotSet: string;
+  readonly reminderAttemptFailed: string;
   readonly tooManyActions: string;
   readonly checkinReserved: string;
   readonly cancelNotFound: string;
@@ -151,6 +152,7 @@ const en: Notices = {
   reminderDuplicate: "(I already have that reminder set, so I didn't change it.)",
   reminderKept: (dueLocal) => `(Your reminder is still set for ${dueLocal}.)`,
   reminderNotSet: "(I couldn't set that reminder.)",
+  reminderAttemptFailed: "(One attempt to set that reminder failed.)",
   tooManyActions: "(That was more than I can do in one message, so I skipped some of it.)",
   checkinReserved: "(The daily check-in can't be set or cancelled like a reminder.)",
   cancelNotFound: "(I couldn't find that reminder, so nothing was cancelled.)",
@@ -330,6 +332,7 @@ const th: Notices = {
   reminderDuplicate: "(มีเตือนนี้ตั้งไว้อยู่แล้ว เลยไม่ได้เปลี่ยนอะไรค่ะ)",
   reminderKept: (dueLocal) => `(เตือนเดิมยังตั้งไว้ที่ ${dueLocal} เหมือนเดิมค่ะ)`,
   reminderNotSet: "(ตั้งเตือนนั้นไม่ได้ค่ะ)",
+  reminderAttemptFailed: "(ครั้งหนึ่งที่ลองตั้งเตือนนั้นไม่สำเร็จค่ะ)",
   tooManyActions: "(ทำทั้งหมดในข้อความเดียวไม่ได้ เลยข้ามบางส่วนไปค่ะ)",
   checkinReserved: "(การทักทายประจำวันตั้งหรือยกเลิกแบบเตือนทั่วไปไม่ได้ค่ะ)",
   cancelNotFound: "(ไม่เจอเตือนนั้น เลยไม่ได้ยกเลิกอะไรค่ะ)",

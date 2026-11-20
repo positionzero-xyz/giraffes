@@ -9,6 +9,7 @@ import { d1Billing, type BillingStore } from "../src/billing/store";
 import type { CheckoutId, CheckoutRequest, StripeApi, StripeReply } from "../src/billing/stripe";
 import { loadConfig, type BillingConfig, type Env } from "../src/config";
 import type { Agent, AgentSnapshot, BillingDeps, BoxDeps } from "../src/agent/agent";
+import type { TurnOutput } from "../src/agent/turn";
 import { boxClient } from "../src/box/client";
 import type { BoxHost, HostResult } from "../src/box/host";
 import { boxName, type BoxName } from "../src/box/names";
@@ -375,7 +376,7 @@ export type HostStep = "ok" | "die" | { readonly retryable: boolean; readonly de
 export type DestroyStep = "ok" | "die" | "fail";
 
 export type BoxReplyStep =
-  | { readonly kind: "reply"; readonly step: ScriptStep }
+  | { readonly kind: "reply"; readonly step: ScriptStep; readonly refusedCalls?: Readonly<NonNullable<TurnOutput["refusedCalls"]>> }
   | { readonly kind: "signed_out" }
   | { readonly kind: "status"; readonly status: number };
 
@@ -478,7 +479,7 @@ export function fakeBox(
           const actions = (step.step.value as { actions: { type: string; text?: string }[] }).actions;
           const text = actions.flatMap((a) => (a.type === "send" ? [a.text ?? ""] : [])).join("\n\n");
           const calls = actions.filter((a) => a.type !== "send" && a.type !== "quiet").map(({ type, ...input }) => ({ name: type, input }));
-          return Response.json({ text, calls, usage: { input_tokens: 900, output_tokens: 90 }, stop: "end" });
+          return Response.json({ text, calls, refusedCalls: step.refusedCalls, usage: { input_tokens: 900, output_tokens: 90 }, stop: "end" });
         }
       }
     }

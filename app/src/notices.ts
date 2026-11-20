@@ -256,7 +256,7 @@ const en: Notices = {
       ? [
           "I need an AI to answer you, and you bring your own. Pick one:",
           ...(o.box ? ["• Have Claude Pro or Max? Send /claude to connect it."] : []),
-          ...(o.key ? ["• Have an API key? Send /key. OpenCode Go ($10 a month, opencode.ai/go) works well. A Mistral key is cheap too, and students and teachers pay less (mistral.ai/pricing)."] : []),
+          ...(o.key ? ["• Have an API key? Send /key. OpenCode Go ($10 a month, opencode.ai/go) works well. A Mistral key works too, either a Studio API key or the key from your Vibe plan, and students and teachers pay less (mistral.ai/pricing)."] : []),
           ...(o.included ? ["• Or get AI included with a plan: send /plan."] : []),
           "Your reminders still go out either way.",
         ].join("\n")
@@ -438,7 +438,7 @@ const th: Notices = {
       ? [
           "ต้องมี AI ถึงจะตอบคุณได้ค่ะ และคุณใช้ AI ของคุณเองได้ เลือกได้เลยนะคะ",
           ...(o.box ? ["• มี Claude Pro หรือ Max ไหมคะ ส่ง /claude เพื่อเชื่อมต่อ"] : []),
-          ...(o.key ? ["• มี API key ไหมคะ ส่ง /key ได้เลย OpenCode Go (เดือนละ $10 ที่ opencode.ai/go) ใช้ได้ดีค่ะ key ของ Mistral ก็ราคาถูก และนักเรียนนักศึกษากับครูได้ราคาพิเศษค่ะ (mistral.ai/pricing)"] : []),
+          ...(o.key ? ["• มี API key ไหมคะ ส่ง /key ได้เลย OpenCode Go (เดือนละ $10 ที่ opencode.ai/go) ใช้ได้ดีค่ะ key ของ Mistral ก็ใช้ได้ค่ะ จะเป็น API key จาก Studio หรือ key จากแพ็กเกจ Vibe ก็ได้ และนักเรียนนักศึกษากับครูได้ราคาพิเศษค่ะ (mistral.ai/pricing)"] : []),
           ...(o.included ? ["• หรือเลือกแพ็กเกจที่รวม AI ไว้ให้ ส่ง /plan"] : []),
           "การแจ้งเตือนที่คุณขอไว้ยังส่งถึงคุณตามปกติค่ะ",
         ].join("\n")

@@ -472,6 +472,13 @@ describe("the Mistral preset", () => {
       value: { provider: "mistral", baseUrl: "https://api.mistral.ai/v1", model: "mistral-small-2603" },
     });
   });
+
+  test("a pasted Vibe plan key with no model gets the same Small 4 on the same URL", () => {
+    expect(draftKey({ provider: "mistral-vibe", model: "", baseUrl: "", key: "AbCdEfGhIjKlMnOpQrStUvWxYz012345" }, { devMode: false })).toMatchObject({
+      ok: true,
+      value: { provider: "mistral-vibe", baseUrl: "https://api.mistral.ai/v1", model: "mistral-small-2603" },
+    });
+  });
 });
 
 describe("a dev run's stub provider", () => {

@@ -1,4 +1,4 @@
-export const PROVIDER_IDS = ["anthropic", "opencode-go", "openrouter", "deepinfra", "alibaba", "mistral", "anthropic-compatible", "openai-compatible"] as const;
+export const PROVIDER_IDS = ["anthropic", "opencode-go", "openrouter", "deepinfra", "alibaba", "mistral", "mistral-vibe", "anthropic-compatible", "openai-compatible"] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 export const isProviderId = (s: string): s is ProviderId => PROVIDER_IDS.some((p) => p === s);
 
@@ -66,6 +66,23 @@ const openaiCard = (input: number, cacheRead: number, output: number, longPrompt
 });
 
 const none = () => ({});
+
+/** A Vibe plan key spends the plan's Vibe budget instead of its API credit, on the same API and models. */
+const MISTRAL_STUDIO: Provider = {
+  label: "Mistral Studio (API key)",
+  protocol: "openai",
+  baseUrl: "https://api.mistral.ai/v1",
+  auth: "bearer",
+  keyShape: null,
+  defaultModel: "mistral-small-2603",
+  /** Mistral publishes no cached-input price for Small 4, so a cache read is priced as input. */
+  models: { "mistral-small-2603": { card: openaiCard(0.15, 0.15, 0.6), effort: false } },
+  schema: "probe",
+  feeBps: 0,
+  headers: none,
+  body: {},
+  signup: "https://console.mistral.ai/api-keys",
+};
 
 export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
   anthropic: {
@@ -138,21 +155,8 @@ export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
     body: {},
     signup: "https://www.alibabacloud.com/product/modelstudio",
   },
-  mistral: {
-    label: "Mistral",
-    protocol: "openai",
-    baseUrl: "https://api.mistral.ai/v1",
-    auth: "bearer",
-    keyShape: null,
-    defaultModel: "mistral-small-2603",
-    /** Mistral publishes no cached-input price for Small 4, so a cache read is priced as input. */
-    models: { "mistral-small-2603": { card: openaiCard(0.15, 0.15, 0.6), effort: false } },
-    schema: "probe",
-    feeBps: 0,
-    headers: none,
-    body: {},
-    signup: "https://console.mistral.ai/api-keys",
-  },
+  mistral: MISTRAL_STUDIO,
+  "mistral-vibe": { ...MISTRAL_STUDIO, label: "Mistral Vibe (plan key)", signup: "https://chat.mistral.ai/code/extensions" },
   "anthropic-compatible": {
     label: "Other (Anthropic-compatible)",
     protocol: "anthropic",

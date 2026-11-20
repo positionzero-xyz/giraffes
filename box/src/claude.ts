@@ -159,7 +159,7 @@ export type AgentReply =
 export type SessionStore = { get(): string | null; set(id: string): void };
 
 const TOOL_PREFIX = "mcp__giraffe__";
-const MCP_SERVER = fileURLToPath(new URL("./giraffe-mcp.ts", import.meta.url));
+const MCP_SERVER = fileURLToPath(new URL("./giraffe-mcp.ts", import.meta.url).href);
 
 export function readAgentRequest(body: unknown): AgentRequest | null {
   if (!isObject(body) || !Array.isArray(body.tools)) return null;

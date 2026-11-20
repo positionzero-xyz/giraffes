@@ -9,6 +9,8 @@ export type BoxHealth =
   | { readonly kind: "unavailable"; readonly detail: string };
 
 export type BoxRequest = { readonly model: string; readonly system: string; readonly user: string; readonly jsonSchema: JsonSchema };
+/** A turn in the person's own Claude Code session: `append` follows its system prompt, `turn` is the context and what is new. */
+export type BoxAgentRequest = { readonly model: string; readonly append: string; readonly turn: string; readonly tools: readonly unknown[] };
 
 export type BoxReply =
   /** The CLI answered; whether the answer is valid is the caller's to decide. */
@@ -20,11 +22,14 @@ export type BoxReply =
 export interface BoxClient {
   health(url: string, token: BoxToken): Promise<BoxHealth>;
   parse(url: string, token: BoxToken, req: BoxRequest): Promise<BoxReply>;
+  /** The reply's text is the JSON `{text, calls}`: the session's answer and the tool calls it made. */
+  agent(url: string, token: BoxToken, req: BoxAgentRequest): Promise<BoxReply>;
 }
 
 export const BOX_TIMEOUTS = { parseMs: 120_000, healthMs: 15_000 } as const;
 
 const Health = z.object({ ok: z.literal(true), signedIn: z.boolean() });
+const AgentBody = z.object({ text: z.string(), calls: z.array(z.unknown()), usage: z.unknown(), stop: z.unknown() });
 
 function jsonOrNull(text: string): unknown {
   try {
@@ -51,24 +56,32 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
       return parsed.success ? { kind: "up", signedIn: parsed.data.signedIn } : { kind: "unavailable", detail: "health reply unreadable" };
     },
 
-    async parse(url, token, req) {
-      let res: Response;
-      let text: string;
-      try {
-        res = await fetch(`${url}/parse`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-          body: bridgeBody(req),
-          signal: AbortSignal.timeout(timeouts.parseMs),
-        });
-        text = await res.text();
-      } catch (err) {
-        return { kind: "unavailable", detail: reason(err) };
-      }
-      if (res.status === 409) return { kind: "signed_out" };
-      if (res.status === 401) return { kind: "unauthorized" };
-      if (!res.ok) return { kind: "unavailable", detail: `parse ${res.status}` };
-      return { kind: "reply", reply: readBridgeReply(jsonOrNull(text)) ?? UNREADABLE_REPLY };
-    },
+    parse: (url, token, req) => post(url, token, "parse", bridgeBody(req), readBridgeReply),
+
+    agent: (url, token, req) =>
+      post(url, token, "agent", JSON.stringify(req), (raw) => {
+        const body = AgentBody.safeParse(raw);
+        return body.success ? readBridgeReply({ structured: { text: body.data.text, calls: body.data.calls }, usage: body.data.usage, stop: body.data.stop }) : null;
+      }),
   };
+
+  async function post(url: string, token: BoxToken, path: "parse" | "agent", body: string, read: (raw: unknown) => ReturnType<typeof readBridgeReply>): Promise<BoxReply> {
+    let res: Response;
+    let text: string;
+    try {
+      res = await fetch(`${url}/${path}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body,
+        signal: AbortSignal.timeout(timeouts.parseMs),
+      });
+      text = await res.text();
+    } catch (err) {
+      return { kind: "unavailable", detail: reason(err) };
+    }
+    if (res.status === 409) return { kind: "signed_out" };
+    if (res.status === 401) return { kind: "unauthorized" };
+    if (!res.ok) return { kind: "unavailable", detail: `${path} ${res.status}` };
+    return { kind: "reply", reply: read(jsonOrNull(text)) ?? UNREADABLE_REPLY };
+  }
 }

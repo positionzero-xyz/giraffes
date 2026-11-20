@@ -30,6 +30,7 @@ import {
 import type { ActionRejection, LogRow, TurnOutcome } from "../ledger/ledger";
 import { NOTICES, type FixedNotice, type Notices } from "../notices";
 import { bytesOf, type PromptParts, type PromptSection } from "../model/prompt";
+import { jsonSchemaOf, type JsonSchema } from "../model/client";
 import {
   admitReminder,
   checkinWakeup,
@@ -112,6 +113,38 @@ const TaskOpSchema = z.object({
   title: z.string().min(1).describe(atMostBytes(TASKS.maxTitleBytes)),
   plan: z.string().describe(`The whole plan, one step or time per line, when op is propose; otherwise "". ${atMost(TASKS.maxPlanChars)}`),
 });
+
+const AGENT_ACTIONS: Readonly<Partial<Record<z.infer<typeof ActionSchema>["type"], string>>> = {
+  schedule_wakeup: "Schedule a reminder, or a routine the person asked for, in their local time.",
+  cancel_wakeup: "Cancel a pending wake-up by its key. Cancelling a routine's key ends the routine.",
+  remember: "Keep a durable note about the person that will matter in a week.",
+  set_locale: "Set the person's IANA time zone and the language of code-written notices.",
+};
+
+export type AgentTool = { readonly name: string; readonly description: string; readonly inputSchema: JsonSchema };
+
+/** The actions an agent session takes as tools; sending is its reply text, and quiet is an empty reply. */
+export const AGENT_TOOLS: readonly AgentTool[] = ActionSchema.options.flatMap((o) => {
+  const description = AGENT_ACTIONS[o.shape.type.value];
+  if (description === undefined) return [];
+  const { $schema: _, properties, required, ...rest } = jsonSchemaOf(o) as JsonSchema & { properties: Record<string, unknown>; required: string[] };
+  const { type: __, ...fields } = properties;
+  return [{ name: o.shape.type.value, description, inputSchema: { ...rest, properties: fields, required: required.filter((k) => k !== "type") } }];
+});
+
+const AgentReply = z.object({ text: z.string(), calls: z.array(z.object({ name: z.string(), input: z.record(z.string(), z.unknown()) })) });
+
+/** An agent session's reply as a turn output, for the same checks as any other; null when the box sent something else. */
+export function turnFromAgent(raw: unknown): unknown {
+  const reply = AgentReply.safeParse(raw);
+  if (!reply.success) return null;
+  const text = reply.data.text.trim();
+  return {
+    actions: [...reply.data.calls.map((c) => ({ ...c.input, type: c.name })), text ? { type: "send", text } : { type: "quiet" }],
+    tasks: [],
+    about: "",
+  };
+}
 
 export const TurnOutputSchema = z.object({
   actions: z.array(ActionSchema).describe(`At most ${TURN.maxActions} actions.`),
@@ -740,4 +773,10 @@ export function logsForTurn(input: {
     });
   }
   return rows;
+}
+
+/** The person started it: something they sent, or only reminders and routines they asked for. Check-ins and the agent's own follow-ups don't count. */
+export function ownTurn(batch: Batch): boolean {
+  const sent = batch.items.some((i) => i.event.kind !== "wakeup" && i.event.kind !== "checkin");
+  return sent || batch.items.every((i) => i.event.kind === "wakeup" && i.event.origin === "person");
 }

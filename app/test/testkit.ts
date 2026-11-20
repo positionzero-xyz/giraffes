@@ -390,7 +390,8 @@ export type FakeBox = {
   image: string;
   readonly destroyCalls: string[];
   readonly healthCalls: string[];
-  readonly parses: { readonly authorization: string | null; readonly user: string }[];
+  /** Every turn the box got; `agent` is set for a turn run as the person's own Claude Code session. */
+  readonly parses: { readonly authorization: string | null; readonly user: string; readonly agent: { readonly append: string; readonly tools: readonly string[] } | null }[];
   readonly replies: BoxReplyStep[];
   signedIn: boolean;
   /** False makes the box's own URL unreachable, as a wedged machine or a network fault would. */
@@ -417,7 +418,7 @@ export function fakeBox(
     image: "registry.test/box:1",
     destroyCalls: [] as string[],
     healthCalls: [] as string[],
-    parses: [] as { authorization: string | null; user: string }[],
+    parses: [] as FakeBox["parses"][number][],
     replies: [] as BoxReplyStep[],
     signedIn: opts.signedIn ?? false,
     reachable: true,
@@ -460,9 +461,10 @@ export function fakeBox(
     if (url.pathname === "/health") {
       return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test" });
     }
-    if (url.pathname === "/parse") {
-      const body = JSON.parse(String(init?.body)) as { user: string };
-      box.parses.push({ authorization, user: body.user });
+    if (url.pathname === "/parse" || url.pathname === "/agent") {
+      const agent = url.pathname === "/agent";
+      const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; append?: string; tools?: { name: string }[] };
+      box.parses.push({ authorization, user: (agent ? body.turn : body.user) ?? "", agent: agent ? { append: body.append ?? "", tools: (body.tools ?? []).map((t) => t.name) } : null });
       const step = box.replies.shift();
       if (!step) throw new Error("the box got a turn the test didn't script");
       switch (step.kind) {
@@ -472,7 +474,11 @@ export function fakeBox(
           return Response.json({ error: "claude_failed" }, { status: step.status });
         case "reply": {
           if (step.step.kind !== "output") throw new Error("a box reply must be an output step");
-          return Response.json({ structured: step.step.value, usage: { input_tokens: 900, output_tokens: 90 }, stop: "end" });
+          if (!agent) return Response.json({ structured: step.step.value, usage: { input_tokens: 900, output_tokens: 90 }, stop: "end" });
+          const actions = (step.step.value as { actions: { type: string; text?: string }[] }).actions;
+          const text = actions.flatMap((a) => (a.type === "send" ? [a.text ?? ""] : [])).join("\n\n");
+          const calls = actions.filter((a) => a.type !== "send" && a.type !== "quiet").map(({ type, ...input }) => ({ name: type, input }));
+          return Response.json({ text, calls, usage: { input_tokens: 900, output_tokens: 90 }, stop: "end" });
         }
       }
     }

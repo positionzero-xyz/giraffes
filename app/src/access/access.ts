@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { planAllowsBox, type Plan } from "../billing/plan";
+import type { BoxAgentRequest } from "../box/client";
 import type { BoxState } from "../box/machine";
+import { AGENT_SYSTEM } from "../agent/prompt";
+import { AGENT_TOOLS, turnFromAgent } from "../agent/turn";
 import { assertNever, eventKey, mayspend, type AgentKey, type EpochMs, type MicroUsd } from "../domain";
 import { modelCallRow, type Backend, type ModelCallStatus } from "../ledger/ledger";
 import { NOTICES, type KeyPageError } from "../notices";
@@ -117,6 +120,7 @@ export type BoxAnswer = { readonly kind: "reply"; readonly reply: Extract<WireRe
 export interface BoxLane {
   state(): BoxState | null;
   parse(req: { readonly purpose: CallPurpose; readonly model: string; readonly system: string; readonly user: string; readonly jsonSchema: JsonSchema }): Promise<BoxAnswer>;
+  agent(req: BoxAgentRequest): Promise<BoxAnswer>;
 }
 
 export type Clock = { now(): EpochMs };
@@ -132,7 +136,14 @@ export type AccessDeps = {
   readonly instance: string;
 };
 
-export type CallRequest<P extends Purpose> = { readonly purpose: P; readonly system: string; readonly prompt: PromptParts; readonly plan: Plan };
+export type CallRequest<P extends Purpose> = {
+  readonly purpose: P;
+  readonly system: string;
+  readonly prompt: PromptParts;
+  readonly plan: Plan;
+  /** A turn the person started: their own message, or a reminder or routine they asked for. Only these run on their Claude plan. */
+  readonly own?: boolean;
+};
 
 type Next = {
   readonly kind: "next";
@@ -325,7 +336,23 @@ export class ModelAccess {
     );
   }
 
+  /** A turn as the person's own Claude Code session; its tool calls and reply become a turn output for the usual checks. */
+  async #boxAgent(req: CallRequest<"turn">): Promise<LaneResult<"turn">> {
+    if (req.own !== true) return { kind: "next" };
+    const route = routeFor({ kind: "box", provider: "claude" }, "turn");
+    const fitted = this.#fit(route, "strict", { ...req, prompt: { sections: req.prompt.sections.filter((s) => !s.history) } });
+    if (fitted === null) return { kind: "next", tooLong: true };
+    const answer = await this.deps.box.agent({ model: route.model, append: AGENT_SYSTEM, turn: fitted.user, tools: AGENT_TOOLS });
+    if (answer.kind === "moved_on") return { kind: "next", transient: answer.transient, told: answer.told };
+    const output = turnFromAgent(jsonOrNull(answer.reply.text));
+    const attempt = readAttempt(output === null ? answer.reply : { ...answer.reply, text: JSON.stringify(output) }, outputOf("turn"));
+    this.#log(route, "box", "settled", 0 as MicroUsd, 0 as MicroUsd, attempt);
+    const call: CallRecord = { lane: "box", model: route.ref, costMicro: 0 as MicroUsd };
+    return { kind: "served", served: attempt.kind === "ok" ? { kind: "ok", value: attempt.value, call, trimmed: false } : { kind: "failed", call, trimmed: false } };
+  }
+
   async #box<P extends Purpose>(req: CallRequest<P>): Promise<LaneResult<P>> {
+    if (isTurn(req)) return this.#boxAgent(req) as Promise<LaneResult<P>>;
     const route = routeFor({ kind: "box", provider: "claude" }, req.purpose);
     const fitted = this.#fit(route, "strict", req);
     if (fitted === null) return { kind: "next", tooLong: true };
@@ -471,5 +498,15 @@ export class ModelAccess {
         );
       },
     };
+  }
+}
+
+const isTurn = (req: CallRequest<Purpose>): req is CallRequest<"turn"> => req.purpose === "turn";
+
+function jsonOrNull(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
   }
 }

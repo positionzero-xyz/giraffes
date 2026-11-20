@@ -15,7 +15,7 @@ import { NO_STANDING, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan,
 import { INVITE_FOR_MS, MANAGE_NOTE, planChanged, planChoices, planStatus, type Links } from "../billing/say";
 import { d1Billing, type BillingStore } from "../billing/store";
 import { offeredPlans, parseSubscription, stripeApi, type BillingEvent, type StripeApi } from "../billing/stripe";
-import { boxClient, type BoxClient } from "../box/client";
+import { boxClient, type BoxClient, type BoxReply } from "../box/client";
 import { flyHost } from "../box/fly";
 import { staticHost, type BoxHost, type BoxHostKind, type Fetch } from "../box/host";
 import {
@@ -71,7 +71,7 @@ import { scripted, scriptedConnect, type ScriptStep } from "../model/scripted";
 import { connect, type Connect } from "../model/client";
 import { bytesOf, renderPrompt, type PromptParts } from "../model/prompt";
 import { PROVIDERS } from "../model/providers";
-import { routeFor, type Purpose } from "../model/routes";
+import { routeFor, type CallPurpose, type Purpose } from "../model/routes";
 import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach";
 import { inLineReserve, type QuotaReading } from "../policy/quota";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
@@ -92,6 +92,7 @@ import {
 import {
   bypassModel,
   logsForTurn,
+  ownTurn,
   planTurn,
   planWithoutModel,
   renderUser,
@@ -564,7 +565,7 @@ export class Agent extends DurableObject<Env> {
     }
 
     const shown = await this.#historyThatFits(batch, a, view, plan);
-    const served = await this.#access().call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan });
+    const served = await this.#access().call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan, own: ownTurn(batch) });
     const historyTrimmed = shown.historyLeftOut > 0 || ((served.kind === "ok" || served.kind === "failed") && served.trimmed);
     switch (served.kind) {
       case "ok":
@@ -633,7 +634,8 @@ export class Agent extends DurableObject<Env> {
         const a = this.#store.agent();
         return box && a && boxServes(this.#deps.box, a.key) ? box.state : null;
       },
-      parse: (req) => this.#parseOnBox(req),
+      parse: (req) => this.#onBox(req.purpose, req.model, (client, url, token) => client.parse(url, token, { model: req.model, system: req.system, user: req.user, jsonSchema: req.jsonSchema })),
+      agent: (req) => this.#onBox("turn", req.model, (client, url, token) => client.agent(url, token, req)),
     };
   }
 
@@ -1003,16 +1005,16 @@ export class Agent extends DurableObject<Env> {
     return health.kind === "unavailable" ? { kind: "down", retryable: true, detail: health.detail } : health;
   }
 
-  async #parseOnBox(req: Parameters<BoxLane["parse"]>[0]): Promise<BoxAnswer> {
+  async #onBox(purpose: CallPurpose, model: string, send: (client: BoxClient, url: string, token: BoxToken) => Promise<BoxReply>): Promise<BoxAnswer> {
     const deps = this.#deps.box;
     const box = this.#store.box();
     const agent = this.#agent().key;
     if (!boxServes(deps, agent) || box?.state !== "signed_in") return { kind: "moved_on", transient: false, told: false };
     if (this.#deps.clock.now() < this.#skipBoxUntil) return { kind: "moved_on", transient: true, told: false };
-    const res = await deps.client.parse(box.url, await boxToken(deps.secret, box.name), { model: req.model, system: req.system, user: req.user, jsonSchema: req.jsonSchema });
+    const res = await send(deps.client, box.url, await boxToken(deps.secret, box.name));
     const now = this.#deps.clock.now();
     const missed = (status: "rejected" | "unavailable"): LogRow =>
-      modelCallRow({ id: crypto.randomUUID(), agent, purpose: req.purpose, model: `claude-plan:${req.model}`, backend: "box", status, estimate: NO_COST, cost: NO_COST, usage: null, at: now });
+      modelCallRow({ id: crypto.randomUUID(), agent, purpose, model: `claude-plan:${model}`, backend: "box", status, estimate: NO_COST, cost: NO_COST, usage: null, at: now });
     switch (res.kind) {
       case "reply":
         return { kind: "reply", reply: res.reply };

@@ -22,7 +22,9 @@ import {
   memoryLedger,
   stripeChange,
   quiet,
+  schedule,
   scripted,
+  send,
   TEST_KEY_SECRET,
   type BillingKit,
   turn,
@@ -369,6 +371,62 @@ async function linkIn(text: string, user: string, sentAt: EpochMs) {
   return { name, exp: Number(exp), valid: expected === `${exp}.${mac}`, expiresInMs: Number(exp) - sentAt, user };
 }
 
+describe("a turn on the person's own Claude Code session", () => {
+  async function signedIn(user: string, at = "2099-11-04T10:00") {
+    const box = fakeBox({ signedIn: true });
+    const c = await devChat(user, { model: scripted([]), at, box: box.deps });
+    await c.say("/claude");
+    await c.received();
+    return { box, c };
+  }
+
+  test("its tool calls are applied like any turn's actions: the reminder is pending, the note kept, and the reply sent", async () => {
+    const { box, c } = await signedIn("agt");
+    box.replies.push({
+      kind: "reply",
+      step: turn({ actions: [schedule("call-clinic", "2099-11-06T09:00", "Call the clinic"), { type: "remember", note: "Allergic to peanuts." }, send("Friday at 9.")] }),
+    });
+
+    await c.say("I'm allergic to peanuts. Remind me Friday 9 am to call the clinic");
+
+    expect(await c.received()).toEqual(["Friday at 9."]);
+    const s = await c.snapshot();
+    expect(s.pendingWakeups.filter((w) => w.kind === "reminder").map((w) => [w.key, w.origin])).toEqual([["call-clinic", "person"]]);
+    expect(s.memoryNotes).toEqual(["Allergic to peanuts."]);
+    expect(box.parses[0].agent?.tools).toEqual(["schedule_wakeup", "cancel_wakeup", "remember", "set_locale"]);
+  });
+
+  test("the session holds the conversation, so a turn sends only the context and what is new", async () => {
+    const { box, c } = await signedIn("ctx");
+    box.replies.push({ kind: "reply", step: chat("Hi!") }, { kind: "reply", step: chat("Fine, thanks.") });
+
+    await c.say("hello there");
+    await c.say("how are you");
+
+    const second = box.parses[1].user;
+    expect(second).toContain("Person: how are you");
+    expect(second).not.toContain("hello there");
+    expect(second).not.toContain("Hi!");
+  });
+
+  test("only turns the person started run on their plan: a reminder they asked for does, the daily check-in doesn't", async () => {
+    const { box, c } = await signedIn("own", "2099-11-04T08:00");
+    box.replies.push({ kind: "reply", step: turn({ actions: [schedule("stretch", "2099-11-04T08:30", "Stretch"), send("At 8:30.")] }) });
+    await c.say("remind me at 8:30 to stretch");
+    box.replies.push({ kind: "reply", step: chat("Time to stretch!") });
+
+    await c.advanceTo("2099-11-04T09:05");
+
+    expect(box.parses.map((p) => p.user.split("\n").find((l) => l.startsWith("Your wake-up") || l.startsWith("Person:") || l.startsWith("Daily")))).toEqual([
+      "Person: remind me at 8:30 to stretch",
+      expect.stringContaining('Your wake-up "stretch" fired'),
+    ]);
+    expect(await c.received()).toEqual(["At 8:30.", "Time to stretch!"]);
+    expect(c.logs("turn").filter((r) => r.eventKind === "checkin")).toHaveLength(1);
+    expect(box.replies).toEqual([]);
+  });
+});
+
 describe("connecting a Claude plan", () => {
   test("with BOX_HOST=none, /claude says it isn't available and calls no model", async () => {
     const model = scripted([]);
@@ -502,7 +560,13 @@ describe("connecting a Claude plan", () => {
     await c.say("hello");
 
     expect(await c.received()).toEqual(["Hello from your own plan."]);
-    expect(box.parses).toEqual([{ authorization: `Bearer ${await boxToken(BOX_SECRET, await box.nameOf("fin"))}`, user: expect.stringContaining("Person: hello") }]);
+    expect(box.parses).toEqual([
+      {
+        authorization: `Bearer ${await boxToken(BOX_SECRET, await box.nameOf("fin"))}`,
+        user: expect.stringContaining("Person: hello"),
+        agent: { append: expect.stringContaining("You are Giraffe"), tools: ["schedule_wakeup", "cancel_wakeup", "remember", "set_locale"] },
+      },
+    ]);
     expect(model.calls).toHaveLength(0);
     expect((await c.snapshot()).spendThisMonthMicro).toBe(0);
     expect(c.logs("model_call").map((r) => [r.backend, r.status, r.costMicro, r.estimateMicro])).toEqual([["box", "settled", 0, 0]]);

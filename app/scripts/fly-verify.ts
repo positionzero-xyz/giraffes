@@ -1,4 +1,4 @@
-import { FLY_API, FLY_TIMEOUT_MS, flyAuthorization, flyHost, type FlyConfig } from "../src/box/fly.ts";
+import { FLY_API, FLY_TIMEOUT_MS, FlyVolumesReply, flyAuthorization, flyHost, type FlyConfig } from "../src/box/fly.ts";
 import { boxToken, signinTicket, type BoxName } from "../src/box/names.ts";
 import type { EpochMs } from "../src/domain.ts";
 
@@ -87,6 +87,11 @@ try {
   begin("provisioning");
   const first = await host.ensure(name, token);
   if (!first.ok) throw new Error(`provisioning failed (retryable: ${first.retryable}): ${first.detail}`);
+
+  begin("checking that the data volume has automatic snapshots disabled");
+  const volumes = FlyVolumesReply.parse(await fly("GET", `/apps/${name}/volumes`));
+  const data = volumes.find((volume) => volume.name === "data");
+  if (data?.auto_backup_enabled !== false) throw new Error("Fly did not confirm automatic snapshots are disabled on the data volume");
 
   begin("provisioning again, which must find every step done and the machine's config current");
   changed.length = 0;

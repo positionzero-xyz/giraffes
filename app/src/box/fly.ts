@@ -21,8 +21,8 @@ export type StepLog = (step: FlyStep, outcome: "created" | "exists" | "updated")
 
 const AppReply = z.object({ organization: z.object({ slug: z.string() }).nullish() });
 const IpsReply = z.object({ ips: z.array(z.object({ ip: z.string(), shared: z.boolean().nullish(), egress: z.boolean().nullish() })).nullable() });
-const VolumesReply = z.array(z.object({ id: z.string(), name: z.string(), state: z.string() }));
-const VolumeReply = z.object({ id: z.string() });
+export const FlyVolumesReply = z.array(z.object({ id: z.string(), name: z.string(), state: z.string(), auto_backup_enabled: z.boolean().optional() }));
+const VolumeReply = z.object({ id: z.string(), auto_backup_enabled: z.literal(false) });
 const MachinesReply = z.array(z.object({ id: z.string(), config: z.unknown() }));
 
 const GONE_VOLUME = new Set(["destroyed", "destroying", "pending_destroy"]);
@@ -150,18 +150,28 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
   }
 
   async function volume(name: BoxName): Promise<{ readonly ok: true; readonly id: string } | HostFailure> {
-    const listed = await call("GET", `/apps/${name}/volumes`);
+    const path = `/apps/${name}/volumes`;
+    const listed = await call("GET", path);
     if (!listed.ok) return listed;
-    const volumes = read(listed, VolumesReply, `GET /apps/${name}/volumes`);
+    const volumes = read(listed, FlyVolumesReply, `GET ${path}`);
     if (failed(volumes)) return volumes;
     const current = volumes.find((v) => v.name === "data" && !GONE_VOLUME.has(v.state));
     if (current) {
-      log("volume", "exists");
+      if (current.auto_backup_enabled === false) {
+        log("volume", "exists");
+        return { ok: true, id: current.id };
+      }
+      const updatePath = `${path}/${current.id}`;
+      const r = await call("PUT", updatePath, { auto_backup_enabled: false });
+      if (!r.ok) return r;
+      const updated = read(r, VolumeReply, `PUT ${updatePath}`);
+      if (failed(updated)) return updated;
+      log("volume", "updated");
       return { ok: true, id: current.id };
     }
-    const r = await call("POST", `/apps/${name}/volumes`, { name: "data", region: cfg.region, size_gb: cfg.volumeGb });
+    const r = await call("POST", path, { name: "data", region: cfg.region, size_gb: cfg.volumeGb, auto_backup_enabled: false });
     if (!r.ok) return r;
-    const made = read(r, VolumeReply, `POST /apps/${name}/volumes`);
+    const made = read(r, VolumeReply, `POST ${path}`);
     if (failed(made)) return made;
     log("volume", "created");
     return { ok: true, id: made.id };

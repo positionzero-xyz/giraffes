@@ -101,7 +101,7 @@ type FlyRequest = { readonly method: string; readonly path: string; readonly bod
 function fakeFly(org = "giraffes") {
   const apps = new Map<string, string>();
   const ips = new Map<string, { ip: string; shared: boolean }[]>();
-  const volumes = new Map<string, { id: string; name: string; state: string }[]>();
+  const volumes = new Map<string, { id: string; name: string; state: string; auto_backup_enabled: boolean }[]>();
   const machines = new Map<string, { id: string; config: Record<string, unknown> }[]>();
   const requests: FlyRequest[] = [];
   const failures: { method: string; path: string; status: number }[] = [];
@@ -134,8 +134,14 @@ function fakeFly(org = "giraffes") {
       return Response.json({ ip: "x" });
     }
     if (sub === "volumes" && method === "GET") return Response.json(list(volumes));
-    if (sub === "volumes") {
-      const v = { id: `vol_${++n}`, name: body.name, state: "created" };
+    if (sub === "volumes" && method === "PUT") {
+      const v = list(volumes).find((x) => x.id === id);
+      if (!v) return Response.json({ error: "volume not found" }, { status: 404 });
+      v.auto_backup_enabled = body.auto_backup_enabled;
+      return Response.json(v);
+    }
+    if (sub === "volumes" && method === "POST") {
+      const v = { id: `vol_${++n}`, name: body.name, state: "created", auto_backup_enabled: body.auto_backup_enabled ?? true };
       list(volumes).push(v);
       return Response.json(v);
     }
@@ -206,7 +212,7 @@ describe("fly host", () => {
       ["/apps", { app_name: app, org_slug: "giraffes", network: app }],
       [`/apps/${app}/ip_assignments`, { type: "shared_v4" }],
       [`/apps/${app}/ip_assignments`, { type: "v6" }],
-      [`/apps/${app}/volumes`, { name: "data", region: "sin", size_gb: 5 }],
+      [`/apps/${app}/volumes`, { name: "data", region: "sin", size_gb: 5, auto_backup_enabled: false }],
       [
         `/apps/${app}/machines`,
         {
@@ -236,6 +242,42 @@ describe("fly host", () => {
     ]);
     expect(new Set(fly.requests.map((r) => r.authorization))).toEqual(new Set(["Bearer fake-org-token"]));
     expect(host.urlOf(app)).toBe(`https://${app}.fly.dev`);
+  });
+
+  test("provisioning disables automatic snapshots on an existing data volume in place", async () => {
+    const fly = fakeFly();
+    fly.apps.set(app, flyConfig.org);
+    const volume = { id: "vol_existing", name: "data", state: "created", auto_backup_enabled: true };
+    fly.volumes.set(app, [volume]);
+    const host = flyHost(flyConfig, fly.fetch);
+    const volumePath = `/apps/${app}/volumes/${volume.id}`;
+
+    expect(await host.ensure(app, token)).toEqual({ ok: true });
+    expect(fly.requests.filter((r) => r.method === "PUT")).toMatchObject([
+      { path: volumePath, body: { auto_backup_enabled: false } },
+    ]);
+    expect(fly.volumes.get(app)).toEqual([{ ...volume, auto_backup_enabled: false }]);
+    expect(fly.machines.get(app)?.[0].config.mounts).toMatchObject([{ volume: volume.id, path: "/data" }]);
+
+    const settled = fly.requests.length;
+    expect(await host.ensure(app, token)).toEqual({ ok: true });
+    expect(fly.requests.slice(settled).filter((r) => r.method === "PUT")).toEqual([]);
+  });
+
+  test("provisioning waits to create the machine if disabling snapshots fails", async () => {
+    const fly = fakeFly();
+    fly.apps.set(app, flyConfig.org);
+    const volume = { id: "vol_existing", name: "data", state: "created", auto_backup_enabled: true };
+    fly.volumes.set(app, [volume]);
+    fly.failures.push({ method: "PUT", path: `/apps/${app}/volumes/${volume.id}`, status: 503 });
+    const host = flyHost(flyConfig, fly.fetch);
+
+    expect(await host.ensure(app, token)).toMatchObject({ ok: false, retryable: true });
+    expect(fly.machines.get(app)).toBeUndefined();
+
+    expect(await host.ensure(app, token)).toEqual({ ok: true });
+    expect(fly.volumes.get(app)).toEqual([{ ...volume, auto_backup_enabled: false }]);
+    expect(fly.machines.get(app)).toHaveLength(1);
   });
 
   test("a run that failed midway resumes, and a run after success creates nothing", async () => {

@@ -36,8 +36,6 @@ Text your bot. With no AI connected, it answers with a short code-written messag
 
 Someone with both is asked once whether the key may back up their Claude plan. Until they say yes, a box that can't answer never spends their key's money. Reminders a person asked for still arrive as code-written text whatever their access.
 
-An earlier deploy's `ANTHROPIC_API_KEY` secret is no longer read. Delete it with `npx wrangler secret delete ANTHROPIC_API_KEY`. Anyone who was answered on it gets the no-access message on their next message.
-
 ## Knobs
 
 - `MAX_BOXES` (the script asks; default 20) caps boxes across everyone.

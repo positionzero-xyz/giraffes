@@ -65,7 +65,9 @@ function reply(body) {
   const tools = body.tools ?? [];
   const structured = tools.find((t) => t.name === "StructuredOutput");
   const hasBash = tools.some((t) => t.name === "Bash");
-  const results = body.messages.flatMap((m) => (Array.isArray(m.content) ? m.content.filter((c) => c.type === "tool_result") : [])).length;
+  // Tool results since this turn's message: a resumed session also carries every earlier turn's.
+  const turnStart = body.messages.findLastIndex((m) => m.role === "user" && textOf(m.content).trim() && !(Array.isArray(m.content) && m.content.some((c) => c.type === "tool_result")));
+  const results = body.messages.slice(turnStart + 1).flatMap((m) => (Array.isArray(m.content) ? m.content.filter((c) => c.type === "tool_result") : [])).length;
   const SCRIPT = SCRIPT_FILE ? JSON.parse(readFileSync(SCRIPT_FILE, "utf8")) : null;
   const scripted = SCRIPT && tools.some((t) => t.name.startsWith("mcp__giraffe__"));
   const usage = { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };

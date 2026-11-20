@@ -30,7 +30,7 @@ import {
 import type { ActionRejection, LogRow, TurnOutcome } from "../ledger/ledger";
 import { NOTICES, type FixedNotice, type Notices } from "../notices";
 import { bytesOf, type PromptParts, type PromptSection } from "../model/prompt";
-import { jsonSchemaOf, type JsonSchema } from "../model/client";
+import type { JsonSchema } from "../model/client";
 import {
   admitReminder,
   checkinWakeup,
@@ -127,7 +127,8 @@ export type AgentTool = { readonly name: string; readonly description: string; r
 export const AGENT_TOOLS: readonly AgentTool[] = ActionSchema.options.flatMap((o) => {
   const description = AGENT_ACTIONS[o.shape.type.value];
   if (description === undefined) return [];
-  const { $schema: _, properties, required, ...rest } = jsonSchemaOf(o) as JsonSchema & { properties: Record<string, unknown>; required: string[] };
+  // Plain JSON Schema, not the strict-mode form the parse routes need: an optional field stays optional for a tool call.
+  const { $schema: _, properties, required, ...rest } = z.toJSONSchema(o) as JsonSchema & { properties: Record<string, unknown>; required: string[] };
   const { type: __, ...fields } = properties;
   return [{ name: o.shape.type.value, description, inputSchema: { ...rest, properties: fields, required: required.filter((k) => k !== "type") } }];
 });

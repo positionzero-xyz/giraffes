@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { COMPACTION, CompactionOutputSchema, planCompaction } from "../src/agent/compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "../src/agent/prompt";
 import { TASKS } from "../src/agent/tasks";
-import { planTurn, planWithoutModel, TURN, TurnOutputSchema, type Batch, type InboxItem, type TurnOutput, type TurnView } from "../src/agent/turn";
+import { AGENT_TOOLS, planTurn, planWithoutModel, TURN, TurnOutputSchema, type Batch, type InboxItem, type TurnOutput, type TurnView } from "../src/agent/turn";
 import {
   CHECKIN_KEY,
   TASK_KINDS,
@@ -171,6 +171,20 @@ function checkin(dueAt: EpochMs): PendingWakeup {
 function wakeupEvent(dueAt: EpochMs, firedAt: EpochMs, origin: "person" | "agent" = "person"): AgentEvent {
   return { kind: "wakeup", wakeupId: 7 as WakeupId, key: "bins" as WakeupKey, origin, note: "Take the bins out", dueAt, firedAt, task: null, bookkeeping: false, repeat: null };
 }
+
+describe("agent tools", () => {
+  test("each tool asks for exactly what the turn schema requires, with optional fields left optional and no type field", () => {
+    const schedule = AGENT_TOOLS.find((t) => t.name === "schedule_wakeup")?.inputSchema as { required: string[]; properties: Record<string, unknown> };
+    expect(schedule.required).toEqual(["key", "at", "note", "asked", "task"]);
+    expect(Object.keys(schedule.properties)).toEqual(["key", "at", "note", "asked", "task", "repeat"]);
+    expect(AGENT_TOOLS.map((t) => [t.name, (t.inputSchema as { required: string[] }).required])).toEqual([
+      ["schedule_wakeup", ["key", "at", "note", "asked", "task"]],
+      ["cancel_wakeup", ["key"]],
+      ["remember", ["note"]],
+      ["set_locale", ["timeZone", "language"]],
+    ]);
+  });
+});
 
 describe("reminders", () => {
   test("a routine keeps its local time across a clock change, and weekdays skip the weekend", () => {

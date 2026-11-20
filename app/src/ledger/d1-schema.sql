@@ -186,6 +186,15 @@ CREATE TABLE IF NOT EXISTS admission_log (
 );
 CREATE INDEX IF NOT EXISTS admission_log_agent ON admission_log (agent_key, change);
 
+CREATE TABLE IF NOT EXISTS feedback (
+  id        TEXT PRIMARY KEY,
+  agent_key TEXT NOT NULL,
+  channel   TEXT NOT NULL CHECK (channel IN ('line', 'telegram', 'dev')),
+  at        INTEGER NOT NULL,
+  text      TEXT NOT NULL,
+  cohort    TEXT CHECK (cohort IN ('recruit', 'joiner', 'staff'))
+);
+
 CREATE TABLE IF NOT EXISTS beta (
   one       INTEGER PRIMARY KEY CHECK (one = 1),
   starts_at INTEGER NOT NULL

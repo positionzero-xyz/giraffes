@@ -25,6 +25,8 @@ export type Notices = {
   readonly reminder: (note: string) => string;
 
   readonly billingOff: string;
+  readonly feedbackThanks: string;
+  readonly feedbackUsage: string;
   readonly billingBusy: string;
   readonly freeBeta: string;
   readonly onTrial: (daysLeft: number) => string;
@@ -165,6 +167,8 @@ const en: Notices = {
   reminder: (note) => `Reminder: ${note}`,
 
   billingOff: "Plans aren't available yet.",
+  feedbackThanks: "Thanks for the feedback!",
+  feedbackUsage: "Use /feedback followed by your message.",
   billingBusy: "I couldn't do that just now. Please try again in a minute.",
   freeBeta: "You're on the free beta, so there's nothing to pay.",
   onTrial: (n) => `You're on the free trial, with ${days(n)} left.`,
@@ -345,6 +349,8 @@ const th: Notices = {
   reminder: (note) => `เตือนความจำ: ${note}`,
 
   billingOff: "ตอนนี้ยังไม่มีแพ็กเกจให้เลือกค่ะ",
+  feedbackThanks: "ขอบคุณที่แจ้งค่ะ",
+  feedbackUsage: "พิมพ์ /feedback แล้วตามด้วยข้อความค่ะ",
   billingBusy: "ตอนนี้ทำรายการนั้นไม่ได้ ลองใหม่อีกครั้งในอีกสักครู่นะคะ",
   freeBeta: "ตอนนี้ใช้รุ่นทดลองฟรีอยู่ ไม่ต้องจ่ายอะไรค่ะ",
   onTrial: (n) => `ตอนนี้อยู่ในช่วงทดลองใช้ฟรี เหลืออีก ${n} วันค่ะ`,

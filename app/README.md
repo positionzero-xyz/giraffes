@@ -122,6 +122,7 @@ price plus the provider's fee from our price cards, not an invoice.
      Moving a start that is already set, which moves week 0 for every recruit, needs `--force`.
      A Telegram recruit opens `https://t.me/<bot>?start=<code>`; a LINE recruit sends `/join <code>`.
      Enrolled people get joiner codes with `/invite`. It can't run with `BILLING=on`.
+     Send `/feedback <text>` to report a problem. Reports are redacted, saved to the ledger and forwarded if `OPERATOR_CHAT` is set.
    - `ADMISSION=open`: everyone is admitted at first contact, and `/invite` and `/join` are billing's.
 
    Plans and payments (`/plan`, `/invite`, `/join <code>`, `/leave`, see `docs/design/BOX.md`) follow `BILLING`:

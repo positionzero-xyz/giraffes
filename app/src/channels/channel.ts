@@ -1,7 +1,7 @@
-import type { ChannelId, EpochMs, InboundEnvelope, OutboundMessage } from "../domain";
-import type { Config } from "../config";
+import type { ChannelId, EpochMs, InboundEnvelope, OutboundMessage, OutboxId } from "../domain";
+import type { Config, OperatorChat } from "../config";
 import { lineChannel } from "./line";
-import { telegramChannel } from "./telegram";
+import { SEND_MESSAGE_MAX_CHARS, telegramChannel } from "./telegram";
 import { devChannel } from "./dev";
 
 export type Received =
@@ -28,6 +28,18 @@ export function makeChannels(config: Config): ChannelRegistry {
     telegram: telegramChannel(config.telegram),
     dev: devChannel(config.devMode),
   };
+}
+
+export async function tellOperator(channels: ChannelRegistry, to: OperatorChat, text: string, now: EpochMs): Promise<OperatorChat["channel"] | null> {
+  const messages = to.channel === "telegram" ? (text.match(new RegExp(`.{1,${SEND_MESSAGE_MAX_CHARS}}`, "gsu")) ?? []) : [text];
+  for (const message of messages) {
+    const sent = await channels[to.channel].deliver({ id: crypto.randomUUID() as OutboxId, to, texts: [message], intent: "requested" }, now);
+    if (sent.kind !== "sent") {
+      console.warn("operator alert not sent", sent.kind);
+      return null;
+    }
+  }
+  return to.channel;
 }
 
 export function disabledChannel(id: ChannelId): ChannelAdapter {

@@ -10,6 +10,7 @@ export type Command =
   /** A message code redacted because it looked like an API key; it never reaches a model. */
   | { readonly kind: "pasted_key" }
   | { readonly kind: "plan" }
+  | { readonly kind: "feedback"; readonly text: string }
   | { readonly kind: "invite" }
   | { readonly kind: "join"; readonly code: string }
   | { readonly kind: "leave" };
@@ -28,8 +29,11 @@ const KEY: ReadonlyMap<string, Command> = new Map<string, Command>([
 
 export function commandOf(e: AgentEvent): Command | null {
   if (e.kind !== "message") return null;
+  const trimmed = e.text.trim();
+  const feedback = /^\/feedback(?:\s+([\s\S]+))?$/i.exec(trimmed);
+  if (feedback) return { kind: "feedback", text: feedback[1] ?? "" };
   if (e.redacted) return { kind: "pasted_key" };
-  const text = e.text.trim().replace(/\s+/g, " ");
+  const text = trimmed.replace(/\s+/g, " ");
   const join = text.match(/^\/join ([A-Za-z0-9]{4,16})$/);
   const cap = text.match(/^\/key cap \$?(\d{1,4}(?:\.\d{1,2})?)$/);
   return EXACT.get(text) ?? KEY.get(text.toLowerCase()) ?? (join ? { kind: "join", code: join[1].toUpperCase() } : cap ? { kind: "key_cap", usd: Number(cap[1]) } : null);

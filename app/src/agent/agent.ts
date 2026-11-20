@@ -41,9 +41,9 @@ import {
   type Step,
 } from "../box/machine";
 import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
-import { makeChannels, type ChannelRegistry } from "../channels/channel";
+import { makeChannels, tellOperator, type ChannelRegistry } from "../channels/channel";
 import { commandOf, type Command } from "./commands";
-import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env } from "../config";
+import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env, type OperatorChat } from "../config";
 import {
   assertNever,
   CHANNEL_LANGUAGE,
@@ -138,6 +138,7 @@ export type AgentDeps = {
   readonly box: BoxDeps | null;
   readonly billing: BillingDeps;
   readonly admission: AdmissionMode;
+  readonly operatorChat: OperatorChat | null;
 };
 
 export type BillingDeps = {
@@ -557,7 +558,7 @@ export class Agent extends DurableObject<Env> {
     }
     if (first.kind === "choice" && first.choice.kind === "backup") return this.#backupTap(first.choice.revision, view, a.key);
     const command = commandOf(first);
-    if (command) return this.#command(command, view, a.key);
+    if (command) return this.#command(command, view, a);
     const plan = await this.#planNow(a.key, view.now);
     if (plan.kind === "lapsed") {
       const alreadyToldToday = this.#store.toldToday("lapsed", startOfLocalDay(view.now, view.tz));
@@ -639,9 +640,10 @@ export class Agent extends DurableObject<Env> {
     };
   }
 
-  #commit(commit: TurnCommit, view: TurnView, agent: AgentKey, call: TurnCall, box: Box | null = null): void {
+  #commit(commit: TurnCommit, view: TurnView, agent: AgentKey, call: TurnCall, box: Box | null = null, extraLogs: readonly LogRow[] = []): void {
     const now = this.#deps.clock.now();
-    this.#store.commitTurn(commit, logsForTurn({ agent, commit, view, call, startedAt: view.now, now }), now, box);
+    const logs = logsForTurn({ agent, commit, view, call, startedAt: view.now, now });
+    this.#store.commitTurn(commit, logs.concat(extraLogs), now, box);
   }
 
   async #admission(view: TurnView, a: AgentRow): Promise<void> {
@@ -683,7 +685,8 @@ export class Agent extends DurableObject<Env> {
     this.#store.releaseBatch(keys, (now + MODEL_RETRY_BASE_MS * 2 ** (attempts - 1)) as EpochMs, [], now);
   }
 
-  async #command(command: Command, view: TurnView, agent: AgentKey): Promise<void> {
+  async #command(command: Command, view: TurnView, a: AgentRow): Promise<void> {
+    const agent = a.key;
     if (this.#deps.admission === "beta" && (command.kind === "invite" || command.kind === "join")) return this.#betaCommand(command, view, agent);
     switch (command.kind) {
       case "claude":
@@ -696,6 +699,8 @@ export class Agent extends DurableObject<Env> {
       case "key_backup":
       case "pasted_key":
         return this.#keyCommand(command, view, agent);
+      case "feedback":
+        return this.#feedback(command.text, view, a);
       case "plan":
       case "invite":
       case "join":
@@ -714,6 +719,24 @@ export class Agent extends DurableObject<Env> {
       default:
         return assertNever(command);
     }
+  }
+
+  #feedback(text: string, view: TurnView, a: AgentRow): void {
+    const t = NOTICES[view.language];
+    const item = view.batch.items[0];
+    const logs: LogRow[] = text === "" ? [] : [
+      {
+        stream: "feedback",
+        id: `${a.key}|${item.key}`,
+        agent: a.key,
+        channel: a.identity.channel,
+        at: item.receivedAt,
+        text,
+        cohort: mayspend(view.admission) ? view.admission.seat.cohort : null,
+      },
+    ];
+    const commit = planWithoutModel(view, { kind: "feedback", text: text === "" ? t.feedbackUsage : t.feedbackThanks });
+    this.#commit(commit, view, a.key, { kind: "none" }, null, logs);
   }
 
   async #keyCommand(command: Extract<Command, { kind: "key" | "key_remove" | "key_cap" | "key_backup" | "pasted_key" }>, view: TurnView, agent: AgentKey): Promise<void> {
@@ -1175,6 +1198,7 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #flushLogs(): Promise<void> {
+    const { channels, operatorChat } = this.#deps;
     for (let i = 0; i < LOG_BATCHES_PER_DRAIN; i++) {
       const rows = this.#store.pendingLogs(this.#deps.clock.now(), LOG_BATCH);
       if (rows.length === 0) return;
@@ -1185,6 +1209,11 @@ export class Agent extends DurableObject<Env> {
         return this.#store.logsFailed(this.#deps.clock.now());
       }
       this.#store.logsShipped(rows);
+      if (operatorChat !== null) {
+        for (const row of rows) {
+          if (row.stream === "feedback") await tellOperator(channels, operatorChat, row.text, this.#deps.clock.now());
+        }
+      }
       if (rows.length < LOG_BATCH) return;
     }
   }
@@ -1274,5 +1303,6 @@ function defaultDeps(env: Env): AgentDeps {
       stripe: config.billing.on ? stripeApi(config.billing.stripe, config.billing.rules, (input, init) => fetch(input, init)) : null,
     },
     admission: config.admission,
+    operatorChat: config.operatorChat,
   };
 }

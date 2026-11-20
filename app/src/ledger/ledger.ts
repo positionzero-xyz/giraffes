@@ -27,6 +27,15 @@ import { REMINDER_REJECTIONS } from "../policy/schedule";
 
 export type LogRow =
   | {
+      readonly stream: "feedback";
+      readonly id: string;
+      readonly agent: AgentKey;
+      readonly channel: ChannelId;
+      readonly at: EpochMs;
+      readonly text: string;
+      readonly cohort: Cohort | null;
+    }
+  | {
       readonly stream: "agent";
       readonly id: string;
       readonly agent: AgentKey;
@@ -226,6 +235,10 @@ const APPEND_CHUNK = 100;
 
 function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
   switch (row.stream) {
+    case "feedback":
+      return db
+        .prepare("INSERT INTO feedback (id, agent_key, channel, at, text, cohort) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")
+        .bind(row.id, row.agent, row.channel, row.at, row.text, row.cohort);
     case "agent":
       return db
         .prepare("INSERT INTO agent (id, agent_key, channel, first_seen_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")

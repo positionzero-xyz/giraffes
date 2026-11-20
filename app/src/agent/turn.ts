@@ -624,6 +624,7 @@ export type NoModelReason =
   | { readonly kind: "too_long" }
   | { readonly kind: "poison" }
   | { readonly kind: "command"; readonly text: string; readonly note: string }
+  | { readonly kind: "feedback"; readonly text: string }
   | { readonly kind: "admission"; readonly commit: AdmissionCommit; readonly text: string | null; readonly consent: boolean };
 
 export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "block" | "stale_lifecycle" }> | null {
@@ -654,7 +655,8 @@ function textWithoutModel(view: TurnView, notice: string | null): string | null 
  */
 export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit {
   const t: Notices = NOTICES[view.language];
-  const fx = taskEffects(view);
+  const keepInHistory = why.kind !== "feedback";
+  const fx = keepInHistory ? taskEffects(view) : { commit: NO_TASKS, replies: [] };
   let outcome: TurnOutcome;
   let text: string | null = null;
   let note: string | null = null;
@@ -694,6 +696,10 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
       text = why.text;
       note = why.note;
       break;
+    case "feedback":
+      outcome = "no_model";
+      text = why.text;
+      break;
     case "admission":
       return planAdmissionTurn(view, why);
     default:
@@ -702,9 +708,9 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
   const confirmed = fx.replies.map((r) => acceptNotice(t, r));
   const joined = (lead: string | null) => [lead, ...confirmed].filter((x) => x !== null).join("\n") || null;
   const said = joined(text);
-  const turns = personTurns(view);
+  const turns = keepInHistory ? personTurns(view) : [];
   const kept = joined(note ?? text);
-  if (kept !== null) turns.push({ role: "note", text: kept, at: view.now, eventKey: view.batch.items[0].key });
+  if (keepInHistory && kept !== null) turns.push({ role: "note", text: kept, at: view.now, eventKey: view.batch.items[0].key });
   return {
     batchKeys: batchKeys(view),
     outcome,

@@ -9,6 +9,8 @@ import type { ScriptStep } from "../src/model/scripted";
 import { NOTICES } from "../src/notices";
 import { costOf } from "../src/policy/spend";
 import { fromLocal, toLocal } from "../src/policy/time";
+import type { Env } from "../src/config";
+import worker from "../src/worker";
 import { cancel, chat, devChat, hold, local, memoryLedger, quiet, routine, schedule, scripted, send, throws, turn, wall } from "./testkit";
 
 const NOTICE = NOTICES.en;
@@ -909,6 +911,21 @@ describe("compaction", () => {
 });
 
 describe("dev runs", () => {
+  test("without DEV_MODE every dev route answers 404, even for a wake-up that exists", async () => {
+    const model = scripted([turn({ actions: [schedule("call-clinic", "2099-11-13T09:00", "Call the clinic"), send("Friday at 9.")] })]);
+    const c = await devChat("lok", { model, at: "2099-11-06T11:45" });
+    await c.say("remind me Friday 9 am to call the clinic");
+    const live = { ...env, MODEL_BACKEND: "", DEV_MODE: "" } as Env;
+    const post = (path: string, body: unknown) => worker.fetch(new Request(`https://agent.test${path}`, { method: "POST", body: JSON.stringify(body) }), live);
+
+    expect((await post("/dev/fire", { user: "lok", key: "call-clinic" })).status).toBe(404);
+    expect((await post("/dev/script", { user: "lok", turns: [] })).status).toBe(404);
+    expect((await post("/dev/remove", { agent: c.agent })).status).toBe(404);
+    expect((await post("/webhook/dev", { user: "lok", text: "hi", id: "x1" })).status).toBe(404);
+    for (const path of ["/dev", "/dev/transcript?user=lok"]) expect((await worker.fetch(new Request(`https://agent.test${path}`), live)).status).toBe(404);
+    expect((await c.snapshot()).pendingWakeups.map((w) => w.key)).toContain("call-clinic");
+  });
+
   test("a scripted dev run answers from the outputs posted to /dev/script", async () => {
     const output = { actions: [{ type: "send", text: "Scripted hello." }], tasks: [], about: "" };
     expect((await SELF.fetch("https://agent.test/dev/script", { method: "POST", body: JSON.stringify({ user: "sia", turns: [output] }) })).status).toBe(200);

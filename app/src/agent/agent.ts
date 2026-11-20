@@ -1211,7 +1211,10 @@ export class Agent extends DurableObject<Env> {
       this.#store.logsShipped(rows);
       if (operatorChat !== null) {
         for (const row of rows) {
-          if (row.stream === "feedback") await tellOperator(channels, operatorChat, row.text, this.#deps.clock.now());
+          if (row.stream !== "feedback") continue;
+          const from = `Feedback from ${row.agent} (${row.cohort === null ? "no cohort" : `beta: ${row.cohort}`}):`;
+          await tellOperator(channels, operatorChat, `${from}
+${row.text}`, this.#deps.clock.now());
         }
       }
       if (rows.length < LOG_BATCH) return;

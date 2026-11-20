@@ -67,6 +67,7 @@ describe("/feedback", () => {
     expect(deliver).toHaveBeenCalledTimes(1);
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ to: operatorChat, intent: "requested" }), c.clock.now());
     expect(operator.delivered[0]?.text).toContain(`${text} ${KEY_REMOVED}`);
+    expect(operator.delivered[0]?.text.split("\n")[0]).toBe(`Feedback from ${c.agent} (beta: staff):`);
     expect(operator.delivered[0]?.text).not.toContain(fakeKey);
     expect(await c.received()).toEqual(["Thanks for the feedback!"]);
   });

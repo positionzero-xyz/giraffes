@@ -1,9 +1,11 @@
 import http from "node:http";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 
 const LOG = process.argv[2];
 const PORT = Number(process.argv[3] ?? 8788);
 const DUMP_DIR = process.argv[4];
+// Optional, read on every request: {"calls":[{"name","input"}],"text"} makes the model call Giraffe's tools in order, then answer `text`.
+const SCRIPT_FILE = process.argv[5];
 let seq = 0;
 
 function sse(res, events) {
@@ -63,6 +65,9 @@ function reply(body) {
   const tools = body.tools ?? [];
   const structured = tools.find((t) => t.name === "StructuredOutput");
   const hasBash = tools.some((t) => t.name === "Bash");
+  const results = body.messages.flatMap((m) => (Array.isArray(m.content) ? m.content.filter((c) => c.type === "tool_result") : [])).length;
+  const SCRIPT = SCRIPT_FILE ? JSON.parse(readFileSync(SCRIPT_FILE, "utf8")) : null;
+  const scripted = SCRIPT && tools.some((t) => t.name.startsWith("mcp__giraffe__"));
   const usage = { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
   const start = ["message_start", { message: { id: "msg_mock", type: "message", role: "assistant", model: body.model, content: [], stop_reason: null, usage } }];
   const toolCall = (name, input) => [start,
@@ -71,6 +76,11 @@ function reply(body) {
     ["content_block_stop", { index: 0 }],
     ["message_delta", { delta: { stop_reason: "tool_use" }, usage: { output_tokens: 20 } }],
     ["message_stop", {}]];
+  if (scripted && results < SCRIPT.calls.length) {
+    const call = SCRIPT.calls[results];
+    return { events: toolCall(`mcp__giraffe__${call.name}`, call.input) };
+  }
+  const finalText = scripted ? SCRIPT.text : "ok";
   if (structured && !sawTool) {
     const input = structuredAnswer(structured, body);
     return { events: toolCall("StructuredOutput", input), answered: input };
@@ -78,7 +88,7 @@ function reply(body) {
   if (hasBash && !sawTool) return { events: toolCall("Bash", { command: "echo hi", description: "Print hi" }) };
   return { events: [start,
     ["content_block_start", { index: 0, content_block: { type: "text", text: "" } }],
-    ["content_block_delta", { index: 0, delta: { type: "text_delta", text: "ok" } }],
+    ["content_block_delta", { index: 0, delta: { type: "text_delta", text: finalText } }],
     ["content_block_stop", { index: 0 }],
     ["message_delta", { delta: { stop_reason: "end_turn" }, usage: { output_tokens: 2 } }],
     ["message_stop", {}]] };

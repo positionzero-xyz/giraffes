@@ -1,11 +1,11 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { verifyBearer, verifyTicket } from "./auth.ts";
-import { authStatus, cliVersion, parseTurn, readParseRequest, spawnClaude, type Cli, type TurnReply } from "./claude.ts";
+import { agentTurn, authStatus, cliVersion, parseTurn, readAgentRequest, readParseRequest, spawnClaude, type Cli, type SessionStore } from "./claude.ts";
 import { readJson, sendJson } from "./http.ts";
 
-export type BoxOptions = { readonly token: string; readonly cli: Cli; readonly now?: () => number };
+export type BoxOptions = { readonly token: string; readonly cli: Cli; readonly sessionFile: string; readonly now?: () => number };
 
 const SIGNIN_TTL_MS = 10 * 60_000;
 const URL_WAIT_MS = 30_000;
@@ -40,12 +40,21 @@ function signinUrl(output: string): string | undefined {
   return undefined;
 }
 
-export function createBox({ token, cli, now = Date.now }: BoxOptions): Server {
+function fileSessions(path: string): SessionStore {
+  return {
+    get: () => (existsSync(path) ? readFileSync(path, "utf8").trim() || null : null),
+    set: (id) => writeFileSync(path, id),
+  };
+}
+
+export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOptions): Server {
   let login: Login | null = null;
   let turns: Promise<unknown> = Promise.resolve();
   let version: string | null = null;
 
-  function oneTurnAtATime(run: () => Promise<TurnReply>): Promise<TurnReply> {
+  const sessions = fileSessions(sessionFile);
+
+  function oneTurnAtATime<R>(run: () => Promise<R>): Promise<R> {
     const next = turns.then(run);
     turns = next.catch(() => {});
     return next;
@@ -92,6 +101,17 @@ export function createBox({ token, cli, now = Date.now }: BoxOptions): Server {
       if (!res.writableFinished) abandoned.abort();
     });
     const reply = await oneTurnAtATime(() => parseTurn(cli, parsed, abandoned.signal));
+    sendJson(res, reply.status, reply.body);
+  }
+
+  async function agent(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const parsed = readAgentRequest(await readJson(req));
+    if (!parsed) return sendJson(res, 400, { error: "bad_request" });
+    const abandoned = new AbortController();
+    res.on("close", () => {
+      if (!res.writableFinished) abandoned.abort();
+    });
+    const reply = await oneTurnAtATime(() => agentTurn(cli, parsed, sessions, abandoned.signal));
     sendJson(res, reply.status, reply.body);
   }
 
@@ -146,6 +166,7 @@ export function createBox({ token, cli, now = Date.now }: BoxOptions): Server {
   const routes = new Map<string, Handler>([
     ["GET /health", withBearer((_, res) => health(res))],
     ["POST /parse", withBearer(parse)],
+    ["POST /agent", withBearer(agent)],
     ["GET /signin", (_, res) => void res.writeHead(200, PAGE_HEADERS).end(PAGE)],
     ["POST /signin/start", withTicket((_, res) => signinStart(res))],
     ["POST /signin/code", withTicket((fields, res) => signinCode(fields.code, res))],

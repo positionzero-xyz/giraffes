@@ -17,7 +17,7 @@ const TEN_MINUTES = 10 * 60_000;
 const dir = mkdtempSync(join(tmpdir(), "box-test-"));
 let clockOffset = 0;
 const now = () => Date.now() + clockOffset;
-const server = createBox({ token: TOKEN, cli: [process.execPath, FAKE, dir], now });
+const server = createBox({ token: TOKEN, cli: [process.execPath, FAKE, dir], sessionFile: join(dir, "session"), now });
 let base = "";
 
 const ticket = (exp = Date.now() + 30 * 60_000) => `${exp}.${createHmac("sha256", TOKEN).update(`signin:${exp}`).digest("base64url")}`;

@@ -1,7 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type Cli = readonly [string, ...string[]];
 
@@ -52,10 +54,11 @@ function runClaude(
   stdin: string,
   timeoutMs: number,
   signal?: AbortSignal,
+  env?: NodeJS.ProcessEnv,
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     if (signal?.aborted) return resolve({ code: null, stdout: "", stderr: "abandoned" });
-    const proc = spawnClaude(cli, args);
+    const proc = spawnClaude(cli, args, env);
     const kill = () => proc.kill("SIGKILL");
     const timer = setTimeout(kill, timeoutMs);
     signal?.addEventListener("abort", kill, { once: true });
@@ -136,6 +139,116 @@ export async function parseTurn(cli: Cli, req: ParseRequest, signal?: AbortSigna
     status: 200,
     body: {
       structured: result.structured_output ?? null,
+      usage: usageOf(result.usage),
+      stop: result.stop_reason === "refusal" ? "refusal" : result.stop_reason === "max_tokens" ? "max_tokens" : "end",
+      costUsd,
+    },
+  };
+}
+
+export type AgentTool = { readonly name: string; readonly description: string; readonly inputSchema: Json };
+/** `append` follows Claude Code's own system prompt; `turn` is the context and the new message for this turn. */
+export type AgentRequest = { readonly model: string; readonly append: string; readonly turn: string; readonly tools: readonly AgentTool[] };
+export type AgentCall = { readonly name: string; readonly input: Json };
+export type AgentReply =
+  | { readonly status: 200; readonly body: { text: string; calls: AgentCall[]; usage: Usage | null; stop: "end" | "refusal" | "max_tokens"; costUsd: number | null } }
+  | { readonly status: 409; readonly body: { error: "signed_out" } }
+  | { readonly status: 502; readonly body: { error: "claude_failed" } };
+
+/** Where the box keeps the id of the person's one Claude Code session. */
+export type SessionStore = { get(): string | null; set(id: string): void };
+
+const TOOL_PREFIX = "mcp__giraffe__";
+const MCP_SERVER = fileURLToPath(new URL("./giraffe-mcp.ts", import.meta.url));
+
+export function readAgentRequest(body: unknown): AgentRequest | null {
+  if (!isObject(body) || !Array.isArray(body.tools)) return null;
+  const { model, append, turn } = body;
+  if (typeof model !== "string" || typeof append !== "string" || typeof turn !== "string" || !turn.trim()) return null;
+  const tools: AgentTool[] = [];
+  for (const t of body.tools) {
+    if (!isObject(t) || typeof t.name !== "string" || !/^[a-z_]{1,40}$/.test(t.name) || typeof t.description !== "string" || !isObject(t.inputSchema)) return null;
+    tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema });
+  }
+  return { model, append, turn, tools };
+}
+
+/** The calls Giraffe's tool server accepted, in order; a call it refused was already answered to the model as an error. */
+function acceptedCalls(events: readonly Json[]): AgentCall[] {
+  const asked = new Map<string, AgentCall>();
+  const order: string[] = [];
+  const accepted = new Set<string>();
+  for (const e of events) {
+    const message = isObject(e.message) ? e.message : null;
+    const content = Array.isArray(message?.content) ? message.content : [];
+    for (const block of content) {
+      if (!isObject(block)) continue;
+      if (e.type === "assistant" && block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string" && block.name.startsWith(TOOL_PREFIX)) {
+        asked.set(block.id, { name: block.name.slice(TOOL_PREFIX.length), input: isObject(block.input) ? block.input : {} });
+        order.push(block.id);
+      }
+      if (e.type === "user" && block.type === "tool_result" && typeof block.tool_use_id === "string" && block.is_error !== true) accepted.add(block.tool_use_id);
+    }
+  }
+  return order.filter((id) => accepted.has(id)).map((id) => asked.get(id) as AgentCall);
+}
+
+function agentArgs(req: AgentRequest, toolsFile: string, session: { readonly id: string; readonly resume: boolean }): string[] {
+  const mcp = { mcpServers: { giraffe: { type: "stdio", command: process.execPath, args: [MCP_SERVER, toolsFile] } } };
+  return [
+    "-p",
+    "--input-format", "stream-json",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--model", ALIAS[req.model] ?? req.model,
+    "--tools", "",
+    "--append-system-prompt", req.append,
+    "--strict-mcp-config",
+    "--mcp-config", JSON.stringify(mcp),
+    "--allowedTools", req.tools.map((t) => `${TOOL_PREFIX}${t.name}`).join(","),
+    "--setting-sources", "",
+    ...(session.resume ? ["--resume", session.id] : ["--session-id", session.id]),
+  ];
+}
+
+/** Read per turn, after main.ts has removed BOX_TOKEN from the environment. */
+const agentEnv = (): NodeJS.ProcessEnv => ({ ...process.env, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1", CLAUDE_CODE_DISABLE_CRON: "1", DISABLE_AUTOUPDATER: "1" });
+
+/**
+ * One turn of the person's own Claude Code session: Claude Code keeps its system prompt and gets ours appended, has no
+ * built-in tools, and acts only through Giraffe's tools, which answer "noted". The Worker applies the calls.
+ */
+export async function agentTurn(cli: Cli, req: AgentRequest, sessions: SessionStore, signal?: AbortSignal): Promise<AgentReply> {
+  const toolsFile = join(mkdtempSync(join(tmpdir(), "giraffe-tools-")), "tools.json");
+  writeFileSync(toolsFile, JSON.stringify(req.tools));
+  const input = `${JSON.stringify({ type: "user", message: { role: "user", content: req.turn } })}\n`;
+  const started = Date.now();
+  const known = sessions.get();
+  let session = known ? { id: known, resume: true } : { id: randomUUID(), resume: false };
+  let run = await runClaude(cli, agentArgs(req, toolsFile, session), input, TURN_TIMEOUT_MS, signal, agentEnv());
+  if (session.resume && /No conversation found with session ID/.test(run.stdout + run.stderr)) {
+    console.log("session not found on this box, starting a new one");
+    session = { id: randomUUID(), resume: false };
+    run = await runClaude(cli, agentArgs(req, toolsFile, session), input, TURN_TIMEOUT_MS, signal, agentEnv());
+  }
+  rmSync(dirname(toolsFile), { recursive: true, force: true });
+  if (signal?.aborted) return { status: 502, body: { error: "claude_failed" } };
+  const events = run.stdout.split("\n").map(parseJson).filter(isObject);
+  const result = events.findLast((e) => e.type === "result");
+  if (run.code !== 0 || !result || result.is_error !== false) {
+    const subtype = typeof result?.subtype === "string" ? result.subtype : "none";
+    console.error(`agent turn failed (exit ${run.code}, subtype ${subtype}): ${run.stderr.slice(0, 300)}`);
+    const status = await authStatus(cli);
+    return status?.loggedIn === false ? { status: 409, body: { error: "signed_out" } } : { status: 502, body: { error: "claude_failed" } };
+  }
+  if (!session.resume) sessions.set(session.id);
+  const costUsd = numOrNull(result.total_cost_usd);
+  console.log(`${req.model} agent ${Date.now() - started}ms $${(costUsd ?? 0).toFixed(5)}`);
+  return {
+    status: 200,
+    body: {
+      text: typeof result.result === "string" ? result.result : "",
+      calls: acceptedCalls(events),
       usage: usageOf(result.usage),
       stop: result.stop_reason === "refusal" ? "refusal" : result.stop_reason === "max_tokens" ? "max_tokens" : "end",
       costUsd,

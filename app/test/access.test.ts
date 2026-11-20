@@ -70,6 +70,15 @@ describe("no access", () => {
     expect(NOTICES.th.noAccess({ box: true, key: true, included: false })).toContain("/key");
   });
 
+  test("the key offer names the cheap routes, OpenCode Go and Mistral, in both languages", () => {
+    for (const notice of [NOTICES.en, NOTICES.th]) {
+      const offer = notice.noAccess({ box: false, key: true, included: false });
+      expect(offer).toContain("opencode.ai/go");
+      expect(offer).toContain("Mistral");
+    }
+    expect(NOTICE.noAccess({ box: true, key: false, included: false })).not.toContain("Mistral");
+  });
+
   test("MODEL_BACKEND=anthropic, left in an old deploy's env, fails loudly instead of serving on our key", () => {
     expect(() => loadConfig({ MODEL_BACKEND: "anthropic" } as unknown as Env)).toThrow("MODEL_BACKEND=anthropic was removed");
     expect(loadConfig({ KEY_SECRET: TEST_KEY_SECRET, PUBLIC_URL: "https://giraffes.test" } as unknown as Env)).toMatchObject({

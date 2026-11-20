@@ -132,6 +132,18 @@ describe("OpenAI-compatible protocol", () => {
     });
   });
 
+  test("Mistral takes a Bearer key on its chat completions path with a strict schema and no reasoning effort", async () => {
+    const f = fakeFetch(() => Response.json(completion('{"answer":42}')));
+
+    const out = await runParse(connect(f)(endpoint("mistral")), ask(route("mistral")), meter());
+
+    expect(out.last).toMatchObject({ kind: "ok", value: { answer: 42 } });
+    expect(f.seen[0].url).toBe("https://api.mistral.ai/v1/chat/completions");
+    expect(f.seen[0].headers.get("authorization")).toBe("Bearer sk-test-0123456789");
+    expect(f.seen[0].body).toMatchObject({ model: "mistral-small-2603", max_tokens: 18_000, response_format: { type: "json_schema", json_schema: { strict: true } } });
+    expect(f.seen[0].body).not.toHaveProperty("reasoning_effort");
+  });
+
   test("OpenRouter asks only for endpoints that honour the schema, and its reported cost is kept", async () => {
     const f = fakeFetch(() => Response.json(completion('{"answer":42}', { cost: 0.000421 })));
 

@@ -465,6 +465,15 @@ describe("every key write is compare-and-set on the key's revision", () => {
   });
 });
 
+describe("the Mistral preset", () => {
+  test("a pasted Mistral key with no model gets Mistral Small 4 on Mistral's own URL", () => {
+    expect(draftKey({ provider: "mistral", model: "", baseUrl: "", key: "AbCdEfGhIjKlMnOpQrStUvWxYz012345" }, { devMode: false })).toMatchObject({
+      ok: true,
+      value: { provider: "mistral", baseUrl: "https://api.mistral.ai/v1", model: "mistral-small-2603" },
+    });
+  });
+});
+
 describe("a dev run's stub provider", () => {
   test("with DEV_MODE a preset may point at a loopback stub, so its own route is exercised; without it the preset's URL stands", () => {
     const fields = { provider: "alibaba", model: "", baseUrl: "http://127.0.0.1:18801/v1", key: "sk-alibaba-0123456789" };

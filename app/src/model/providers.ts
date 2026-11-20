@@ -1,4 +1,4 @@
-export const PROVIDER_IDS = ["anthropic", "opencode-go", "openrouter", "deepinfra", "alibaba", "anthropic-compatible", "openai-compatible"] as const;
+export const PROVIDER_IDS = ["anthropic", "opencode-go", "openrouter", "deepinfra", "alibaba", "mistral", "anthropic-compatible", "openai-compatible"] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 export const isProviderId = (s: string): s is ProviderId => PROVIDER_IDS.some((p) => p === s);
 
@@ -137,6 +137,21 @@ export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
     headers: none,
     body: {},
     signup: "https://www.alibabacloud.com/product/modelstudio",
+  },
+  mistral: {
+    label: "Mistral",
+    protocol: "openai",
+    baseUrl: "https://api.mistral.ai/v1",
+    auth: "bearer",
+    keyShape: null,
+    defaultModel: "mistral-small-2603",
+    /** Mistral publishes no cached-input price for Small 4, so a cache read is priced as input. */
+    models: { "mistral-small-2603": { card: openaiCard(0.15, 0.15, 0.6), effort: false } },
+    schema: "probe",
+    feeBps: 0,
+    headers: none,
+    body: {},
+    signup: "https://console.mistral.ai/api-keys",
   },
   "anthropic-compatible": {
     label: "Other (Anthropic-compatible)",

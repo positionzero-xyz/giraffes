@@ -171,6 +171,7 @@ function viewOf(f: TurnFixture): TurnView {
     origin: p.origin,
     task: null,
     bookkeeping: false,
+    repeat: null,
   }));
   const eventOf = (b: TurnFixture["batch"][number], i: number): AgentEvent => {
     switch (b.kind) {
@@ -179,7 +180,7 @@ function viewOf(f: TurnFixture): TurnView {
       case "wakeup": {
         const w = pending.find((p) => p.key === b.key);
         const dueAt = (now - (b.lateMinutes ?? 0) * 60_000) as EpochMs;
-        return { kind: "wakeup", wakeupId: (100 + i) as WakeupId, key: b.key as WakeupKey, origin: b.origin, note: w?.note ?? b.key, dueAt, firedAt: now, task: null, bookkeeping: false };
+        return { kind: "wakeup", wakeupId: (100 + i) as WakeupId, key: b.key as WakeupKey, origin: b.origin, note: w?.note ?? b.key, dueAt, firedAt: now, task: null, bookkeeping: false, repeat: null };
       }
       case "checkin":
         return { kind: "checkin", day: localDate(now, tz), dueAt: now, firedAt: now };

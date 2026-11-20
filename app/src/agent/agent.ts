@@ -63,6 +63,7 @@ import {
   type PersonStatus,
   type Seat,
   type TimeZone,
+  type WakeupKey,
 } from "../domain";
 import { d1Ledger, modelCallRow, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
 import { NOTICES, type KeyPageError } from "../notices";
@@ -177,6 +178,8 @@ export type AgentSnapshot = {
   readonly turns: readonly TurnRow[];
   readonly outbox: readonly OutboxView[];
   readonly pendingWakeups: readonly PendingWakeup[];
+  /** Newest first. */
+  readonly memoryNotes: readonly string[];
   readonly unaskedSentToday: number;
   readonly spendThisMonthMicro: MicroUsd;
   readonly box: { readonly host: BoxHostKind; readonly state: BoxState } | null;
@@ -323,6 +326,7 @@ export class Agent extends DurableObject<Env> {
       turns: this.#store.recentTurns(50),
       outbox: this.#store.recentOutbox(50),
       pendingWakeups: this.#store.pendingWakeups(),
+      memoryNotes: this.#store.memoryNotes(20),
       unaskedSentToday: a ? this.#store.unaskedAdmitted(localDate(now, a.tz)) : 0,
       spendThisMonthMicro: (spent.byok + spent.included) as MicroUsd,
       box: box ? { host: box.host, state: box.state } : null,
@@ -447,6 +451,14 @@ export class Agent extends DurableObject<Env> {
     const now = this.#deps.clock.now();
     this.#store.remove(now);
     await this.#armNoLaterThan(now);
+  }
+
+  /** Dev only: the pending wake-up `key` falls due now and fires through the alarm, as it would at its time. */
+  async fireNow(key: WakeupKey): Promise<boolean> {
+    const now = this.#deps.clock.now();
+    if (!this.#store.makeDue(key, now)) return false;
+    await this.#armNoLaterThan(now);
+    return true;
   }
 
   withDeps(over: Partial<AgentDeps>): void {

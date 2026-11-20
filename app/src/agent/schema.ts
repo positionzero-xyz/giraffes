@@ -456,6 +456,10 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE agent ADD COLUMN claude_plan_at INTEGER;
   UPDATE agent SET claude_plan_at = (SELECT state_at FROM box) WHERE EXISTS (SELECT 1 FROM box);
   `,
+  `
+  ALTER TABLE wakeup ADD COLUMN repeat TEXT CHECK (repeat IN ('daily', 'weekdays', 'weekly'));
+  ALTER TABLE wakeup ADD COLUMN repeat_anchor TEXT CHECK ((repeat IS NULL) = (repeat_anchor IS NULL));
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

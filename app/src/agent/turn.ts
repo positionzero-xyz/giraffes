@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   CHECKIN_KEY,
   LANGUAGES,
+  REPEATS,
   TASK_KINDS,
   WAKEUP_KEY_PATTERN,
   assertNever,
@@ -89,6 +90,10 @@ const ActionSchema = z.discriminatedUnion("type", [
     note: z.string().min(1).describe(`What your future self should do. ${atMostBytes(TURN.maxNoteBytes)}`),
     asked: z.boolean().describe("True only when the person explicitly asked you to remind them"),
     task: z.string().describe('The ref of the open task this wake-up follows up, or ""'),
+    repeat: z
+      .enum(REPEATS)
+      .nullish()
+      .describe("Only for a routine the person asked for: daily, weekdays (Monday to Friday) or weekly (the weekday of at). Omit for a one-off."),
   }),
   z.object({ type: z.literal("cancel_wakeup"), key: Slug }),
   z.object({ type: z.literal("remember"), note: z.string().min(1).describe(atMostBytes(TURN.maxNoteBytes)) }),
@@ -172,7 +177,8 @@ function renderEvent(e: AgentEvent, tz: TimeZone): string {
           : "The person chose to use their own key as a backup.";
     case "wakeup": {
       const asked = e.origin === "person" ? " The person asked for this reminder." : "";
-      return `Your wake-up "${e.key}" fired: ${e.note}. Due ${human(e.dueAt, tz)}.${asked}${lateLine(e, tz)}`;
+      const repeats = e.repeat ? ` It repeats ${e.repeat.every} at ${e.repeat.anchor.slice(11)}, and the next one is already scheduled.` : "";
+      return `Your wake-up "${e.key}" fired: ${e.note}. Due ${human(e.dueAt, tz)}.${asked}${repeats}${lateLine(e, tz)}`;
     }
     case "checkin":
       return `Daily check-in.${lateLine(e, tz)}`;
@@ -185,7 +191,8 @@ function renderPending(w: PendingWakeup, tz: TimeZone): string {
   switch (w.kind) {
     case "reminder": {
       const asked = w.origin === "person" ? " (asked for by the person)" : "";
-      return `- ${w.key} · ${human(w.dueAt, tz)} · ${w.note}${asked}`;
+      const repeats = w.repeat ? ` · repeats ${w.repeat.every}` : "";
+      return `- ${w.key} · ${human(w.dueAt, tz)}${repeats} · ${w.note}${asked}`;
     }
     case "checkin":
       return `- daily check-in at ${human(w.dueAt, tz)}`;
@@ -456,7 +463,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
       case "schedule_wakeup": {
         const origin = wakeupOrigin(first.kind, a.asked);
         const note = fitBytes(a.note, TURN.maxNoteBytes, actionLabel(a));
-        const admission = admitReminder({ key: a.key, at: a.at, note, origin }, { now: view.now, tz: view.tz, pending });
+        const admission = admitReminder({ key: a.key, at: a.at, note, origin, repeat: a.repeat ?? null }, { now: view.now, tz: view.tz, pending });
         if (admission.ok) {
           adds.set(admission.wakeup.key, { ...admission.wakeup, task: taskOf(view, tasks, a.task) });
           pending.set(admission.wakeup.key, admission.wakeup);

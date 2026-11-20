@@ -9,7 +9,7 @@ import type { ScriptStep } from "../src/model/scripted";
 import { NOTICES } from "../src/notices";
 import { costOf } from "../src/policy/spend";
 import { fromLocal, toLocal } from "../src/policy/time";
-import { cancel, chat, devChat, hold, local, memoryLedger, quiet, schedule, scripted, send, throws, turn, wall } from "./testkit";
+import { cancel, chat, devChat, hold, local, memoryLedger, quiet, routine, schedule, scripted, send, throws, turn, wall } from "./testkit";
 
 const NOTICE = NOTICES.en;
 const inputThatSpendsTheCap = (DEV_CAP_MICRO * 1_000_000) / HAIKU_5_5.inputPerM;
@@ -266,6 +266,89 @@ describe("reminders", () => {
       ["Update c.", "sent"],
       ["Update d.", "dropped_budget"],
     ]);
+  });
+});
+
+describe("routines", () => {
+  const reminders = async (c: Awaited<ReturnType<typeof devChat>>) =>
+    (await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder").map((w) => [w.key, wall(w.dueAt), w.kind === "reminder" ? w.repeat : null]);
+
+  test("a daily routine fires at its time every day, and code schedules each next one", async () => {
+    const model = scripted([
+      turn({ actions: [routine("stretch", "2099-11-04T08:00", "Remind: stretch", "daily"), send("Every day at 8.")] }),
+      chat("Stretch time."),
+      turn({ actions: [quiet()] }),
+      chat("Stretch again."),
+    ]);
+    const c = await devChat("rut", { model, at: "2099-11-04T07:00" });
+
+    await c.say("every morning at 8 remind me to stretch");
+    await c.advanceTo("2099-11-04T08:00");
+    expect(await c.received()).toEqual(["Every day at 8.", "Stretch time."]);
+    expect(await reminders(c)).toEqual([["stretch", "2099-11-05T08:00", { every: "daily", anchor: "2099-11-04T08:00" }]]);
+    expect(model.calls[1].user).toContain("It repeats daily at 08:00, and the next one is already scheduled.");
+    expect(model.calls[1].user).toMatch(/- stretch · .+ · repeats daily · Remind: stretch/);
+
+    await c.advanceTo("2099-11-05T08:00");
+    expect(await c.received()).toEqual(["Stretch again."]);
+    expect(c.channel.delivered.slice(1).map((d) => wall(d.at))).toEqual(["2099-11-04T08:00", "2099-11-05T08:00"]);
+    model.assertDone();
+  });
+
+  test("a weekday routine that fires on Friday comes back on Monday", async () => {
+    const model = scripted([turn({ actions: [routine("standup", "2099-11-06T09:00", "Ask for today's top task", "weekdays"), send("Weekdays at 9.")] }), chat("Top task today?")]);
+    const c = await devChat("wkd", { model, at: "2099-11-06T08:00" });
+
+    await c.say("every weekday at 9 ask me for my top task");
+    await c.advanceTo("2099-11-06T09:00");
+
+    expect(await reminders(c)).toEqual([["standup", "2099-11-09T09:00", { every: "weekdays", anchor: "2099-11-06T09:00" }]]);
+    model.assertDone();
+  });
+
+  test("a weekly routine comes back on the same weekday", async () => {
+    const model = scripted([turn({ actions: [routine("plan-week", "2099-11-08T19:00", "Plan the week", "weekly"), send("Sundays at 7pm.")] }), chat("Let's plan the week.")]);
+    const c = await devChat("wkl", { model, at: "2099-11-04T10:00" });
+
+    await c.say("every Sunday at 7pm help me plan the week");
+    await c.advanceTo("2099-11-08T19:00");
+
+    expect(await reminders(c)).toEqual([["plan-week", "2099-11-15T19:00", { every: "weekly", anchor: "2099-11-08T19:00" }]]);
+    model.assertDone();
+  });
+
+  test("cancelling a routine stops every later one", async () => {
+    const model = scripted([
+      turn({ actions: [routine("water", "2099-11-04T08:00", "Drink water", "daily"), send("Daily at 8.")] }),
+      chat("Water!"),
+      turn({ actions: [cancel("water"), send("Stopped.")] }),
+    ]);
+    const c = await devChat("cnr", { model, at: "2099-11-04T07:00" });
+
+    await c.say("every day at 8 remind me to drink water");
+    await c.advanceTo("2099-11-04T08:00");
+    await c.say("stop the water reminders");
+    await c.advanceTo("2099-11-06T09:00");
+
+    expect(await c.received()).toEqual(["Daily at 8.", "Water!", "Stopped."]);
+    expect(await reminders(c)).toEqual([]);
+    model.assertDone();
+  });
+
+  test("/dev/fire makes a pending wake-up due now, and it goes out through the alarm without a message", async () => {
+    const model = scripted([turn({ actions: [schedule("call-clinic", "2099-11-13T09:00", "Call the clinic"), send("Friday at 9.")] }), chat("Time to call the clinic.")]);
+    const c = await devChat("ffw", { model, at: "2099-11-06T11:45" });
+
+    await c.say("remind me Friday 9 am to call the clinic");
+    const res = await SELF.fetch("https://agent.test/dev/fire", { method: "POST", body: JSON.stringify({ user: "ffw", key: "call-clinic" }) });
+    expect(res.status).toBe(200);
+    await c.settle();
+
+    expect(await c.received()).toEqual(["Friday at 9.", "Time to call the clinic."]);
+    expect(c.channel.delivered[1]).toMatchObject({ via: "push" });
+    expect(await reminders(c)).toEqual([]);
+    expect((await SELF.fetch("https://agent.test/dev/fire", { method: "POST", body: JSON.stringify({ user: "ffw", key: "nothing" }) })).status).toBe(404);
+    model.assertDone();
   });
 });
 

@@ -359,6 +359,7 @@ export function turn(o: {
 }
 export const send = (text: string) => ({ type: "send", text });
 export const schedule = (key: string, at: string, note: string, asked = true, task = "") => ({ type: "schedule_wakeup", key, at, note, asked, task });
+export const routine = (key: string, at: string, note: string, repeat: "daily" | "weekdays" | "weekly") => ({ ...schedule(key, at, note), repeat });
 export const cancel = (key: string) => ({ type: "cancel_wakeup", key });
 export const quiet = () => ({ type: "quiet" });
 export const propose = (ref: string, title: string, plan: string, kind = "plan") => ({ op: "propose", ref, kind, title, plan });

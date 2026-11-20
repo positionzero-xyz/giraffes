@@ -109,6 +109,7 @@ describe("every cap that guards a prompt budget is in UTF-8 bytes", () => {
       dueAt: NOW,
       task: null,
       bookkeeping: false,
+      repeat: null,
     }));
     const openTasks = Array.from({ length: TASKS.maxOpen }, (_, i) => ({
       id: i as TaskId,

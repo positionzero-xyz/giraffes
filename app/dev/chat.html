@@ -21,6 +21,7 @@
   .turn.note { color: var(--note); font-style: italic; }
   .turn time, .row .tag { color: var(--muted); font-size: 12px; margin-left: 6px; }
   .row { padding: 6px 0; border-bottom: 1px solid var(--line); white-space: pre-wrap; }
+  .row .fire { display: block; margin-top: 4px; font-size: 12px; padding: 2px 8px; }
   input[name=text] { flex: 1; }
   input, button { font: inherit; padding: 6px 10px; }
   @media (max-width: 720px) { main { grid-template-columns: 1fr; } aside { border-left: 0; border-top: 1px solid var(--line); } }
@@ -36,6 +37,7 @@
   <aside>
     <h2>Deliveries</h2><div id="outbox"></div>
     <h2>Pending wake-ups</h2><div id="wakeups"></div>
+    <h2>Memory notes</h2><div id="notes"></div>
   </aside>
 </main>
 <form id="send">
@@ -70,9 +72,13 @@
     }));
     $("wakeups").replaceChildren(...(s.pendingWakeups.length ? s.pendingWakeups.map((w) => {
       const row = el("div", "row", w.kind === "checkin" ? "Daily check-in" : `${w.key}: ${w.note}`);
-      row.append(el("div", "tag", `${time(w.dueAt)} · ${w.origin}`));
+      row.append(el("div", "tag", [time(w.dueAt), w.origin, w.repeat && `repeats ${w.repeat.every}`].filter(Boolean).join(" · ")));
+      const fire = el("button", "fire", "Fire now (dev clock)");
+      fire.dataset.key = w.key;
+      row.append(fire);
       return row;
     }) : [el("div", "tag", "none")]));
+    $("notes").replaceChildren(...(s.memoryNotes.length ? s.memoryNotes.map((n) => el("div", "row", n)) : [el("div", "tag", "none")]));
     $("meta").textContent = s.agent
       ? `${s.agent.status} · ${s.agent.tz} · ${s.agent.language} · unasked today ${s.unaskedSentToday}/3 · $${(s.spendThisMonthMicro / 1e6).toFixed(4)} this month`
       : "no agent yet: say something";
@@ -98,6 +104,10 @@
     if (!text) return;
     input.value = "";
     await fetch("/webhook/dev", { method: "POST", body: JSON.stringify({ user: user(), text, id: crypto.randomUUID() }) });
+  });
+  $("wakeups").addEventListener("click", async (e) => {
+    const key = e.target.dataset?.key;
+    if (key) await fetch("/dev/fire", { method: "POST", body: JSON.stringify({ user: user(), key }) });
   });
   userInput.addEventListener("change", () => { last = ""; });
   poll();

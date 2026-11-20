@@ -22,7 +22,7 @@ import { HAIKU_5_5 } from "../src/model/providers";
 import { OUTPUT_TOKENS, PROMPT_OVERHEAD_TOKENS, routeFor } from "../src/model/routes";
 import { NOTICES } from "../src/notices";
 import { admitUnasked, quietUntil } from "../src/policy/outreach";
-import { fireAt, isLate, nextAlarm, planFiring, wakeupOrigin, type PendingWakeup } from "../src/policy/schedule";
+import { fireAt, isLate, nextAlarm, nextOccurrence, planFiring, wakeupOrigin, type PendingWakeup } from "../src/policy/schedule";
 import { costOf, estimate, fits } from "../src/policy/spend";
 import { fromLocal, nextLocalTime, parseLocalDateTime, parseTimeZone, toLocal } from "../src/policy/time";
 
@@ -163,16 +163,24 @@ const send = (text: string) => ({ type: "send", text }) as const;
 
 let nextId = 1;
 function reminder(key: string, dueAt: EpochMs, origin: "person" | "agent" = "person"): PendingWakeup {
-  return { id: nextId++ as WakeupId, key: key as WakeupKey, kind: "reminder", origin, note: `note ${key}`, dueAt, task: null, bookkeeping: false };
+  return { id: nextId++ as WakeupId, key: key as WakeupKey, kind: "reminder", origin, note: `note ${key}`, dueAt, task: null, bookkeeping: false, repeat: null };
 }
 function checkin(dueAt: EpochMs): PendingWakeup {
   return { id: nextId++ as WakeupId, key: CHECKIN_KEY, kind: "checkin", origin: "system", note: "Daily check-in", dueAt };
 }
 function wakeupEvent(dueAt: EpochMs, firedAt: EpochMs, origin: "person" | "agent" = "person"): AgentEvent {
-  return { kind: "wakeup", wakeupId: 7 as WakeupId, key: "bins" as WakeupKey, origin, note: "Take the bins out", dueAt, firedAt, task: null, bookkeeping: false };
+  return { kind: "wakeup", wakeupId: 7 as WakeupId, key: "bins" as WakeupKey, origin, note: "Take the bins out", dueAt, firedAt, task: null, bookkeeping: false, repeat: null };
 }
 
 describe("reminders", () => {
+  test("a routine keeps its local time across a clock change, and weekdays skip the weekend", () => {
+    const london = "Europe/London" as TimeZone;
+    const daily = { every: "daily", anchor: "2026-03-28T08:00" as LocalDateTime } as const;
+    expect(toLocal(nextOccurrence(daily, fromLocal(daily.anchor, london), london), london)).toBe("2026-03-29T08:00");
+    const weekdays = { every: "weekdays", anchor: "2026-11-20T08:00" as LocalDateTime } as const;
+    expect(toLocal(nextOccurrence(weekdays, fromLocal(weekdays.anchor, london), london), london)).toBe("2026-11-23T08:00");
+  });
+
   test("with 21 reminders already pending, every fresh one is refused and the earlier ones are left alone", () => {
     const pending = Array.from({ length: 21 }, (_, i) => reminder(`old-${i}`, local("2026-11-10T10:00")));
     const commit = planTurn(output([schedule("new-a", "2026-11-04T20:00"), schedule("new-b", "2026-11-04T21:00"), send("Done.")]), view({ pending }));
@@ -188,7 +196,7 @@ describe("reminders", () => {
   test("a reminder is admitted in the person's zone", () => {
     const commit = planTurn(output([schedule("bins", "2026-11-04T23:00"), send("Will do.")]), view());
     expect(commit.wakeupsAdd).toEqual([
-      { key: "bins", kind: "reminder", origin: "person", note: "note bins", dueAt: at("2026-11-04T23:00+07:00"), bookkeeping: false, task: null },
+      { key: "bins", kind: "reminder", origin: "person", note: "note bins", dueAt: at("2026-11-04T23:00+07:00"), bookkeeping: false, task: null, repeat: null },
     ]);
     expect(commit.outbound?.texts).toEqual(["Will do."]);
   });

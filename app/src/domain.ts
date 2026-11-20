@@ -6,6 +6,10 @@ export type MicroUsd = Brand<number, "MicroUsd">;
 export type TimeZone = Brand<string, "TimeZone">;
 export type LocalDateTime = Brand<string, "LocalDateTime">;
 export type LocalDate = Brand<string, "LocalDate">;
+
+export const REPEATS = ["daily", "weekdays", "weekly"] as const;
+/** A routine: `anchor` is its first local time, which fixes the time of day and, for weekly, the weekday. */
+export type Repeat = { readonly every: (typeof REPEATS)[number]; readonly anchor: LocalDateTime };
 export type UtcMonth = Brand<string, "UtcMonth">;
 export type TimeOfDay = `${number}:${number}`;
 
@@ -95,6 +99,7 @@ export type AgentEvent =
       readonly task: TaskId | null;
       /** True only for a check code scheduled itself, never the model. */
       readonly bookkeeping: boolean;
+      readonly repeat: Repeat | null;
     }
   | { readonly kind: "checkin"; readonly day: LocalDate; readonly dueAt: EpochMs; readonly firedAt: EpochMs };
 

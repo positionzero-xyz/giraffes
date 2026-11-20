@@ -6,7 +6,9 @@ import {
   type AgentEventKind,
   type EpochMs,
   type EventKey,
+  type LocalDate,
   type PersonStatus,
+  type Repeat,
   type TaskId,
   type TimeOfDay,
   type TimeZone,
@@ -14,7 +16,7 @@ import {
   type WakeupKey,
 } from "../domain";
 import { quietUntil } from "./outreach";
-import { fromLocal, localDate, nextLocalTime, parseLocalDateTime, toLocal } from "./time";
+import { dayOfWeek, fromLocal, localDate, nextLocalTime, parseLocalDateTime, toLocal } from "./time";
 
 const MINUTE_MS = 60 * 1000;
 
@@ -32,7 +34,7 @@ export type PendingWakeup = {
   readonly note: string;
   readonly dueAt: EpochMs;
 } & (
-  | { readonly kind: "reminder"; readonly origin: "person" | "agent"; readonly task: TaskId | null; readonly bookkeeping: boolean }
+  | { readonly kind: "reminder"; readonly origin: "person" | "agent"; readonly task: TaskId | null; readonly bookkeeping: boolean; readonly repeat: Repeat | null }
   | { readonly kind: "checkin"; readonly origin: "system" }
 );
 
@@ -53,7 +55,7 @@ export type ReminderAdmission =
   | { readonly ok: false; readonly reason: ReminderRejection };
 
 export function admitReminder(
-  req: { readonly key: string; readonly at: string; readonly note: string; readonly origin: "person" | "agent" },
+  req: { readonly key: string; readonly at: string; readonly note: string; readonly origin: "person" | "agent"; readonly repeat: Repeat["every"] | null },
   ctx: { readonly now: EpochMs; readonly tz: TimeZone; readonly pending: ReadonlyMap<WakeupKey, NewWakeup> },
 ): ReminderAdmission {
   const key = parseWakeupKey(req.key);
@@ -66,7 +68,20 @@ export function admitReminder(
   if (dueAt < earliest) return { ok: false, reason: "past" };
   if (dueAt > ctx.now + SCHEDULE.maxHorizonMs) return { ok: false, reason: "too_far" };
   if (ctx.pending.has(key)) return { ok: false, reason: "duplicate" };
-  return { ok: true, wakeup: { key, kind: "reminder", origin: req.origin, note: req.note, dueAt, bookkeeping: false } };
+  const repeat = req.repeat === null ? null : { every: req.repeat, anchor: at };
+  return { ok: true, wakeup: { key, kind: "reminder", origin: req.origin, note: req.note, dueAt, bookkeeping: false, repeat } };
+}
+
+export function nextOccurrence(r: Repeat, after: EpochMs, tz: TimeZone): EpochMs {
+  const time = r.anchor.slice(11) as TimeOfDay;
+  const anchorDay = dayOfWeek(r.anchor.slice(0, 10) as LocalDate);
+  const fits = (t: EpochMs) => {
+    const d = dayOfWeek(localDate(t, tz));
+    return r.every === "daily" || (r.every === "weekdays" ? d >= 1 && d <= 5 : d === anchorDay);
+  };
+  let t = nextLocalTime(after, tz, time);
+  while (!fits(t)) t = nextLocalTime(t, tz, time);
+  return t;
 }
 
 export function remindersOverCap(pending: Iterable<NewWakeup>): number {
@@ -135,8 +150,9 @@ export function planFiring(
             firedAt: now,
             task: w.task,
             bookkeeping: w.bookkeeping,
+            repeat: w.repeat,
           },
-          next: null,
+          next: w.repeat && { key: w.key, kind: "reminder", origin: w.origin, note: w.note, dueAt: nextOccurrence(w.repeat, now, tz), bookkeeping: false, repeat: w.repeat },
         });
         break;
       case "checkin": {

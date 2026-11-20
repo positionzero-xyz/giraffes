@@ -34,11 +34,13 @@ import {
   type Intent,
   type Language,
   type LocalDate,
+  type LocalDateTime,
   type MicroUsd,
   type OutboundMessage,
   type OutboxId,
   type PersonStatus,
   type ProposalId,
+  type Repeat,
   type TaskFact,
   type TaskId,
   type TaskKind,
@@ -163,8 +165,10 @@ type WakeupCols = {
   due_at: EpochMs;
   task_id: TaskId | null;
   bookkeeping: number;
+  repeat: Repeat["every"] | null;
+  repeat_anchor: LocalDateTime | null;
 };
-const WAKEUP_COLS = "id, key, kind, origin, note, due_at, task_id, bookkeeping";
+const WAKEUP_COLS = "id, key, kind, origin, note, due_at, task_id, bookkeeping, repeat, repeat_anchor";
 type OutboxCols = {
   id: OutboxId;
   event_key: EventKey;
@@ -311,7 +315,8 @@ const placeholders = (n: number) => Array.from({ length: n }, () => "?").join(",
 function toWakeup(r: WakeupCols): PendingWakeup {
   const base = { id: r.id, key: r.key, note: r.note, dueAt: r.due_at };
   if (r.kind === "checkin") return { ...base, kind: "checkin", origin: "system" };
-  return { ...base, kind: "reminder", origin: r.origin === "person" ? "person" : "agent", task: r.task_id, bookkeeping: r.bookkeeping === 1 };
+  const repeat = r.repeat && r.repeat_anchor ? { every: r.repeat, anchor: r.repeat_anchor } : null;
+  return { ...base, kind: "reminder", origin: r.origin === "person" ? "person" : "agent", task: r.task_id, bookkeeping: r.bookkeeping === 1, repeat };
 }
 
 function toInboxItem(r: InboxCols): InboxItem {
@@ -1047,7 +1052,8 @@ export class AgentStore {
 
   private insertWakeup(w: NewWakeup, createdBy: string, now: EpochMs, task: TaskId | null = null): void {
     this.sql.exec(
-      `INSERT OR IGNORE INTO wakeup (key, kind, origin, note, due_at, created_at, created_by, task_id, bookkeeping) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO wakeup (key, kind, origin, note, due_at, created_at, created_by, task_id, bookkeeping, repeat, repeat_anchor)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       w.key,
       w.kind,
       w.origin,
@@ -1057,6 +1063,8 @@ export class AgentStore {
       createdBy,
       task,
       w.kind === "reminder" && w.bookkeeping ? 1 : 0,
+      w.kind === "reminder" && w.repeat ? w.repeat.every : null,
+      w.kind === "reminder" && w.repeat ? w.repeat.anchor : null,
     );
   }
 
@@ -1070,6 +1078,17 @@ export class AgentStore {
       this.sql.exec("SELECT 1 FROM inbox WHERE status IN ('pending', 'processing') AND kind IN ('message', 'lifecycle') LIMIT 1").toArray()
         .length > 0
     );
+  }
+
+  memoryNotes(limit: number): readonly string[] {
+    return this.sql
+      .exec<{ text: string }>("SELECT text FROM memory_note ORDER BY id DESC LIMIT ?", limit)
+      .toArray()
+      .map((n) => n.text);
+  }
+
+  makeDue(key: WakeupKey, now: EpochMs): boolean {
+    return this.sql.exec("UPDATE wakeup SET due_at = ? WHERE key = ? AND status = 'pending'", now, key).rowsWritten > 0;
   }
 
   dueWakeups(now: EpochMs): readonly PendingWakeup[] {

@@ -101,6 +101,11 @@ export function utcMonth(t: EpochMs): UtcMonth {
   return new Date(t).toISOString().slice(0, 7) as UtcMonth;
 }
 
+/** 0 is Sunday. */
+export function dayOfWeek(day: LocalDate): number {
+  return new Date(Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10))).getUTCDay();
+}
+
 function addDays(day: LocalDate, n: number): LocalDate {
   const d = new Date(Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10) + n));
   return d.toISOString().slice(0, 10) as LocalDate;

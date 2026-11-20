@@ -10,7 +10,7 @@ import { makeChannels } from "./channels/channel";
 import { devIdentity } from "./channels/dev";
 import { lineQuota } from "./channels/line";
 import { loadConfig, type Config, type Env, type OperatorChat } from "./config";
-import { CHANNEL_IDS, personAgentKey, type AgentKey, type ChannelId, type EpochMs, type OutboxId } from "./domain";
+import { CHANNEL_IDS, parseWakeupKey, personAgentKey, type AgentKey, type ChannelId, type EpochMs, type OutboxId } from "./domain";
 import { d1Ledger } from "./ledger/ledger";
 import { alertsDue, quotaAlert } from "./policy/quota";
 import { utcMonth } from "./policy/time";
@@ -54,6 +54,7 @@ export default {
     }
     if (config.devMode && config.model.backend === "scripted" && req.method === "POST" && url.pathname === "/dev/script") return script(req, env);
     if (config.devMode && req.method === "POST" && url.pathname === "/dev/remove") return remove(req, env);
+    if (config.devMode && req.method === "POST" && url.pathname === "/dev/fire") return fire(req, env);
     return new Response("not found", { status: 404 });
   },
 
@@ -168,6 +169,17 @@ async function script(req: Request, env: Env): Promise<Response> {
   if (!body.success || !identity) return new Response("body must be {user, turns, compaction?}", { status: 400 });
   await agentStub(env, personAgentKey(identity)).script(body.data.turns, body.data.compaction);
   return new Response("ok");
+}
+
+const Fire = z.object({ user: z.string(), key: z.string() });
+
+async function fire(req: Request, env: Env): Promise<Response> {
+  const body = Fire.safeParse(await req.json().catch(() => null));
+  const identity = body.success ? devIdentity(body.data.user) : null;
+  const key = body.success ? parseWakeupKey(body.data.key) : null;
+  if (!identity || !key) return new Response("body must be {user, key}", { status: 400 });
+  const fired = await agentStub(env, personAgentKey(identity)).fireNow(key);
+  return fired ? new Response("ok") : new Response("no pending wake-up with that key", { status: 404 });
 }
 
 const Removal = z.object({ agent: z.string().regex(/^p:(line|telegram|dev):[^:]+$/) });

@@ -29,7 +29,7 @@ const message = (text: string): AgentEvent => ({ kind: "message", text });
 const tap = (proposal: string): AgentEvent => ({ kind: "choice", choice: { kind: "accept", proposal: pid(proposal) }, at: NOW });
 const checkin: AgentEvent = { kind: "checkin", day: "2099-11-04" as never, dueAt: NOW, firedAt: NOW };
 function wakeup(task: number | null, bookkeeping = false): AgentEvent {
-  return { kind: "wakeup", wakeupId: 3 as WakeupId, key: "trip-check" as WakeupKey, origin: "agent", note: "n", dueAt: NOW, firedAt: NOW, task: task === null ? null : id(task), bookkeeping };
+  return { kind: "wakeup", wakeupId: 3 as WakeupId, key: "trip-check" as WakeupKey, origin: "agent", note: "n", dueAt: NOW, firedAt: NOW, task: task === null ? null : id(task), bookkeeping, repeat: null };
 }
 
 const trip: OpenTask = { id: id(7), ref: ref("chiang-mai-trip"), kind: "plan", title: "Chiang Mai long weekend", proposal: pid("7.1") };

@@ -2,6 +2,7 @@
 FROM node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
 
 RUN apt-get update \
+ && apt-get upgrade -y --with-new-pkgs \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
@@ -10,6 +11,7 @@ RUN groupadd --gid 1001 agent && useradd --uid 1001 --gid agent --no-create-home
 COPY package.json package-lock.json /opt/box/
 RUN cd /opt/box && npm ci --omit=dev && npm cache clean --force \
  && ln -s /opt/box/node_modules/.bin/claude /usr/local/bin/claude \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
  && claude --version
 COPY entrypoint.sh /opt/box/
 COPY src/ /opt/box/src/

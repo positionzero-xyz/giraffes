@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
-import { verifyBearer, verifyTicket } from "../src/auth.ts";
+import { readTicket, verifyBearer } from "../src/auth.ts";
 
 const VECTOR = {
   secret: "test-secret-0123456789abcdef",
@@ -17,17 +17,17 @@ describe("contract test vector", () => {
   });
 
   it("accepts the vector ticket until exp and not at exp", () => {
-    assert.equal(verifyTicket(VECTOR.ticket, VECTOR.token, VECTOR.exp - 1), true);
-    assert.equal(verifyTicket(VECTOR.ticket, VECTOR.token, VECTOR.exp), false);
+    assert.deepEqual(readTicket(VECTOR.ticket, VECTOR.token, VECTOR.exp - 1), { value: VECTOR.ticket, expiresAt: VECTOR.exp });
+    assert.equal(readTicket(VECTOR.ticket, VECTOR.token, VECTOR.exp), null);
   });
 
   it("rejects the ticket under another token, another exp, or a changed mac", () => {
     const now = VECTOR.exp - 1000;
-    assert.equal(verifyTicket(VECTOR.ticket, `${VECTOR.token}x`, now), false);
-    assert.equal(verifyTicket(VECTOR.ticket.replace("1790000000000", "1790000000001"), VECTOR.token, now), false);
-    assert.equal(verifyTicket(VECTOR.ticket.replace(/.$/, "l"), VECTOR.token, now), false);
+    assert.equal(readTicket(VECTOR.ticket, `${VECTOR.token}x`, now), null);
+    assert.equal(readTicket(VECTOR.ticket.replace("1790000000000", "1790000000001"), VECTOR.token, now), null);
+    assert.equal(readTicket(VECTOR.ticket.replace(/.$/, "l"), VECTOR.token, now), null);
     for (const bad of [undefined, 42, "", "1790000000000", ".AA1PzFmYf_4obmGHsfd0634YPiMbVDnmjYWbmYI62kM", `${VECTOR.ticket}.x`]) {
-      assert.equal(verifyTicket(bad, VECTOR.token, now), false, String(bad));
+      assert.equal(readTicket(bad, VECTOR.token, now), null, String(bad));
     }
   });
 });

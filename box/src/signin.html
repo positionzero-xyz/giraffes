@@ -53,12 +53,12 @@
     opened: ["Sign in on Anthropic's page, then come back here with the code.", "ลงชื่อเข้าใช้ที่หน้าของ Anthropic แล้วกลับมาที่นี่พร้อมรหัส"],
     checking: ["Checking the code…", "กำลังตรวจสอบรหัส…"],
     connected: ["Connected. Your chats now use your Claude plan. You can close this page.", "เชื่อมต่อแล้ว ต่อจากนี้แชทของคุณจะใช้แพ็กเกจ Claude ของคุณ ปิดหน้านี้ได้เลย"],
-    badCode: ["That code didn't work. Open the sign-in page again and use the new code.", "รหัสนี้ใช้ไม่ได้ เปิดหน้าลงชื่อเข้าใช้อีกครั้งแล้วใช้รหัสใหม่"],
-    timedOut: ["Sign-in timed out. Open the sign-in page again.", "หมดเวลาลงชื่อเข้าใช้ เปิดหน้าลงชื่อเข้าใช้อีกครั้ง"],
+    badCode: ["That code didn't work. Send /claude in the chat for a new sign-in link.", "รหัสนี้ใช้ไม่ได้ ส่ง /claude ในแชทเพื่อรับลิงก์ลงชื่อเข้าใช้ใหม่"],
+    timedOut: ["This sign-in has ended. Send /claude in the chat for a new link.", "การลงชื่อเข้าใช้สิ้นสุดแล้ว ส่ง /claude ในแชทเพื่อรับลิงก์ใหม่"],
     expired: ["This link has expired. Send /claude in the chat to get a new one.", "ลิงก์นี้หมดอายุแล้ว ส่ง /claude ในแชทเพื่อรับลิงก์ใหม่"],
     noTicket: ["This link is incomplete. Send /claude in the chat to get a new one.", "ลิงก์นี้ไม่สมบูรณ์ ส่ง /claude ในแชทเพื่อรับลิงก์ใหม่"],
     busy: ["Still checking your last code. Wait a moment, then try again.", "ยังตรวจสอบรหัสก่อนหน้าอยู่ รอสักครู่แล้วลองใหม่อีกครั้ง"],
-    failed: ["Something went wrong. Try again in a minute.", "เกิดข้อผิดพลาด ลองใหม่อีกครั้งในอีกสักครู่"],
+    failed: ["Something went wrong. Send /claude in the chat for a new sign-in link.", "เกิดข้อผิดพลาด ส่ง /claude ในแชทเพื่อรับลิงก์ลงชื่อเข้าใช้ใหม่"],
   };
   const $ = (id) => document.getElementById(id);
   const ticket = new URLSearchParams(location.hash.slice(1)).get("t");

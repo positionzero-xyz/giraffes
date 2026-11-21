@@ -1,9 +1,9 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { verifyBearer, verifyTicket } from "./auth.ts";
+import { readTicket, verifyBearer, type SigninTicket } from "./auth.ts";
 import { agentTurn, authStatus, cliVersion, parseTurn, readAgentRequest, readParseRequest, spawnClaude, type Cli, type SessionStore } from "./claude.ts";
-import { readJson, sendJson } from "./http.ts";
+import { readJson, readSigninJson, sendJson } from "./http.ts";
 
 export type BoxOptions = { readonly token: string; readonly cli: Cli; readonly sessionFile: string; readonly now?: () => number };
 
@@ -24,7 +24,7 @@ const PAGE_HEADERS = {
 };
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void;
-type Login = { readonly proc: ChildProcessWithoutNullStreams; readonly expiresAt: number; output: string; exited: boolean; completing: boolean };
+type Login = { readonly proc: ChildProcessWithoutNullStreams; readonly ticket: string; readonly expiresAt: number; output: string; exited: boolean; completing: boolean };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -49,6 +49,7 @@ function fileSessions(path: string): SessionStore {
 
 export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOptions): Server {
   let login: Login | null = null;
+  const usedTickets = new Map<string, number>();
   let turns: Promise<unknown> = Promise.resolve();
   let version: string | null = null;
 
@@ -65,23 +66,24 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
     login = null;
   }
 
-  function startLogin(): Login {
+  function startLogin(ticket: SigninTicket): Login {
     stopLogin();
     const proc = spawnClaude(cli, ["auth", "login", "--claudeai"], { ...process.env, BROWSER: "true" });
-    const started: Login = { proc, expiresAt: now() + SIGNIN_TTL_MS, output: "", exited: false, completing: false };
+    const started: Login = { proc, ticket: ticket.value, expiresAt: now() + SIGNIN_TTL_MS, output: "", exited: false, completing: false };
     const append = (c: Buffer) => (started.output += c.toString("utf8"));
     proc.stdout.on("data", append);
     proc.stderr.on("data", append);
     const exited = () => {
       started.exited = true;
-      if (login === started) login = null;
+      if (login === started && !started.completing) login = null;
     };
     proc.on("error", exited);
     proc.on("close", (code) => {
       exited();
       console.log(`sign-in process exited (${code})`);
     });
-    setTimeout(() => proc.kill("SIGKILL"), SIGNIN_TTL_MS).unref();
+    const timeout = setTimeout(() => proc.kill("SIGKILL"), SIGNIN_TTL_MS).unref();
+    proc.once("close", () => clearTimeout(timeout));
     login = started;
     return started;
   }
@@ -115,38 +117,47 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
     sendJson(res, reply.status, reply.body);
   }
 
-  async function signinStart(res: ServerResponse): Promise<void> {
+  async function signinStart(ticket: SigninTicket, res: ServerResponse): Promise<void> {
     if (login?.completing) return sendJson(res, 409, { error: "busy" });
-    const started = startLogin();
+    const at = now();
+    for (const [used, expiresAt] of usedTickets) if (expiresAt <= at) usedTickets.delete(used);
+    if (usedTickets.has(ticket.value)) return sendJson(res, 409, { error: "used_ticket" });
+    usedTickets.set(ticket.value, ticket.expiresAt);
+    const started = startLogin(ticket);
     console.log("sign-in started");
     await waitUntil(() => signinUrl(started.output) !== undefined || started.exited, URL_WAIT_MS);
     const url = signinUrl(started.output);
-    if (url === undefined) {
+    if (login !== started || url === undefined) {
       if (login === started) stopLogin();
       return sendJson(res, 502, { error: "signin_failed" });
     }
     sendJson(res, 200, { url });
   }
 
-  async function signinCode(raw: unknown, res: ServerResponse): Promise<void> {
+  async function signinCode(ticket: SigninTicket, raw: unknown, res: ServerResponse): Promise<void> {
     const code = typeof raw === "string" ? raw.trim() : "";
     if (!code || code.length > MAX_CODE_LENGTH || /[\r\n]/.test(code)) return sendJson(res, 400, { error: "bad_code" });
     const pending = login;
-    if (pending?.completing) return sendJson(res, 409, { error: "busy" });
-    if (!pending || now() >= pending.expiresAt) {
+    if (!pending || pending.ticket !== ticket.value) return sendJson(res, 409, { error: "no_signin" });
+    if (pending.completing) return sendJson(res, 409, { error: "busy" });
+    if (now() >= pending.expiresAt) {
       stopLogin();
       return sendJson(res, 409, { error: "no_signin" });
     }
     pending.completing = true;
-    const mark = pending.output.length;
-    pending.proc.stdin.write(`${code}\n`);
-    // A code the CLI can't read makes it ask again instead of exiting.
-    await waitUntil(() => pending.exited || pending.output.includes("Invalid code", mark), CODE_EXIT_WAIT_MS);
-    if (!pending.exited) pending.proc.kill("SIGKILL");
-    await waitUntil(() => pending.exited, KILL_WAIT_MS);
-    const signedIn = (await authStatus(cli))?.loggedIn === true;
-    console.log(`sign-in code sent, signed in: ${signedIn}`);
-    sendJson(res, 200, { signedIn });
+    try {
+      const mark = pending.output.length;
+      pending.proc.stdin.write(`${code}\n`);
+      // A code the CLI can't read makes it ask again instead of exiting.
+      await waitUntil(() => pending.exited || pending.output.includes("Invalid code", mark), CODE_EXIT_WAIT_MS);
+      if (!pending.exited) pending.proc.kill("SIGKILL");
+      await waitUntil(() => pending.exited, KILL_WAIT_MS);
+      const signedIn = (await authStatus(cli))?.loggedIn === true;
+      console.log(`sign-in code sent, signed in: ${signedIn}`);
+      sendJson(res, 200, { signedIn });
+    } finally {
+      if (login === pending) stopLogin();
+    }
   }
 
   const withBearer =
@@ -155,12 +166,18 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
       verifyBearer(req.headers.authorization, token) ? handler(req, res) : sendJson(res, 401, { error: "unauthorized" });
 
   const withTicket =
-    (handler: (fields: Record<string, unknown>, res: ServerResponse) => Promise<void>): Handler =>
+    (handler: (ticket: SigninTicket, fields: Record<string, unknown>, res: ServerResponse) => Promise<void>): Handler =>
     async (req, res) => {
-      const body = await readJson(req);
+      const result = await readSigninJson(req);
+      if (result.kind !== "json") {
+        res.setHeader("connection", "close");
+        return result.kind === "too_large" ? sendJson(res, 413, { error: "body_too_large" }) : sendJson(res, 408, { error: "request_timeout" });
+      }
+      const { body } = result;
       const fields = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
-      if (!verifyTicket(fields.ticket, token, now())) return sendJson(res, 401, { error: "unauthorized" });
-      await handler(fields, res);
+      const ticket = readTicket(fields.ticket, token, now());
+      if (!ticket) return sendJson(res, 401, { error: "unauthorized" });
+      await handler(ticket, fields, res);
     };
 
   const routes = new Map<string, Handler>([
@@ -168,12 +185,14 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
     ["POST /parse", withBearer(parse)],
     ["POST /agent", withBearer(agent)],
     ["GET /signin", (_, res) => void res.writeHead(200, PAGE_HEADERS).end(PAGE)],
-    ["POST /signin/start", withTicket((_, res) => signinStart(res))],
-    ["POST /signin/code", withTicket((fields, res) => signinCode(fields.code, res))],
+    ["POST /signin/start", withTicket((ticket, _, res) => signinStart(ticket, res))],
+    ["POST /signin/code", withTicket((ticket, fields, res) => signinCode(ticket, fields.code, res))],
   ]);
 
   const server = createServer((req, res) => {
-    const handler = routes.get(`${req.method} ${new URL(req.url ?? "/", "http://box").pathname}`);
+    const target = URL.parse(req.url ?? "/", "http://box");
+    if (!target) return sendJson(res, 400, { error: "bad_request" });
+    const handler = routes.get(`${req.method} ${target.pathname}`);
     if (!handler) return sendJson(res, 404, { error: "not_found" });
     Promise.resolve(handler(req, res)).catch((err: unknown) => {
       console.error(err);

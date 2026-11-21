@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { request, type RequestOptions } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +35,20 @@ async function call(method: string, path: string, opts: { auth?: string; body?: 
     body = JSON.parse(text);
   } catch {}
   return { status: res.status, body, text, headers: res.headers };
+}
+
+function responseTo(options: RequestOptions, incompleteBody?: string): Promise<number | undefined> {
+  return new Promise((resolve, reject) => {
+    const req = request(base, { ...options, agent: false }, (res) => {
+      res.resume();
+      res.on("error", reject);
+      res.on("end", () => resolve(res.statusCode));
+    });
+    req.on("error", reject);
+    req.setTimeout(12_000, () => req.destroy(new Error("no response")));
+    if (incompleteBody !== undefined) req.write(incompleteBody);
+    else req.end();
+  });
 }
 const bearer = `Bearer ${TOKEN}`;
 const turn = (user = "hello") => ({ model: "claude-haiku-5-5", system: "be brief", user, jsonSchema: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object" } });
@@ -74,6 +89,24 @@ describe("auth", () => {
     assert.equal((await call("GET", "/parse", { auth: bearer })).status, 404);
     assert.equal((await call("POST", "/health", { auth: bearer })).status, 404);
     assert.equal((await call("GET", "/", { auth: bearer })).status, 404);
+  });
+
+  it("answers 400 for an invalid request target and still serves the next request", async () => {
+    assert.equal(await responseTo({ path: "//[" }), 400);
+    assert.equal((await call("GET", "/signin")).status, 200);
+  });
+
+  it("refuses oversized bodies on both sign-in routes", async () => {
+    for (const path of ["/signin/start", "/signin/code"]) {
+      assert.equal((await call("POST", path, { body: { padding: "é".repeat(2048) } })).status, 413);
+      assert.equal(await responseTo({ method: "POST", path }, "é".repeat(2049)), 413);
+    }
+    assert.deepEqual(events(), []);
+  });
+
+  it("times out an unfinished sign-in request", { timeout: 14_000 }, async () => {
+    assert.equal(await responseTo({ method: "POST", path: "/signin/start" }, "{"), 408);
+    assert.deepEqual(events(), []);
   });
 
   it("serves the sign-in page without auth", async () => {
@@ -176,6 +209,7 @@ describe("sign-in", () => {
     const code = await call("POST", "/signin/code", { body: { ticket: t, code: "garbled" } });
     assert.deepEqual([code.status, code.body], [200, { signedIn: false }]);
     assert.ok(Date.now() - started < 10_000, "did not wait out the 60 s exit window");
+    assert.deepEqual((await call("POST", "/signin/code", { body: { ticket: t, code: "good-code#state" } })).body, { error: "no_signin" });
   });
 
   it("refuses a code with no sign-in started, or an empty one", async () => {
@@ -219,11 +253,25 @@ describe("sign-in", () => {
     assert.deepEqual((await call("POST", "/signin/code", { body: { ticket: t, code: "good-code#state" } })).body, { error: "no_signin" });
   });
 
-  it("replaces the first sign-in when started again", async () => {
+  it("starts once per ticket and accepts a code only with that ticket", async () => {
     const t = ticket();
-    await call("POST", "/signin/start", { body: { ticket: t } });
-    await call("POST", "/signin/start", { body: { ticket: t } });
+    const other = ticket(Number(t.split(".")[0]) + 1);
+    assert.equal((await call("POST", "/signin/start", { body: { ticket: t } })).status, 200);
+    const reuse = await call("POST", "/signin/start", { body: { ticket: t } });
+    assert.deepEqual([reuse.status, reuse.body], [409, { error: "used_ticket" }]);
+    const mismatch = await call("POST", "/signin/code", { body: { ticket: other, code: "good-code#state" } });
+    assert.deepEqual([mismatch.status, mismatch.body], [409, { error: "no_signin" }]);
+    assert.deepEqual(events(), ["login started BROWSER=true"]);
     assert.deepEqual((await call("POST", "/signin/code", { body: { ticket: t, code: "good-code#state" } })).body, { signedIn: true });
+    assert.equal((await call("POST", "/signin/start", { body: { ticket: t } })).status, 409);
+  });
+
+  it("allows a new ticket to replace an unfinished sign-in", async () => {
+    const t = ticket();
+    const next = ticket(Number(t.split(".")[0]) + 1);
+    assert.equal((await call("POST", "/signin/start", { body: { ticket: t } })).status, 200);
+    assert.equal((await call("POST", "/signin/start", { body: { ticket: next } })).status, 200);
+    assert.deepEqual((await call("POST", "/signin/code", { body: { ticket: next, code: "good-code#state" } })).body, { signedIn: true });
     assert.deepEqual(events(), ["login started BROWSER=true", "login started BROWSER=true", "login read good-code#state"]);
   });
 });

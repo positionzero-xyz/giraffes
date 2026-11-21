@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { readBody } from "../body";
 import type { MicroUsd } from "../domain";
 import type { Auth, Protocol, ProviderId } from "./providers";
 import type { CallPurpose, Route } from "./routes";
@@ -71,6 +72,7 @@ export type WireResult =
     }
   | { readonly kind: "status"; readonly status: number; readonly retryAfterMs: number | null; readonly billing: boolean }
   | { readonly kind: "network" }
+  | { readonly kind: "provider_fault"; readonly reason: "redirect" | "response_too_large" }
   /** The dev bridge didn't answer or answered with an error: nothing ran on anyone's account. */
   | { readonly kind: "unreachable" };
 
@@ -87,6 +89,7 @@ export const LOOSE_INSTRUCTION = "Reply with only one JSON object that matches t
 const REPAIR_INSTRUCTION = "That reply didn't match the schema. Reply with only the corrected JSON object.";
 const BILLING_ERROR = /credit|balance|billing|insufficient|payment|quota/i;
 const MAX_RETRY_AFTER_MS = 24 * 60 * 60_000;
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 export const looseUser = (user: string, schema: JsonSchema): string => `${user}\n\n${LOOSE_INSTRUCTION}\n${JSON.stringify(schema)}`;
 
@@ -98,11 +101,7 @@ function retryAfterMs(h: string | null): number | null {
   return Number.isNaN(at) ? null : Math.min(Math.max(0, at - Date.now()), MAX_RETRY_AFTER_MS);
 }
 
-type Answer = { readonly status: number; readonly ok: boolean; readonly retryAfter: string | null; readonly body: string };
-
-function failed(res: Answer): WireResult {
-  return { kind: "status", status: res.status, retryAfterMs: retryAfterMs(res.retryAfter), billing: res.status === 402 || BILLING_ERROR.test(res.body) };
-}
+type PostResult = { readonly kind: "body"; readonly body: string } | Exclude<WireResult, { kind: "reply" | "unreachable" }>;
 
 function jsonOf(body: string): unknown {
   try {
@@ -117,13 +116,20 @@ function authHeaders(e: Endpoint): Record<string, string> {
   return e.auth === "x-api-key" ? { "x-api-key": e.key.reveal() } : { authorization: `Bearer ${e.key.reveal()}` };
 }
 
-/** Null when the request or its body fails or outlasts `timeoutMs`: the provider may have run it. */
-async function post(fetch: Fetch, url: string, headers: Record<string, string>, body: string, timeoutMs: number): Promise<Answer | null> {
+async function post(fetch: Fetch, url: string, headers: Record<string, string>, body: string, timeoutMs: number): Promise<PostResult> {
   try {
-    const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body, signal: AbortSignal.timeout(timeoutMs) });
-    return { status: res.status, ok: res.ok, retryAfter: res.headers.get("retry-after"), body: await res.text() };
+    const res = await fetch(url, { method: "POST", redirect: "manual", headers: { "content-type": "application/json", ...headers }, body, signal: AbortSignal.timeout(timeoutMs) });
+    if (res.status >= 300 && res.status < 400) {
+      void res.body?.cancel().catch(() => {});
+      return { kind: "provider_fault", reason: "redirect" };
+    }
+    const bytes = await readBody(res.body, MAX_RESPONSE_BYTES);
+    if (bytes === null) return { kind: "provider_fault", reason: "response_too_large" };
+    const text = new TextDecoder().decode(bytes);
+    if (res.ok) return { kind: "body", body: text };
+    return { kind: "status", status: res.status, retryAfterMs: retryAfterMs(res.headers.get("retry-after")), billing: res.status === 402 || BILLING_ERROR.test(text) };
   } catch {
-    return null;
+    return { kind: "network" };
   }
 }
 
@@ -161,8 +167,7 @@ function anthropic(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): Model
         ...(output ? { output_config: output } : {}),
       });
       const res = await post(fetch, `${e.baseUrl}/v1/messages`, { "anthropic-version": "2023-06-01", ...authHeaders(e), ...e.headers }, body, timeouts[req.route.purpose]);
-      if (res === null) return { kind: "network" };
-      if (!res.ok) return failed(res);
+      if (res.kind !== "body") return res;
       const parsed = AnthropicReply.safeParse(jsonOf(res.body));
       if (!parsed.success) return UNREADABLE_REPLY;
       const r = parsed.data;
@@ -223,8 +228,7 @@ function openai(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): ModelCli
         ...(req.route.effort ? { reasoning_effort: req.route.effort } : {}),
       });
       const res = await post(fetch, `${e.baseUrl}/chat/completions`, { ...authHeaders(e), ...e.headers }, body, timeouts[req.route.purpose]);
-      if (res === null) return { kind: "network" };
-      if (!res.ok) return failed(res);
+      if (res.kind !== "body") return res;
       const parsed = OpenAIReply.safeParse(jsonOf(res.body));
       if (!parsed.success) return UNREADABLE_REPLY;
       const [choice] = parsed.data.choices;
@@ -281,7 +285,8 @@ function bridge(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): ModelCli
     async send(req) {
       const body = bridgeBody({ model: req.route.model, system: req.system, user: req.user, jsonSchema: req.schema });
       const res = await post(fetch, `${e.baseUrl}/parse`, {}, body, timeouts[req.route.purpose]);
-      if (res === null || !res.ok) return { kind: "unreachable" };
+      if (res.kind === "provider_fault") return res;
+      if (res.kind !== "body") return { kind: "unreachable" };
       return readBridgeReply(jsonOf(res.body)) ?? UNREADABLE_REPLY;
     },
   };
@@ -394,6 +399,10 @@ const SHORT_RETRY_MS = 60_000;
 export function classify(r: Exclude<WireResult, { kind: "reply" }>): Attempt<never> {
   if (r.kind === "network") return { kind: "in_doubt" };
   if (r.kind === "unreachable") return { kind: "turned_away" };
+  if (r.kind === "provider_fault") {
+    // An oversized reply may already have incurred a charge.
+    return r.reason === "redirect" ? { kind: "fault", fault: "model", retryAfterMs: null } : { kind: "in_doubt" };
+  }
   const { status } = r;
   if (status === 529) return { kind: "turned_away" };
   if (status === 429) {

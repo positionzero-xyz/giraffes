@@ -6,7 +6,7 @@ import { devChannel } from "./dev";
 
 export type Received =
   | { readonly kind: "accepted"; readonly envelopes: readonly InboundEnvelope[]; readonly ignored: number }
-  | { readonly kind: "rejected"; readonly status: 401 | 404 };
+  | { readonly kind: "rejected"; readonly status: 401 | 404 | 413 };
 
 export type Delivery =
   | { readonly kind: "sent"; readonly via: "reply" | "push" }
@@ -30,9 +30,11 @@ export function makeChannels(config: Config): ChannelRegistry {
   };
 }
 
-export async function tellOperator(channels: ChannelRegistry, to: OperatorChat, text: string, now: EpochMs): Promise<OperatorChat["channel"] | null> {
-  const messages = to.channel === "telegram" ? (text.match(new RegExp(`.{1,${SEND_MESSAGE_MAX_CHARS}}`, "gsu")) ?? []) : [text];
-  for (const message of messages) {
+export async function tellOperator(channels: ChannelRegistry, to: OperatorChat, text: string, now: EpochMs, continuation = ""): Promise<OperatorChat["channel"] | null> {
+  const maxChars = SEND_MESSAGE_MAX_CHARS - continuation.length;
+  const messages = to.channel === "telegram" ? (text.match(new RegExp(`.{1,${maxChars}}`, "gsu")) ?? []) : [text];
+  for (const [i, part] of messages.entries()) {
+    const message = i === 0 ? part : continuation + part;
     const sent = await channels[to.channel].deliver({ id: crypto.randomUUID() as OutboxId, to, texts: [message], intent: "requested" }, now);
     if (sent.kind !== "sent") {
       console.warn("operator alert not sent", sent.kind);

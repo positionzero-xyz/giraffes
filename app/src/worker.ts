@@ -3,6 +3,7 @@ import chatPage from "../dev/chat.html";
 import keyPage from "./access/page.html";
 import { readTicket } from "./access/key";
 import type { KeysConfig } from "./access/access";
+import { boundedRequestBody } from "./body";
 import { PROVIDER_IDS, PROVIDERS } from "./model/providers";
 import { NOTICES } from "./notices";
 import { DONE_PATH, parseEvent, verifySignature } from "./billing/stripe";
@@ -109,11 +110,11 @@ const KeyForm = z.object({
 });
 
 async function keyForm(req: Request, env: Env, keys: Extract<KeysConfig, { on: true }>): Promise<Response> {
-  const body = await req.text();
-  if (body.length > MAX_KEY_FORM_BYTES) return Response.json({ ok: false, error: "bad_form" }, { status: 413 });
+  const body = await boundedRequestBody(req, MAX_KEY_FORM_BYTES);
+  if (body === null) return Response.json({ ok: false, error: "bad_form" }, { status: 413 });
   let raw: unknown = null;
   try {
-    raw = JSON.parse(body);
+    raw = JSON.parse(new TextDecoder().decode(body));
   } catch {}
   const form = KeyForm.safeParse(raw);
   if (!form.success) return Response.json({ ok: false, error: "bad_form" }, { status: 400 });

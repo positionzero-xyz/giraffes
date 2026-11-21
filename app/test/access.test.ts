@@ -93,6 +93,15 @@ describe("no access", () => {
     expect(() => loadConfig({ PUBLIC_URL: "https://giraffes.test" } as unknown as Env)).toThrow("KEY_SECRET");
     expect(loadConfig({ MODEL_BACKEND: "scripted", DEV_MODE: "1" } as unknown as Env).keys.on).toBe(false);
   });
+
+  test("Telegram accepts a 32-character URL-safe webhook secret and rejects short or invalid ones", () => {
+    const base = { ...env, TELEGRAM_BOT_TOKEN: "123:abc" };
+    const secret = "A0_-".repeat(8);
+    expect(loadConfig({ ...base, TELEGRAM_WEBHOOK_SECRET: secret }).telegram?.webhookSecret).toBe(secret);
+    for (const invalid of [secret.slice(1), `${secret}+`, `${secret}\n`]) {
+      expect(() => loadConfig({ ...base, TELEGRAM_WEBHOOK_SECRET: invalid })).toThrow("TELEGRAM_WEBHOOK_SECRET");
+    }
+  });
 });
 
 describe("a person's own key", () => {

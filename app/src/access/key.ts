@@ -210,7 +210,7 @@ export const KEY_REMOVED = "<a key, removed>";
 
 const PREFIXED = /(?<![A-Za-z0-9_-])(?:sk-ant-|sk-or-|oc_sk_|sk-)[A-Za-z0-9_-]{16,}/g;
 /** Not after a slash, dot or @, so a link's path, a host name or an address is left alone; after = or : it counts. */
-const LONG_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_\-/=.:@])/g;
+const LONG_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-]|[/=:@.][A-Za-z0-9_-])/g;
 
 function entropyBits(s: string): number {
   const counts = new Map<string, number>();

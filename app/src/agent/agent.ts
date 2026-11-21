@@ -1213,8 +1213,9 @@ export class Agent extends DurableObject<Env> {
         for (const row of rows) {
           if (row.stream !== "feedback") continue;
           const from = `Feedback from ${row.agent} (${row.cohort === null ? "no cohort" : `beta: ${row.cohort}`}):`;
-          await tellOperator(channels, operatorChat, `${from}
-${row.text}`, this.#deps.clock.now());
+          const quote = "> ";
+          const body = row.text.split(/\r\n|[\r\n\u0085\u2028\u2029]/u).map((line) => quote + line).join("\n");
+          await tellOperator(channels, operatorChat, `${from}\n${body}`, this.#deps.clock.now(), quote);
         }
       }
       if (rows.length < LOG_BATCH) return;

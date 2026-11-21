@@ -4,6 +4,7 @@ import { draftKey, KEY_REMOVED, redactSecrets } from "../src/access/key";
 import { AgentStore } from "../src/agent/store";
 import { eventKey, type AgentKey, type LocalDate, type MicroUsd } from "../src/domain";
 import { NOTICES } from "../src/notices";
+import worker from "../src/worker";
 import { chat, devChat, fakeBox, fakeProvider, giveKey, local, scripted, send, type DevChat, type ProviderStep } from "./testkit";
 
 const NOTICE = NOTICES.en;
@@ -59,6 +60,25 @@ describe("entering a key on the page", () => {
     expect(html).not.toMatch(/<script[^>]+src=/);
     expect(html).toContain("OpenCode Go");
     expect(html).toContain(NOTICES.th.keyPage.connect);
+  });
+
+  test.each([true, false])("rejects an oversized form early, declared length %s", async (declared) => {
+    let reads = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode("é".repeat(++reads === 1 ? 2048 : 1)));
+        if (reads === 3) controller.close();
+      },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 });
+    const request = new Request("https://giraffes.test/key", {
+      method: "POST", body, headers: declared ? { "content-length": "4100" } : {},
+    });
+    const res = await worker.fetch(request, env);
+    expect(res.status).toBe(413);
+    expect(reads).toBe(declared ? 0 : 2);
+    expect(cancelled).toBe(!declared);
   });
 
   test("a good key is probed once, sealed, and announced in the chat, and never appears in clear in the DO, the logs or a reply", async () => {
@@ -356,6 +376,16 @@ describe("a key pasted into the chat", () => {
     ["https://github.com/org/repo/commit/3f9a2c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39", false],
   ])("%s is %s", (text, found) => {
     expect(redactSecrets(text).found).toBe(found);
+  });
+
+  const bareKey = "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE";
+
+  test.each([".", ":", "=", "/", "@"])("redacts a bare key followed by %s", (punctuation) => {
+    expect(redactSecrets(`${bareKey}${punctuation}`)).toEqual({ text: `${KEY_REMOVED}${punctuation}`, found: true });
+  });
+
+  test.each([`${bareKey}.com`, `a.${bareKey}.b`, `https://h/${bareKey}/x`, `${bareKey}/path`])("keeps a host or path intact: %s", (text) => {
+    expect(redactSecrets(text)).toEqual({ text, found: false });
   });
 
   test("a key inside a link is removed and the rest of the link is kept", () => {

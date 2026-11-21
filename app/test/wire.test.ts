@@ -9,12 +9,12 @@ import { PROMPT_FLOOR_BYTES, PROMPT_OVERHEAD_TOKENS, routeFor } from "../src/mod
 
 const Answer = z.object({ answer: z.number() });
 
-type Seen = { url: string; headers: Headers; body: Record<string, unknown> };
+type Seen = { url: string; headers: Headers; body: Record<string, unknown>; redirect: RequestInit["redirect"] };
 
 function fakeFetch(respond: (seen: Seen, n: number) => Response | Promise<Response>): Fetch & { readonly seen: Seen[] } {
   const seen: Seen[] = [];
   const f = async (input: string, init?: RequestInit) => {
-    const s = { url: input, headers: new Headers(init?.headers), body: JSON.parse(String(init?.body ?? "null")) };
+    const s = { url: input, headers: new Headers(init?.headers), body: JSON.parse(String(init?.body ?? "null")), redirect: init?.redirect };
     seen.push(s);
     return respond(s, seen.length);
   };
@@ -210,6 +210,36 @@ describe("meaning of a provider's answer", () => {
   test("a billing error body is read without being kept", async () => {
     const f = fakeFetch(() => Response.json({ error: { message: "Your credit balance is too low" } }, { status: 400 }));
     expect((await runParse(connect(f)(endpoint("anthropic")), ask(), meter())).last).toEqual({ kind: "fault", fault: "payment", retryAfterMs: null });
+  });
+
+  test("a provider redirect faults without forwarding the authenticated request", async () => {
+    const f = fakeFetch(() => new Response(null, { status: 302, headers: { location: "https://redirect.example.test/" } }));
+    const out = await runParse(connect(f)(endpoint("anthropic")), ask(), meter());
+    expect(out.last).toEqual({ kind: "fault", fault: "model", retryAfterMs: null });
+    expect(f.seen).toHaveLength(1);
+    expect(f.seen[0].redirect).toBe("manual");
+    expect(f.seen[0].headers.get("x-api-key")).toBe("sk-test-0123456789");
+  });
+
+  test("an oversized provider response faults and stops reading", async () => {
+    let reads = 0;
+    let cancelled = false;
+    const chunk = new Uint8Array(512 * 1024);
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(chunk);
+        if (++reads === 4) controller.close();
+      },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 });
+    const f = fakeFetch(() => new Response(body));
+    const client = connect(f)(endpoint("anthropic"));
+    const { route, mode, system, user } = ask();
+    const wire = await client.send({ route, mode, system, user, schema: jsonSchemaOf(Answer), repair: null });
+    expect(wire).toEqual({ kind: "provider_fault", reason: "response_too_large" });
+    if (wire.kind !== "reply") expect(classify(wire)).toEqual({ kind: "in_doubt" });
+    expect(reads).toBe(3);
+    expect(cancelled).toBe(true);
   });
 
   test("a Retry-After header in seconds decides between a short wait and a usage window", async () => {

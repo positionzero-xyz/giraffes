@@ -311,7 +311,12 @@ export function loadConfig(env: Env): Config {
   const model = modelConfig(env, devMode);
   const publicUrl = present(env.PUBLIC_URL) ? httpUrl("PUBLIC_URL", env.PUBLIC_URL) : null;
   const line = pair("LINE", env.LINE_CHANNEL_SECRET, env.LINE_CHANNEL_ACCESS_TOKEN, (channelSecret, accessToken) => ({ channelSecret, accessToken }));
-  const telegram = pair("Telegram", env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_WEBHOOK_SECRET, (botToken, webhookSecret) => ({ botToken, webhookSecret }));
+  const telegram = pair("Telegram", env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_WEBHOOK_SECRET, (botToken, webhookSecret) => {
+    if (webhookSecret.length < 32 || /[^A-Za-z0-9_-]/.test(webhookSecret)) {
+      throw new Error("TELEGRAM_WEBHOOK_SECRET must be at least 32 characters from A-Za-z0-9_-");
+    }
+    return { botToken, webhookSecret };
+  });
   return {
     devMode,
     model,

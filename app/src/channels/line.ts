@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { boundedRequestBody } from "../body";
 import { eventKey, parseChoice, personAgentKey, type ChannelEvent, type EpochMs, type InboundEnvelope, type OutboundMessage } from "../domain";
 import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
 
@@ -14,6 +15,7 @@ const REPLY_TOKEN_SAFETY_MS = 10_000;
 /** A reply or push carries at most 5 message objects; each text at most 5,000 characters. */
 const MAX_MESSAGES = 5;
 const MAX_TEXT = 5000;
+const MAX_WEBHOOK_BYTES = 1024 * 1024;
 
 const WebhookBody = z.object({ events: z.array(z.unknown()) });
 const WebhookEvent = z.object({
@@ -93,9 +95,11 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
 
   return {
     async receive(req: Request): Promise<Received> {
-      const raw = await req.arrayBuffer();
       const given = req.headers.get("x-line-signature");
-      if (given === null || !sameSecret(given, await signature(secrets.channelSecret, raw))) return { kind: "rejected", status: 401 };
+      if (given === null) return { kind: "rejected", status: 401 };
+      const raw = await boundedRequestBody(req, MAX_WEBHOOK_BYTES);
+      if (raw === null) return { kind: "rejected", status: 413 };
+      if (!sameSecret(given, await signature(secrets.channelSecret, raw.buffer))) return { kind: "rejected", status: 401 };
 
       let json: unknown;
       try {

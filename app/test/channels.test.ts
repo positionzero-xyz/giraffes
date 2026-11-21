@@ -78,6 +78,10 @@ describe("LINE webhook", () => {
     expect(await line().receive(lineWebhook(LINE_BODY.replace("6pm", "7pm"), LINE_SIGNATURE))).toEqual({ kind: "rejected", status: 401 });
   });
 
+  test("rejects a webhook whose body exceeds one MiB", async () => {
+    expect(await line().receive(lineWebhook(" ".repeat(1024 * 1024 + 1), LINE_SIGNATURE))).toEqual({ kind: "rejected", status: 413 });
+  });
+
   test("without secrets the route doesn't exist", async () => {
     expect(await lineChannel(null).receive(lineWebhook(LINE_BODY, LINE_SIGNATURE))).toEqual({ kind: "rejected", status: 404 });
   });
@@ -302,7 +306,9 @@ describe("Telegram delivery", () => {
     delivery = await telegram().deliver(msg, NOW);
 
     expect(delivery).toEqual({ kind: "sent", via: "push" });
-    expect(accepted.map((s) => [s.url, s.body])).toEqual([["https://api.telegram.org/bot123:abc/sendMessage", { chat_id: "777000111", text: "Done.\n\n(note)" }]]);
+    expect(accepted.map((s) => [s.url, s.body])).toEqual([["https://api.telegram.org/bot123:abc/sendMessage", {
+      chat_id: "777000111", text: "Done.\n\n(note)", link_preview_options: { is_disabled: true },
+    }]]);
   });
 
   test.each(LANGUAGES)("the longest row a turn can produce fits one Telegram message, in %s", (lang) => {
@@ -335,6 +341,7 @@ describe("Telegram delivery", () => {
     expect(seen[0].body).toEqual({
       chat_id: "777000111",
       text: "Done.\n\n(note)",
+      link_preview_options: { is_disabled: true },
       reply_markup: { inline_keyboard: [[{ text: "Accept plan", callback_data: "a:7.1" }]] },
     });
   });

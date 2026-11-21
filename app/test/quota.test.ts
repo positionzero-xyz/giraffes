@@ -5,7 +5,7 @@ import worker from "../src/worker";
 
 const LINE_TOKEN = "line-access-token";
 const LINE_VARS = { LINE_CHANNEL_SECRET: "line-channel-secret", LINE_CHANNEL_ACCESS_TOKEN: LINE_TOKEN };
-const TELEGRAM_VARS = { TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_WEBHOOK_SECRET: "tg-secret" };
+const TELEGRAM_VARS = { TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_WEBHOOK_SECRET: "tg-test-secret-0123456789abcdefghi" };
 
 type FakeLine = { quota: unknown; used: number; readonly alerts: string[]; readonly lineCalls: string[] };
 

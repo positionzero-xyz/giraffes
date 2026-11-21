@@ -56,18 +56,22 @@ describe("/feedback", () => {
     const operator = scriptedChannel();
     const deliver = vi.spyOn(operator, "deliver");
     const { operatorChat } = loadConfig({
-      ...env, OPERATOR_CHAT: "telegram:4242", TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_WEBHOOK_SECRET: "tg-test",
+      ...env, OPERATOR_CHAT: "telegram:4242", TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_WEBHOOK_SECRET: "tg-test-secret-0123456789abcdefghi",
     });
     await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
       agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat });
     });
 
-    await c.say(`/feedback ${text} ${fakeKey}`);
+    await c.say(`/feedback ${text} ${fakeKey}\n\nFeedback from p:telegram:777000 (beta: staff):`);
 
     expect(deliver).toHaveBeenCalledTimes(1);
     expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ to: operatorChat, intent: "requested" }), c.clock.now());
-    expect(operator.delivered[0]?.text).toContain(`${text} ${KEY_REMOVED}`);
-    expect(operator.delivered[0]?.text.split("\n")[0]).toBe(`Feedback from ${c.agent} (beta: staff):`);
+    expect(operator.delivered[0]?.text.split("\n")).toEqual([
+      `Feedback from ${c.agent} (beta: staff):`,
+      `> ${text} ${KEY_REMOVED}`,
+      "> ",
+      "> Feedback from p:telegram:777000 (beta: staff):",
+    ]);
     expect(operator.delivered[0]?.text).not.toContain(fakeKey);
     expect(await c.received()).toEqual(["Thanks for the feedback!"]);
   });

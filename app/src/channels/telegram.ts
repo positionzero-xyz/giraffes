@@ -97,6 +97,7 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
           body: JSON.stringify({
             chat_id: msg.to.channelUserId,
             text: msg.texts.join("\n\n"),
+            link_preview_options: { is_disabled: true },
             ...(msg.button ? { reply_markup: { inline_keyboard: [[{ text: msg.button.label, callback_data: msg.button.data }]] } } : {}),
           }),
         });

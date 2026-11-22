@@ -173,6 +173,8 @@ const isThin = (plan: string) => plan.length < TASKS.minPlanChars || plan.split(
 export type TaskOpRejection = { readonly action: string; readonly reason: TaskRejection | "too_long" };
 
 /** Checks the model's task ops against the open tasks after `taskEffects`, and returns both merged. */
+export const taskOpLabel = (op: TaskOp["op"], ref: string): string => `task_${op}:${ref}`;
+
 export function planTasks(
   ops: readonly TaskOp[],
   view: TaskView,
@@ -180,7 +182,7 @@ export function planTasks(
   after: TaskCommit,
 ): { readonly commit: TaskCommit; readonly rejected: readonly TaskOpRejection[] } {
   const rejected: TaskOpRejection[] = [];
-  const reject = (o: TaskOp, reason: TaskOpRejection["reason"]) => rejected.push({ action: `task_${o.op}:${o.ref}`, reason });
+  const reject = (o: TaskOp, reason: TaskOpRejection["reason"]) => rejected.push({ action: taskOpLabel(o.op, o.ref), reason });
   const finished = finishedBy(after);
   const open = new Set(view.openTasks.filter((t) => !isFinished(finished, t)).map((t) => t.ref));
   const done = new Set(view.openTasks.filter((t) => isFinished(finished, t)).map((t) => t.ref));

@@ -51,6 +51,7 @@ import {
   planTasks,
   purposeOf,
   taskEffects,
+  taskOpLabel,
   taskOf,
   type AcceptReply,
   type TaskCommit,
@@ -134,7 +135,7 @@ function toolSchema(o: z.ZodObject): ObjectSchema {
 
 const TASK_TOOL = "task";
 
-/** The actions an agent session takes as tools, plus one for task ops; sending is its reply text, and quiet is an empty reply. */
+/** The actions an agent session takes as tools; sending is its reply text, and quiet is an empty reply. */
 export const AGENT_TOOLS: readonly AgentTool[] = [
   ...ActionSchema.options.flatMap((o) => {
     const description = AGENT_ACTIONS[o.shape.type.value];
@@ -154,10 +155,7 @@ const AgentCall = z.object({ name: z.string(), input: z.record(z.string(), z.unk
 const RefusedCalls = z.array(AgentCall.extend({ problems: z.array(z.string()) })).optional();
 const AgentReply = z.object({ text: z.string(), calls: z.array(AgentCall), refusedCalls: RefusedCalls });
 
-/**
- * An agent session's reply as a turn output, for the same checks as any other; null when the box sent something else.
- * Its messages are about the task its last task call names.
- */
+/** An agent session's reply as a turn output, for the same checks as any other; null when the box sent something else. */
 export function turnFromAgent(raw: unknown): unknown {
   const reply = AgentReply.safeParse(raw);
   if (!reply.success) return null;
@@ -172,12 +170,11 @@ export function turnFromAgent(raw: unknown): unknown {
   };
 }
 
-/** A refused call's log label, in the form an applied call's rejection would take. */
 function refusedLabel(name: string, input: Record<string, unknown>, key: WakeupKey | null): string {
   if (name === TASK_TOOL) {
     const op = TaskOpSchema.shape.op.safeParse(input.op);
     const ref = typeof input.ref === "string" ? parseTaskRef(input.ref) : null;
-    return op.success && ref !== null ? `task_${op.data}:${ref}` : name;
+    return op.success && ref !== null ? taskOpLabel(op.data, ref) : name;
   }
   return key === null ? name : `${name}:${key}`;
 }

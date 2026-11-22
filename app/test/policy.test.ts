@@ -182,7 +182,11 @@ describe("agent tools", () => {
       ["cancel_wakeup", ["key"]],
       ["remember", ["note"]],
       ["set_locale", ["timeZone", "language"]],
+      ["task", ["op", "ref", "kind", "title", "plan"]],
     ]);
+    const task = AGENT_TOOLS.find((t) => t.name === "task")?.inputSchema;
+    expect(task).toMatchObject({ properties: { op: { enum: ["open", "propose", "close"] }, kind: { enum: ["plan", "booking", "site", "group", "other"] } } });
+    expect(AGENT_TOOLS.filter((t) => "$schema" in t.inputSchema)).toEqual([]);
   });
 });
 

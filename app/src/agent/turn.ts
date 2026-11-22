@@ -10,6 +10,7 @@ import {
   clipBytes,
   intentOf,
   mayspend,
+  parseTaskRef,
   parseWakeupKey,
   type Admission,
   type AgentEvent,
@@ -123,31 +124,62 @@ const AGENT_ACTIONS: Readonly<Partial<Record<z.infer<typeof ActionSchema>["type"
 
 export type AgentTool = { readonly name: string; readonly description: string; readonly inputSchema: JsonSchema };
 
-/** The actions an agent session takes as tools; sending is its reply text, and quiet is an empty reply. */
-export const AGENT_TOOLS: readonly AgentTool[] = ActionSchema.options.flatMap((o) => {
-  const description = AGENT_ACTIONS[o.shape.type.value];
-  if (description === undefined) return [];
-  // Plain JSON Schema, not the strict-mode form the parse routes need: an optional field stays optional for a tool call.
-  const { $schema: _, properties, required, ...rest } = z.toJSONSchema(o) as JsonSchema & { properties: Record<string, unknown>; required: string[] };
-  const { type: __, ...fields } = properties;
-  return [{ name: o.shape.type.value, description, inputSchema: { ...rest, properties: fields, required: required.filter((k) => k !== "type") } }];
-});
+type ObjectSchema = JsonSchema & { readonly properties: Record<string, unknown>; readonly required: readonly string[] };
+
+// Plain JSON Schema, not the strict-mode form the parse routes need: an optional field stays optional for a tool call.
+function toolSchema(o: z.ZodObject): ObjectSchema {
+  const { $schema: _, ...schema } = z.toJSONSchema(o) as ObjectSchema;
+  return schema;
+}
+
+const TASK_TOOL = "task";
+
+/** The actions an agent session takes as tools, plus one for task ops; sending is its reply text, and quiet is an empty reply. */
+export const AGENT_TOOLS: readonly AgentTool[] = [
+  ...ActionSchema.options.flatMap((o) => {
+    const description = AGENT_ACTIONS[o.shape.type.value];
+    if (description === undefined) return [];
+    const { properties, required, ...rest } = toolSchema(o);
+    const { type: _, ...fields } = properties;
+    return [{ name: o.shape.type.value, description, inputSchema: { ...rest, properties: fields, required: required.filter((k) => k !== "type") } }];
+  }),
+  {
+    name: TASK_TOOL,
+    description: "Open a task, propose its whole plan, or close one the person dropped. Opening a task that is already open only marks your reply as about it.",
+    inputSchema: toolSchema(TaskOpSchema),
+  },
+];
 
 const AgentCall = z.object({ name: z.string(), input: z.record(z.string(), z.unknown()) });
 const RefusedCalls = z.array(AgentCall.extend({ problems: z.array(z.string()) })).optional();
 const AgentReply = z.object({ text: z.string(), calls: z.array(AgentCall), refusedCalls: RefusedCalls });
 
-/** An agent session's reply as a turn output, for the same checks as any other; null when the box sent something else. */
+/**
+ * An agent session's reply as a turn output, for the same checks as any other; null when the box sent something else.
+ * Its messages are about the task its last task call names.
+ */
 export function turnFromAgent(raw: unknown): unknown {
   const reply = AgentReply.safeParse(raw);
   if (!reply.success) return null;
   const text = reply.data.text.trim();
+  const tasks = reply.data.calls.filter((c) => c.name === TASK_TOOL).map((c) => c.input);
+  const about = tasks.at(-1)?.ref;
   return {
-    actions: [...reply.data.calls.map((c) => ({ ...c.input, type: c.name })), text ? { type: "send", text } : { type: "quiet" }],
+    actions: [...reply.data.calls.filter((c) => c.name !== TASK_TOOL).map((c) => ({ ...c.input, type: c.name })), text ? { type: "send", text } : { type: "quiet" }],
     refusedCalls: reply.data.refusedCalls,
-    tasks: [],
-    about: "",
+    tasks,
+    about: typeof about === "string" ? about : "",
   };
+}
+
+/** A refused call's log label, in the form an applied call's rejection would take. */
+function refusedLabel(name: string, input: Record<string, unknown>, key: WakeupKey | null): string {
+  if (name === TASK_TOOL) {
+    const op = TaskOpSchema.shape.op.safeParse(input.op);
+    const ref = typeof input.ref === "string" ? parseTaskRef(input.ref) : null;
+    return op.success && ref !== null ? `task_${op.data}:${ref}` : name;
+  }
+  return key === null ? name : `${name}:${key}`;
 }
 
 export const TurnOutputSchema = z.object({
@@ -547,7 +579,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
     const key = (isSchedule || name === "cancel_wakeup") && typeof input.key === "string" ? parseWakeupKey(input.key) : null;
     const asked = isSchedule && input.asked === true;
     const replacement = key !== null && adds.has(key);
-    reject(key === null ? name : `${name}:${key}`, "tool_refused", asked && !replacement);
+    reject(refusedLabel(name, input, key), "tool_refused", asked && !replacement);
     if (asked && replacement) notices.add(t.reminderAttemptFailed);
     if (isSchedule) keepCancelled(key, asked);
   }

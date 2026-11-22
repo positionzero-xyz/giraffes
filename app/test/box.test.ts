@@ -755,7 +755,7 @@ describe("connecting a Claude plan", () => {
       {
         authorization: `Bearer ${await boxToken(BOX_SECRET, await box.nameOf("fin"))}`,
         user: expect.stringContaining("Person: hello"),
-        agent: { append: expect.stringContaining("You are Giraffe"), tools: ["schedule_wakeup", "cancel_wakeup", "remember", "set_locale"] },
+        agent: { append: expect.stringContaining("You are Giraffe"), tools: ["schedule_wakeup", "cancel_wakeup", "remember", "set_locale", "task"] },
       },
     ]);
     expect(model.calls).toHaveLength(0);

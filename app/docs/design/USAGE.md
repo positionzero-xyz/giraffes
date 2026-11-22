@@ -115,7 +115,7 @@ With `BOX_HOST` set to `fly` or `static`, the person sends `/claude`. `BOX.md` h
 1. The message is claimed as a batch of its own and never reaches the model. With no box, the agent claims a slot in D1's `boxes`, inserts the `box` row in `provisioning`, and replies that it is setting up. Past `MAX_BOXES` it says it can't connect another plan.
 2. The drain's box phase runs the host's `ensure` (Fly app, IPs, volume, machine) and then `GET /health` with the box token. When the box answers, the row becomes `signed_out` and the outbox gets `https://<box>/signin#t=<ticket>`, valid for 30 minutes.
 3. The drain polls `/health` every 30 s for 30 minutes. When `signedIn` turns true, the row becomes `signed_in` and the person is told.
-4. From then on, while the plan includes the box, `ModelAccess` sends each turn and compaction to the box's `/parse` first. No spend is reserved, and `model_call` logs it with `backend = 'box'` and cost 0. A box that can't answer falls back to the person's own key only if they said yes when asked.
+4. From then on, while the plan includes the box, `ModelAccess` sends each turn, check-ins and the agent's own wake-ups included, to the box's `/agent` first, and compaction to its `/parse`. No spend is reserved, and `model_call` logs it with `backend = 'box'` and cost 0. A box that can't answer falls back to the person's own key only if they said yes when asked.
 
 ```ts
 test("a signed-in person's turn runs on their box with their token, reserves no spend, and is logged as backend 'box'", async () => {

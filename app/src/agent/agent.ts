@@ -92,7 +92,6 @@ import {
 import {
   bypassModel,
   logsForTurn,
-  ownTurn,
   planTurn,
   planWithoutModel,
   renderUser,
@@ -566,7 +565,7 @@ export class Agent extends DurableObject<Env> {
     }
 
     const shown = await this.#historyThatFits(batch, a, view, plan);
-    const served = await this.#access().call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan, own: ownTurn(batch) });
+    const served = await this.#access().call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan });
     const historyTrimmed = shown.historyLeftOut > 0 || ((served.kind === "ok" || served.kind === "failed") && served.trimmed);
     switch (served.kind) {
       case "ok":

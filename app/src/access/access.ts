@@ -141,8 +141,6 @@ export type CallRequest<P extends Purpose> = {
   readonly system: string;
   readonly prompt: PromptParts;
   readonly plan: Plan;
-  /** A turn the person started: their own message, or a reminder or routine they asked for. Only these run on their Claude plan. */
-  readonly own?: boolean;
 };
 
 type Next = {
@@ -338,7 +336,6 @@ export class ModelAccess {
 
   /** A turn as the person's own Claude Code session; its tool calls and reply become a turn output for the usual checks. */
   async #boxAgent(req: CallRequest<"turn">): Promise<LaneResult<"turn">> {
-    if (req.own !== true) return { kind: "next" };
     const route = routeFor({ kind: "box", provider: "claude" }, "turn");
     const fitted = this.#fit(route, "strict", { ...req, prompt: { sections: req.prompt.sections.filter((s) => !s.history) } });
     if (fitted === null) return { kind: "next", tooLong: true };

@@ -797,9 +797,3 @@ export function logsForTurn(input: {
   }
   return rows;
 }
-
-/** The person started it: something they sent, or only reminders and routines they asked for. Check-ins and the agent's own follow-ups don't count. */
-export function ownTurn(batch: Batch): boolean {
-  const sent = batch.items.some((i) => i.event.kind !== "wakeup" && i.event.kind !== "checkin");
-  return sent || batch.items.every((i) => i.event.kind === "wakeup" && i.event.origin === "person");
-}

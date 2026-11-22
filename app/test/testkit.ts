@@ -369,6 +369,8 @@ export const throws = (): ScriptStep => ({ kind: "throw" });
 export const hold = (then: ScriptStep): ScriptStep => ({ kind: "hold", then });
 export const chat = (text: string): ScriptStep => turn({ actions: [send(text)] });
 
+/** The box client reads a thrown fetch as unavailable and the turn retries quietly, so setup fails the test from this list instead. */
+export const UNSCRIPTED_BOX_TURNS: string[] = [];
 export const BOX_SECRET = "test-secret-0123456789abcdef";
 
 export type HostStep = "ok" | "die" | { readonly retryable: boolean; readonly detail: string };
@@ -467,7 +469,10 @@ export function fakeBox(
       const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; append?: string; tools?: { name: string }[] };
       box.parses.push({ authorization, user: (agent ? body.turn : body.user) ?? "", agent: agent ? { append: body.append ?? "", tools: (body.tools ?? []).map((t) => t.name) } : null });
       const step = box.replies.shift();
-      if (!step) throw new Error("the box got a turn the test didn't script");
+      if (!step) {
+        UNSCRIPTED_BOX_TURNS.push((agent ? body.turn : body.user)?.slice(-120) ?? "");
+        throw new Error("the box got a turn the test didn't script");
+      }
       switch (step.kind) {
         case "signed_out":
           return Response.json({ error: "signed_out" }, { status: 409 });

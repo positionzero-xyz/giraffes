@@ -20,6 +20,8 @@ import {
   giveKey,
   local,
   memoryLedger,
+  openTask,
+  propose,
   stripeChange,
   quiet,
   schedule,
@@ -33,6 +35,9 @@ import {
 
 const NOTICE = NOTICES.en;
 const say = (s: BoxSay) => boxMessage(s, "en", null).text;
+const TRIP = "chiang-mai-trip";
+const TITLE = "Chiang Mai long weekend";
+const PLAN = "Fri 18:30 overnight train from Bangkok\nSat Doi Suthep at 7 before the heat, Nimman cafes after\nSun 16:00 flight back";
 const LINK = /^https:\/\/([a-z0-9-]+)\.box\.test\/signin#t=(\d+)\.([A-Za-z0-9_-]+)$/m;
 
 describe("names and secrets", () => {
@@ -435,7 +440,7 @@ describe("a turn on the person's own Claude Code session", () => {
     const s = await c.snapshot();
     expect(s.pendingWakeups.filter((w) => w.kind === "reminder").map((w) => [w.key, w.origin])).toEqual([["call-clinic", "person"]]);
     expect(s.memoryNotes).toEqual(["Allergic to peanuts."]);
-    expect(box.parses[0].agent?.tools).toEqual(["schedule_wakeup", "cancel_wakeup", "remember", "set_locale"]);
+    expect(box.parses[0].agent?.tools).toEqual(["schedule_wakeup", "cancel_wakeup", "remember", "set_locale", "task"]);
   });
 
   test("a refused box reminder is corrected in the same reply and every refusal is logged", async () => {
@@ -509,21 +514,107 @@ describe("a turn on the person's own Claude Code session", () => {
     expect(second).not.toContain("Hi!");
   });
 
-  test("only turns the person started run on their plan: a reminder they asked for does, the daily check-in doesn't", async () => {
+  test("every turn runs on their plan: a reminder they asked for, and a daily check-in with nothing to say sends nothing", async () => {
     const { box, c } = await signedIn("own", "2099-11-04T08:00");
     box.replies.push({ kind: "reply", step: turn({ actions: [schedule("stretch", "2099-11-04T08:30", "Stretch"), send("At 8:30.")] }) });
     await c.say("remind me at 8:30 to stretch");
-    box.replies.push({ kind: "reply", step: chat("Time to stretch!") });
+    box.replies.push({ kind: "reply", step: chat("Time to stretch!") }, { kind: "reply", step: turn({ actions: [quiet()] }) });
 
     await c.advanceTo("2099-11-04T09:05");
 
     expect(box.parses.map((p) => p.user.split("\n").find((l) => l.startsWith("Your wake-up") || l.startsWith("Person:") || l.startsWith("Daily")))).toEqual([
       "Person: remind me at 8:30 to stretch",
       expect.stringContaining('Your wake-up "stretch" fired'),
+      "Daily check-in.",
     ]);
     expect(await c.received()).toEqual(["At 8:30.", "Time to stretch!"]);
-    expect(c.logs("turn").filter((r) => r.eventKind === "checkin")).toHaveLength(1);
+    expect(c.logs("turn").filter((r) => r.eventKind === "checkin").map((r) => r.outcome)).toEqual(["quiet"]);
     expect(box.replies).toEqual([]);
+  });
+
+  test("a person with only their Claude plan gets their daily check-in from the box", async () => {
+    const { box, c } = await signedIn("checkin", "2099-11-04T08:00");
+    box.replies.push({ kind: "reply", step: chat("Morning! Want me to plan the long weekend?") });
+
+    await c.advanceTo("2099-11-04T09:05");
+
+    expect(await c.received()).toEqual(["Morning! Want me to plan the long weekend?"]);
+    expect(box.parses.at(-1)?.user).toContain("Daily check-in.");
+    expect(c.logs("model_call").map((r) => [r.backend, r.costMicro])).toEqual([["box", 0]]);
+    expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "unlinked"]]);
+  });
+
+  test("a follow-up the agent scheduled for itself runs on the box", async () => {
+    const { box, c } = await signedIn("follow-up");
+    box.replies.push({
+      kind: "reply",
+      step: turn({ actions: [schedule("ask-flight", "2099-11-04T15:00", "Ask whether the flight got booked", false), send("Good luck with the booking!")] }),
+    });
+    await c.say("I'm booking my flight this afternoon");
+    box.replies.push({ kind: "reply", step: chat("Did the flight booking work out?") });
+
+    await c.advanceTo("2099-11-04T15:05");
+
+    expect(await c.received()).toEqual(["Good luck with the booking!", "Did the flight booking work out?"]);
+    expect(box.parses.at(-1)?.user).toContain('Your wake-up "ask-flight" fired');
+    expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "unlinked"]]);
+  });
+
+  test("a box check-in that proposes a plan sends it under Accept, and the tap completes the task", async () => {
+    const { box, c } = await signedIn("plan", "2099-11-04T08:00");
+    box.replies.push({ kind: "reply", step: turn({ actions: [send("Morning! The long weekend is close, so I sketched a trip.")], tasks: [propose(TRIP, TITLE, PLAN)] }) });
+
+    await c.advanceTo("2099-11-04T09:00");
+
+    expect(c.channel.delivered.at(-1)).toMatchObject({
+      text: `Morning! The long weekend is close, so I sketched a trip.\n${PLAN}`,
+      button: { label: NOTICE.acceptButton, data: "a:1.1" },
+    });
+    await c.received();
+    box.replies.push({ kind: "reply", step: chat("Great, I'll remind you on Friday.") });
+
+    await c.tap("a:1.1");
+
+    expect(await c.received()).toEqual([`Great, I'll remind you on Friday.\n${NOTICE.planAccepted(TITLE)}`]);
+    expect(box.parses.at(-1)?.user).toContain("The person tapped Accept on plan 1.1.");
+    const [task] = (await c.snapshot()).tasks;
+    expect(task).toMatchObject({ ref: TRIP, kind: "plan", title: TITLE, status: "completed" });
+    expect(task.facts.map((f) => [f.kind, f.completes, f.personDecision])).toEqual([
+      ["opened", false, false],
+      ["proposed", false, false],
+      ["plan_accepted", true, true],
+    ]);
+    expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "task_followup"]]);
+  });
+
+  test("a box check-in that names an open task is a follow-up on it and changes nothing else", async () => {
+    const { box, c } = await signedIn("about", "2099-11-04T08:00");
+    box.replies.push({ kind: "reply", step: turn({ actions: [send("Noted, a weekend in Chiang Mai.")], tasks: [openTask(TRIP, TITLE, "plan")] }) });
+    await c.say("I want a long weekend in Chiang Mai");
+    box.replies.push({ kind: "reply", step: turn({ actions: [send("Still thinking about Chiang Mai? Trains sell out early.")], tasks: [openTask(TRIP, TITLE, "plan")] }) });
+
+    await c.advanceTo("2099-11-04T09:05");
+
+    expect(await c.received()).toEqual(["Noted, a weekend in Chiang Mai.", "Still thinking about Chiang Mai? Trains sell out early."]);
+    const [task] = (await c.snapshot()).tasks;
+    expect([task.status, task.facts.map((f) => f.kind)]).toEqual(["open", ["opened"]]);
+    expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "task_followup"]]);
+  });
+
+  test("a refused box task call is logged like a refused action, and no plan goes out", async () => {
+    const { box, c } = await signedIn("refused-task");
+    box.replies.push({
+      kind: "reply",
+      step: chat("I'll sketch a plan for you."),
+      refusedCalls: [{ name: "task", input: { op: "propose", ref: TRIP, kind: "plan", title: TITLE }, problems: ["missing plan"] }],
+    });
+
+    await c.say("plan me a weekend in Chiang Mai");
+
+    expect(await c.received()).toEqual(["I'll sketch a plan for you."]);
+    expect(c.channel.delivered.at(-1)).not.toHaveProperty("button");
+    expect((await c.snapshot()).tasks).toEqual([]);
+    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([[`task_propose:${TRIP}`, "tool_refused"]]);
   });
 });
 

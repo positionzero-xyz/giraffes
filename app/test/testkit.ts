@@ -476,9 +476,12 @@ export function fakeBox(
         case "reply": {
           if (step.step.kind !== "output") throw new Error("a box reply must be an output step");
           if (!agent) return Response.json({ structured: step.step.value, usage: { input_tokens: 900, output_tokens: 90 }, stop: "end" });
-          const actions = (step.step.value as { actions: { type: string; text?: string }[] }).actions;
+          const { actions, tasks } = step.step.value as { actions: { type: string; text?: string }[]; tasks: Record<string, unknown>[] };
           const text = actions.flatMap((a) => (a.type === "send" ? [a.text ?? ""] : [])).join("\n\n");
-          const calls = actions.filter((a) => a.type !== "send" && a.type !== "quiet").map(({ type, ...input }) => ({ name: type, input }));
+          const calls = [
+            ...actions.filter((a) => a.type !== "send" && a.type !== "quiet").map(({ type, ...input }) => ({ name: type, input })),
+            ...tasks.map((input) => ({ name: "task", input })),
+          ];
           return Response.json({ text, calls, refusedCalls: step.refusedCalls, usage: { input_tokens: 900, output_tokens: 90 }, stop: "end" });
         }
       }

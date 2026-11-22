@@ -109,7 +109,7 @@ function fakeFly(org = "giraffes") {
   const volumes = new Map<string, { id: string; name: string; state: string; auto_backup_enabled: boolean }[]>();
   const machines = new Map<string, { id: string; config: Record<string, unknown> }[]>();
   const requests: FlyRequest[] = [];
-  const failures: { method: string; path: string; status: number }[] = [];
+  const failures: { method: string; path: string; status: number; body?: unknown }[] = [];
   let n = 0;
   const fetch: Fetch = async (input, init) => {
     const url = new URL(input);
@@ -118,10 +118,13 @@ function fakeFly(org = "giraffes") {
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     requests.push({ method, path, body, authorization: new Headers(init?.headers).get("authorization") });
     const failure = failures.findIndex((f) => f.method === method && f.path === path);
-    if (failure >= 0) return new Response("boom", { status: failures.splice(failure, 1)[0].status });
+    if (failure >= 0) {
+      const f = failures.splice(failure, 1)[0];
+      return f.body === undefined ? new Response("boom", { status: f.status }) : Response.json(f.body, { status: f.status });
+    }
     const [, app, sub, id] = url.pathname.match(/^\/v1\/apps(?:\/([^/]+))?(?:\/(\w+))?(?:\/([^/]+))?$/) ?? [];
     if (!app && method === "POST") {
-      if (apps.has(body.app_name)) return Response.json({ error: "Validation failed: Name has already been taken" }, { status: 422 });
+      if (apps.has(body.app_name)) return Response.json({ error: "Validation failed: Name has already been taken", status: "name_taken" }, { status: 422 });
       apps.set(body.app_name, body.org_slug);
       return Response.json({ id: `app${++n}`, created_at: 1 }, { status: 201 });
     }
@@ -334,6 +337,17 @@ describe("fly host", () => {
     fly.apps.set(app, "someone-else");
     expect(await host.ensure(app, token)).toMatchObject({ ok: false, retryable: false });
     expect(fly.machines.get(app)).toBeUndefined();
+  });
+
+  test("a name Fly refuses for another reason fails with Fly's words, not as a name owned elsewhere", async () => {
+    const fly = fakeFly();
+    const host = flyHost(flyConfig, fly.fetch);
+    const refusal = "Name blocked by abuse filter. verify is a common phishing target";
+    fly.failures.push({ method: "POST", path: "/apps", status: 422, body: { error: refusal } });
+    const result = await host.ensure(app, token);
+    expect(result).toMatchObject({ ok: false, retryable: false });
+    expect(result.ok === false && result.detail).toContain(refusal);
+    expect(fly.requests.filter((r) => r.method === "GET" && r.path === `/apps/${app}`)).toHaveLength(0);
   });
 
   test("a Fly call that hangs before answering or while sending its body times out as retryable", async () => {

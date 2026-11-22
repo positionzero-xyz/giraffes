@@ -19,6 +19,7 @@ export type FlyConfig = {
 export type FlyStep = "app" | "ip shared_v4" | "ip v6" | "volume" | "machine";
 export type StepLog = (step: FlyStep, outcome: "created" | "exists" | "updated") => void;
 
+const NameTaken = z.object({ status: z.literal("name_taken") });
 const AppReply = z.object({ organization: z.object({ slug: z.string() }).nullish() });
 const IpsReply = z.object({ ips: z.array(z.object({ ip: z.string(), shared: z.boolean().nullish(), egress: z.boolean().nullish() })).nullable() });
 export const FlyVolumesReply = z.array(z.object({ id: z.string(), name: z.string(), state: z.string(), auto_backup_enabled: z.boolean().optional() }));
@@ -116,7 +117,8 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       log("app", "created");
       return HOST_OK;
     }
-    if (!exists(created.status)) return fail(false, `POST /apps: ${created.status} ${JSON.stringify(created.body).slice(0, 200)}`);
+    const taken = created.status === 409 || (created.status === 422 && NameTaken.safeParse(created.body).success);
+    if (!taken) return fail(false, `POST /apps: ${created.status} ${JSON.stringify(created.body).slice(0, 200)}`);
     const got = await call("GET", `/apps/${name}`);
     if (!got.ok) return got;
     const owner = read(got, AppReply, `GET /apps/${name}`);

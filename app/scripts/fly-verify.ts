@@ -34,7 +34,7 @@ const cfg: FlyConfig = {
 
 const started = Date.now();
 const elapsed = () => `${((Date.now() - started) / 1000).toFixed(1)}s`;
-const name = `${cfg.appPrefix}verify-${started.toString(36)}` as BoxName;
+const name = `${cfg.appPrefix}check-${started.toString(36)}` as BoxName;
 const changed: string[] = [];
 const host = flyHost(cfg, fetch, (step, outcome) => {
   console.log(`[${elapsed()}] ${step}: ${outcome}`);

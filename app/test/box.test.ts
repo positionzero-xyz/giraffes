@@ -584,6 +584,9 @@ describe("a turn on the person's own Claude Code session", () => {
       ["proposed", false, false],
       ["plan_accepted", true, true],
     ]);
+    expect(c.logs("task_fact").filter((f) => f.completes).map((f) => [f.kind, f.causeKind, JSON.parse(f.detail)])).toEqual([
+      ["plan_accepted", "choice", { via: "tap", version: 1 }],
+    ]);
     expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "task_followup"]]);
   });
 

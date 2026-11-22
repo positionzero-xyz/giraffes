@@ -215,7 +215,7 @@ const en: Notices = {
     still_setting_up: () => "Your Claude connection is still being set up. I'll send the sign-in link when it's ready.",
     link: (link) => `Sign in to Claude here to connect your plan. The link works for 30 minutes.\n${link}`,
     signed_out_link: (link) =>
-      `Your Claude plan is signed out, so I can't answer until you sign in again. Sign in here, then send your message again. The link works for 30 minutes.\n${link}`,
+      `Your Claude plan is signed out, so I can't answer until you sign in again. Sign in here. If you sent me something, send it again after you sign in. The link works for 30 minutes.\n${link}`,
     signed_out_backup: (link) =>
       `Your Claude plan is signed out, so your backup key answers for now. Sign in again here. The link works for 30 minutes.\n${link}`,
     connected: () => "Your Claude plan is connected. Your messages now use your Claude plan.",
@@ -397,7 +397,7 @@ const th: Notices = {
     still_setting_up: () => "ยังตั้งค่าการเชื่อม Claude อยู่ค่ะ พร้อมเมื่อไหร่จะส่งลิงก์เข้าสู่ระบบให้",
     link: (link) => `เข้าสู่ระบบ Claude ที่ลิงก์นี้เพื่อเชื่อมแพ็กเกจได้เลยค่ะ ลิงก์ใช้ได้ 30 นาที\n${link}`,
     signed_out_link: (link) =>
-      `แพ็กเกจ Claude ออกจากระบบอยู่ เลยยังตอบไม่ได้จนกว่าจะเข้าสู่ระบบอีกครั้งค่ะ เข้าสู่ระบบได้ที่ลิงก์นี้ แล้วส่งข้อความมาอีกครั้งนะคะ ลิงก์ใช้ได้ 30 นาที\n${link}`,
+      `แพ็กเกจ Claude ออกจากระบบอยู่ เลยยังตอบไม่ได้จนกว่าจะเข้าสู่ระบบอีกครั้งค่ะ เข้าสู่ระบบได้ที่ลิงก์นี้ ถ้าส่งอะไรมา รบกวนส่งอีกครั้งหลังเข้าสู่ระบบนะคะ ลิงก์ใช้ได้ 30 นาที\n${link}`,
     signed_out_backup: (link) =>
       `แพ็กเกจ Claude ออกจากระบบอยู่ ตอนนี้เลยใช้คีย์สำรองของคุณตอบไปก่อนค่ะ เข้าสู่ระบบอีกครั้งได้ที่ลิงก์นี้ ใช้ได้ 30 นาที\n${link}`,
     connected: () => "เชื่อมแพ็กเกจ Claude แล้วค่ะ จากนี้ข้อความจะใช้แพ็กเกจ Claude ของคุณ",

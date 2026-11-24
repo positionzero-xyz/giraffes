@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="th">
+<head><meta charset="utf-8"><title>จองคิวนวด</title></head>
+<body>
+<h1>จองคิวนวด</h1>
+<form id="f">
+  <label>ชื่อ <input name="name" required></label>
+  <label>เบอร์โทร <input name="phone" type="tel"></label>
+  <label>วันที่ <input name="date" type="date"></label>
+  <label>เวลา <input name="time" type="time"></label>
+  <button type="submit">จองคิว</button>
+</form>
+<p id="done"></p>
+<script>
+  document.getElementById("f").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const all = JSON.parse(localStorage.getItem("bookings") || "[]");
+    all.push(Object.fromEntries(new FormData(e.target)));
+    localStorage.setItem("bookings", JSON.stringify(all));
+    document.getElementById("done").textContent = "จองแล้ว";
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="th">
+<head><meta charset="utf-8"><title>รายจ่าย</title></head>
+<body>
+<div>
+  <input id="what" placeholder="รายการ">
+  <input id="amount" type="number" placeholder="บาท">
+  <button onclick="add()">เพิ่ม</button>
+</div>
+<ul id="list"></ul>
+<p>รวม <span id="total">0</span> บาท</p>
+<script>
+  const load = () => JSON.parse(localStorage.getItem("expenses") || "[]");
+  function draw() {
+    const items = load();
+    document.getElementById("list").innerHTML = items.map((i) => `<li>${i.what} ${i.amount}</li>`).join("");
+    document.getElementById("total").textContent = items.reduce((s, i) => s + i.amount, 0);
+  }
+  function add() {
+    const items = load();
+    items.push({ what: document.getElementById("what").value, amount: Number(document.getElementById("amount").value) });
+    localStorage.setItem("expenses", JSON.stringify(items));
+    draw();
+  }
+  draw();
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="th">
+<head><meta charset="utf-8"><title>รายจ่าย</title></head>
+<body>
+<input id="what" placeholder="รายการ">
+<button id="add">เพิ่ม</button>
+<ul id="list"></ul>
+<script>
+  document.getElementById("add").addEventListener("click", () => {
+    const li = document.createElement("li");
+    li.textContent = document.getElementById("what").value;
+    document.getElementById("list").append(li);
+  });
+</script>
+</body>
+</html>

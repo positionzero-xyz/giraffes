@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts bench/model-eval/test/*.test.ts",
+    "eval": "node bench/model-eval/eval.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "2.1.316"

@@ -98,4 +98,9 @@ describe("the calibration trio against the deterministic checks", () => {
     assert.equal(passes(CALIBRATION.flat), true);
   });
   it("the bad draft gets facts wrong", () => assert.equal(passes(CALIBRATION.bad), false));
+  it("buy one get one passes however the free cup is phrased", () => {
+    const rest = "บ้านดอยคอฟฟี่ ลาเต้เย็น ปกติแก้วละ 65 บาท 1–7 ธันวาคม เฉพาะหน้าร้าน สาขานิมมาน";
+    for (const deal of ["ซื้อ 1 แถม 1", "ซื้อลาเต้เย็น 1 แก้ว (ปกติแก้วละ 65 บาท) แถมอีก 1 แก้ว!", "ซื้อ 1 แก้ว ได้ฟรีอีก 1 แก้ว"]) assert.equal(passes(`${deal} ${rest}`), true, deal);
+    assert.equal(passes(`ลด 10% ${rest}`), false);
+  });
 });

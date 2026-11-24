@@ -129,7 +129,7 @@ export const CASES: readonly Case[] = [
           kind: "facts",
           facts: [
             p("shop name", "บ้านดอยคอฟฟี่"),
-            p("buy one get one", "1แถม1", "ซื้อ1แถม1", "1แก้วแถม1"),
+            p("buy one get one", "1แถม1", "1แก้วแถม1", "แถมอีก1", "ฟรีอีก1", "ฟรี1แก้ว"),
             p("price 65", "65"),
             p("1 to 7 December", "1-7ธ", "1ถึง7ธ", "1ธ.ค.-7ธ.ค", "1ธันวาคม-7ธันวาคม", "1-7ธันวา"),
             p("in store only", "หน้าร้าน"),

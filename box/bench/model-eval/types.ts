@@ -61,7 +61,7 @@ export type Case = {
   readonly make: (now: Wall) => { readonly message: string; readonly checks: readonly Check[] };
 };
 
-export type RunStatus = "ok" | "timeout" | "claude_failed" | "signed_out" | "invalid_output";
+export type RunStatus = "ok" | "timeout" | "claude_failed" | "signed_out" | "invalid_output" | "harness_error";
 
 export type Tap = { readonly firstTextMs: number | null; readonly wallMs: number; readonly killed: boolean; readonly costUsd: number | null; readonly models: readonly string[] };
 

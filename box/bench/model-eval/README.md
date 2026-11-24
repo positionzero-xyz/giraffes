@@ -4,12 +4,14 @@ This harness measures how well a model and effort level do Giraffe's own jobs in
 
 ## Shapes
 
-| Shape | Path | What is graded |
-| --- | --- | --- |
-| `chat` | Product: the box's `agentTurn` with the Worker's appended prompt, tools and turn prompt | Thai reply, no internal jargon, answers the question, fits the 600-character reply, the Worker accepts it. A judge scores helpfulness and natural Thai. |
-| `reminder` | Product, as above, then the Worker's `planTurn` | The reminder's local time (and repeat) equals the expected value. A vague time passes only if the reply asks back or names the time it picked. |
-| `draft` | Planned: the same turn path, graded on the full reply before the Worker's 600-character cut | Every given fact present, mostly Thai, length in range. A judge scores natural Thai, persuasion and fit to the channel. |
-| `build` | Planned: `claude -p` in an empty temp folder with only Read, Write and Edit, 300 s limit | `index.html` exists and is whole, holds the required items, loads in headless Chrome or Edge with no errors, and for the two interactive cases keeps an entry after a reload. A judge scores whether the owner would use it. |
+| Shape | Cases | Runs through | Deterministic checks (`checks.ts`) | Judged |
+| --- | --- | --- | --- | --- |
+| `chat` | 4 | `agentTurn`, fed what `#boxAgent` sends, then `planTurn` | `thai`, `no_jargon`, `mentions`, `fits_reply`, `worker_accepts` | yes |
+| `reminder` | 6 | the same, with "now" at 10:00 Bangkok | `due_at` (with `repeat`), or `asks_or_assumes` for a vague time, plus the chat checks except `mentions` | no |
+| `draft` | 4 | the same turn; the checks read the full reply, and `overReplyCap` records whether the Worker would cut it | `thai`, `length`, `facts` | yes |
+| `build` | 3 | a separate `claude -p` in an empty folder, file tools only | `file`, `html_complete`, `page_has`, `loads_clean`, and `persists` for the two interactive pages | yes |
+
+Chat and reminder are the product path. Draft and build are a planned contract: the product doesn't ship them yet.
 
 "Now" is today at 10:00 Asia/Bangkok, because the CLI also puts the machine's date in its system prompt. `--now` pins it, and every record whose date differs from the machine's is flagged.
 

@@ -302,8 +302,13 @@ async function main() {
         const safe = id.replace(/[^\w.-]+/g, "_");
         const tapFile = join(runDir, "taps", `${safe}.jsonl`);
         const { message, checks } = k.make(now);
-        const machineDate = new Date().toLocaleDateString("en-CA", { timeZone: TZ });
-        const out = k.shape === "build" ? await buildTurn(cli, chrome, c, message, checks, tapFile, join(runDir, "builds", safe)) : await productTurn(cli, c, message, now, tapFile);
+        const machineDate = new Date().toLocaleDateString("en-CA");
+        const out = await (k.shape === "build" ? buildTurn(cli, chrome, c, message, checks, tapFile, join(runDir, "builds", safe)) : productTurn(cli, c, message, now, tapFile)).catch(
+          (err: unknown): Outcome => {
+            console.error(`${id} harness error: ${String(err)}`);
+            return { status: "harness_error", observation: NO_OBSERVATION, calls: [], refusedCalls: [], usage: null, costUsd: readTap(tapFile)?.costUsd ?? null, tap: readTap(tapFile), buildDir: null };
+          },
+        );
         const record: RunRecord = {
           id,
           candidate: label(c),

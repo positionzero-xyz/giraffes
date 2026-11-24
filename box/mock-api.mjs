@@ -110,7 +110,7 @@ http.createServer((req, res) => {
     const out = path === "/v1/messages" && body.stream ? reply(body) : null;
     appendFileSync(LOG, JSON.stringify({
       t, n, path, bytes: Buffer.byteLength(raw), systemChars: system.length, toolsChars: JSON.stringify(body.tools ?? []).length,
-      tools: (body.tools ?? []).map((x) => x.name), messages: (body.messages ?? []).length, model: body.model, stream: body.stream,
+      tools: (body.tools ?? []).map((x) => x.name), messages: (body.messages ?? []).length, model: body.model, effort: body.output_config?.effort, stream: body.stream,
       ...(out?.answered ? { answered: out.answered } : {}),
     }) + "\n");
     if (out) return sse(res, out.events);

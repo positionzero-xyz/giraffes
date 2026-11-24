@@ -147,8 +147,10 @@ export async function parseTurn(cli: Cli, req: ParseRequest, signal?: AbortSigna
 }
 
 export type AgentTool = { readonly name: string; readonly description: string; readonly inputSchema: Json };
-/** `append` follows Claude Code's own system prompt; `turn` is the context and the new message for this turn. */
-export type AgentRequest = { readonly model: string; readonly append: string; readonly turn: string; readonly tools: readonly AgentTool[] };
+export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type Effort = (typeof EFFORTS)[number];
+/** `append` follows Claude Code's own system prompt; `turn` is the context and the new message for this turn. Without `effort` the CLI picks its own. */
+export type AgentRequest = { readonly model: string; readonly append: string; readonly turn: string; readonly tools: readonly AgentTool[]; readonly effort?: Effort };
 export type AgentCall = { readonly name: string; readonly input: Json };
 type ToolCalls = { readonly calls: AgentCall[]; readonly refusedCalls: (AgentCall & { readonly problems: string[] })[] };
 export type AgentReply =
@@ -164,14 +166,15 @@ const MCP_SERVER = fileURLToPath(new URL("./giraffe-mcp.ts", import.meta.url).hr
 
 export function readAgentRequest(body: unknown): AgentRequest | null {
   if (!isObject(body) || !Array.isArray(body.tools)) return null;
-  const { model, append, turn } = body;
+  const { model, append, turn, effort } = body;
   if (typeof model !== "string" || typeof append !== "string" || typeof turn !== "string" || !turn.trim()) return null;
+  if (effort !== undefined && !EFFORTS.includes(effort as Effort)) return null;
   const tools: AgentTool[] = [];
   for (const t of body.tools) {
     if (!isObject(t) || typeof t.name !== "string" || !/^[a-z_]{1,40}$/.test(t.name) || typeof t.description !== "string" || !isObject(t.inputSchema)) return null;
     tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema });
   }
-  return { model, append, turn, tools };
+  return { model, append, turn, tools, ...(effort === undefined ? {} : { effort: effort as Effort }) };
 }
 
 function toolProblems(content: unknown): string[] {
@@ -205,7 +208,7 @@ function toolCalls(events: readonly Json[]): ToolCalls {
   return out;
 }
 
-function agentArgs(req: AgentRequest, toolsFile: string, session: { readonly id: string; readonly resume: boolean }): string[] {
+export function agentArgs(req: AgentRequest, toolsFile: string, session: { readonly id: string; readonly resume: boolean }): string[] {
   const mcp = { mcpServers: { giraffe: { type: "stdio", command: process.execPath, args: [MCP_SERVER, toolsFile] } } };
   return [
     "-p",
@@ -213,6 +216,7 @@ function agentArgs(req: AgentRequest, toolsFile: string, session: { readonly id:
     "--output-format", "stream-json",
     "--verbose",
     "--model", ALIAS[req.model] ?? req.model,
+    ...(req.effort ? ["--effort", req.effort] : []),
     "--tools", "",
     "--append-system-prompt", req.append,
     "--strict-mcp-config",

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { readAgentRequest } from "../src/claude.ts";
 import { createBox } from "../src/server.ts";
 
 const CLI = fileURLToPath(new URL("../node_modules/@anthropic-ai/claude-code/bin/claude.exe", import.meta.url));
@@ -28,15 +29,15 @@ const SCHEDULE = {
   },
 };
 const REMEMBER = { name: "remember", description: "Remember a fact.", inputSchema: { type: "object", properties: { note: { type: "string" } }, required: ["note"] } };
-const turnBody = (turn: string) => ({ model: "claude-haiku-5-5", append: "You are Giraffe, a personal assistant.", turn, tools: [SCHEDULE, REMEMBER] });
+const turnBody = (turn: string, more: Record<string, unknown> = {}) => ({ model: "claude-haiku-5-5", append: "You are Giraffe, a personal assistant.", turn, tools: [SCHEDULE, REMEMBER], ...more });
 const requests = () => readFileSync(mockLog, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((r) => r.path === "/v1/messages" && r.tools.some((t: string) => t.startsWith("mcp__giraffe__")));
 
 let mock: ChildProcess;
 let base = "";
 const server = createBox({ token: TOKEN, cli: [CLI], sessionFile });
 
-async function agent(turn: string, auth = `Bearer ${TOKEN}`): Promise<{ status: number; body: any }> {
-  const res = await fetch(`${base}/agent`, { method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: JSON.stringify(turnBody(turn)) });
+async function agent(turn: string, auth = `Bearer ${TOKEN}`, more: Record<string, unknown> = {}): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${base}/agent`, { method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: JSON.stringify(turnBody(turn, more)) });
   return { status: res.status, body: await res.json() };
 }
 
@@ -123,7 +124,33 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.notEqual(readFileSync(sessionFile, "utf8"), "11111111-2222-3333-4444-555555555555");
   });
 
+  it("sends the requested effort to the API", async () => {
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Low." }));
+    writeFileSync(sessionFile, "");
+    const r = await agent("New\nPerson: hi", `Bearer ${TOKEN}`, { effort: "low" });
+    assert.equal(r.status, 200);
+    assert.equal(requests().at(-1).effort, "low");
+  });
+
+  it("refuses an effort the CLI doesn't know", async () => {
+    assert.equal((await agent("New\nPerson: hi", `Bearer ${TOKEN}`, { effort: "turbo" })).status, 400);
+  });
+
   it("refuses a turn without the box token", async () => {
     assert.equal((await agent("New\nPerson: hi", "Bearer wrong")).status, 401);
+  });
+});
+
+describe("an agent request's effort", () => {
+  it("is optional, so a Worker that sends none keeps the CLI's own choice", () => {
+    const req = readAgentRequest(turnBody("New\nPerson: hi"));
+    assert.ok(req);
+    assert.equal("effort" in req, false);
+  });
+
+  it("is kept when it is one the CLI takes", () => assert.equal(readAgentRequest(turnBody("New\nPerson: hi", { effort: "max" }))?.effort, "max"));
+
+  it("refuses anything else", () => {
+    for (const effort of ["turbo", "", 3, null]) assert.equal(readAgentRequest(turnBody("New\nPerson: hi", { effort })), null, String(effort));
   });
 });

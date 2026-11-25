@@ -221,7 +221,7 @@ export class Agent extends DurableObject<Env> {
     const envelope = withoutSecrets(given);
     const first = {
       tz: DEFAULT_TIME_ZONE,
-      language: CHANNEL_LANGUAGE[envelope.identity.channel],
+      language: envelope.initialLanguage ?? CHANNEL_LANGUAGE[envelope.identity.channel],
       checkinLocal: SCHEDULE.defaultCheckinLocal,
       checkin: checkinWakeup(now, DEFAULT_TIME_ZONE, SCHEDULE.defaultCheckinLocal),
       trialEndsAt: this.#deps.billing.config.on ? trialEnd(now, this.#deps.billing.config.rules) : null,

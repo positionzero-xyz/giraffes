@@ -1,48 +1,62 @@
 import { diagnostic } from "../diagnostics";
 import { z } from "zod";
-import { eventKey, parseChoice, parseInviteCode, personAgentKey, type ChannelEvent, type EpochMs, type OutboundMessage } from "../domain";
+import { LANGUAGES, eventKey, parseChoice, parseInviteCode, personAgentKey, type ChannelEvent, type EpochMs, type Language, type OutboundMessage } from "../domain";
 import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
 
 const Chat = z.object({ id: z.number().int(), type: z.string() });
+const Sender = z.object({ language_code: z.string().optional() }).optional().catch(undefined);
 const Update = z.object({
   update_id: z.number().int(),
-  message: z.looseObject({ date: z.number(), chat: Chat, text: z.string().optional() }).optional(),
+  message: z.looseObject({ date: z.number(), chat: Chat, from: Sender, text: z.string().optional() }).optional(),
   my_chat_member: z
-    .object({ date: z.number(), chat: Chat, new_chat_member: z.object({ status: z.string() }) })
+    .object({ date: z.number(), chat: Chat, from: Sender, new_chat_member: z.object({ status: z.string() }) })
     .optional(),
   callback_query: z
-    .object({ id: z.string(), message: z.object({ chat: Chat }).optional(), data: z.string().optional() })
+    .object({ id: z.string(), from: Sender, message: z.object({ chat: Chat }).optional(), data: z.string().optional() })
     .optional(),
 });
 type Update = z.infer<typeof Update>;
+type TelegramEvent = { readonly chatId: number; readonly at: EpochMs; readonly event: ChannelEvent; readonly languageCode: string | undefined };
 
 const MEDIA = ["photo", "sticker", "voice", "audio", "video", "video_note", "animation", "document", "location", "contact"] as const;
 
 /** A tap carries no time of its own, so `now` stands in for it. */
-function toEvent(u: Update, now: EpochMs): { readonly chatId: number; readonly at: EpochMs; readonly event: ChannelEvent } | null {
+function toEvent(u: Update, now: EpochMs): TelegramEvent | null {
   const tap = u.callback_query;
   if (tap?.message?.chat.type === "private") {
     const choice = tap.data === undefined ? null : parseChoice(tap.data);
-    return choice ? { chatId: tap.message.chat.id, at: now, event: { kind: "choice", choice, at: now } } : null;
+    return choice ? { chatId: tap.message.chat.id, at: now, event: { kind: "choice", choice, at: now }, languageCode: tap.from?.language_code } : null;
   }
   if (u.message && u.message.chat.type === "private") {
     const m = u.message;
     const at = (m.date * 1000) as EpochMs;
+    const source = { chatId: m.chat.id, at, languageCode: m.from?.language_code };
     if (m.text === "/start" || m.text?.startsWith("/start ")) {
       const code = parseInviteCode(m.text.slice("/start".length));
-      return { chatId: m.chat.id, at, event: code ? { kind: "lifecycle", change: "follow", at, code } : { kind: "lifecycle", change: "follow", at } };
+      return { ...source, event: code ? { kind: "lifecycle", change: "follow", at, code } : { kind: "lifecycle", change: "follow", at } };
     }
     const text = m.text ?? `[sent a ${MEDIA.find((k) => k in m) ?? "message"}]`;
-    return { chatId: m.chat.id, at, event: { kind: "message", text } };
+    return { ...source, event: { kind: "message", text } };
   }
   const member = u.my_chat_member;
   if (member && member.chat.type === "private") {
     const at = (member.date * 1000) as EpochMs;
     const status = member.new_chat_member.status;
-    if (status === "kicked") return { chatId: member.chat.id, at, event: { kind: "lifecycle", change: "block", at } };
-    if (status === "member") return { chatId: member.chat.id, at, event: { kind: "lifecycle", change: "follow", at } };
+    const source = { chatId: member.chat.id, at, languageCode: member.from?.language_code };
+    if (status === "kicked") return { ...source, event: { kind: "lifecycle", change: "block", at } };
+    if (status === "member") return { ...source, event: { kind: "lifecycle", change: "follow", at } };
   }
   return null;
+}
+
+function supportedLanguage(code: string | undefined): Language | undefined {
+  if (code === undefined) return undefined;
+  try {
+    const language = new Intl.Locale(code).language;
+    return LANGUAGES.find((supported) => supported === language);
+  } catch {
+    return undefined;
+  }
 }
 
 const SendError = z.object({ parameters: z.object({ retry_after: z.number() }).optional() });
@@ -77,10 +91,18 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
       if (update.data.callback_query) await answer(update.data.callback_query.id);
       // In a private chat the chat id is the person's user id.
       const identity = { channel: "telegram", channelUserId: String(parsed.chatId) } as const;
+      const initialLanguage = supportedLanguage(parsed.languageCode);
       return {
         kind: "accepted",
         envelopes: [
-          { agent: personAgentKey(identity), identity, key: eventKey.telegram(update.data.update_id), receivedAt: parsed.at, event: parsed.event },
+          {
+            agent: personAgentKey(identity),
+            identity,
+            key: eventKey.telegram(update.data.update_id),
+            receivedAt: parsed.at,
+            event: parsed.event,
+            ...(initialLanguage === undefined ? {} : { initialLanguage }),
+          },
         ],
         ignored: 0,
       };

@@ -399,6 +399,8 @@ export type FakeBox = {
     readonly authorization: string | null;
     readonly user: string;
     readonly agent: { readonly append: string; readonly tools: readonly string[]; readonly session: string | null; readonly resumed: boolean; readonly fresh: string | null } | null;
+    /** The volume and forget epoch the request named, or null when it named none. */
+    readonly at?: { readonly box: unknown; readonly epoch: unknown } | null;
   }[];
   readonly replies: BoxReplyStep[];
   readonly sessions: Set<string>;
@@ -417,6 +419,8 @@ export function fakeBox(
     readonly destroy?: readonly DestroyStep[];
     readonly signedIn?: boolean;
     readonly onlyFor?: string;
+    /** The volume id the box's /health reports, as an image with erase does. */
+    readonly volume?: string;
   } = {},
 ): FakeBox {
   const steps = [...(opts.host ?? [])];
@@ -471,11 +475,11 @@ export function fakeBox(
     if (!box.created.has(name) || !box.reachable) throw new TypeError("fetch failed: no such host");
     const authorization = new Headers(init?.headers).get("authorization");
     if (url.pathname === "/health") {
-      return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test" });
+      return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test", ...(opts.volume ? { box: opts.volume } : {}) });
     }
     if (url.pathname === "/parse" || url.pathname === "/agent") {
       const agent = url.pathname === "/agent";
-      const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; fresh?: string | null; session?: string | null; append?: string; tools?: { name: string }[] };
+      const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; fresh?: string | null; session?: string | null; append?: string; tools?: { name: string }[]; box?: unknown; epoch?: unknown };
       const named = box.ignoresSession ? null : (body.session ?? null);
       const resumed = box.ignoresSession || (named !== null && box.sessions.has(named));
       const session = resumed ? named : crypto.randomUUID();
@@ -484,6 +488,7 @@ export function fakeBox(
         authorization,
         user: read,
         agent: agent ? { append: body.append ?? "", tools: (body.tools ?? []).map((t) => t.name), session: body.session ?? null, resumed, fresh: body.fresh ?? null } : null,
+        at: body.box === undefined && body.epoch === undefined ? null : { box: body.box, epoch: body.epoch },
       });
       const step = box.replies.shift();
       if (!step) {

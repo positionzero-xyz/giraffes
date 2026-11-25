@@ -256,8 +256,19 @@ describe("erasing the person's words from the box", { skip: existsSync(CLI) ? fa
     writeFileSync(join(config, ".credentials.json"), credentials);
   });
 
+  it("empties the folder that holds the erase record, keeping only the record itself as a regular file", async () => {
+    const stateDir = join(dir, "state");
+    seed(join(stateDir, "left.txt"), "MARKER-TWELVE-4410");
+    seed(join(stateDir, "nested", "deep.txt"), "MARKER-TWELVE-4410");
+    seed(join(stateDir, "erase.json.next"), "MARKER-TWELVE-4410");
+    assert.deepEqual(await call(base, "/erase", { epoch: 3 }), { status: 200, body: { box, floor: 3 } });
+    assert.deepEqual(readdirSync(stateDir), ["erase.json"]);
+    assert.deepEqual(JSON.parse(readFileSync(stateFile, "utf8")), { box, floor: 3, erasing: false, epochs: true });
+  });
+
   it("refuses a request without an epoch on a fresh volume once a request named the volume and an epoch, and after a restart", async () => {
-    const freshState = join(dir, "fresh-state.json");
+    const freshState = join(dir, "fresh-state", "erase.json");
+    mkdirSync(join(dir, "fresh-state"), { recursive: true });
     const fresh = await listen({ stateFile: freshState });
     const volume = (await call(fresh, "/health")).body.box;
     assert.notEqual(volume, box);
@@ -269,7 +280,8 @@ describe("erasing the person's words from the box", { skip: existsSync(CLI) ? fa
   });
 
   it("refuses every request without an epoch on a fresh volume the Worker set up to require one", async () => {
-    const required = await listen({ stateFile: join(dir, "required-state.json"), requireEpoch: true });
+    mkdirSync(join(dir, "required-state"), { recursive: true });
+    const required = await listen({ stateFile: join(dir, "required-state", "erase.json"), requireEpoch: true });
     const volume = (await call(required, "/health")).body.box;
     assert.deepEqual(await call(required, "/parse", parse("MARKER-TWELVE-5528")), STALE);
     assert.equal(sentToMock("MARKER-TWELVE-5528"), false);

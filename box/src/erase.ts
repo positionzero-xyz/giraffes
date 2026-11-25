@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
-export type PersonFiles = { readonly home: string; readonly configDir: string; readonly scratchDirs: readonly string[]; readonly sessionFile: string };
+export type PersonFiles = { readonly home: string; readonly configDir: string; readonly scratchDirs: readonly string[]; readonly sessionFile: string; readonly stateFile: string };
 
 export type EraseState = { readonly box: string; readonly floor: number; readonly erasing: boolean; readonly epochs: boolean };
 
@@ -61,6 +61,7 @@ function readObject(file: string): Record<string, unknown> | null {
 const accountFile = (files: PersonFiles) => join(files.configDir, ".claude.json");
 const extraFields = (account: Record<string, unknown>) => Object.keys(account).filter((key) => !SIGN_IN_FIELDS.has(key));
 const isSignIn = (dir: string, name: string) => SIGN_IN.has(name) && lstatSync(join(dir, name)).isFile();
+const isRecord = (files: PersonFiles, name: string) => name === basename(files.stateFile) && lstatSync(files.stateFile).isFile();
 
 // A process the erase just killed can hold a file open for a moment, which makes a delete fail on Windows.
 const GONE = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 } as const;
@@ -82,6 +83,7 @@ export function sweep(files: PersonFiles): void {
   }
   emptyDir(files.home);
   for (const dir of files.scratchDirs) emptyDir(dir);
+  emptyDir(dirname(files.stateFile), (name) => isRecord(files, name));
 }
 
 export function leftovers(files: PersonFiles): string[] {
@@ -91,5 +93,7 @@ export function leftovers(files: PersonFiles): string[] {
   const account = existsSync(file) ? readObject(file) : {};
   if (account === null || extraFields(account).length > 0) left.push(file);
   for (const dir of [files.home, ...files.scratchDirs]) left.push(...entries(dir).map((name) => join(dir, name)));
+  const stateDir = dirname(files.stateFile);
+  left.push(...entries(stateDir).filter((name) => !isRecord(files, name)).map((name) => join(stateDir, name)));
   return left;
 }

@@ -50,7 +50,7 @@ function parseJson(text: string): unknown {
 
 /** Kills the CLI and every process it started, such as its MCP server; on Windows only the CLI itself. */
 export function stopClaude(proc: ChildProcessWithoutNullStreams): void {
-  if (process.platform !== "win32" && proc.pid !== undefined && proc.exitCode === null && proc.signalCode === null) {
+  if (process.platform !== "win32" && proc.pid !== undefined) {
     try {
       process.kill(-proc.pid, "SIGKILL");
       return;

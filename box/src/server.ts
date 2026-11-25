@@ -62,7 +62,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
   const usedTickets = new Map<string, number>();
   let turns: Promise<unknown> = Promise.resolve();
   let version: string | null = null;
-  const files: PersonFiles = { home, configDir, scratchDirs, sessionFile };
+  const files: PersonFiles = { home, configDir, scratchDirs, sessionFile, stateFile };
   let state = loadOrCreateState(stateFile);
   const requireEpochs = () => {
     if (state.epochs) return;
@@ -222,6 +222,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
 
   async function signinStart(ticket: SigninTicket, res: ServerResponse): Promise<void> {
     while (wiping) await wiping;
+    if (state.erasing) return sendJson(res, 412, { error: "stale" });
     if (login?.completing) return sendJson(res, 409, { error: "busy" });
     const at = now();
     for (const [used, expiresAt] of usedTickets) if (expiresAt <= at) usedTickets.delete(used);

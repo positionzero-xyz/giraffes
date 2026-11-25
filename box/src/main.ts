@@ -14,6 +14,7 @@ if (!home || !configDir || !stateDir) {
   console.error("HOME, CLAUDE_CONFIG_DIR and BOX_STATE_DIR are required: an erase empties HOME and CLAUDE_CONFIG_DIR, and records itself in BOX_STATE_DIR");
   process.exit(1);
 }
+delete process.env.BOX_STATE_DIR;
 
 const LOCKED_SCRATCH = ["/var/tmp", "/run/lock", "/dev/shm", "/dev/mqueue"];
 const port = Number(process.env.BOX_PORT ?? 8789);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request, type RequestOptions } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,7 +18,9 @@ const TEN_MINUTES = 10 * 60_000;
 const dir = mkdtempSync(join(tmpdir(), "box-test-"));
 let clockOffset = 0;
 const now = () => Date.now() + clockOffset;
-const server = createBox({ token: TOKEN, cli: [process.execPath, FAKE, dir], sessionFile: join(dir, ".giraffe-session"), home: join(dir, "home"), configDir: join(dir, "config"), scratchDirs: [join(dir, "tmp")], stateFile: join(dir, "erase.json"), now });
+const stateDir = join(dir, "state");
+mkdirSync(stateDir, { recursive: true });
+const server = createBox({ token: TOKEN, cli: [process.execPath, FAKE, dir], sessionFile: join(dir, ".giraffe-session"), home: join(dir, "home"), configDir: join(dir, "config"), scratchDirs: [join(dir, "tmp")], stateFile: join(stateDir, "erase.json"), now });
 let base = "";
 
 const ticket = (exp = Date.now() + 30 * 60_000) => `${exp}.${createHmac("sha256", TOKEN).update(`signin:${exp}`).digest("base64url")}`;
@@ -161,12 +163,12 @@ describe("health and parse", () => {
   it("keeps what the CLI printed to stderr out of the box's log", async () => {
     signIn(true);
     const logged: string[] = [];
-    const { log, error, warn } = console;
-    console.log = console.error = console.warn = (...args: unknown[]) => void logged.push(args.map(String).join(" "));
+    const { log, info, error, warn } = console;
+    console.log = console.info = console.error = console.warn = (...args: unknown[]) => void logged.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
     try {
       assert.equal((await call("POST", "/parse", { auth: bearer, body: turn("crash") })).status, 502);
     } finally {
-      Object.assign(console, { log, error, warn });
+      Object.assign(console, { log, info, error, warn });
     }
     assert.ok(logged.length > 0);
     assert.deepEqual(logged.filter((line) => line.includes("boom")), []);

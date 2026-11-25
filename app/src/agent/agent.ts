@@ -1097,6 +1097,9 @@ export class Agent extends DurableObject<Env> {
         this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [missed("rejected")], now);
         return { kind: "moved_on", transient: false, told: true };
       }
+      case "stale":
+        this.#store.appendLogs([missed("rejected")], now);
+        return { kind: "moved_on", transient: true, told: false };
       case "unauthorized":
         this.#store.applyBox(needsEnsure(box, now), null, [missed("rejected")], now);
         return { kind: "moved_on", transient: true, told: false };

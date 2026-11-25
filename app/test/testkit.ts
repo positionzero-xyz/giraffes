@@ -380,6 +380,7 @@ export type DestroyStep = "ok" | "die" | "fail";
 export type BoxReplyStep =
   | { readonly kind: "reply"; readonly step: ScriptStep; readonly refusedCalls?: Readonly<NonNullable<TurnOutput["refusedCalls"]>> }
   | { readonly kind: "signed_out" }
+  | { readonly kind: "stale" }
   | { readonly kind: "refusal" }
   | { readonly kind: "status"; readonly status: number };
 
@@ -494,6 +495,8 @@ export function fakeBox(
       switch (step.kind) {
         case "signed_out":
           return Response.json({ error: "signed_out" }, { status: 409 });
+        case "stale":
+          return Response.json({ error: "stale" }, { status: 412 });
         case "status":
           return Response.json({ error: "claude_failed" }, { status: step.status });
         case "refusal":

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request, type RequestOptions } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,7 +18,9 @@ const TEN_MINUTES = 10 * 60_000;
 const dir = mkdtempSync(join(tmpdir(), "box-test-"));
 let clockOffset = 0;
 const now = () => Date.now() + clockOffset;
-const server = createBox({ token: TOKEN, cli: [process.execPath, FAKE, dir], sessionFile: join(dir, ".giraffe-session"), now });
+const stateDir = join(dir, "state");
+mkdirSync(stateDir, { recursive: true });
+const server = createBox({ token: TOKEN, cli: [process.execPath, FAKE, dir], sessionFile: join(dir, ".giraffe-session"), home: join(dir, "home"), configDir: join(dir, "config"), scratchDirs: [join(dir, "tmp")], stateFile: join(stateDir, "erase.json"), now });
 let base = "";
 
 const ticket = (exp = Date.now() + 30 * 60_000) => `${exp}.${createHmac("sha256", TOKEN).update(`signin:${exp}`).digest("base64url")}`;
@@ -51,6 +53,14 @@ function responseTo(options: RequestOptions, incompleteBody?: string): Promise<n
   });
 }
 const bearer = `Bearer ${TOKEN}`;
+
+async function waitFor(done: () => boolean): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!done()) {
+    if (Date.now() > deadline) throw new Error("timed out");
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
 const turn = (user = "hello") => ({ model: "claude-haiku-5-5", system: "be brief", user, jsonSchema: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object" } });
 
 before(async () => {
@@ -142,10 +152,26 @@ describe("auth", () => {
 });
 
 describe("health and parse", () => {
-  it("reports signedIn from the CLI's auth status", async () => {
-    assert.deepEqual((await call("GET", "/health", { auth: bearer })).body, { ok: true, signedIn: false, authMethod: "none", version: "2.1.316" });
+  it("reports signedIn from the CLI's auth status, and names the volume", async () => {
+    const out = (await call("GET", "/health", { auth: bearer })).body;
+    assert.match(out.box, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    assert.deepEqual(out, { ok: true, signedIn: false, authMethod: "none", version: "2.1.316", box: out.box });
     signIn(true);
-    assert.deepEqual((await call("GET", "/health", { auth: bearer })).body, { ok: true, signedIn: true, authMethod: "claude.ai", version: "2.1.316" });
+    assert.deepEqual((await call("GET", "/health", { auth: bearer })).body, { ok: true, signedIn: true, authMethod: "claude.ai", version: "2.1.316", box: out.box });
+  });
+
+  it("keeps what the CLI printed to stderr out of the box's log", async () => {
+    signIn(true);
+    const logged: string[] = [];
+    const { log, info, error, warn } = console;
+    console.log = console.info = console.error = console.warn = (...args: unknown[]) => void logged.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    try {
+      assert.equal((await call("POST", "/parse", { auth: bearer, body: turn("crash") })).status, 502);
+    } finally {
+      Object.assign(console, { log, info, error, warn });
+    }
+    assert.ok(logged.length > 0);
+    assert.deepEqual(logged.filter((line) => line.includes("boom")), []);
   });
 
   it("answers 409 signed_out when the CLI has no login", async () => {
@@ -289,5 +315,26 @@ describe("sign-in", () => {
     assert.equal((await call("POST", "/signin/start", { body: { ticket: next } })).status, 200);
     assert.deepEqual((await call("POST", "/signin/code", { body: { ticket: next, code: "good-code#state" } })).body, { signedIn: true });
     assert.deepEqual(events(), ["login started BROWSER=true", "login started BROWSER=true", "login read good-code#state"]);
+  });
+});
+
+describe("erase, with the fake CLI", () => {
+  it("stops a sign-in in progress, so its code reaches no CLI", async () => {
+    const t = ticket();
+    assert.equal((await call("POST", "/signin/start", { body: { ticket: t } })).status, 200);
+    assert.equal((await call("POST", "/erase", { auth: bearer, body: { epoch: 1 } })).status, 200);
+    assert.deepEqual((await call("POST", "/signin/code", { body: { ticket: t, code: "good-code#state" } })).body, { error: "no_signin" });
+    assert.deepEqual(events(), ["login started BROWSER=true"]);
+  });
+
+  it("kills a running turn's CLI before it erases, and the turn answers 502", async () => {
+    signIn(true);
+    const box = (await call("GET", "/health", { auth: bearer })).body.box;
+    const held = call("POST", "/parse", { auth: bearer, body: { ...turn("hang"), box, epoch: 1 } });
+    await waitFor(() => events().some((e) => e.startsWith("turn start")));
+    const erased = await call("POST", "/erase", { auth: bearer, body: { epoch: 2 } });
+    assert.deepEqual([erased.status, erased.body], [200, { box, floor: 2 }]);
+    assert.deepEqual((await held).body, { error: "claude_failed" });
+    assert.deepEqual(events().map((e) => e.split(" ").slice(0, 2).join(" ")), ["turn start"]);
   });
 });

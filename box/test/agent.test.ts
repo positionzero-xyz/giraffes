@@ -50,7 +50,9 @@ const userTexts = (s: Sent): string[] => s.messages.filter((m) => m.role === "us
 
 let mock: ChildProcess;
 let base = "";
-const server = createBox({ token: TOKEN, cli: [CLI], sessionFile: join(dir, ".giraffe-session") });
+const stateDir = join(dir, "state");
+mkdirSync(stateDir, { recursive: true });
+const server = createBox({ token: TOKEN, cli: [CLI], sessionFile: join(dir, ".giraffe-session"), home: join(dir, "home"), configDir: join(dir, "config"), scratchDirs: [join(dir, "tmp")], stateFile: join(stateDir, "erase.json") });
 
 async function postAgent(body: object, auth = `Bearer ${TOKEN}`): Promise<{ status: number; body: any }> {
   const res = await fetch(`${base}/agent`, { method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: JSON.stringify(body) });

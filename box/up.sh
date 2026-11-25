@@ -27,7 +27,12 @@ if [ "$mode" = --mock ]; then
 fi
 docker run -d --name "$name" --init -p "127.0.0.1:$port:8789" -v "$data:/data" -e BOX_TOKEN "${mock[@]}" "${BOX_IMAGE:-giraffes-box:mvp}"
 if [ "$mode" = --mock ]; then
-  docker exec -d -u agent "$name" node /box/mock-api.mjs /tmp/mock.log 8788 "$dumps"
+  if [ -n "$dumps" ]; then
+    # lockdown.sh takes agent's write access to the dumps mount, so the mock writes there as root.
+    docker exec -d "$name" node /box/mock-api.mjs /dumps/mock.log 8788 "$dumps"
+  else
+    docker exec -d -u agent "$name" node /box/mock-api.mjs /tmp/mock.log 8788 ""
+  fi
 fi
 for _ in $(seq 1 40); do
   docker logs "$name" 2>&1 | grep -q "box on" && break

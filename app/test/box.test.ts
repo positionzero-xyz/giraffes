@@ -407,6 +407,54 @@ describe("box client", () => {
     expect(await boxClient(hang, { parseMs: 20, healthMs: 20 }).health("https://b", token)).toMatchObject({ kind: "unavailable" });
   });
 
+  test("a 412 stale is stale, never signed out, and any other 412 is unavailable", async () => {
+    const agentReq = { model: "claude-haiku-5-5", append: "a", session: null, turn: "t", fresh: "f", tools: [] };
+    expect(await boxClient(answering(412, { error: "stale" })).parse("https://b", token, req)).toEqual({ kind: "stale" });
+    expect(await boxClient(answering(412, { error: "stale" })).agent("https://b", token, agentReq)).toEqual({ kind: "stale" });
+    expect(await boxClient(answering(412, {})).parse("https://b", token, req)).toMatchObject({ kind: "unavailable" });
+  });
+
+  test("a request carries the volume and the epoch only when the caller gives them", async () => {
+    const bodies: unknown[] = [];
+    const recording: Fetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ structured: {}, usage: null, stop: "end" });
+    };
+    const box = "6f1c2b9e-1d2a-4c3b-9e8f-0a1b2c3d4e5f";
+    await boxClient(recording).parse("https://b", token, req);
+    await boxClient(recording).parse("https://b", token, { ...req, at: { box, epoch: 3 } });
+    await boxClient(recording).agent("https://b", token, { model: "m", append: "a", session: null, turn: "t", fresh: "f", tools: [], at: { box, epoch: 3 } });
+    expect(bodies[0]).toEqual(req);
+    expect(bodies[1]).toEqual({ ...req, box, epoch: 3 });
+    expect(bodies[2]).toMatchObject({ box, epoch: 3 });
+    expect(bodies[2]).not.toHaveProperty("at");
+  });
+
+  test("health names the volume when the image does", async () => {
+    const box = "6f1c2b9e-1d2a-4c3b-9e8f-0a1b2c3d4e5f";
+    expect(await boxClient(answering(200, { ok: true, signedIn: true, box })).health("https://b", token)).toEqual({ kind: "up", signedIn: true, box });
+    expect(await boxClient(answering(200, { ok: true, signedIn: true })).health("https://b", token)).toEqual({ kind: "up", signedIn: true });
+  });
+
+  test("an erase is done only when the box answers 200 with a floor at or past the epoch; an old image's 404 and every failure are pending", async () => {
+    const box = "6f1c2b9e-1d2a-4c3b-9e8f-0a1b2c3d4e5f";
+    let sent: { url: string; body: unknown } | null = null;
+    const ok: Fetch = async (url, init) => {
+      sent = { url, body: JSON.parse(String(init?.body)) };
+      return Response.json({ box, floor: 4 });
+    };
+    expect(await boxClient(ok).erase("https://b", token, 3)).toEqual({ kind: "erased", box, floor: 4 });
+    expect(sent).toEqual({ url: "https://b/erase", body: { epoch: 3 } });
+    expect(await boxClient(answering(200, { box, floor: 2 })).erase("https://b", token, 3)).toMatchObject({ kind: "pending" });
+    expect(await boxClient(answering(200, { floor: 3 })).erase("https://b", token, 3)).toMatchObject({ kind: "pending" });
+    for (const status of [404, 500, 503]) expect(await boxClient(answering(status, {})).erase("https://b", token, 3)).toMatchObject({ kind: "pending" });
+    expect(await boxClient(answering(401, {})).erase("https://b", token, 3)).toEqual({ kind: "unauthorized" });
+    const down: Fetch = async () => {
+      throw new TypeError("fetch failed");
+    };
+    expect(await boxClient(down).erase("https://b", token, 3)).toMatchObject({ kind: "pending" });
+  });
+
   test("a reply is read as the bridge's, and the default parse timeout is 120 s", async () => {
     const ok = answering(200, { structured: { a: "hi" }, usage: { input_tokens: 5, output_tokens: 2 }, stop: "end" });
     expect(await boxClient(ok).parse("https://b", token, req)).toEqual({
@@ -866,6 +914,27 @@ describe("connecting a Claude plan", () => {
     ]);
     expect(model.calls).toHaveLength(0);
     expect((await c.snapshot()).spendThisMonthMicro).toBe(0);
+  });
+
+  test("a box that refuses a turn as stale keeps the person signed in and sends no sign-in link; the turn is retried, then apologised for", async () => {
+    const box = fakeBox({ signedIn: true });
+    const model = scripted([]);
+    const c = await devChat("hap", { model, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    box.replies.push({ kind: "stale" }, { kind: "stale" }, { kind: "stale" });
+    await c.say("hello");
+    await c.advanceTo("2099-11-04T10:04");
+    expect(await c.received()).toEqual([NOTICE.failed]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+    expect(box.parses).toHaveLength(3);
+    expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
+      ["box", "rejected"],
+      ["box", "rejected"],
+      ["box", "rejected"],
+    ]);
+    expect(model.calls).toHaveLength(0);
   });
 
   test("a person's own key backs up their box only after they said yes", async () => {

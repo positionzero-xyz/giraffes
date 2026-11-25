@@ -7,10 +7,14 @@ export const REPLY_CAP = 600;
 const has = (text: string, p: Phrase) => p.any.some((a) => squash(text).includes(squash(a)));
 const missing = (text: string, ps: readonly Phrase[]) => ps.filter((p) => !has(text, p)).map((p) => p.label);
 
+/** Names a Thai post or chat writes in Latin letters as a matter of course, so they don't count against it. */
+const BRANDS = /\b(?:LINE MAN|LINE|OA|Shopee|Lazada|Facebook|TikTok|Instagram|IG|Grab|Foodpanda|Messenger)\b/g;
+
+/** Thai letters over all letters, in any script, after NFC; combining vowel and tone marks are not letters in any script. */
 export function thaiShare(s: string): number {
-  const thai = s.match(/[ก-ฮะ-ฺเ-ๅ]/g)?.length ?? 0;
-  const latin = s.match(/[A-Za-z]/g)?.length ?? 0;
-  return thai + latin === 0 ? 0 : thai / (thai + latin);
+  const letters = s.normalize("NFC").replace(BRANDS, "").match(/\p{L}/gu) ?? [];
+  const thai = letters.filter((c) => /\p{Script=Thai}/u.test(c)).length;
+  return letters.length === 0 ? 0 : thai / letters.length;
 }
 
 const JARGON = /schedule_wakeup|cancel_wakeup|set_locale|mcp__|wake-?ups?|\btool(s|\s?calls?)?\b|\bjson\b|\bschema\b|system prompt|claude code|latenotice|unasked messages|\bprompt\b|\bmodel\b/i;

@@ -1,5 +1,6 @@
+import { AMOUNT } from "./browser.ts";
 import { wrongFact } from "./facts.ts";
-import { says, squash, statedRepeats, statedTimes } from "./thai.ts";
+import { plain, says, squash, statedRepeats, statedTimes } from "./thai.ts";
 import type { Check, CheckResult, Observation, Phrase, Wakeup } from "./types.ts";
 
 export const REPLY_CAP = 600;
@@ -95,10 +96,42 @@ const GRADERS: { readonly [K in Check["kind"]]: Grader<K> } = {
     const p = o.page?.persist;
     if (!p) return { pass: false, detail: "not driven" };
     if (!p.ok) return { pass: false, detail: p.reason };
+    if (p.missing.length) return { pass: false, detail: `saved without ${p.missing.join(", ")}` };
     if (c.shown && !p.shown) return { pass: false, detail: "saved but not shown after reload" };
     return { pass: true, detail: p.reason };
   },
+  priced: (c, o) => {
+    if (!o.page?.loaded) return { pass: false, detail: "page did not load" };
+    const wrong = c.items.flatMap((i) => {
+      const got = pricesOf(o.page!.text, i, c.items);
+      return got.includes(i.price) && got.every((p) => p === i.price) ? [] : [`${i.label} ${got.join("/") || "unpriced"}, want ${i.price}`];
+    });
+    return { pass: wrong.length === 0, detail: wrong.join("; ") || `all ${c.items.length}` };
+  },
+  total_adds: (_, o) => {
+    const p = o.page?.persist;
+    if (!p?.ok) return { pass: false, detail: p ? p.reason : "not driven" };
+    if (p.totalAfter === null) return { pass: false, detail: "no total shown after reload" };
+    const grew = p.totalAfter - (p.totalBefore ?? 0);
+    return { pass: grew === Number(AMOUNT), detail: `total ${p.totalBefore ?? "none"} to ${p.totalAfter} after adding ${AMOUNT}` };
+  },
 };
+
+const PRICE = /(?<![\d.])(\d+)(?:\.\d+)? ?(?:บาท|฿|\.-)|฿ ?(\d+)/;
+
+/** The price after each mention of a dish, read up to the next dish named or 60 characters, whichever comes first. */
+function pricesOf(text: string, item: Phrase, all: readonly Phrase[]): number[] {
+  const t = plain(text);
+  const at = (p: Phrase, from: number) => Math.min(...p.any.map((a) => t.indexOf(plain(a), from)).filter((i) => i >= 0), Number.POSITIVE_INFINITY);
+  const prices: number[] = [];
+  for (let start = at(item, 0); Number.isFinite(start); start = at(item, start + 1)) {
+    const end = Math.min(start + 60, ...all.filter((p) => p !== item).map((p) => at(p, start + 1)));
+    const span = t.slice(start, end);
+    const m = PRICE.exec(span) ?? /(?<![\d.])(\d+)(?![\d])/.exec(span);
+    if (m) prices.push(Number(m[1] ?? m[2]));
+  }
+  return prices;
+}
 
 export function grade(c: Check, o: Observation): CheckResult {
   const grader = GRADERS[c.kind] as Grader<typeof c.kind>;

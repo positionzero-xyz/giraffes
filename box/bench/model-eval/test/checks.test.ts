@@ -60,8 +60,8 @@ describe("every check passes its known-good and fails its known-bad", () => {
   it("persists", () =>
     both(
       { kind: "persists", shown: true },
-      page({ persist: { ok: true, shown: true, reason: "kept after reload" } }),
-      page({ persist: { ok: true, shown: false, reason: "kept after reload" } }),
+      page({ persist: { ok: true, shown: true, reason: "kept after reload", missing: [], totalBefore: null, totalAfter: null } }),
+      page({ persist: { ok: true, shown: false, reason: "kept after reload", missing: [], totalBefore: null, totalAfter: null } }),
     ));
 });
 

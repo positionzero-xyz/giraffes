@@ -45,13 +45,25 @@ export type Check =
   | { readonly kind: "html_complete"; readonly path: string }
   | { readonly kind: "page_has"; readonly items: readonly Phrase[] }
   | { readonly kind: "loads_clean" }
-  | { readonly kind: "persists"; readonly shown: boolean };
+  | { readonly kind: "persists"; readonly shown: boolean }
+  /** Each dish's nearest price, before the next dish, is its own. */
+  | { readonly kind: "priced"; readonly items: readonly (Phrase & { readonly price: number })[] }
+  /** The shown total grows by exactly the amount the driver entered, and stays so after a reload. */
+  | { readonly kind: "total_adds" };
 
 export type CheckResult = { readonly check: string; readonly pass: boolean; readonly detail: string };
 
 export type Wakeup = { readonly at: string; readonly repeat: Repeat | null; readonly asked: boolean; readonly note: string };
 
-export type PersistReport = { readonly ok: boolean; readonly shown: boolean; readonly reason: string };
+/** After one entry and a reload: whether it was kept and shown, which entered values the saved data lacks, and the shown total before and after. */
+export type PersistReport = {
+  readonly ok: boolean;
+  readonly shown: boolean;
+  readonly reason: string;
+  readonly missing: readonly string[];
+  readonly totalBefore: number | null;
+  readonly totalAfter: number | null;
+};
 export type PageReport = { readonly loaded: boolean; readonly errors: readonly string[]; readonly text: string; readonly persist: PersistReport | null };
 
 /** `text` is what the checks grade: what the person receives on the product path, the full reply on the planned one. */

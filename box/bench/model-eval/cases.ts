@@ -236,7 +236,18 @@ export const CASES: readonly Case[] = [
     judged: true,
     make: fixed(
       "ช่วยทำหน้าเว็บเมนูร้านก๋วยเตี๋ยวเรือ 'เจ๊หมวย' หน้าเดียวให้หน่อย มี ก๋วยเตี๋ยวเรือหมู 50 บาท, ก๋วยเตี๋ยวเรือเนื้อ 60 บาท, เกาเหลา 55 บาท, ชาเย็น 25 บาท",
-      BUILD([p("shop name", "เจ๊หมวย"), p("pork", "เรือหมู"), p("beef", "เรือเนื้อ"), p("soup", "เกาเหลา"), p("iced tea", "ชาเย็น"), p("50", "50"), p("60", "60"), p("55", "55"), p("25", "25")]),
+      [
+        ...BUILD([p("shop name", "เจ๊หมวย")]),
+        {
+          kind: "priced",
+          items: [
+            { label: "pork", any: ["เรือหมู"], price: 50 },
+            { label: "beef", any: ["เรือเนื้อ"], price: 60 },
+            { label: "soup", any: ["เกาเหลา"], price: 55 },
+            { label: "iced tea", any: ["ชาเย็น"], price: 25 },
+          ],
+        },
+      ],
     ),
   },
   {
@@ -257,6 +268,7 @@ export const CASES: readonly Case[] = [
     make: fixed("ทำเว็บจดรายจ่ายเล็กๆ ให้หน่อย ใส่รายการกับจำนวนเงิน แล้วโชว์ยอดรวม ข้อมูลเก็บไว้ในเครื่อง เปิดใหม่ก็ยังอยู่", [
       ...BUILD([p("total", "รวม")]),
       { kind: "persists", shown: true },
+      { kind: "total_adds" },
     ]),
   },
 ];

@@ -147,7 +147,7 @@ async function buildTurn(cli: string, chrome: string | null, c: Candidate, messa
     return { status: auth?.loggedIn === false ? "signed_out" : "claude_failed", observation: NO_OBSERVATION, ...base };
   }
   const files = readFiles(keep);
-  const drive = checks.some((k) => k.kind === "persists");
+  const drive = checks.some((k) => k.kind === "persists" || k.kind === "total_adds");
   const page = chrome && files["index.html"] ? await inspect(chrome, join(keep, "index.html"), drive) : null;
   const text = String(result.result ?? "");
   return { status: "ok", observation: { text, raw: text, answered: text.trim() !== "", wakeups: [], rejected: [], files, page }, ...base };

@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { plain } from "./thai.ts";
 import type { PageReport, PersistReport } from "./types.ts";
 
 const CANDIDATES = [
@@ -19,6 +20,8 @@ export function findChrome(given?: string): string | null {
 }
 
 const MARK = "ทดสอบ7319";
+/** What the driver types into an amount field; a tracker's total should grow by exactly this. */
+export const AMOUNT = "137";
 
 const FILL_AND_SUBMIT = `(() => {
   const mark = ${JSON.stringify(MARK)};
@@ -26,18 +29,21 @@ const FILL_AND_SUBMIT = `(() => {
   const skip = new Set(["hidden", "submit", "button", "reset", "checkbox", "radio", "file", "image"]);
   const fields = [...document.querySelectorAll("input, textarea, select")].filter((el) => visible(el) && !skip.has((el.type || "").toLowerCase()) && !el.disabled);
   if (fields.length === 0) return { ok: false, reason: "no fields to fill" };
+  const hint = (el) => [el.name, el.id, el.placeholder, el.getAttribute("aria-label"), el.labels?.[0]?.innerText].join(" ").toLowerCase();
+  const entered = [];
   let texts = 0;
   for (const el of fields) {
     const type = (el.type || "text").toLowerCase();
-    let value = mark;
+    let value;
     if (el.tagName === "SELECT") value = el.options[el.options.length > 1 ? 1 : 0]?.value ?? "";
     else if (type === "date") value = "2026-12-20";
     else if (type === "time") value = "14:30";
     else if (type === "datetime-local") value = "2026-12-20T14:30";
-    else if (type === "number" || type === "range") value = "123";
-    else if (type === "tel") value = "0812345678";
     else if (type === "email") value = "test@example.com";
-    else texts++;
+    else if (type === "tel" || /tel|phone|mobile|เบอร์|โทร/.test(hint(el))) value = "0812345678";
+    else if (type === "number" || type === "range" || /amount|price|จำนวน|เงิน|บาท|ราคา/.test(hint(el))) value = ${JSON.stringify(AMOUNT)};
+    else value = texts++ === 0 ? mark : mark + "-" + texts;
+    if (el.tagName !== "SELECT") entered.push(value);
     const proto = el.tagName === "SELECT" ? HTMLSelectElement : el.tagName === "TEXTAREA" ? HTMLTextAreaElement : HTMLInputElement;
     Object.getOwnPropertyDescriptor(proto.prototype, "value").set.call(el, value);
     el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -52,14 +58,25 @@ const FILL_AND_SUBMIT = `(() => {
     buttons[0];
   if (!button) return { ok: false, reason: "no button to press" };
   button.click();
-  return { ok: true, reason: "pressed " + JSON.stringify(label(button).slice(0, 30)) + " after filling " + fields.length + " fields" };
+  return { ok: true, entered, reason: "pressed " + JSON.stringify(label(button).slice(0, 30)) + " after filling " + fields.length + " fields" };
 })()`;
 
 const AFTER_RELOAD = `(() => {
-  const mark = ${JSON.stringify(MARK)};
-  const stored = Object.keys(localStorage).some((k) => (localStorage.getItem(k) || "").includes(mark));
-  return { stored, shown: document.body.innerText.includes(mark) };
+  const stored = Object.keys(localStorage).map((k) => localStorage.getItem(k) || "").join("\\n");
+  return { stored, text: document.body.innerText };
 })()`;
+
+/** Ways a page may store a value it was given, such as a date written day first or in the Buddhist era. */
+const FORMS: Readonly<Record<string, readonly string[]>> = {
+  "2026-12-20": ["2026-12-20", "20/12/2026", "20/12/2569", "2569-12-20"],
+  "14:30": ["14:30", "14.30"],
+};
+
+/** The last amount the page shows after a total word, such as รวม 137 บาท. */
+export function totalIn(text: string): number | null {
+  const last = [...plain(text).matchAll(/(?:รวม|total)[^\d]{0,30}?(\d+(?:\.\d+)?)/g)].at(-1);
+  return last ? Number(last[1]) : null;
+}
 
 type Pending = { resolve: (v: any) => void; reject: (e: Error) => void };
 
@@ -174,16 +191,20 @@ export async function inspect(chrome: string, file: string, drive: boolean): Pro
       const text = await page.eval<string>("document.body ? document.body.innerText : ''");
       let persist: PersistReport | null = null;
       if (drive) {
-        const pressed = await page.eval<{ ok: boolean; reason: string }>(FILL_AND_SUBMIT);
-        if (!pressed.ok) persist = { ok: false, shown: false, reason: pressed.reason };
+        const totalBefore = totalIn(text);
+        const pressed = await page.eval<{ ok: boolean; reason: string; entered?: string[] }>(FILL_AND_SUBMIT);
+        if (!pressed.ok) persist = { ok: false, shown: false, reason: pressed.reason, missing: [], totalBefore, totalAfter: null };
         else {
           await settle(800);
           const reloaded = page.event("Page.loadEventFired", 15_000);
           await page.send("Page.navigate", { url });
           await reloaded;
           await settle(500);
-          const after = await page.eval<{ stored: boolean; shown: boolean }>(AFTER_RELOAD);
-          persist = { ok: after.stored, shown: after.shown, reason: after.stored ? `${pressed.reason}; kept after reload` : `${pressed.reason}; nothing saved` };
+          const after = await page.eval<{ stored: string; text: string }>(AFTER_RELOAD);
+          const ok = after.stored.includes(MARK);
+          const missing = (pressed.entered ?? []).filter((v) => !(FORMS[v] ?? [v]).some((f) => after.stored.includes(f)));
+          const reason = ok ? `${pressed.reason}; kept after reload` : `${pressed.reason}; nothing saved`;
+          persist = { ok, shown: after.text.includes(MARK), reason, missing, totalBefore, totalAfter: totalIn(after.text) };
         }
       }
       return { loaded: true, errors: [...page.errors], text, persist };

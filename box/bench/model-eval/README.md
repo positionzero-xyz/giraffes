@@ -11,7 +11,7 @@ This harness measures how well a model and effort level do Giraffe's own jobs in
 | `draft` | 4 | the same turn; the checks read the full reply, and `overReplyCap` records whether the Worker would cut it | `thai`, `length`, `facts` | yes |
 | `build` | 3 | a separate `claude -p` in an empty folder, file tools only | `file`, `html_complete`, `page_has`, `loads_clean`, and `persists` for the two interactive pages | yes |
 
-For Claude candidates, chat and reminder are the product path. Draft and build are a planned contract: the product doesn't ship them yet. Giraffe has no Codex path, so every Codex shape is a planned contract.
+For Claude candidates, chat and reminder are the product path. Draft and build are a planned contract: the product doesn't ship them yet. Giraffe has no Codex or OpenCode path, so every Codex and OpenCode shape is a planned contract.
 
 "Now" is today at 10:00 Asia/Bangkok, because the CLI also puts the machine's date in its system prompt. `--now` pins it, and every record whose date differs from the machine's is flagged.
 
@@ -25,7 +25,7 @@ node bench/model-eval/eval.ts --candidates haiku@low,haiku@medium --cases 1 --dr
 node bench/model-eval/eval.ts --candidates haiku@low,haiku@medium --cases 1 --out <dir>
 ```
 
-A candidate is `model@effort`, where effort is `default` (no flag, so the CLI picks) or one of `low`, `medium`, `high`, `xhigh`, `max`. With no `--candidates`, the first-run matrix of eight Claude candidates runs. A Codex candidate is `codex:model@effort`, with effort `default`, `low`, `medium`, `high` or `xhigh` (see below). `--cases` takes case ids or a count per shape, and `--reps` repeats each case.
+A candidate is `model@effort`, where effort is `default` (no flag, so the CLI picks) or one of `low`, `medium`, `high`, `xhigh`, `max`. With no `--candidates`, the first-run matrix of eight Claude candidates runs. A Codex candidate is `codex:model@effort`, with effort `default`, `low`, `medium`, `high` or `xhigh` (see below). An OpenCode candidate is `opencode:provider/model@variant`, such as `opencode:mistral/deepseek-v4-1-flash-1017@low`, where `default` leaves the variant to OpenCode and OpenCode refuses a variant the model doesn't have. `--cases` takes case ids or a count per shape, and `--reps` repeats each case.
 
 Each run writes `run.json` (one record per case, candidate and rep), `summary.md`, the timing taps, each build's files, and a judge batch.
 
@@ -40,6 +40,17 @@ Codex can't be limited to Giraffe's tools alone. It still offers Code Mode's `ex
 
 Codex reports tokens but no cost, so `costUsd` is null and the summary shows its cost as unknown. Token columns use Claude's meaning: in is the uncached input, cache read is Codex's cached input, and out includes reasoning. A usage-limit error records `usage_limit`, and any other failed turn records `codex_failed`. Codex's raw events for each run are saved next to its tap as `<id>.codex.jsonl`.
 
+## OpenCode
+
+An OpenCode candidate runs `opencode run --standalone --format json --model <provider/model>#<variant> --agent giraffe --archived`, with the prompt on stdin. The harness calls the real executable behind npm's shims (`--opencode` overrides it). It uses the providers already signed in on this machine. Each run gets a private config folder, its own XDG config and home folders, and no project config. The config turns off every built-in plugin (`"-*"`) and then turns back on only the ones the run needs, so your own agents, MCP servers, skills and search providers stay out. OpenCode's data folder holds the stored provider login, so it stays shared, and each run's session lands there, archived.
+
+- Chat, reminder and draft get the box turn's appended system text as the agent's system text, its turn on stdin, and its tools through the box's own tool server (`box/src/giraffe-mcp.ts`). OpenCode attaches that server as the local MCP server `giraffe`, and its tools appear as `giraffe_<name>`. Every other action is denied. The reply then goes through `readTurn`, the same as a Claude turn. Each run gets a fresh empty temp folder and a 119 s limit.
+- Build gets the build system text and only OpenCode's `read`, `write` and `edit` tools, in an empty temp folder, with a 300 s limit. Every other action, and any path outside the folder, is denied. That includes the temp folder OpenCode's own prompt calls "approved for external access". No tool can reach the network.
+
+OpenCode puts the agent's system text first, then its own lines naming the model, the date and the folder. Before spending anything, each run reads the tool list and that system text from OpenCode's first request. It runs the same config on a stand-in provider pointed at a local plain-HTTP server, which refuses the request, so the inventory never sees the real provider. The run stops unless the turn offers exactly Giraffe's tools, the build offers exactly `edit`, `read` and `write`, and the system text starts with the harness's own. The list goes in `run.json` and the summary. `otherTools` on a record names any other tool that shows up in OpenCode's events.
+
+OpenCode reports tokens and a dollar cost for every step, and the record sums them. The cost is OpenCode's own figure from its price list, not the provider's bill. In is the uncached input, cache read and cache write are OpenCode's cache counts, and out adds OpenCode's separate reasoning count to its output count. The served model and variant come from each run's `session export`. A rate-limit, quota or budget error records `usage_limit`, a rejected key records `signed_out`, and any other failed turn records `opencode_failed`. OpenCode's raw events for each run are saved next to its tap as `<id>.opencode.jsonl`.
+
 ## Judges
 
 `judge/` holds a shuffled batch under random ids, with three hand-written calibration drafts mixed in. `judge-key.json` maps ids back to runs and sits outside `judge/`, so give judges only that folder. Ingest each judge's scores, then read the rebuilt summary:
@@ -52,4 +63,4 @@ A judge counts only if it scores the calibration drafts good above flat above ba
 
 ## Tests
 
-`npm test` in `box/` proves every check on a known-good and a known-bad fixture, the answer keys at pinned dates, the timing tap's timeout, the browser driver on two page styles, and the judge gate both ways. For Codex it proves the arguments, the isolated home and its key handling, the tool server attachment, and the JSONL reader on a recorded turn, a failed turn and a usage-limit error.
+`npm test` in `box/` proves every check on a known-good and a known-bad fixture, the answer keys at pinned dates, the timing tap's timeout, the browser driver on two page styles, and the judge gate both ways. For Codex it proves the arguments, the isolated home and its key handling, the tool server attachment, and the JSONL reader on a recorded turn, a failed turn and a usage-limit error. For OpenCode it proves the arguments, the private config for each mode, the environment, finding the executable, the tool inventory reader, and the JSON reader. The reader is tested on a recorded turn with an accepted and a refused call, a recorded failed turn, a synthetic rate-limit error, and a cut-off stream.

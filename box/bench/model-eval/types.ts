@@ -1,6 +1,6 @@
 import type { Usage } from "../../src/claude.ts";
 
-export const HARNESSES = ["claude-code", "codex"] as const;
+export const HARNESSES = ["claude-code", "codex", "opencode"] as const;
 export type Harness = (typeof HARNESSES)[number];
 
 export const EFFORTS = ["default", "low", "medium", "high", "xhigh", "max"] as const;
@@ -14,8 +14,7 @@ export type Shape = (typeof SHAPES)[number];
 export type Contract = "product" | "planned";
 /** How a shape is graded: on what the person receives (product) or on the full reply (planned). */
 export const CONTRACT: Readonly<Record<Shape, Contract>> = { chat: "product", reminder: "product", draft: "planned", build: "planned" };
-/** Whether a run took a path Giraffe ships. Giraffe has no Codex path, so a Codex run is graded like its shape but labelled planned. */
-export const contractOf = (harness: Harness, shape: Shape): Contract => (harness === "codex" ? "planned" : CONTRACT[shape]);
+export const contractOf = (harness: Harness, shape: Shape): Contract => (harness === "claude-code" ? CONTRACT[shape] : "planned");
 
 export type Wall = string & { readonly __wall: unique symbol };
 
@@ -80,7 +79,7 @@ export type Case = {
 };
 
 /** `cut_off` and `refused`: the CLI answered but stopped at the output limit or refused, which the Worker treats as a failed turn. */
-export type RunStatus = "ok" | "timeout" | "claude_failed" | "codex_failed" | "usage_limit" | "signed_out" | "invalid_output" | "cut_off" | "refused" | "harness_error";
+export type RunStatus = "ok" | "timeout" | "claude_failed" | "codex_failed" | "opencode_failed" | "usage_limit" | "signed_out" | "invalid_output" | "cut_off" | "refused" | "harness_error";
 
 /** What the tap saw of one CLI run. `firstTextMs` is the first assistant text, which the Worker never sends; null spend means none was reported. */
 export type Tap = {
@@ -136,8 +135,11 @@ export type RunMeta = {
   readonly nowPinned: boolean;
   readonly argv: readonly string[];
   readonly codex: CodexMeta | null;
+  readonly opencode?: OpencodeMeta | null;
 };
 
 export type CodexMeta = { readonly cli: string; readonly version: string | null; readonly profile: string; readonly provider: string; readonly tools: Readonly<Partial<Record<"turn" | "build", readonly string[]>>> };
+
+export type OpencodeMeta = { readonly cli: string; readonly version: string | null; readonly tools: Readonly<Partial<Record<"turn" | "build", readonly string[]>>> };
 
 export type RunFile = { readonly meta: RunMeta; readonly records: RunRecord[] };

@@ -9,17 +9,19 @@ import { findChrome, inspect } from "./browser.ts";
 import { BUILD_SYSTEM, selectCases } from "./cases.ts";
 import { grade, REPLY_CAP } from "./checks.ts";
 import { CODEX_EFFORTS, codexArgs, codexEnv, giraffeMcp, homeConfig, parseCodexJsonl, PROFILE, readPool, toolInventory, writeHome, type CodexMode, type Mcp, type Pool } from "./codex.ts";
+import { findOpencode, opencodeArgs, opencodeConfig, opencodeEnv, parseOpencodeJsonl, toolInventory as opencodeInventory, writeLane, type OpencodeMode } from "./opencode.ts";
 import { ingestScores, readScores, writeJudgeBatch, type JudgeKey } from "./judge.ts";
 import { agentRequest, effortOf, failedTurn, NO_OBSERVATION, readTurn, TZ } from "./product.ts";
 import { render, type JudgeScores } from "./summary.ts";
-import { CONTRACT, contractOf, EFFORTS, HARNESSES, SHAPES, type Candidate, type Case, type Check, type CodexMeta, type Effort, type Observation, type RunFile, type RunRecord, type RunStatus, type Shape, type Tap, type Wall } from "./types.ts";
+import { CONTRACT, contractOf, EFFORTS, HARNESSES, SHAPES, type Candidate, type Case, type Check, type CodexMeta, type Effort, type Observation, type OpencodeMeta, type RunFile, type RunRecord, type RunStatus, type Shape, type Tap, type Wall } from "./types.ts";
 import { dateOf, parseWall, todayAt } from "./when.ts";
 
 const USAGE = `usage:
   node bench/model-eval/eval.ts [--candidates haiku@default,haiku@low,...] [--shapes chat,reminder,draft,build]
-    [--cases <id,...> | <n per shape>] [--reps 1] [--out <dir>] [--now YYYY-MM-DDTHH:mm] [--claude <cli>] [--codex <cli>] [--chrome <browser>] [--dry]
+    [--cases <id,...> | <n per shape>] [--reps 1] [--out <dir>] [--now YYYY-MM-DDTHH:mm] [--claude <cli>] [--codex <cli>] [--opencode <cli>] [--chrome <browser>] [--dry]
   node bench/model-eval/eval.ts score --run <run dir> --judge <name> --scores <file.json>
-A candidate is [harness:]model@effort. The harness is claude-code (the default) or codex, as in codex:gpt-6.2-sol@low;
+A candidate is [harness:]model@effort. The harness is claude-code (the default), codex, as in codex:gpt-6.2-sol@low,
+or opencode, as in opencode:mistral/deepseek-v4-1-flash-1017@low, whose effort is an OpenCode variant;
 codex takes the efforts ${CODEX_EFFORTS.join(", ")}. --dry prints every command and spends nothing.`;
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -42,7 +44,7 @@ function flag(name: string, fallback: string): string {
 }
 
 function parseCandidate(raw: string): Candidate {
-  const m = /^(?:([a-z-]+):)?([A-Za-z0-9._-]+)@([a-z]+)$/.exec(raw.trim());
+  const m = /^(?:([a-z-]+):)?([A-Za-z0-9._/-]+)@([a-z]+)$/.exec(raw.trim());
   const harness = m?.[1] ?? "claude-code";
   const efforts: readonly string[] = harness === "codex" ? CODEX_EFFORTS : EFFORTS;
   if (!m || !HARNESSES.includes(harness as Candidate["harness"]) || !efforts.includes(m[3])) fail(`not a candidate: ${raw}\n${USAGE}`);
@@ -88,6 +90,7 @@ type Outcome = {
   readonly costUsd: number | null;
   readonly tap: Tap | null;
   readonly buildDir: string | null;
+  readonly servedModels?: readonly string[];
 };
 
 const outcome = (status: RunStatus, tap: Tap | null, rest: Partial<Outcome> = {}): Outcome => ({
@@ -236,13 +239,97 @@ async function codexBuild(codex: Codex, chrome: string | null, c: Candidate, mes
   return outcome("ok", tap, { ...rest, observation: await observeBuild(chrome, keep, checks, turn.text) });
 }
 
+type Opencode = {
+  readonly cli: string;
+  readonly root: string;
+  readonly mcp: Mcp;
+  readonly turn: Pick<AgentRequest, "append" | "tools">;
+  readonly lanes: Readonly<Record<OpencodeMode, string>>;
+};
+
+function opencodeSetup(cli: string, sample: AgentRequest): Opencode {
+  const root = mkdtempSync(join(tmpdir(), "giraffe-opencode-"));
+  const toolsFile = join(root, "tools.json");
+  writeFileSync(toolsFile, JSON.stringify(sample.tools));
+  const mcp = giraffeMcp(toolsFile);
+  return {
+    cli,
+    root,
+    mcp,
+    turn: { append: sample.append, tools: sample.tools },
+    lanes: {
+      turn: writeLane(join(root, "turn"), opencodeConfig("turn", sample.append, mcp)),
+      build: writeLane(join(root, "build"), opencodeConfig("build", BUILD_SYSTEM, null)),
+    },
+  };
+}
+
+const OPENCODE_STATUS: Readonly<Record<"usage_limit" | "signed_out" | "failed", RunStatus>> = { usage_limit: "usage_limit", signed_out: "signed_out", failed: "opencode_failed" };
+
+async function servedModel(opencode: Opencode, mode: OpencodeMode, cwd: string, session: string | null): Promise<string[]> {
+  if (!session) return [];
+  const raw = await run([opencode.cli, "session", "export", "--standalone", session], cwd, "", opencodeEnv(opencode.lanes[mode], cwd));
+  try {
+    const m = JSON.parse(raw).info.model;
+    return [`${m.providerID}/${m.id}${m.variant && m.variant !== "default" ? `#${m.variant}` : ""}`];
+  } catch {
+    return [];
+  }
+}
+
+async function opencodeRun(opencode: Opencode, c: Candidate, mode: OpencodeMode, cwd: string, stdin: string, tapFile: string) {
+  const timeout = mode === "build" ? BUILD_TIMEOUT_MS : TURN_TAP_MS;
+  const cmd = [process.execPath, TAP, tapFile, String(timeout), opencode.cli, ...opencodeArgs(c.model, c.effort)];
+  const stdout = await run(cmd, cwd, stdin, opencodeEnv(opencode.lanes[mode], cwd));
+  writeFileSync(tapFile.replace(/\.jsonl$/, ".opencode.jsonl"), stdout);
+  const turn = parseOpencodeJsonl(stdout);
+  const tap = readTap(tapFile);
+  const servedModels = await servedModel(opencode, mode, cwd, turn.session);
+  const status: RunStatus | null = tap?.killed ? "timeout" : turn.failure ? OPENCODE_STATUS[turn.failure.kind] : null;
+  return { turn, tap, status, servedModels };
+}
+
+async function opencodeTurn(opencode: Opencode, c: Candidate, k: Case, message: string, now: Wall, tapFile: string): Promise<Outcome> {
+  const req = agentRequest(c, message, now);
+  if (req.append !== opencode.turn.append || JSON.stringify(req.tools) !== JSON.stringify(opencode.turn.tools)) throw new Error("this turn's system text or tools differ from the OpenCode lane's");
+  const cwd = mkdtempSync(join(tmpdir(), "giraffe-opencode-turn-"));
+  const { turn, tap, status, servedModels } = await opencodeRun(opencode, c, "turn", cwd, req.turn, tapFile);
+  rmSync(cwd, { recursive: true, force: true });
+  const rest = { usage: turn.usage, costUsd: turn.costUsd, otherTools: turn.otherTools, servedModels };
+  if (status) return outcome(status, tap, rest);
+  const body = { text: turn.text, calls: [...turn.calls], refusedCalls: turn.refusedCalls.map((r) => ({ ...r, problems: [...r.problems] })), usage: turn.usage, stop: turn.stop, costUsd: turn.costUsd };
+  return { ...readTurn(body, message, now, CONTRACT[k.shape]), otherTools: turn.otherTools, tap, buildDir: null, servedModels };
+}
+
+async function opencodeBuild(opencode: Opencode, chrome: string | null, c: Candidate, message: string, checks: readonly Check[], tapFile: string, keep: string): Promise<Outcome> {
+  const work = mkdtempSync(join(tmpdir(), "giraffe-build-"));
+  const { turn, tap, status, servedModels } = await opencodeRun(opencode, c, "build", work, message, tapFile);
+  keepBuild(work, keep);
+  const rest = { usage: turn.usage, costUsd: turn.costUsd, otherTools: turn.otherTools, buildDir: keep, servedModels };
+  if (status) return outcome(status, tap, rest);
+  return outcome("ok", tap, { ...rest, observation: await observeBuild(chrome, keep, checks, turn.text) });
+}
+
+function expectInventory(mode: OpencodeMode, seen: { tools: readonly string[]; system: string }, system: string, tools: readonly string[]) {
+  const want = [...tools].sort().join(", ");
+  const got = [...seen.tools].sort().join(", ");
+  if (got !== want) fail(`opencode's ${mode} tools are ${got || "none"}, not ${want}`);
+  if (!seen.system.startsWith(system)) fail(`opencode's ${mode} system text doesn't start with the harness's own`);
+}
+
 const quote = (a: string) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replaceAll("'", "'\\''")}'`);
 
-function printDry(cli: string, codex: Codex | null, candidates: readonly Candidate[], cases: readonly Case[], reps: number, now: Wall) {
+function printDry(cli: string, codex: Codex | null, opencode: Opencode | null, candidates: readonly Candidate[], cases: readonly Case[], reps: number, now: Wall) {
   if (codex) {
     for (const mode of ["turn", "build"] as const) {
       console.log(`# codex ${mode} home: CODEX_HOME=${codex.homes[mode]} with ${PROFILE}.config.toml naming ${codex.pool.provider}, USERPROFILE and HOME an empty folder, the key only in the environment`);
       console.log(readFileSync(join(codex.homes[mode], "config.toml"), "utf8"));
+    }
+  }
+  if (opencode) {
+    for (const mode of ["turn", "build"] as const) {
+      console.log(`# opencode ${mode} lane: OPENCODE_CONFIG_DIR=${join(opencode.lanes[mode], "config")}, its own XDG config and home folders, project config off`);
+      console.log(readFileSync(join(opencode.lanes[mode], "config", "opencode.json"), "utf8"));
     }
   }
   for (const c of candidates) {
@@ -250,10 +337,15 @@ function printDry(cli: string, codex: Codex | null, candidates: readonly Candida
       const { message } = k.make(now);
       const req = agentRequest(c, message, now);
       const build = k.shape === "build";
-      const where = build || c.harness === "codex" ? "a fresh empty temp folder" : "the box's empty folder";
+      const where = build || c.harness !== "claude-code" ? "a fresh empty temp folder" : "the box's empty folder";
       console.log(`# ${label(c)} ${k.id} x${reps} (${contractOf(c.harness, k.shape)}, cwd ${where})`);
       if (c.harness === "codex") {
         console.log([codex?.cli ?? "codex", ...codexArgs(c.model, c.effort, build ? "build" : "turn", "<temp folder>")].map(quote).join(" "));
+        console.log(`# stdin: ${build ? message : req.turn}\n`);
+        continue;
+      }
+      if (c.harness === "opencode") {
+        console.log([opencode?.cli ?? "opencode", ...opencodeArgs(c.model, c.effort)].map(quote).join(" "));
         console.log(`# stdin: ${build ? message : req.turn}\n`);
         continue;
       }
@@ -317,10 +409,14 @@ async function main() {
   const codexCandidates = candidates.filter((c) => c.harness === "codex");
   const sample = codexCandidates.length && cases.length ? agentRequest(codexCandidates[0], cases[0].make(now).message, now) : null;
   const codex = sample ? codexSetup(flag("codex", "codex"), process.env.CODEX_HOME ?? join(homedir(), ".codex"), sample) : null;
+  const opencodeCandidates = candidates.filter((c) => c.harness === "opencode");
+  const opencodeSample = opencodeCandidates.length && cases.length ? agentRequest(opencodeCandidates[0], cases[0].make(now).message, now) : null;
+  const opencode = opencodeSample ? opencodeSetup(findOpencode(flag("opencode", "") || null), opencodeSample) : null;
 
   if (process.argv.includes("--dry")) {
-    printDry(cli, codex, candidates, cases, reps, now);
+    printDry(cli, codex, opencode, candidates, cases, reps, now);
     if (codex) rmSync(codex.root, { recursive: true, force: true });
+    if (opencode) rmSync(opencode.root, { recursive: true, force: true });
     return;
   }
 
@@ -344,6 +440,22 @@ async function main() {
     codexMeta = { cli: codex.cli, version, profile: PROFILE, provider: codex.pool.provider, tools };
   }
 
+  let opencodeMeta: OpencodeMeta | null = null;
+  if (opencode) {
+    const version = spawnSync(opencode.cli, ["--version"], { encoding: "utf8" }).stdout?.trim().split(/\s+/).at(-1)?.replace(/^v/, "") ?? null;
+    const modes = [...new Set(cases.map((k) => (k.shape === "build" ? "build" : "turn") as OpencodeMode))];
+    const tools: Partial<Record<OpencodeMode, readonly string[]>> = {};
+    for (const mode of modes) {
+      const turn = mode === "turn";
+      const system = turn ? opencode.turn.append : BUILD_SYSTEM;
+      const seen = await opencodeInventory(opencode.cli, mode, system, turn ? opencode.mcp : null).catch((err: Error) => fail(err.message));
+      expectInventory(mode, seen, system, turn ? opencode.turn.tools.map((t) => `giraffe_${t.name}`) : ["edit", "read", "write"]);
+      tools[mode] = seen.tools;
+      console.log(`opencode ${mode} tools: ${seen.tools.join(", ")}`);
+    }
+    opencodeMeta = { cli: opencode.cli, version, tools };
+  }
+
   const stamp = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
   const runDir = resolve(flag("out", join(HERE, "out")), `${stamp}-${randomBytes(2).toString("hex")}`);
   mkdirSync(join(runDir, "taps"), { recursive: true });
@@ -358,12 +470,14 @@ async function main() {
       nowPinned: pinned !== "",
       argv: process.argv.slice(2),
       codex: codexMeta,
+      opencode: opencodeMeta,
     },
     records: [],
   };
   console.log(`run ${runDir}: ${candidates.length} candidates x ${cases.length} cases x ${reps} reps, now ${now}`);
 
   const attempt = (c: Candidate, k: Case, message: string, checks: readonly Check[], tapFile: string, keep: string): Promise<Outcome> => {
+    if (c.harness === "opencode" && opencode) return k.shape === "build" ? opencodeBuild(opencode, chrome, c, message, checks, tapFile, keep) : opencodeTurn(opencode, c, k, message, now, tapFile);
     if (c.harness === "codex" && codex) return k.shape === "build" ? codexBuild(codex, chrome, c, message, checks, tapFile, keep) : codexTurn(codex, c, k, message, now, tapFile);
     return k.shape === "build" ? buildTurn(cli, chrome, c, message, checks, tapFile, keep) : productTurn(cli, c, k, message, now, tapFile);
   };
@@ -408,7 +522,7 @@ async function main() {
           firstTextMs: out.tap?.firstTextMs ?? null,
           usage: out.usage,
           costUsd: out.costUsd,
-          models: out.tap?.models ?? [],
+          models: out.servedModels ?? out.tap?.models ?? [],
           buildDir: out.buildDir,
         };
         file.records.push(record);
@@ -420,6 +534,7 @@ async function main() {
     }
   }
   if (codex) rmSync(codex.root, { recursive: true, force: true, maxRetries: 3 });
+  if (opencode) rmSync(opencode.root, { recursive: true, force: true, maxRetries: 3 });
   const judged = writeJudgeBatch(runDir, file.records);
   console.log(`judge batch: ${judged.items} items in ${join(runDir, "judge")}`);
   console.log(writeSummary(runDir, file));

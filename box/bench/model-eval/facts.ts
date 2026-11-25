@@ -8,7 +8,19 @@ const UNITS: Readonly<Record<Unit, RegExp>> = {
   cm: new RegExp(`${NUMBER} ?(?:ซม|เซนติเมตร|เซน|cm)`, "g"),
 };
 
-const amounts = (text: string, unit: Unit): number[] => [...plain(text).matchAll(UNITS[unit])].map((m) => Number(m[1] ?? m[2]));
+/** "30x35 ซม." gives each side the unit, so it reads as 30 ซม. and 35 ซม.; a bare "30x35" is a size in centimetres too. */
+const SIZE = /(\d+(?:\.\d+)?) ?(?:ซม\.?|cm)? ?[x×*] ?(\d+(?:\.\d+)?) ?(ซม|เซนติเมตร|เซน|cm)?/g;
+
+const amounts = (text: string, unit: Unit): number[] =>
+  [...plain(text).replace(SIZE, (_, a, b, u = "ซม") => `${a} ${u} x ${b} ${u}`).matchAll(UNITS[unit])].map((m) => Number(m[1] ?? m[2]));
+
+/** A claim right after ไม่รวม, ไม่รับ or the like is ruled out, not made. */
+const NEGATED = /(?:ไม่|งด|ยกเว้น|no|not)[^ไ]{0,4}$/;
+
+function claims(text: string, any: readonly string[]): boolean {
+  const t = squash(text);
+  return any.some((a) => [...t.matchAll(new RegExp(squash(a).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))].some((m) => !NEGATED.test(t.slice(Math.max(0, m.index - 7), m.index))));
+}
 
 const DECEMBER = String.raw`(?:ธ\.? ?ค\.?|ธันวา(?:คม)?|/ ?12(?!\d))`;
 const DAY = String.raw`(?<![\d.])\d{1,2}`;
@@ -33,7 +45,7 @@ export function wrongFact(f: Fact, text: string): string | null {
     case "says":
       return has(text, f.any) ? null : `missing ${f.label}`;
     case "never":
-      return has(text, f.any) ? `claims ${f.label}` : null;
+      return claims(text, f.any) ? `claims ${f.label}` : null;
     case "amounts": {
       const got = amounts(text, f.unit);
       const gone = f.need.filter((n) => !got.includes(n));

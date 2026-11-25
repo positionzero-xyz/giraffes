@@ -1,5 +1,5 @@
-import type { Case, Check, Phrase, Rubric, Shape } from "./types.ts";
-import { addMinutes, dayAt, nextWeekReadings, nextWeekday, thaiDate } from "./when.ts";
+import type { Case, Check, Phrase, Rubric, Shape, Wall } from "./types.ts";
+import { addMinutes, dateOf, dayAt, nextWeekReadings, nextWeekday, thaiDate } from "./when.ts";
 
 const p = (label: string, ...any: string[]): Phrase => ({ label, any });
 
@@ -14,6 +14,10 @@ const BUILD = (items: readonly Phrase[]): Check[] => [
 ];
 
 const fixed = (message: string, checks: readonly Check[]) => () => ({ message, checks });
+
+const EVENING = { fromHour: 16, toHour: 20 } as const;
+/** "This evening" asked once the evening is over means tomorrow's. */
+const eveningDate = (now: Wall, toHour: number) => dateOf(Number(now.slice(11, 13)) < toHour ? now : dayAt(now, 1, "00:00"));
 
 export const CASES: readonly Case[] = [
   {
@@ -63,7 +67,7 @@ export const CASES: readonly Case[] = [
     judged: false,
     make: (now) => ({
       message: "อีก 20 นาทีเตือนให้ไปปิดเตาแก๊สด้วยนะ",
-      checks: [...REMINDER, { kind: "due_at", readings: [{ label: "in 20 minutes", at: addMinutes(now, 20) }] }],
+      checks: [...REMINDER, { kind: "due_at", readings: [{ label: "in 20 minutes", at: addMinutes(now, 20) }], repeat: null, about: ["เตา", "แก๊ส", "gas", "stove"] }],
     }),
   },
   {
@@ -73,7 +77,7 @@ export const CASES: readonly Case[] = [
     judged: false,
     make: (now) => ({
       message: "พรุ่งนี้บ่ายสองเตือนให้โทรหาคลินิกทำฟันหน่อย",
-      checks: [...REMINDER, { kind: "due_at", readings: [{ label: "tomorrow 14:00", at: dayAt(now, 1, "14:00") }] }],
+      checks: [...REMINDER, { kind: "due_at", readings: [{ label: "tomorrow 14:00", at: dayAt(now, 1, "14:00") }], repeat: null, about: ["คลินิก", "ฟัน", "clinic", "dentist", "dental"] }],
     }),
   },
   {
@@ -83,7 +87,7 @@ export const CASES: readonly Case[] = [
     judged: false,
     make: (now) => ({
       message: "ช่วยเตือนส่งรายงานให้หัวหน้าทุกวันจันทร์ 8 โมงเช้าหน่อย",
-      checks: [...REMINDER, { kind: "due_at", readings: [{ label: "next Monday 08:00", at: nextWeekday(now, 0, "08:00") }], repeat: "weekly" }],
+      checks: [...REMINDER, { kind: "due_at", readings: [{ label: "next Monday 08:00", at: nextWeekday(now, 0, "08:00") }], repeat: "weekly", about: ["รายงาน", "report"] }],
     }),
   },
   {
@@ -93,7 +97,7 @@ export const CASES: readonly Case[] = [
     judged: false,
     make: (now) => ({
       message: "วันศุกร์หน้าเตือนให้จ่ายค่าเช่าห้องตอน 10 โมงเช้าด้วย",
-      checks: [...REMINDER, { kind: "due_at", readings: nextWeekReadings(now, 4, "10:00") }],
+      checks: [...REMINDER, { kind: "due_at", readings: nextWeekReadings(now, 4, "10:00"), repeat: null, about: ["ค่าเช่า", "ค่าห้อง", "rent"] }],
     }),
   },
   {
@@ -105,7 +109,7 @@ export const CASES: readonly Case[] = [
       const due = dayAt(now, 20, "09:00");
       return {
         message: `วันที่ ${thaiDate(due)} ช่วยเตือนให้ไปต่อภาษีรถตอน 9 โมงเช้านะ`,
-        checks: [...REMINDER, { kind: "due_at", readings: [{ label: "the Buddhist-era date", at: due }] }],
+        checks: [...REMINDER, { kind: "due_at", readings: [{ label: "the Buddhist-era date", at: due }], repeat: null, about: ["ภาษี", "tax"] }],
       };
     },
   },
@@ -114,7 +118,10 @@ export const CASES: readonly Case[] = [
     shape: "reminder",
     brief: "This evening, remind me to water the plants (no time given).",
     judged: false,
-    make: fixed("ตอนเย็นเตือนให้รดน้ำต้นไม้ด้วยนะ", [...REMINDER, { kind: "asks_or_assumes", fromHour: 16, toHour: 20 }]),
+    make: (now) => ({
+      message: "ตอนเย็นเตือนให้รดน้ำต้นไม้ด้วยนะ",
+      checks: [...REMINDER, { kind: "asks_or_assumes", date: eveningDate(now, EVENING.toHour), ...EVENING, about: ["รดน้ำ", "ต้นไม้", "water", "plant"] }],
+    }),
   },
   {
     id: "draft-facebook-coffee",

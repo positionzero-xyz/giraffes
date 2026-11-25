@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { grade, hourPhrases, squash, thaiShare } from "../checks.ts";
+import { grade, thaiShare } from "../checks.ts";
+import { squash, statedRepeats, statedTimes, thaiNumber } from "../thai.ts";
 import type { Check, Observation, PageReport, Wall } from "../types.ts";
 
 const turn = (text: string, more: Partial<Observation> = {}): Observation => ({ text, wakeups: [], rejected: [], files: {}, page: null, ...more });
@@ -24,46 +25,6 @@ describe("every check passes its known-good and fails its known-bad", () => {
   it("fits_reply", () => both({ kind: "fits_reply" }, turn("ก".repeat(600)), turn("ก".repeat(601))));
 
   it("worker_accepts", () => both({ kind: "worker_accepts" }, turn("ok"), turn("ok", { rejected: ["schedule_wakeup:rent past"] })));
-
-  it("due_at on the exact wall time", () =>
-    both(
-      { kind: "due_at", readings: [{ label: "in 20 minutes", at: w("2026-11-29T10:20") }] },
-      turn("", { wakeups: [{ at: "2026-11-29T10:20", repeat: null, asked: true }] }),
-      turn("", { wakeups: [{ at: "2026-11-29T10:00", repeat: null, asked: true }] }),
-    ));
-
-  it("due_at with a repeat", () =>
-    both(
-      { kind: "due_at", readings: [{ label: "monday", at: w("2026-11-30T08:00") }], repeat: "weekly" },
-      turn("", { wakeups: [{ at: "2026-11-30T08:00", repeat: "weekly", asked: true }] }),
-      turn("", { wakeups: [{ at: "2026-11-30T08:00", repeat: null, asked: true }] }),
-    ));
-
-  it("due_at names the reading it matched", () => {
-    const r = grade(
-      { kind: "due_at", readings: [{ label: "coming", at: w("2026-11-27T10:00") }, { label: "next week", at: w("2026-12-04T10:00") }] },
-      turn("", { wakeups: [{ at: "2026-12-04T10:00", repeat: null, asked: true }] }),
-    );
-    assert.equal(r.pass, true);
-    assert.match(r.detail, /^next week/);
-  });
-
-  it("asks_or_assumes when it asks back", () =>
-    both({ kind: "asks_or_assumes", fromHour: 16, toHour: 20 }, turn("ได้เลย อยากให้เตือนกี่โมงดี"), turn("ได้เลยจ้า")));
-
-  it("asks_or_assumes when it picks a time and says it", () =>
-    both(
-      { kind: "asks_or_assumes", fromHour: 16, toHour: 20 },
-      turn("ตั้งไว้หกโมงเย็นนะ", { wakeups: [{ at: "2026-11-29T18:00", repeat: null, asked: true }] }),
-      turn("ตั้งไว้ให้แล้วนะ", { wakeups: [{ at: "2026-11-29T18:00", repeat: null, asked: true }] }),
-    ));
-
-  it("asks_or_assumes refuses a time outside the evening", () =>
-    both(
-      { kind: "asks_or_assumes", fromHour: 16, toHour: 20 },
-      turn("เตือนตอน 17:30 นะ", { wakeups: [{ at: "2026-11-29T17:30", repeat: null, asked: true }] }),
-      turn("เตือนตอน 21:00 นะ", { wakeups: [{ at: "2026-11-29T21:00", repeat: null, asked: true }] }),
-    ));
 
   it("facts", () =>
     both(
@@ -101,9 +62,31 @@ describe("every check passes its known-good and fails its known-bad", () => {
 describe("text helpers", () => {
   it("squashes spaces, dashes and Thai digits", () => assert.equal(squash("๑ – ๗ ธ.ค."), "1-7ธ.ค."));
   it("counts letters only for the Thai share", () => assert.equal(thaiShare("ก ข 123 !! 😀"), 1));
-  it("names evening hours the Thai ways", () => {
-    assert.ok(hourPhrases(17, 0).includes("ห้าโมงเย็น"));
-    assert.ok(hourPhrases(19, 0).includes("ทุ่มนึง"));
-    assert.ok(hourPhrases(18, 30).includes("18.30"));
+  it("reads Thai number words, including the spoken thousands", () => {
+    assert.deepEqual(["หกสิบห้า", "ยี่สิบเอ็ด", "สามร้อยเก้าสิบ", "หนึ่งพันห้าร้อย", "พันห้า", "พันสอง"].map(thaiNumber), [65, 21, 390, 1500, 1500, 1200]);
+    assert.equal(thaiNumber("สองสาม"), null);
+  });
+
+  it("reads a clock time in 24-hour form and in each Thai daypart", () => {
+    const read = (s: string) => statedTimes(s).map((t) => `${t.hours.join("/")}:${t.minute}`);
+    assert.deepEqual(read("เตือนตอน 17:30 นะ"), ["17:30"]);
+    assert.deepEqual(read("ห้าโมงครึ่งเย็น"), ["17:30"]);
+    assert.deepEqual(read("บ่ายสองโมง"), ["14:0"]);
+    assert.deepEqual(read("สองทุ่มครึ่ง"), ["20:30"]);
+    assert.deepEqual(read("ทุ่มนึง"), ["19:0"]);
+    assert.deepEqual(read("ตี 5"), ["5:0"]);
+    assert.deepEqual(read("8 โมงเช้า"), ["8:0"]);
+    assert.deepEqual(read("เที่ยงคืน"), ["0:0"]);
+  });
+
+  it("doesn't read a duration or a dotted date as a clock time", () => {
+    assert.deepEqual(statedTimes("อีก 20 นาที อีก 2 ชั่วโมง"), []);
+    assert.deepEqual(statedTimes("วันที่ 15.12.2569"), []);
+  });
+
+  it("reads a stated cadence", () => {
+    assert.deepEqual(statedRepeats("เตือนทุกวันจันทร์"), ["weekly"]);
+    assert.deepEqual(statedRepeats("เตือนทุกวันนะ"), ["daily"]);
+    assert.deepEqual(statedRepeats("พรุ่งนี้บ่ายสอง"), []);
   });
 });

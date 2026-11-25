@@ -1,15 +1,7 @@
-import type { Check, CheckResult, Observation, Phrase } from "./types.ts";
+import { says, squash, statedRepeats, statedTimes } from "./thai.ts";
+import type { Check, CheckResult, Observation, Phrase, Wakeup } from "./types.ts";
 
 export const REPLY_CAP = 600;
-
-const THAI_DIGITS = /[๐-๙]/g;
-export function squash(s: string): string {
-  return s
-    .replace(THAI_DIGITS, (d) => String(d.charCodeAt(0) - 0x0e50))
-    .replace(/[–—]/g, "-")
-    .replace(/\s+/g, "")
-    .toLowerCase();
-}
 
 const has = (text: string, p: Phrase) => p.any.some((a) => squash(text).includes(squash(a)));
 const missing = (text: string, ps: readonly Phrase[]) => ps.filter((p) => !has(text, p)).map((p) => p.label);
@@ -22,24 +14,23 @@ export function thaiShare(s: string): number {
 
 const JARGON = /schedule_wakeup|cancel_wakeup|set_locale|mcp__|wake-?ups?|\btool(s|\s?calls?)?\b|\bjson\b|\bschema\b|system prompt|claude code|latenotice|unasked messages|\bprompt\b|\bmodel\b/i;
 
-const ASKS = /[?？]|ไหม|มั้ย|หรือเปล่า|รึเปล่า|ป่ะ|กี่โมง|เวลาไหน|ตอนไหน|กี่ทุ่ม|สะดวก/;
-const THAI_COUNT = ["", "หนึ่ง", "สอง", "สาม", "สี่", "ห้า", "หก"];
+const TIME_QUESTION = /กี่โมง|กี่ทุ่ม|เวลาไหน|เวลาอะไร|ตอนไหน|ช่วงไหน|เวลากี่|สะดวกเวลา|whattime/;
+const QUESTION = /[?？]|ไหม|มั้ย|ดีคะ|ดีครับ|ดีมั้ย|หรือ|รึ/;
 
-export function hourPhrases(h: number, m: number): string[] {
-  const mm = String(m).padStart(2, "0");
-  const out = [`${h}:${mm}`, `${h}.${mm}`, `${String(h).padStart(2, "0")}:${mm}`, `${String(h).padStart(2, "0")}.${mm}`];
-  if (m !== 0) return out;
-  if (h >= 13 && h <= 18) {
-    const n = h - 12;
-    out.push(`${n}โมงเย็น`, `${THAI_COUNT[n]}โมงเย็น`, `${n}โมง`, `${THAI_COUNT[n]}โมง`);
-    if (h <= 16) out.push(`บ่าย${n}`, `บ่าย${THAI_COUNT[n]}`);
-  }
-  if (h >= 19 && h <= 23) {
-    const n = h - 18;
-    out.push(`${n}ทุ่ม`, `${THAI_COUNT[n]}ทุ่ม`);
-    if (n === 1) out.push("ทุ่มนึง", "ทุ่มหนึ่ง");
-  }
-  return out;
+const clock = (w: Wakeup) => w.at.slice(11).split(":").map(Number) as [number, number];
+
+/** Why the one reminder isn't the asked-for one-off or routine about the job, or null when it is. */
+function wrongReminder(o: Observation, repeat: Wakeup["repeat"], about: readonly string[]): string | null {
+  if (o.wakeups.length !== 1) return o.wakeups.length ? `${o.wakeups.length} reminders` : "no reminder";
+  const [w] = o.wakeups;
+  if (!w.asked) return `${w.at} marked as not asked for`;
+  if (w.repeat !== repeat) return `${w.at} repeats ${w.repeat ?? "never"}, want ${repeat ?? "never"}`;
+  if (!about.some((a) => squash(w.note).includes(squash(a)))) return `note "${w.note}" isn't about ${about[0]}`;
+  const [h, m] = clock(w);
+  if (statedTimes(o.text).length && !says(o.text, h, m)) return `the reply states another time than ${w.at.slice(11)}`;
+  const cadence = statedRepeats(o.text);
+  if (cadence.length && (repeat === null || cadence.some((c) => c !== repeat))) return `the reply says ${cadence.join(", ")}, set ${repeat ?? "once"}`;
+  return null;
 }
 
 type Grader<K extends Check["kind"]> = (c: Extract<Check, { kind: K }>, o: Observation) => Omit<CheckResult, "check">;
@@ -57,21 +48,23 @@ const GRADERS: { readonly [K in Check["kind"]]: Grader<K> } = {
   fits_reply: (_, o) => ({ pass: o.text.length <= REPLY_CAP, detail: `${o.text.length} chars` }),
   worker_accepts: (_, o) => ({ pass: o.rejected.length === 0, detail: o.rejected.join(" ") || "none rejected" }),
   due_at: (c, o) => {
-    for (const r of c.readings) {
-      const w = o.wakeups.find((x) => x.at === r.at);
-      if (!w) continue;
-      if (c.repeat && w.repeat !== c.repeat) return { pass: false, detail: `${r.at} but repeat ${w.repeat ?? "none"}, want ${c.repeat}` };
-      return { pass: true, detail: `${r.label} ${r.at}${w.repeat ? ` ${w.repeat}` : ""}` };
-    }
-    return { pass: false, detail: `got ${o.wakeups.map((w) => w.at).join(" ") || "no reminder"}, want ${c.readings.map((r) => r.at).join(" or ")}` };
+    const wrong = wrongReminder(o, c.repeat, c.about);
+    if (wrong) return { pass: false, detail: wrong };
+    const r = c.readings.find((x) => x.at === o.wakeups[0].at);
+    return r ? { pass: true, detail: `${r.label} ${r.at}` } : { pass: false, detail: `got ${o.wakeups[0].at}, want ${c.readings.map((x) => x.at).join(" or ")}` };
   },
   asks_or_assumes: (c, o) => {
+    if (o.wakeups.length === 0) {
+      const asked = TIME_QUESTION.test(squash(o.text)) || (QUESTION.test(o.text) && statedTimes(o.text).some((t) => t.hours.some((h) => h >= c.fromHour && h < c.toHour)));
+      return asked ? { pass: true, detail: "asked which time" } : { pass: false, detail: "no reminder and no question about the time" };
+    }
+    const wrong = wrongReminder(o, null, c.about);
+    if (wrong) return { pass: false, detail: wrong };
     const w = o.wakeups[0];
-    if (!w) return ASKS.test(o.text) ? { pass: true, detail: "asked back" } : { pass: false, detail: "no reminder and no question" };
-    const [h, m] = w.at.slice(11).split(":").map(Number);
+    const [h, m] = clock(w);
+    if (w.at.slice(0, 10) !== c.date) return { pass: false, detail: `${w.at} is not on ${c.date}` };
     if (h < c.fromHour || h >= c.toHour) return { pass: false, detail: `${w.at} is outside ${c.fromHour}:00-${c.toHour}:00` };
-    const said = hourPhrases(h, m).some((p) => squash(o.text).includes(squash(p)));
-    return { pass: said, detail: said ? `assumed ${w.at} and said so` : `set ${w.at} without saying when` };
+    return says(o.text, h, m) ? { pass: true, detail: `assumed ${w.at} and said so` } : { pass: false, detail: `set ${w.at} without saying when` };
   },
   facts: (c, o) => {
     const gone = missing(o.text, c.facts);

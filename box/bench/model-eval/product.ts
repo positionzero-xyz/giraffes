@@ -59,10 +59,11 @@ export function readTurn(body: Extract<AgentReply, { status: 200 }>["body"], mes
     return { status, observation: { ...NO_OBSERVATION, text: body.text }, ...base };
   }
   const commit = planTurn(attempt.value, viewOf(message, now));
-  const wakeups: Wakeup[] = commit.wakeupsAdd.map((w: { dueAt: number; repeat: { every: Wakeup["repeat"] } | null; origin: string }) => ({
+  const wakeups: Wakeup[] = commit.wakeupsAdd.map((w: { dueAt: number; repeat: { every: Wakeup["repeat"] } | null; origin: string; note: string }) => ({
     at: toLocal(w.dueAt, tz),
     repeat: w.repeat?.every ?? null,
     asked: w.origin === "person",
+    note: w.note,
   }));
   const rejected = commit.rejected.map((r: { action: string; reason: string }) => `${r.action} ${r.reason}`);
   return { status: "ok", observation: { text: body.text.trim(), wakeups, rejected, files: {}, page: null }, ...base };

@@ -26,8 +26,10 @@ export type Check =
   | { readonly kind: "mentions"; readonly what: string; readonly any: readonly string[] }
   | { readonly kind: "fits_reply" }
   | { readonly kind: "worker_accepts" }
-  | { readonly kind: "due_at"; readonly readings: readonly Reading[]; readonly repeat?: Repeat }
-  | { readonly kind: "asks_or_assumes"; readonly fromHour: number; readonly toHour: number }
+  /** One reminder, asked for, at one of `readings`, repeating exactly so, whose note names the job; the reply states no other time or cadence. */
+  | { readonly kind: "due_at"; readonly readings: readonly Reading[]; readonly repeat: Repeat | null; readonly about: readonly string[] }
+  /** Asks which time, or sets one asked-for one-off reminder on `date` within the hours and says when. */
+  | { readonly kind: "asks_or_assumes"; readonly date: string; readonly fromHour: number; readonly toHour: number; readonly about: readonly string[] }
   | { readonly kind: "facts"; readonly facts: readonly Phrase[] }
   | { readonly kind: "length"; readonly min: number; readonly max: number }
   | { readonly kind: "file"; readonly path: string }
@@ -38,7 +40,7 @@ export type Check =
 
 export type CheckResult = { readonly check: string; readonly pass: boolean; readonly detail: string };
 
-export type Wakeup = { readonly at: string; readonly repeat: Repeat | null; readonly asked: boolean };
+export type Wakeup = { readonly at: string; readonly repeat: Repeat | null; readonly asked: boolean; readonly note: string };
 
 export type PersistReport = { readonly ok: boolean; readonly shown: boolean; readonly reason: string };
 export type PageReport = { readonly loaded: boolean; readonly errors: readonly string[]; readonly text: string; readonly persist: PersistReport | null };

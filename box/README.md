@@ -6,19 +6,24 @@ person's own Claude account and answers the Worker over HTTP. The contract is
 
 ## Contents
 
-- `src/main.ts` starts the server on port 8789. It refuses to start without `BOX_TOKEN`.
-- `src/server.ts` serves `GET /health`, `POST /parse` and the sign-in routes. `src/auth.ts` checks the bearer token and
+- `src/main.ts` starts the server on port 8789. It refuses to start without `BOX_TOKEN`, `HOME`, `CLAUDE_CONFIG_DIR` and
+  `BOX_STATE_DIR`, because an erase empties the first two.
+- `src/server.ts` serves `GET /health`, `POST /parse`, `POST /agent`, `POST /erase` and the sign-in routes. `src/erase.ts`
+  holds what an erase removes and keeps, and the box's record of its erases. `src/auth.ts` checks the bearer token and
   sign-in tickets. `src/signin.html` is the page a person opens from the sign-in link.
 - `src/claude.ts` runs one `claude -p` turn. `app/dev/bridge.ts` serves the same turn locally without auth.
-- `Dockerfile` builds the image from this directory: `docker build -t giraffes-box:mvp box`. `entrypoint.sh` creates
-  `/data/home` (`HOME`) and `/data/claude` (`CLAUDE_CONFIG_DIR`) on the volume, hands them to `agent` (uid 1001) and drops
-  to that user before starting the server.
+- `Dockerfile` builds the image from this directory: `docker build -t giraffes-box:mvp box`. `entrypoint.sh` runs
+  `lockdown.sh` as root, then drops to `agent` (uid 1001) and starts the server. `lockdown.sh` creates `/data/home` (`HOME`),
+  `/data/claude` (`CLAUDE_CONFIG_DIR`) and `/data/box-state` (`BOX_STATE_DIR`) on the volume and hands them to `agent`. It
+  then takes away `agent`'s write access everywhere else but `/tmp`, including the tmpfs mounts the host adds, and exits
+  non-zero if any such place is left, so the box never writes where an erase doesn't reach.
 - `up.sh <name> <host-port> <data-dir> [--mock]` runs the image locally with `BOX_TOKEN` from the environment. `--mock`
   runs `mock-api.mjs` inside the box and signs the CLI in with a fake API key pointed at it, with every Anthropic host
   resolved to loopback, so `/parse` answers without a real model.
 - `push.sh <fly-app>` builds for linux/amd64 and pushes `registry.fly.io/<fly-app>:<git short sha>`. It refuses when `box/`
   has uncommitted changes. Log docker in to `registry.fly.io` first.
-- `npm test` runs `test/*.test.ts` against `test/fake-claude.mjs`. It needs Node 24 and nothing installed.
+- `npm test` runs `test/*.test.ts` against `test/fake-claude.mjs`, and `agent.test.ts` and `erase.test.ts` against the
+  pinned CLI and `mock-api.mjs` on ports 18791 and 18792. It needs Node 24; the CLI tests skip until `npm ci` has run here.
 
 `package.json` and `package-lock.json` pin Claude Code. The lockfile is generated on Linux so npm sees the `libc` fields and
 installs only the glibc binary.

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +8,9 @@ import { diagnostic } from "./diagnostics.ts";
 
 export type Cli = readonly [string, ...string[]];
 
-export type ParseRequest = { readonly model: string; readonly system: string; readonly user: string; readonly jsonSchema: Record<string, unknown> };
+export type At = { readonly box: string; readonly epoch: number } | null;
+
+export type ParseRequest = { readonly model: string; readonly system: string; readonly user: string; readonly jsonSchema: Record<string, unknown>; readonly at: At };
 
 export type Usage = {
   readonly input_tokens: number;
@@ -28,7 +30,11 @@ const ALIAS: Readonly<Record<string, string>> = { "claude-haiku-5-5": "haiku", "
 const TURN_TIMEOUT_MS = 120_000;
 const STATUS_TIMEOUT_MS = 30_000;
 // An empty working directory, so the CLI picks up no project files or settings.
-const EMPTY_DIR = mkdtempSync(join(tmpdir(), "claude-cwd-"));
+let workDir: string | null = null;
+function emptyWorkDir(): string {
+  if (workDir === null || !existsSync(workDir)) workDir = mkdtempSync(join(tmpdir(), "claude-cwd-"));
+  return workDir;
+}
 
 type Json = Record<string, unknown>;
 const isObject = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -42,9 +48,20 @@ function parseJson(text: string): unknown {
   }
 }
 
+/** Kills the CLI and every process it started, such as its MCP server; on Windows only the CLI itself. */
+export function stopClaude(proc: ChildProcessWithoutNullStreams): void {
+  if (process.platform !== "win32" && proc.pid !== undefined && proc.exitCode === null && proc.signalCode === null) {
+    try {
+      process.kill(-proc.pid, "SIGKILL");
+      return;
+    } catch {}
+  }
+  proc.kill("SIGKILL");
+}
+
 export function spawnClaude(cli: Cli, args: readonly string[], env: NodeJS.ProcessEnv = process.env): ChildProcessWithoutNullStreams {
   const [bin, ...prefix] = cli;
-  const proc = spawn(bin, [...prefix, ...args], { cwd: EMPTY_DIR, env, stdio: ["pipe", "pipe", "pipe"] });
+  const proc = spawn(bin, [...prefix, ...args], { cwd: emptyWorkDir(), env, stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32" });
   proc.stdin.on("error", () => {});
   return proc;
 }
@@ -60,7 +77,7 @@ function runClaude(
   return new Promise((resolve) => {
     if (signal?.aborted) return resolve({ code: null, stdout: "", stderr: "abandoned" });
     const proc = spawnClaude(cli, args, env);
-    const kill = () => proc.kill("SIGKILL");
+    const kill = () => stopClaude(proc);
     const timer = setTimeout(kill, timeoutMs);
     signal?.addEventListener("abort", kill, { once: true });
     let stdout = "";
@@ -77,22 +94,34 @@ function runClaude(
   });
 }
 
+const isEpoch = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
+
+function readAt(body: Json): At | undefined {
+  if (body.box === undefined && body.epoch === undefined) return null;
+  return typeof body.box === "string" && SESSION_ID.test(body.box) && isEpoch(body.epoch) ? { box: body.box, epoch: body.epoch } : undefined;
+}
+
+export function readEraseRequest(body: unknown): number | null {
+  return isObject(body) && isEpoch(body.epoch) && body.epoch > 0 ? body.epoch : null;
+}
+
 export function readParseRequest(body: unknown): ParseRequest | null {
   if (!isObject(body) || !isObject(body.jsonSchema)) return null;
   const { model, system, user, jsonSchema } = body;
-  if (typeof model !== "string" || typeof system !== "string" || typeof user !== "string") return null;
-  return { model, system, user, jsonSchema };
+  const at = readAt(body);
+  if (typeof model !== "string" || typeof system !== "string" || typeof user !== "string" || at === undefined) return null;
+  return { model, system, user, jsonSchema, at };
 }
 
-export async function authStatus(cli: Cli): Promise<AuthStatus | null> {
-  const run = await runClaude(cli, ["auth", "status", "--json"], "", STATUS_TIMEOUT_MS);
+export async function authStatus(cli: Cli, signal?: AbortSignal): Promise<AuthStatus | null> {
+  const run = await runClaude(cli, ["auth", "status", "--json"], "", STATUS_TIMEOUT_MS, signal);
   const status = parseJson(run.stdout);
   if (!isObject(status) || typeof status.loggedIn !== "boolean") return null;
   return { loggedIn: status.loggedIn, authMethod: typeof status.authMethod === "string" ? status.authMethod : "unknown" };
 }
 
-export async function cliVersion(cli: Cli): Promise<string | null> {
-  const run = await runClaude(cli, ["--version"], "", STATUS_TIMEOUT_MS);
+export async function cliVersion(cli: Cli, signal?: AbortSignal): Promise<string | null> {
+  const run = await runClaude(cli, ["--version"], "", STATUS_TIMEOUT_MS, signal);
   return run.code === 0 ? (run.stdout.trim().split(/\s+/)[0] ?? null) : null;
 }
 
@@ -129,7 +158,7 @@ export async function parseTurn(cli: Cli, req: ParseRequest, signal?: AbortSigna
   const result = run.code === 0 ? parseJson(run.stdout) : undefined;
   if (!isObject(result) || result.is_error !== false) {
     diagnostic({ code: "parse_failed", exit: run.code });
-    const status = await authStatus(cli);
+    const status = await authStatus(cli, signal);
     return status?.loggedIn === false ? { status: 409, body: { error: "signed_out" } } : { status: 502, body: { error: "claude_failed" } };
   }
   const costUsd = numOrNull(result.total_cost_usd);
@@ -153,6 +182,7 @@ export type AgentRequest = {
   readonly turn: string;
   readonly fresh: string | null;
   readonly tools: readonly AgentTool[];
+  readonly at: At;
 };
 export type SessionUsed = { readonly id: string; readonly resumed: boolean };
 export type AgentCall = { readonly name: string; readonly input: Json };
@@ -175,12 +205,14 @@ export function readAgentRequest(body: unknown): AgentRequest | null {
   if (session !== undefined && session !== null && (typeof session !== "string" || !SESSION_ID.test(session))) return null;
   const fresh = body.fresh ?? null;
   if (fresh !== null && (typeof fresh !== "string" || !fresh.trim())) return null;
+  const at = readAt(body);
+  if (at === undefined) return null;
   const tools: AgentTool[] = [];
   for (const t of body.tools) {
     if (!isObject(t) || typeof t.name !== "string" || !/^[a-z_]{1,40}$/.test(t.name) || typeof t.description !== "string" || !isObject(t.inputSchema)) return null;
     tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema });
   }
-  return { model, append, session, turn, fresh, tools };
+  return { model, append, session, turn, fresh, tools, at };
 }
 
 function toolProblems(content: unknown): string[] {
@@ -258,7 +290,7 @@ export async function agentTurn(cli: Cli, req: AgentRequest, signal?: AbortSigna
   const result = events.findLast((e) => e.type === "result");
   if (run.code !== 0 || !result || result.is_error !== false) {
     diagnostic({ code: "agent_failed", exit: run.code });
-    const status = await authStatus(cli);
+    const status = await authStatus(cli, signal);
     return status?.loggedIn === false ? { status: 409, body: { error: "signed_out" } } : { status: 502, body: { error: "claude_failed" } };
   }
   const costUsd = numOrNull(result.total_cost_usd);

@@ -2,11 +2,25 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readTicket, verifyBearer, type SigninTicket } from "./auth.ts";
-import { agentTurn, authStatus, cliVersion, parseTurn, readAgentRequest, readParseRequest, spawnClaude, type Cli } from "./claude.ts";
+import { agentTurn, authStatus, cliVersion, parseTurn, readAgentRequest, readEraseRequest, readParseRequest, spawnClaude, stopClaude, type At, type Cli } from "./claude.ts";
 import { diagnostic } from "./diagnostics.ts";
+import { leftovers, loadOrCreateState, saveState, sweep, type PersonFiles } from "./erase.ts";
 import { readJson, readSigninJson, sendJson } from "./http.ts";
 
-export type BoxOptions = { readonly token: string; readonly cli: Cli; readonly sessionFile: string; readonly now?: () => number };
+export type BoxOptions = {
+  readonly token: string;
+  readonly cli: Cli;
+  readonly sessionFile: string;
+  readonly home: string;
+  readonly configDir: string;
+  readonly scratchDirs: readonly string[];
+  readonly stateFile: string;
+  readonly requireEpoch?: boolean;
+  readonly now?: () => number;
+};
+
+const STALE = { status: 412, body: { error: "stale" } } as const;
+const DRAIN_MS = 30_000;
 
 const SIGNIN_TTL_MS = 10 * 60_000;
 const URL_WAIT_MS = 30_000;
@@ -27,6 +41,8 @@ const PAGE_HEADERS = {
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void;
 type Login = { readonly proc: ChildProcessWithoutNullStreams; readonly ticket: string; readonly expiresAt: number; output: string; exited: boolean; completing: boolean };
 
+const errorCode = (err: unknown) => (err instanceof Error ? ((err as NodeJS.ErrnoException).code ?? err.name) : "unknown");
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function waitUntil(done: () => boolean, ms: number): Promise<void> {
@@ -41,11 +57,23 @@ function signinUrl(output: string): string | undefined {
   return undefined;
 }
 
-export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOptions): Server {
+export function createBox({ token, cli, sessionFile, home, configDir, scratchDirs, stateFile, requireEpoch = false, now = Date.now }: BoxOptions): Server {
   let login: Login | null = null;
   const usedTickets = new Map<string, number>();
   let turns: Promise<unknown> = Promise.resolve();
   let version: string | null = null;
+  const files: PersonFiles = { home, configDir, scratchDirs, sessionFile };
+  let state = loadOrCreateState(stateFile);
+  const requireEpochs = () => {
+    if (state.epochs) return;
+    const next = { ...state, epochs: true };
+    saveState(stateFile, next);
+    state = next;
+  };
+  if (requireEpoch) requireEpochs();
+  const cliRuns = new Set<AbortController>();
+  let wiping: Promise<boolean> | null = null;
+  let erasesStarted = 0;
 
   function oneTurnAtATime<R>(run: () => Promise<R>): Promise<R> {
     const next = turns.then(run);
@@ -53,8 +81,62 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
     return next;
   }
 
+  async function withCli<R>(abort: AbortController, run: () => Promise<R>): Promise<R> {
+    while (wiping) await wiping;
+    cliRuns.add(abort);
+    try {
+      return await run();
+    } finally {
+      cliRuns.delete(abort);
+    }
+  }
+
+  const admits = (at: At): boolean => !state.erasing && (at === null ? !state.epochs : at.box === state.box && at.epoch >= state.floor);
+
+  function turnAt<R>(at: At, arrivedAfter: number, abort: AbortController, run: () => Promise<R>): Promise<R | typeof STALE> {
+    const current = () => admits(at) && erasesStarted === arrivedAfter;
+    if (!current()) return Promise.resolve(STALE);
+    if (at !== null) requireEpochs();
+    return oneTurnAtATime(() => withCli(abort, async () => (current() ? run() : STALE)));
+  }
+
+  function wipe(): Promise<boolean> {
+    const run = (async () => {
+      for (const abort of cliRuns) abort.abort();
+      const signingIn = login;
+      stopLogin();
+      await waitUntil(() => cliRuns.size === 0 && (signingIn === null || signingIn.exited), DRAIN_MS);
+      if (cliRuns.size > 0 || (signingIn !== null && !signingIn.exited)) {
+        console.error("erase stopped: a Claude Code process outlived its kill");
+        return false;
+      }
+      try {
+        sweep(files);
+        const left = leftovers(files).length;
+        if (left > 0) {
+          console.error(`erase left ${left} entries`);
+          return false;
+        }
+        const done = { ...state, erasing: false };
+        saveState(stateFile, done);
+        state = done;
+        return true;
+      } catch (err) {
+        console.error(`erase failed: ${errorCode(err)}`);
+        return false;
+      }
+    })();
+    wiping = run;
+    void run.then(() => {
+      if (wiping === run) wiping = null;
+    });
+    return run;
+  }
+
+  if (state.erasing) void wipe().then((done) => console.log(`erase resumed at start: ${done ? "done" : "not done"}`));
+
   function stopLogin(): void {
-    login?.proc.kill("SIGKILL");
+    if (login) stopClaude(login.proc);
     login = null;
   }
 
@@ -74,38 +156,44 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
       exited();
       diagnostic({ code: "signin_exit", exit: code });
     });
-    const timeout = setTimeout(() => proc.kill("SIGKILL"), SIGNIN_TTL_MS).unref();
+    const timeout = setTimeout(() => stopClaude(proc), SIGNIN_TTL_MS).unref();
     proc.once("close", () => clearTimeout(timeout));
     login = started;
     return started;
   }
 
   async function health(res: ServerResponse): Promise<void> {
-    const status = await authStatus(cli);
+    const abort = new AbortController();
+    const status = await withCli(abort, async () => {
+      const auth = await authStatus(cli, abort.signal);
+      if (auth) version ??= await cliVersion(cli, abort.signal);
+      return auth;
+    });
     if (!status) return sendJson(res, 502, { error: "claude_failed" });
-    version ??= await cliVersion(cli);
-    sendJson(res, 200, { ok: true, signedIn: status.loggedIn, authMethod: status.authMethod, version: version ?? "unknown" });
+    sendJson(res, 200, { ok: true, signedIn: status.loggedIn, authMethod: status.authMethod, version: version ?? "unknown", box: state.box });
   }
 
   async function parse(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const arrivedAfter = erasesStarted;
     const parsed = readParseRequest(await readJson(req));
     if (!parsed) return sendJson(res, 400, { error: "bad_request" });
     const abandoned = new AbortController();
     res.on("close", () => {
       if (!res.writableFinished) abandoned.abort();
     });
-    const reply = await oneTurnAtATime(() => parseTurn(cli, parsed, abandoned.signal));
+    const reply = await turnAt(parsed.at, arrivedAfter, abandoned, () => parseTurn(cli, parsed, abandoned.signal));
     sendJson(res, reply.status, reply.body);
   }
 
   async function agent(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const arrivedAfter = erasesStarted;
     const parsed = readAgentRequest(await readJson(req));
     if (!parsed) return sendJson(res, 400, { error: "bad_request" });
     const abandoned = new AbortController();
     res.on("close", () => {
       if (!res.writableFinished) abandoned.abort();
     });
-    const reply = await oneTurnAtATime(async () => {
+    const reply = await turnAt(parsed.at, arrivedAfter, abandoned, async () => {
       if (parsed.session !== undefined) {
         const named = await agentTurn(cli, parsed, abandoned.signal);
         if (named.status === 200 && parsed.session !== null) writeFileSync(sessionFile, named.body.session.id);
@@ -119,7 +207,21 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
     sendJson(res, reply.status, reply.body);
   }
 
+  async function erase(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const epoch = readEraseRequest(await readJson(req));
+    if (epoch === null) return sendJson(res, 400, { error: "bad_request" });
+    while (wiping) await wiping;
+    const erasing = { ...state, floor: Math.max(state.floor, epoch), erasing: true, epochs: true };
+    saveState(stateFile, erasing);
+    state = erasing;
+    erasesStarted += 1;
+    if (!(await wipe())) return sendJson(res, 500, { error: "erase_incomplete" });
+    console.log(`erased to epoch ${state.floor}`);
+    sendJson(res, 200, { box: state.box, floor: state.floor });
+  }
+
   async function signinStart(ticket: SigninTicket, res: ServerResponse): Promise<void> {
+    while (wiping) await wiping;
     if (login?.completing) return sendJson(res, 409, { error: "busy" });
     const at = now();
     for (const [used, expiresAt] of usedTickets) if (expiresAt <= at) usedTickets.delete(used);
@@ -152,9 +254,10 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
       pending.proc.stdin.write(`${code}\n`);
       // A code the CLI can't read makes it ask again instead of exiting.
       await waitUntil(() => pending.exited || pending.output.includes("Invalid code", mark), CODE_EXIT_WAIT_MS);
-      if (!pending.exited) pending.proc.kill("SIGKILL");
+      if (!pending.exited) stopClaude(pending.proc);
       await waitUntil(() => pending.exited, KILL_WAIT_MS);
-      const signedIn = (await authStatus(cli))?.loggedIn === true;
+      const abort = new AbortController();
+      const signedIn = (await withCli(abort, () => authStatus(cli, abort.signal)))?.loggedIn === true;
       diagnostic({ code: "signin_complete", signedIn });
       sendJson(res, 200, { signedIn });
     } finally {
@@ -186,6 +289,7 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
     ["GET /health", withBearer((_, res) => health(res))],
     ["POST /parse", withBearer(parse)],
     ["POST /agent", withBearer(agent)],
+    ["POST /erase", withBearer(erase)],
     ["GET /signin", (_, res) => void res.writeHead(200, PAGE_HEADERS).end(PAGE)],
     ["POST /signin/start", withTicket((ticket, _, res) => signinStart(ticket, res))],
     ["POST /signin/code", withTicket((ticket, fields, res) => signinCode(ticket, fields.code, res))],

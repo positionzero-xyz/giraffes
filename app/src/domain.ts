@@ -83,6 +83,7 @@ export type InboundEnvelope = {
   readonly key: EventKey;
   readonly receivedAt: EpochMs;
   readonly event: ChannelEvent;
+  readonly initialLanguage?: Language;
 };
 
 export type AgentEvent =

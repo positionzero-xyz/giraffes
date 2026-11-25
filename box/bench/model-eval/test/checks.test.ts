@@ -62,6 +62,15 @@ describe("every check passes its known-good and fails its known-bad", () => {
       page({ persist: { ok: true, shown: true, reason: "kept after reload", missing: [], totalBefore: null, totalAfter: null } }),
       page({ persist: { ok: true, shown: false, reason: "kept after reload", missing: [], totalBefore: null, totalAfter: null } }),
     ));
+
+  it("priced, on a menu that names each dish again beside an order counter", () => {
+    const menu = { kind: "priced", items: [{ label: "pork", any: ["เรือหมู"], price: 50 }, { label: "soup", any: ["เกาเหลา"], price: 55 }] } as const;
+    both(
+      menu,
+      page({ text: "ก๋วยเตี๋ยวเรือหมู 50 บาท\nเกาเหลา 55 บาท\nสั่งเลย\nก๋วยเตี๋ยวเรือหมู - 0 +\nเกาเหลา - 0 +\nรวม 0 บาท" }),
+      page({ text: "ก๋วยเตี๋ยวเรือหมู 55 บาท\nเกาเหลา 50 บาท\nสั่งเลย\nก๋วยเตี๋ยวเรือหมู - 0 +\nเกาเหลา - 0 +\nรวม 0 บาท" }),
+    );
+  });
 });
 
 describe("text helpers", () => {

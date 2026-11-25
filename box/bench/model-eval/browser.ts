@@ -20,7 +20,6 @@ export function findChrome(given?: string): string | null {
 }
 
 const MARK = "ทดสอบ7319";
-/** What the driver types into an amount field; a tracker's total should grow by exactly this. */
 export const AMOUNT = "137";
 
 const FILL_AND_SUBMIT = `(() => {
@@ -72,7 +71,6 @@ const FORMS: Readonly<Record<string, readonly string[]>> = {
   "14:30": ["14:30", "14.30"],
 };
 
-/** The last amount the page shows after a total word, such as รวม 137 บาท. */
 export function totalIn(text: string): number | null {
   const last = [...plain(text).matchAll(/(?:รวม|total)[^\d]{0,30}?(\d+(?:\.\d+)?)/g)].at(-1);
   return last ? Number(last[1]) : null;

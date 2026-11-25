@@ -27,11 +27,10 @@ export function thaiNumber(run: string): number | null {
   }
   if (digit === null) return words.length ? total : null;
   // พันห้า is said for 1,500, as หมื่นสอง is for 12,000.
-  const spoken = lastPower !== null && lastPower >= 1_000 && words.at(-2) !== undefined && words.at(-2)! in POWERS;
-  return total + digit * (spoken ? lastPower! / 10 : 1);
+  const spoken = lastPower !== null && lastPower >= 1_000 && POWERS[words.at(-2) ?? ""] === lastPower;
+  return total + digit * (spoken && lastPower !== null ? lastPower / 10 : 1);
 }
 
-/** Thai text with every number in Arabic digits and no thousands separators, dashes unified, lower case, single spaces. */
 export function plain(s: string): string {
   return s
     .normalize("NFC")
@@ -99,5 +98,4 @@ const CADENCE: readonly (readonly [Repeat, RegExp])[] = [
   ["daily", new RegExp(`ทุกวัน(?!${DAYS}|ธรรมดา|ทำงาน|ที่)|ทุกเช้า|ทุกเย็น|daily|everyday`)],
 ];
 
-/** The repeats the text claims, such as ทุกวันจันทร์ for weekly. */
 export const statedRepeats = (text: string): Repeat[] => CADENCE.filter(([, re]) => re.test(squash(text))).map(([r]) => r);

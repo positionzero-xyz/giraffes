@@ -2,11 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { grade, thaiShare } from "../checks.ts";
 import { squash, statedRepeats, statedTimes, thaiNumber } from "../thai.ts";
-import type { Check, Observation, PageReport, Wall } from "../types.ts";
+import type { Check, Observation, PageReport } from "../types.ts";
 
 const turn = (text: string, more: Partial<Observation> = {}): Observation => ({ text, raw: text, answered: text !== "", wakeups: [], rejected: [], files: {}, page: null, ...more });
 const page = (p: Partial<PageReport>): Observation => turn("", { page: { loaded: true, errors: [], text: "", persist: null, ...p } });
-const w = (s: string) => s as Wall;
 
 function both(check: Check, good: Observation, bad: Observation) {
   const g = grade(check, good);

@@ -14,12 +14,10 @@ const DECEMBER = String.raw`(?:ธ\.? ?ค\.?|ธันวา(?:คม)?|/ ?12(?
 const DAY = String.raw`(?<![\d.])\d{1,2}`;
 const DATES = new RegExp(`(?:${DAY} ?${DECEMBER}? ?(?:-|ถึง|จนถึง) ?(?:วันที่ ?)?)?${DAY} ?${DECEMBER}`, "g");
 
-/** Each December date or range the text names, as its days in order. */
 const decemberDays = (text: string): number[][] => [...plain(text).matchAll(DATES)].map((m) => [...m[0].replace(/\/ ?12/g, "").matchAll(/\d{1,2}/g)].map((d) => Number(d[0])));
 
 const CUE = /(ปกติ|จาก|เดิม|ราคาเต็ม)|(เหลือ|เพียง|แค่|พิเศษ|ราคาโปร|โปร)/g;
 
-/** Where each price stands in the text, and whether the nearest cue word just before it makes it the old or the new price. */
 function pricesAt(text: string, value: number): { readonly at: number; readonly cue: "was" | "now" | null }[] {
   const t = squash(text);
   return [...t.matchAll(new RegExp(String.raw`(?<![\d.])${value}(?!\d)`, "g"))].map((m) => {
@@ -30,7 +28,6 @@ function pricesAt(text: string, value: number): { readonly at: number; readonly 
 
 const has = (text: string, any: readonly string[]) => any.some((a) => squash(text).includes(squash(a)));
 
-/** Why the text gets a fact wrong, or null when it states it and contradicts nothing. */
 export function wrongFact(f: Fact, text: string): string | null {
   switch (f.kind) {
     case "says":

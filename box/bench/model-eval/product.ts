@@ -70,7 +70,6 @@ export type TurnRead = {
   readonly costUsd: number | null;
 };
 
-/** A box turn that got no 200, with whatever spend the tap saw on the CLI's own result. */
 export function failedTurn(status: 409 | 502, tap: Tap | null): TurnRead {
   const kind: RunStatus = tap?.killed ? "timeout" : status === 409 ? "signed_out" : "claude_failed";
   return { status: kind, observation: NO_OBSERVATION, calls: [], refusedCalls: [], usage: tap?.usage ?? null, costUsd: tap?.costUsd ?? null };
@@ -78,7 +77,6 @@ export function failedTurn(status: 409 | 502, tap: Tap | null): TurnRead {
 
 const FAILED: Readonly<Record<string, RunStatus>> = { refused_by_model: "refused", invalid: "invalid_output" };
 
-/** A 200 reply from the box turn, read through the Worker's own box client and decoder, then planned against the eval's view. */
 export function readTurn(body: Extract<AgentReply, { status: 200 }>["body"], message: string, now: Wall, contract: Contract = "product"): TurnRead {
   const base = { calls: body.calls, refusedCalls: body.refusedCalls, usage: body.usage, costUsd: body.costUsd };
   const attempt = boxTurnAttempt(readAgentBody(JSON.parse(JSON.stringify(body))) ?? UNREADABLE_REPLY);

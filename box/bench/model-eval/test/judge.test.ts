@@ -50,7 +50,7 @@ function batch() {
   return { dir, key, level, chat };
 }
 
-const draftScores = (good: number, flat: number, bad: number, b: ReturnType<typeof batch>) => ({
+const draftScores = (good: number, flat: number, bad: number, b: ReturnType<typeof batch>): Record<string, Record<string, number>> => ({
   [b.chat]: { helpful: 4, natural_thai: 4 },
   [b.level("good")]: { natural_thai: good, persuasive: good, fits_channel: good, facts_right: good },
   [b.level("flat")]: { natural_thai: flat, persuasive: flat, fits_channel: flat, facts_right: flat },

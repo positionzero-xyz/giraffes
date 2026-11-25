@@ -395,7 +395,6 @@ export type FakeBox = {
   readonly healthCalls: string[];
   /** Every turn the box got; `agent` is set for a turn run as the person's own Claude Code session. */
   readonly parses: { readonly authorization: string | null; readonly user: string; readonly agent: { readonly append: string; readonly tools: readonly string[] } | null }[];
-  /** Every body sent to the box's /agent, whole. */
   readonly agentBodies: unknown[];
   readonly replies: BoxReplyStep[];
   signedIn: boolean;

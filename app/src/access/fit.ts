@@ -3,7 +3,6 @@ import { jsonSchemaOf, looseUser, type SchemaMode } from "../model/client";
 import { bytesOf, fitSections, type PromptParts } from "../model/prompt";
 import type { Purpose, Route } from "../model/routes";
 
-/** What a route takes for the user prompt: its budget less the system prompt and, in loose mode, the inlined schema. */
 export function userBudget(route: Route, mode: SchemaMode, purpose: Purpose, system: string): number {
   const schemaBytes = mode === "loose" ? bytesOf(looseUser("", jsonSchemaOf(OUTPUTS[purpose]))) : 0;
   return route.promptBytes - bytesOf(system) - schemaBytes;

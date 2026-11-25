@@ -25,7 +25,6 @@ const QUESTION = /[?？]|ไหม|มั้ย|ดีคะ|ดีครับ|
 
 const clock = (w: Wakeup) => w.at.slice(11).split(":").map(Number) as [number, number];
 
-/** Why the one reminder isn't the asked-for one-off or routine about the job, or null when it is. */
 function wrongReminder(o: Observation, repeat: Wakeup["repeat"], about: readonly string[]): string | null {
   if (o.wakeups.length !== 1) return o.wakeups.length ? `${o.wakeups.length} reminders` : "no reminder";
   const [w] = o.wakeups;
@@ -119,7 +118,6 @@ const GRADERS: { readonly [K in Check["kind"]]: Grader<K> } = {
 
 const PRICE = /(?<![\d.])(\d+)(?:\.\d+)? ?(?:บาท|฿|\.-)|฿ ?(\d+)/;
 
-/** The price after each mention of a dish, read up to the next dish named or 60 characters, whichever comes first. */
 function pricesOf(text: string, item: Phrase, all: readonly Phrase[]): number[] {
   const t = plain(text);
   const at = (p: Phrase, from: number) => Math.min(...p.any.map((a) => t.indexOf(plain(a), from)).filter((i) => i >= 0), Number.POSITIVE_INFINITY);

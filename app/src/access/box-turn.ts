@@ -14,7 +14,6 @@ export function boxTurnRequest(system: string, prompt: PromptParts): BoxAgentReq
   return fitted === null ? null : { model: BOX_TURN_ROUTE.model, append: AGENT_SYSTEM, turn: fitted.user, tools: AGENT_TOOLS };
 }
 
-/** The box's answer as a turn output, held to the same stop reasons and schema as any other model's. */
 export function boxTurnAttempt(reply: Extract<WireResult, { kind: "reply" }>): Attempt<TurnOutput> {
   const output = turnFromAgent(jsonOrNull(reply.text));
   return readAttempt(output === null ? reply : { ...reply, text: JSON.stringify(output) }, BoxTurnOutputSchema);

@@ -39,7 +39,6 @@ function jsonOrNull(text: string): unknown {
   }
 }
 
-/** The box's agent reply as a wire reply: its answer and tool calls become the text, beside the CLI's stop reason and usage. */
 export function readAgentBody(raw: unknown): Extract<WireResult, { kind: "reply" }> | null {
   const body = AgentBody.safeParse(raw);
   if (!body.success) return null;

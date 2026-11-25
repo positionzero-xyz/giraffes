@@ -395,6 +395,8 @@ export type FakeBox = {
   readonly healthCalls: string[];
   /** Every turn the box got; `agent` is set for a turn run as the person's own Claude Code session. */
   readonly parses: { readonly authorization: string | null; readonly user: string; readonly agent: { readonly append: string; readonly tools: readonly string[] } | null }[];
+  /** Every body sent to the box's /agent, whole. */
+  readonly agentBodies: unknown[];
   readonly replies: BoxReplyStep[];
   signedIn: boolean;
   /** False makes the box's own URL unreachable, as a wedged machine or a network fault would. */
@@ -422,6 +424,7 @@ export function fakeBox(
     destroyCalls: [] as string[],
     healthCalls: [] as string[],
     parses: [] as FakeBox["parses"][number][],
+    agentBodies: [] as unknown[],
     replies: [] as BoxReplyStep[],
     signedIn: opts.signedIn ?? false,
     reachable: true,
@@ -467,6 +470,7 @@ export function fakeBox(
     if (url.pathname === "/parse" || url.pathname === "/agent") {
       const agent = url.pathname === "/agent";
       const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; append?: string; tools?: { name: string }[] };
+      if (agent) box.agentBodies.push(JSON.parse(String(init?.body)));
       box.parses.push({ authorization, user: (agent ? body.turn : body.user) ?? "", agent: agent ? { append: body.append ?? "", tools: (body.tools ?? []).map((t) => t.name) } : null });
       const step = box.replies.shift();
       if (!step) {

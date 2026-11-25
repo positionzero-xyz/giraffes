@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import type { AgentReply } from "../../../src/claude.ts";
-import { readTurn } from "../product.ts";
+import { agentRequest, readTurn } from "../product.ts";
 import type { Wall } from "../types.ts";
 
 const NOW = "2026-11-26T10:00" as Wall;
@@ -33,4 +34,14 @@ describe("a box turn reply read the way the Worker reads it", () => {
       assert.equal(r.costUsd, 0.0031);
     });
   }
+});
+
+describe("the request a box turn sends", () => {
+  const capture = JSON.parse(readFileSync(new URL("../../../../app/test/fixtures/box-first-turn-line.json", import.meta.url), "utf8"));
+
+  it("is the Worker's own first LINE turn, captured in the app's tests, with only the model and effort swapped", () => {
+    assert.deepEqual(agentRequest({ harness: "claude-code", model: capture.request.model, effort: "default" }, capture.message, capture.now), capture.request);
+    const low = agentRequest({ harness: "claude-code", model: "opus", effort: "low" }, capture.message, capture.now);
+    assert.deepEqual(low, { ...capture.request, model: "opus", effort: "low" });
+  });
 });

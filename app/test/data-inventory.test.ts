@@ -21,7 +21,7 @@ const durable = {
   box: { identity: "name url", operational: "one host state state_at link_sent_at signin_poll_until attempts next_at poll_at reclaim_at reclaim_reason retire_at image ensure_at" },
   box_session: { chat: "memory reply_backfill", identity: "id", operational: "one seen_seq" },
   checkout_session: { identity: "id event_key", operational: "created_at" },
-  inbox: { chat: "payload", identity: "event_key", operational: "seq kind received_at ready_at status attempts outcome finished_at" },
+  inbox: { chat: "payload", identity: "event_key", operational: "seq kind received_at ready_at status attempts outcome finished_at catch_up catch_up_budget" },
   key_revision: { operational: "one revision" },
   key_ticket: { secret: "nonce_hash", operational: "expires_at revision status outcome created_at" },
   log_flush: { operational: "one failures retry_at" },

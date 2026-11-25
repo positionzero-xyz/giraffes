@@ -93,8 +93,8 @@ export const logSchema = z.discriminatedUnion("stream", [
 
 export type LogRow = z.infer<typeof logSchema>;
 
-export function diagnosticRow(raw: unknown): LogRow {
-  return logSchema.parse(raw);
+export function diagnosticRow(raw: unknown): LogRow | null {
+  return logSchema.safeParse(raw).data ?? null;
 }
 
 export function modelCallRow(input: {

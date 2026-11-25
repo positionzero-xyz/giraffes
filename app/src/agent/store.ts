@@ -1622,11 +1622,13 @@ export class AgentStore {
 
   private insertLogs(rows: readonly LogRow[], now: EpochMs): void {
     for (const row of rows) {
+      const diagnostic = diagnosticRow(row);
+      if (diagnostic === null) continue;
       this.sql.exec(
         "INSERT OR IGNORE INTO log_outbox (id, stream, row, created_at) VALUES (?, ?, ?, ?)",
         `${row.stream}:${row.id}`,
         row.stream,
-        JSON.stringify(diagnosticRow(row)),
+        JSON.stringify(diagnostic),
         now,
       );
     }
@@ -1635,10 +1637,16 @@ export class AgentStore {
   pendingLogs(now: EpochMs, limit: number): readonly LogRow[] {
     const { retry_at } = this.sql.exec<{ retry_at: EpochMs }>("SELECT retry_at FROM log_flush").one();
     if (retry_at > now) return [];
-    return this.sql
-      .exec<{ row: string }>("SELECT row FROM log_outbox ORDER BY created_at, rowid LIMIT ?", limit)
-      .toArray()
-      .map((r) => diagnosticRow(JSON.parse(r.row)));
+    const queued = this.sql.exec<{ id: string; row: string }>(
+      "SELECT id, CASE WHEN json_valid(row) THEN row ELSE 'null' END AS row FROM log_outbox ORDER BY created_at, rowid LIMIT ?", limit,
+    ).toArray();
+    const rows: LogRow[] = [];
+    for (const { id, row } of queued) {
+      const diagnostic = diagnosticRow(JSON.parse(row));
+      if (diagnostic !== null) rows.push(diagnostic);
+      else this.sql.exec("DELETE FROM log_outbox WHERE id = ?", id);
+    }
+    return rows;
   }
 
   logsShipped(rows: readonly LogRow[]): void {

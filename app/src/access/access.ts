@@ -498,8 +498,9 @@ export class ModelAccess {
         open.delete(reserved.id);
         const now = clock.now();
         const ran = outcome.kind === "ok" || outcome.kind === "invalid" || outcome.kind === "refused_by_model";
-        const unmetered = ran && outcome.usage === null && outcome.reported === null;
-        const cost = ran && !unmetered ? costOf(route, outcome.usage, outcome.reported) : unmetered || outcome.kind === "in_doubt" ? r.estimate : (0 as MicroUsd);
+        const measured = ran && (outcome.usage !== null || outcome.reported !== null) ? costOf(route, outcome.usage, outcome.reported) : null;
+        const unmetered = ran && (measured === null || !Number.isSafeInteger(measured) || measured < 0);
+        const cost = unmetered || outcome.kind === "in_doubt" ? r.estimate : measured ?? (0 as MicroUsd);
         spent += cost;
         const usage = "usage" in outcome ? outcome.usage : null;
         const status = unmetered ? "usage_missing" : STATUS[outcome.kind];

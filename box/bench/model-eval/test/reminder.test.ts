@@ -5,7 +5,7 @@ import { grade } from "../checks.ts";
 import type { Check, Observation, Wakeup, Wall } from "../types.ts";
 
 const NOW = "2026-11-26T10:00" as Wall;
-const said = (text: string, wakeups: Wakeup[] = []): Observation => ({ text, wakeups, rejected: [], files: {}, page: null });
+const said = (text: string, wakeups: Wakeup[] = []): Observation => ({ text, raw: text, answered: true, wakeups, rejected: [], files: {}, page: null });
 const at = (when: string, note: string, more: Partial<Wakeup> = {}): Wakeup => ({ at: when, repeat: null, asked: true, note, ...more });
 
 function check(caseId: string, kind: Check["kind"]): Check {

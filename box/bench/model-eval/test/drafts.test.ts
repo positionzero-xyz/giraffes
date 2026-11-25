@@ -8,7 +8,7 @@ const NOW = "2026-11-26T10:00" as Wall;
 
 function failing(caseId: string, text: string): string[] {
   const checks = CASES.find((c) => c.id === caseId)?.make(NOW).checks ?? assert.fail(`no case ${caseId}`);
-  return checks.map((c) => grade(c, { text, wakeups: [], rejected: [], files: {}, page: null })).filter((r) => !r.pass).map((r) => `${r.check}: ${r.detail}`);
+  return checks.map((c) => grade(c, { text, raw: text, answered: true, wakeups: [], rejected: [], files: {}, page: null })).filter((r) => !r.pass).map((r) => `${r.check}: ${r.detail}`);
 }
 
 const good = (caseId: string, text: string) => assert.deepEqual(failing(caseId, text), [], text);

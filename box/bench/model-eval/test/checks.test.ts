@@ -4,7 +4,7 @@ import { grade, thaiShare } from "../checks.ts";
 import { squash, statedRepeats, statedTimes, thaiNumber } from "../thai.ts";
 import type { Check, Observation, PageReport, Wall } from "../types.ts";
 
-const turn = (text: string, more: Partial<Observation> = {}): Observation => ({ text, wakeups: [], rejected: [], files: {}, page: null, ...more });
+const turn = (text: string, more: Partial<Observation> = {}): Observation => ({ text, raw: text, answered: text !== "", wakeups: [], rejected: [], files: {}, page: null, ...more });
 const page = (p: Partial<PageReport>): Observation => turn("", { page: { loaded: true, errors: [], text: "", persist: null, ...p } });
 const w = (s: string) => s as Wall;
 
@@ -24,7 +24,7 @@ describe("every check passes its known-good and fails its known-bad", () => {
 
   it("fits_reply", () => both({ kind: "fits_reply" }, turn("ก".repeat(600)), turn("ก".repeat(601))));
 
-  it("worker_accepts", () => both({ kind: "worker_accepts" }, turn("ok"), turn("ok", { rejected: ["schedule_wakeup:rent past"] })));
+  it("replies", () => both({ kind: "replies" }, turn("ได้เลย"), turn("ตั้งเตือนไม่สำเร็จ", { answered: false })));
 
   it("facts", () =>
     both(

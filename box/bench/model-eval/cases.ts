@@ -6,8 +6,8 @@ const says = (label: string, ...any: string[]): Fact => ({ kind: "says", label, 
 const never = (label: string, ...any: string[]): Fact => ({ kind: "never", label, any });
 const DELIVERY = never("delivery", "เดลิเวอรี่", "เดลิเวอรี", "delivery", "ส่งถึงบ้าน", "grab", "lineman", "foodpanda", "สั่งออนไลน์");
 
-const CHAT: readonly Check[] = [{ kind: "thai", min: 0.8 }, { kind: "no_jargon" }, { kind: "fits_reply" }, { kind: "worker_accepts" }];
-const REMINDER: readonly Check[] = [{ kind: "thai", min: 0.6 }, { kind: "no_jargon" }, { kind: "fits_reply" }, { kind: "worker_accepts" }];
+const CHAT: readonly Check[] = [{ kind: "replies" }, { kind: "thai", min: 0.8 }, { kind: "no_jargon" }, { kind: "fits_reply" }];
+const REMINDER: readonly Check[] = [{ kind: "replies" }, { kind: "thai", min: 0.6 }, { kind: "no_jargon" }, { kind: "fits_reply" }];
 const DRAFT = (min: number, max: number): Check[] => [{ kind: "thai", min: 0.85 }, { kind: "length", min, max }];
 const BUILD = (items: readonly Phrase[]): Check[] => [
   { kind: "file", path: "index.html" },

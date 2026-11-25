@@ -28,6 +28,8 @@ export type Row = {
   readonly casesPassed: number;
   readonly checksPassed: number;
   readonly checks: number;
+  /** Ok product turns the Worker took with no action refused or cut; a diagnostic, not a pass. */
+  readonly cleanTurns: number | null;
   readonly medianWallMs: number | null;
   readonly medianFirstTextMs: number | null;
   readonly overWindow: number;
@@ -63,6 +65,7 @@ export function rows(run: RunFile, key: JudgeKey | null, judges: readonly JudgeS
         casesPassed: ok.filter((r) => r.checks.every((c) => c.pass)).length,
         checksPassed: sum(ok.map((r) => r.checks.filter((c) => c.pass).length)),
         checks: sum(ok.map((r) => r.checks.length)),
+        cleanTurns: ok.some((r) => r.contract === "product") ? ok.filter((r) => r.contract === "product" && r.rejected.length === 0).length : null,
         medianWallMs: median(walls),
         medianFirstTextMs: median(ok.flatMap((r) => (r.firstTextMs === null ? [] : [r.firstTextMs]))),
         overWindow: walls.filter((w) => w > LINE_REPLY_WINDOW_MS).length,
@@ -84,7 +87,7 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
   const table = rows(run, key, judges);
   const gates = new Map<string, Gate>(key ? judges.map((j) => [j.name, calibrationGate(key, j.scores)]) : []);
   const judgeCols = judges.map((j) => `judge ${j.name}${gates.get(j.name)?.proven ? "" : " (unproven)"}`);
-  const head = ["candidate", "shape", "ok/runs", "cases passed", "checks passed", "median wall s", "median first text s", "over 50 s", "tokens in/out/cache read/cache write", "cost USD", ...judgeCols];
+  const head = ["candidate", "shape", "ok/runs", "cases passed", "checks passed", "clean turns", "median wall s", "median first text s", "over 50 s", "tokens in/out/cache read/cache write", "cost USD", ...judgeCols];
   const lines = [
     `# Model eval ${run.meta.startedAt}`,
     "",
@@ -101,6 +104,7 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
         `${r.ok}/${r.runs}`,
         `${r.casesPassed}/${r.graded}`,
         `${r.checksPassed}/${r.checks}`,
+        r.cleanTurns === null ? "-" : `${r.cleanTurns}/${r.ok}`,
         secs(r.medianWallMs),
         secs(r.medianFirstTextMs),
         String(r.overWindow),

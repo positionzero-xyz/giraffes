@@ -33,7 +33,8 @@ export type Check =
   | { readonly kind: "no_jargon" }
   | { readonly kind: "mentions"; readonly what: string; readonly any: readonly string[] }
   | { readonly kind: "fits_reply" }
-  | { readonly kind: "worker_accepts" }
+  /** The model's own message reaches the person; a quiet turn or a notice alone fails. */
+  | { readonly kind: "replies" }
   /** One reminder, asked for, at one of `readings`, repeating exactly so, whose note names the job; the reply states no other time or cadence. */
   | { readonly kind: "due_at"; readonly readings: readonly Reading[]; readonly repeat: Repeat | null; readonly about: readonly string[] }
   /** Asks which time, or sets one asked-for one-off reminder on `date` within the hours and says when. */
@@ -53,8 +54,12 @@ export type Wakeup = { readonly at: string; readonly repeat: Repeat | null; read
 export type PersistReport = { readonly ok: boolean; readonly shown: boolean; readonly reason: string };
 export type PageReport = { readonly loaded: boolean; readonly errors: readonly string[]; readonly text: string; readonly persist: PersistReport | null };
 
+/** `text` is what the checks grade: what the person receives on the product path, the full reply on the planned one. */
 export type Observation = {
   readonly text: string;
+  /** The model's whole reply before the Worker cuts or adds to it. */
+  readonly raw: string;
+  readonly answered: boolean;
   readonly wakeups: readonly Wakeup[];
   readonly rejected: readonly string[];
   readonly files: Readonly<Record<string, string>>;
@@ -92,6 +97,8 @@ export type RunRecord = {
   readonly status: RunStatus;
   readonly message: string;
   readonly reply: string;
+  /** What the Worker would send the person, notices included; null off the product path. */
+  readonly delivered: string | null;
   readonly overReplyCap: boolean;
   readonly calls: readonly unknown[];
   readonly refusedCalls: readonly unknown[];

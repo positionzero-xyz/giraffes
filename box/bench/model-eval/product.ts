@@ -1,5 +1,5 @@
 import type { AgentReply, AgentRequest, Usage } from "../../src/claude.ts";
-import type { Candidate, Observation, RunStatus, Wall, Wakeup } from "./types.ts";
+import type { Candidate, Contract, Observation, RunStatus, Wall, Wakeup } from "./types.ts";
 import {
   boxTurnAttempt,
   boxTurnRequest,
@@ -59,7 +59,7 @@ export function agentRequest(c: Candidate, message: string, now: Wall): AgentReq
   return { ...sent, model: c.model, ...(effort ? { effort } : {}) };
 }
 
-export const NO_OBSERVATION: Observation = { text: "", wakeups: [], rejected: [], files: {}, page: null };
+export const NO_OBSERVATION: Observation = { text: "", raw: "", answered: false, wakeups: [], rejected: [], files: {}, page: null };
 
 export type TurnRead = {
   readonly status: RunStatus;
@@ -73,12 +73,12 @@ export type TurnRead = {
 const FAILED: Readonly<Record<string, RunStatus>> = { refused_by_model: "refused", invalid: "invalid_output" };
 
 /** A 200 reply from the box turn, read through the Worker's own box client and decoder, then planned against the eval's view. */
-export function readTurn(body: Extract<AgentReply, { status: 200 }>["body"], message: string, now: Wall): TurnRead {
+export function readTurn(body: Extract<AgentReply, { status: 200 }>["body"], message: string, now: Wall, contract: Contract = "product"): TurnRead {
   const base = { calls: body.calls, refusedCalls: body.refusedCalls, usage: body.usage, costUsd: body.costUsd };
   const attempt = boxTurnAttempt(readAgentBody(JSON.parse(JSON.stringify(body))) ?? UNREADABLE_REPLY);
   if (attempt.kind !== "ok") {
     const status = body.stop === "max_tokens" ? "cut_off" : (FAILED[attempt.kind] ?? "invalid_output");
-    return { status, observation: { ...NO_OBSERVATION, text: body.text }, ...base };
+    return { status, observation: { ...NO_OBSERVATION, text: body.text, raw: body.text }, ...base };
   }
   const commit = planTurn(attempt.value, viewOf(message, now));
   const wakeups: Wakeup[] = commit.wakeupsAdd.map((w: { dueAt: number; repeat: { every: Wakeup["repeat"] } | null; origin: string; note: string }) => ({
@@ -88,5 +88,8 @@ export function readTurn(body: Extract<AgentReply, { status: 200 }>["body"], mes
     note: w.note,
   }));
   const rejected = commit.rejected.map((r: { action: string; reason: string }) => `${r.action} ${r.reason}`);
-  return { status: "ok", observation: { text: body.text.trim(), wakeups, rejected, files: {}, page: null }, ...base };
+  const raw = body.text.trim();
+  const delivered = commit.outbound?.texts.join("\n") ?? "";
+  const answered = commit.turns.some((t: { role: string }) => t.role === "agent");
+  return { status: "ok", observation: { text: contract === "product" ? delivered : raw, raw, answered, wakeups, rejected, files: {}, page: null }, ...base };
 }

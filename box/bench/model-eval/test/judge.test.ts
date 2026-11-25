@@ -26,6 +26,7 @@ const record = (id: string, reply: string): RunRecord => ({
   status: "ok",
   message: "",
   reply,
+  delivered: reply,
   overReplyCap: false,
   calls: [],
   refusedCalls: [],
@@ -118,7 +119,7 @@ describe("the judge hand-off", () => {
 
 describe("the calibration trio against the deterministic checks", () => {
   const facts = CASES.find((c) => c.id === CALIBRATION_CASE)?.make("2026-11-29T10:00" as Wall).checks.find((c) => c.kind === "facts");
-  const passes = (text: string) => grade(facts!, { text, wakeups: [], rejected: [], files: {}, page: null }).pass;
+  const passes = (text: string) => grade(facts!, { text, raw: text, answered: true, wakeups: [], rejected: [], files: {}, page: null }).pass;
   it("the good and the flat draft carry every fact", () => {
     assert.equal(passes(CALIBRATION.good), true);
     assert.equal(passes(CALIBRATION.flat), true);

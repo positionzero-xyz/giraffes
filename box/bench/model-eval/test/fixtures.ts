@@ -16,6 +16,7 @@ export const record = (more: Partial<RunRecord>): RunRecord => ({
   status: "ok",
   message: "",
   reply: "",
+  delivered: null,
   overReplyCap: false,
   calls: [],
   refusedCalls: [],

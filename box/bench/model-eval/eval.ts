@@ -86,7 +86,7 @@ type Outcome = {
   readonly buildDir: string | null;
 };
 
-async function productTurn(cli: string, c: Candidate, message: string, now: Wall, tapFile: string): Promise<Outcome> {
+async function productTurn(cli: string, c: Candidate, k: Case, message: string, now: Wall, tapFile: string): Promise<Outcome> {
   let id: string | null = null;
   const sessions: SessionStore = { get: () => id, set: (v) => void (id = v) };
   const reply = await agentTurn([process.execPath, TAP, tapFile, String(TURN_TAP_MS), cli], agentRequest(c, message, now), sessions);
@@ -95,7 +95,7 @@ async function productTurn(cli: string, c: Candidate, message: string, now: Wall
     const status: RunStatus = tap?.killed ? "timeout" : reply.status === 409 ? "signed_out" : "claude_failed";
     return { status, observation: NO_OBSERVATION, calls: [], refusedCalls: [], usage: null, costUsd: tap?.costUsd ?? null, tap, buildDir: null };
   }
-  const read = readTurn(reply.body, message, now);
+  const read = readTurn(reply.body, message, now, CONTRACT[k.shape]);
   return { ...read, costUsd: tap?.costUsd ?? read.costUsd, tap, buildDir: null };
 }
 
@@ -149,7 +149,8 @@ async function buildTurn(cli: string, chrome: string | null, c: Candidate, messa
   const files = readFiles(keep);
   const drive = checks.some((k) => k.kind === "persists");
   const page = chrome && files["index.html"] ? await inspect(chrome, join(keep, "index.html"), drive) : null;
-  return { status: "ok", observation: { text: String(result.result ?? ""), wakeups: [], rejected: [], files, page }, ...base };
+  const text = String(result.result ?? "");
+  return { status: "ok", observation: { text, raw: text, answered: text.trim() !== "", wakeups: [], rejected: [], files, page }, ...base };
 }
 
 const quote = (a: string) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replaceAll("'", "'\\''")}'`);
@@ -240,7 +241,7 @@ async function main() {
         const tapFile = join(runDir, "taps", `${safe}.jsonl`);
         const { message, checks } = k.make(now);
         const machineDate = new Date().toLocaleDateString("en-CA");
-        const out = await (k.shape === "build" ? buildTurn(cli, chrome, c, message, checks, tapFile, join(runDir, "builds", safe)) : productTurn(cli, c, message, now, tapFile)).catch(
+        const out = await (k.shape === "build" ? buildTurn(cli, chrome, c, message, checks, tapFile, join(runDir, "builds", safe)) : productTurn(cli, c, k, message, now, tapFile)).catch(
           (err: unknown): Outcome => {
             console.error(`${id} harness error: ${String(err)}`);
             return { status: "harness_error", observation: NO_OBSERVATION, calls: [], refusedCalls: [], usage: null, costUsd: readTap(tapFile)?.costUsd ?? null, tap: readTap(tapFile), buildDir: null };
@@ -261,8 +262,9 @@ async function main() {
           dateMismatch: machineDate !== dateOf(now),
           status: out.status,
           message,
-          reply: out.observation.text,
-          overReplyCap: out.observation.text.length > REPLY_CAP,
+          reply: out.observation.raw,
+          delivered: out.status === "ok" && CONTRACT[k.shape] === "product" ? out.observation.text : null,
+          overReplyCap: out.observation.raw.length > REPLY_CAP,
           calls: out.calls,
           refusedCalls: out.refusedCalls,
           rejected: out.observation.rejected,

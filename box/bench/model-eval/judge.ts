@@ -43,7 +43,7 @@ export function writeJudgeBatch(runDir: string, records: readonly RunRecord[]): 
     if (r.status !== "ok" || !CASES.find((c) => c.id === r.caseId)?.judged) continue;
     const html = r.buildDir ? join(r.buildDir, "index.html") : null;
     if (r.shape === "build" && (!html || !existsSync(html))) continue;
-    items.push({ id: blindId(), entry: { shape: r.shape, caseId: r.caseId, record: r.id }, reply: r.reply, html });
+    items.push({ id: blindId(), entry: { shape: r.shape, caseId: r.caseId, record: r.id }, reply: r.delivered ?? r.reply, html });
   }
   for (const level of Object.keys(CALIBRATION) as Calibration[]) {
     items.push({ id: blindId(), entry: { shape: "draft", caseId: CALIBRATION_CASE, calibration: level }, reply: CALIBRATION[level], html: null });

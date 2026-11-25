@@ -10,7 +10,7 @@ const pageFile = (name: string) => fileURLToPath(new URL(`./pages/${name}.html`,
 
 async function graded(name: string, check: Check) {
   const page = await inspect(chrome as string, pageFile(name), check.kind === "persists");
-  const o: Observation = { text: "", wakeups: [], rejected: [], files: {}, page };
+  const o: Observation = { text: "", raw: "", answered: true, wakeups: [], rejected: [], files: {}, page };
   return grade(check, o);
 }
 

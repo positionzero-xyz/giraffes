@@ -46,8 +46,8 @@ const GRADERS: { readonly [K in Check["kind"]]: Grader<K> } = {
     return { pass: hit === null, detail: hit ? `says "${hit[0]}"` : "none" };
   },
   mentions: (c, o) => ({ pass: has(o.text, { label: c.what, any: c.any }), detail: c.what }),
-  fits_reply: (_, o) => ({ pass: o.text.length <= REPLY_CAP, detail: `${o.text.length} chars` }),
-  worker_accepts: (_, o) => ({ pass: o.rejected.length === 0, detail: o.rejected.join(" ") || "none rejected" }),
+  fits_reply: (_, o) => ({ pass: o.raw.length <= REPLY_CAP, detail: `${o.raw.length} chars` }),
+  replies: (_, o) => ({ pass: o.answered, detail: o.answered ? "sent" : "nothing of the model's reached the person" }),
   due_at: (c, o) => {
     const wrong = wrongReminder(o, c.repeat, c.about);
     if (wrong) return { pass: false, detail: wrong };

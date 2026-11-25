@@ -1,40 +1,62 @@
 import type { AgentReply, AgentRequest, Usage } from "../../src/claude.ts";
 import type { Candidate, Observation, RunStatus, Wall, Wakeup } from "./types.ts";
-import { AGENT_SYSTEM, AGENT_TOOLS, boxTurnAttempt, fromLocal, parseTimeZone, planTurn, readAgentBody, renderPrompt, renderUser, toLocal, UNREADABLE_REPLY } from "./worker.ts";
+import {
+  boxTurnAttempt,
+  boxTurnRequest,
+  CHANNEL_LANGUAGE,
+  checkinWakeup,
+  fromLocal,
+  OUTREACH,
+  parseTimeZone,
+  planTurn,
+  readAgentBody,
+  renderUser,
+  SCHEDULE,
+  toLocal,
+  TURN_SYSTEM,
+  UNREADABLE_REPLY,
+} from "./worker.ts";
 
 export const TZ = "Asia/Bangkok";
 const tz = parseTimeZone(TZ);
 
 export const effortOf = (c: Candidate) => (c.effort === "default" ? undefined : c.effort);
 
+/** The channel the eval plays: Thailand first, so LINE, whose notices start in Thai. */
+export const CHANNEL = "line";
+
+/**
+ * A fresh LINE person's first box turn, built as the Worker builds one: their check-in pending and a full day's unasked
+ * budget. A box turn comes only after the person sent /claude and signed in, so there is history, which the box never sees.
+ */
 export function viewOf(message: string, now: Wall) {
   const at = fromLocal(now, tz);
   return {
     now: at,
     tz,
-    language: "th",
+    language: CHANNEL_LANGUAGE[CHANNEL],
     status: "active",
     statusAt: 0,
-    checkinLocal: "09:00",
+    checkinLocal: SCHEDULE.defaultCheckinLocal,
     admission: { state: "admitted", seat: { cohort: "staff", half: null, code: null, inviter: null }, at: 0 },
     batch: { items: [{ key: "eval:0", event: { kind: "message", text: message }, attempts: 1, receivedAt: at }] },
     summary: "",
     notes: [],
-    recent: [],
+    recent: [{ role: "person", text: "/claude", at: at - 60_000 }],
     historyLeftOut: 0,
-    pending: [],
+    pending: [checkinWakeup(at - 60_000, tz, SCHEDULE.defaultCheckinLocal)],
     openTasks: [],
     acceptable: null,
     tapped: [],
-    unaskedLeftToday: 3,
+    unaskedLeftToday: OUTREACH.dailyUnaskedBudget,
   };
 }
 
 export function agentRequest(c: Candidate, message: string, now: Wall): AgentRequest {
-  const parts = renderUser(viewOf(message, now));
-  const turn = renderPrompt({ sections: parts.sections.filter((s: { history?: boolean }) => !s.history) });
+  const sent = boxTurnRequest(TURN_SYSTEM, renderUser(viewOf(message, now)));
+  if (sent === null) throw new Error("the turn doesn't fit the box route");
   const effort = effortOf(c);
-  return { model: c.model, append: AGENT_SYSTEM, turn, tools: AGENT_TOOLS, ...(effort ? { effort } : {}) };
+  return { ...sent, model: c.model, ...(effort ? { effort } : {}) };
 }
 
 export const NO_OBSERVATION: Observation = { text: "", wakeups: [], rejected: [], files: {}, page: null };

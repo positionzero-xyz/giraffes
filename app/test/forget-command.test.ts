@@ -503,3 +503,44 @@ describe("the receipt's backup sentence", () => {
     );
   });
 });
+
+describe("the model flag and recovery on other paths", () => {
+  test("a forget the person's box flags sends only the offer and saves nothing else", async () => {
+    const box = fakeBox({ signedIn: true, volume: VOLUME });
+    const c = await devChat("flag-box", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+    box.replies.push({ kind: "reply", step: turn({ actions: [{ type: "forget" }, send("I forgot it."), { type: "remember", note: `Moved to ${MARKER}.` }] }) });
+
+    expect(await say(c, "please forget where I live")).toEqual([en.offer]);
+    expect(box.parses.at(-1)?.agent?.tools).toContain("forget");
+    expect(await sql(c, "SELECT COUNT(*) AS n FROM memory_note")).toEqual([{ n: 0 }]);
+    expect(await sql(c, "SELECT epoch FROM forget")).toEqual([{ epoch: 0 }]);
+  });
+
+  test("a page left sending by a send that died is recovered and sent again during the hold", async () => {
+    const c = await devChat("crash-page", { model: scripted([]), at: "2099-11-04T10:00", deliveries: [{ kind: "throw" }] });
+    await sql(c, "INSERT INTO memory_note (text, created_at, event_key) VALUES ('kept note', 0, 'dev:seed')");
+    const [page] = await say(c, "/forget");
+    expect(await sql(c, "SELECT status, attempts FROM outbox WHERE privacy = 'page'")).toEqual([{ status: "sent", attempts: 2 }]);
+    expect(page).toContain("kept note");
+    expect(page).toContain(en.listDone(codeOf(page)));
+  });
+
+  test("a Telegram receipt left sending by a send that died isn't sent again by itself", async () => {
+    let dies = false;
+    const tg = channelOf(() => {
+      if (dies) throw new Error("the instance died mid-send");
+      return { kind: "sent", via: "push" };
+    });
+    const { c, message } = await onChannel("4545", "telegram", tg);
+    dies = true;
+    await message("/forget all", false);
+    dies = false;
+    await coldDrain(c, tg);
+    expect(await sql(c, "SELECT status, attempts FROM outbox WHERE privacy = 'receipt'")).toEqual([{ status: "dropped", attempts: 1 }]);
+    expect(tg.sent).toEqual([]);
+    await message("/forget status", false);
+    expect(tg.sent).toEqual([en.lastReceipt({ deleted: ["all"], backups: "expire" })]);
+  });
+});

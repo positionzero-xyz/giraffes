@@ -71,3 +71,30 @@ describe("the review reply", () => {
   it("fails a discount that isn't for the next visit", () => bad("draft-review-reply", right.replace("สำหรับการมาใช้บริการครั้งหน้า หวังว่าจะได้ต้อนรับอีกครั้งนะคะ", "ให้กับบิลนี้เลยค่ะ")));
   it("fails another discount", () => bad("draft-review-reply", right.replace("15%", "50%")));
 });
+
+describe("careful wording a draft may use", () => {
+  it("passes a coffee post that rules delivery out in words", () => {
+    good(
+      "draft-facebook-coffee",
+      "บ้านดอยคอฟฟี่ สาขานิมมาน ซื้อลาเต้เย็น 1 แก้ว แถมอีก 1 แก้วฟรี ปกติแก้วละ 65 บาท วันที่ 1-7 ธันวาคมนี้ เฉพาะซื้อที่หน้าร้านเท่านั้น ไม่รวมเดลิเวอรี่ แวะมาจิบกาแฟหอมๆ ชวนเพื่อนมาแบ่งกันนะคะ อากาศเย็นแบบนี้ต้องมีลาเต้สักแก้ว",
+    );
+  });
+
+  it("passes a salon broadcast that rules out walk-ins and phone booking, with the closed day said another way", () => {
+    good(
+      "draft-line-salon",
+      "ซาลอนมะลิ เดือนธันวาคม ทำสีผมลด 20% จากปกติ 1,500 บาท เหลือเพียง 1,200 บาท ต้องจองล่วงหน้าทาง LINE เท่านั้น ไม่รับ walk-in และไม่รับจองทางโทรศัพท์ ร้านปิดให้บริการทุกวันพุธนะคะ",
+    );
+    good(
+      "draft-line-salon",
+      "ซาลอนมะลิ เดือนธันวาคม ทำสีผมลด 20% จากปกติ 1,500 บาท เหลือเพียง 1,200 บาท จองคิวล่วงหน้าทางไลน์เท่านั้น ทุกวันพุธร้านปิดนะคะ แล้วพบกันค่ะ",
+    );
+  });
+
+  it("passes a bag described by width and height", () => {
+    good(
+      "draft-shopee-bag",
+      "กระเป๋าผ้าฝ้ายทอมือจากน่าน งานแฮนด์เมดจากช่างทอในชุมชน กว้าง 30 ซม. สูง 35 ซม. ใส่ของได้เยอะ มีให้เลือก 3 สี คือ คราม น้ำตาล และครีม ราคาเพียง 390 บาท ซักเครื่องได้ ไม่ต้องกลัวเลอะ เหมาะกับไปทำงาน ไปเรียน หรือไปเที่ยว",
+    );
+  });
+});

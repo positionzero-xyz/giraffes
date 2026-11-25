@@ -62,7 +62,13 @@ describe("the vague evening reminder", () => {
     assert.equal(passes(evening, said("ตั้งเตือนไว้ 18:00 นะ", [at("2026-11-26T18:00", "Water the plants")])), true);
   });
 
-  it("fails a question that isn't about the time", () => assert.equal(passes(evening, said("รดน้ำต้นไม้ตอนเช้าดีไหม")), false));
+  it("fails a question that isn't about the time", () => assert.equal(passes(evening, said("ต้นไม้ชนิดนี้ต้องรดน้ำบ่อยแค่ไหนคะ")), false));
+
+  it("reads this evening, asked after the evening is over, as tomorrow evening", () => {
+    const late = CASES.find((k) => k.id === "reminder-vague-evening")?.make("2026-11-26T21:00" as Wall).checks.find((k) => k.kind === "asks_or_assumes") ?? assert.fail("no check");
+    assert.equal(passes(late, said("ตั้งไว้พรุ่งนี้หกโมงเย็นนะ", [at("2026-11-27T18:00", "รดน้ำต้นไม้")])), true);
+    assert.equal(passes(late, said("ตั้งไว้หกโมงเย็นนะ", [at("2026-11-26T18:00", "รดน้ำต้นไม้")])), false);
+  });
 
   it("fails an evening time on another day, repeating or unasked", () => {
     assert.equal(passes(evening, said("ตั้งไว้ห้าโมงเย็นนะ", [at("2026-11-27T17:00", "รดน้ำต้นไม้")])), false);

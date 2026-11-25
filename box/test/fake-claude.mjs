@@ -52,7 +52,8 @@ if (args[0] === "--version") {
     process.exit(1);
   }
   if (user === "crash") {
-    console.error("boom");
+    console.error(flag("--system-prompt"));
+    console.log(JSON.stringify({ type: "result", is_error: true, subtype: flag("--model") }));
     process.exit(2);
   }
   const ok = flag("--tools") === "" && flag("--setting-sources") === "" && args.includes("--no-session-persistence");

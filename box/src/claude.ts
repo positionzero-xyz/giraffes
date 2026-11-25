@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { diagnostic } from "./diagnostics.ts";
 
 export type Cli = readonly [string, ...string[]];
 
@@ -122,19 +123,17 @@ export async function parseTurn(cli: Cli, req: ParseRequest, signal?: AbortSigna
   const started = Date.now();
   const run = await runClaude(cli, args, req.user, TURN_TIMEOUT_MS, signal);
   if (signal?.aborted) {
-    console.log(`${req.model} abandoned by the caller after ${Date.now() - started}ms`);
+    diagnostic({ code: "parse_abandoned", durationMs: Date.now() - started });
     return { status: 502, body: { error: "claude_failed" } };
   }
   const result = run.code === 0 ? parseJson(run.stdout) : undefined;
   if (!isObject(result) || result.is_error !== false) {
-    const failed = parseJson(run.stdout);
-    const subtype = isObject(failed) && typeof failed.subtype === "string" ? failed.subtype : "none";
-    console.error(`claude -p failed (exit ${run.code}, subtype ${subtype}): ${run.stderr.slice(0, 300)}`);
+    diagnostic({ code: "parse_failed", exit: run.code });
     const status = await authStatus(cli);
     return status?.loggedIn === false ? { status: 409, body: { error: "signed_out" } } : { status: 502, body: { error: "claude_failed" } };
   }
   const costUsd = numOrNull(result.total_cost_usd);
-  console.log(`${req.model} ${Date.now() - started}ms $${(costUsd ?? 0).toFixed(5)}`);
+  diagnostic({ code: "parse_complete", durationMs: Date.now() - started, costUsd });
   return {
     status: 200,
     body: {
@@ -249,7 +248,7 @@ export async function agentTurn(cli: Cli, req: AgentRequest, signal?: AbortSigna
   const input = () => `${JSON.stringify({ type: "user", message: { role: "user", content: session.resume ? req.turn : (req.fresh ?? req.turn) } })}\n`;
   let run = await runClaude(cli, agentArgs(req, toolsFile, session), input(), TURN_TIMEOUT_MS, signal, agentEnv());
   if (session.resume && /No conversation found with session ID/.test(run.stdout + run.stderr)) {
-    console.log("session not found on this box, starting a new one");
+    diagnostic({ code: "session_missing" });
     session = startNew();
     run = await runClaude(cli, agentArgs(req, toolsFile, session), input(), TURN_TIMEOUT_MS, signal, agentEnv());
   }
@@ -258,13 +257,12 @@ export async function agentTurn(cli: Cli, req: AgentRequest, signal?: AbortSigna
   const events = run.stdout.split("\n").map(parseJson).filter(isObject);
   const result = events.findLast((e) => e.type === "result");
   if (run.code !== 0 || !result || result.is_error !== false) {
-    const subtype = typeof result?.subtype === "string" ? result.subtype : "none";
-    console.error(`agent turn failed (exit ${run.code}, subtype ${subtype}): ${run.stderr.slice(0, 300)}`);
+    diagnostic({ code: "agent_failed", exit: run.code });
     const status = await authStatus(cli);
     return status?.loggedIn === false ? { status: 409, body: { error: "signed_out" } } : { status: 502, body: { error: "claude_failed" } };
   }
   const costUsd = numOrNull(result.total_cost_usd);
-  console.log(`${req.model} agent ${Date.now() - started}ms $${(costUsd ?? 0).toFixed(5)}`);
+  diagnostic({ code: "agent_complete", durationMs: Date.now() - started, costUsd });
   return {
     status: 200,
     body: {

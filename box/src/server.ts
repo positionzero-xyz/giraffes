@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readTicket, verifyBearer, type SigninTicket } from "./auth.ts";
 import { agentTurn, authStatus, cliVersion, parseTurn, readAgentRequest, readParseRequest, spawnClaude, type Cli } from "./claude.ts";
+import { diagnostic } from "./diagnostics.ts";
 import { readJson, readSigninJson, sendJson } from "./http.ts";
 
 export type BoxOptions = { readonly token: string; readonly cli: Cli; readonly sessionFile: string; readonly now?: () => number };
@@ -71,7 +72,7 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
     proc.on("error", exited);
     proc.on("close", (code) => {
       exited();
-      console.log(`sign-in process exited (${code})`);
+      diagnostic({ code: "signin_exit", exit: code });
     });
     const timeout = setTimeout(() => proc.kill("SIGKILL"), SIGNIN_TTL_MS).unref();
     proc.once("close", () => clearTimeout(timeout));
@@ -125,7 +126,7 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
     if (usedTickets.has(ticket.value)) return sendJson(res, 409, { error: "used_ticket" });
     usedTickets.set(ticket.value, ticket.expiresAt);
     const started = startLogin(ticket);
-    console.log("sign-in started");
+    diagnostic({ code: "signin_started" });
     await waitUntil(() => signinUrl(started.output) !== undefined || started.exited, URL_WAIT_MS);
     const url = signinUrl(started.output);
     if (login !== started || url === undefined) {
@@ -154,7 +155,7 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
       if (!pending.exited) pending.proc.kill("SIGKILL");
       await waitUntil(() => pending.exited, KILL_WAIT_MS);
       const signedIn = (await authStatus(cli))?.loggedIn === true;
-      console.log(`sign-in code sent, signed in: ${signedIn}`);
+      diagnostic({ code: "signin_complete", signedIn });
       sendJson(res, 200, { signedIn });
     } finally {
       if (login === pending) stopLogin();
@@ -195,8 +196,8 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
     if (!target) return sendJson(res, 400, { error: "bad_request" });
     const handler = routes.get(`${req.method} ${target.pathname}`);
     if (!handler) return sendJson(res, 404, { error: "not_found" });
-    Promise.resolve(handler(req, res)).catch((err: unknown) => {
-      console.error(err);
+    Promise.resolve().then(() => handler(req, res)).catch(() => {
+      diagnostic({ code: "route_failed" });
       if (!res.headersSent) sendJson(res, 500, { error: "internal" });
     });
   });

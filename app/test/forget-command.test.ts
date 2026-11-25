@@ -169,7 +169,7 @@ describe("/forget all", () => {
     expect(await sql(c, "SELECT status, texts FROM outbox WHERE status IN ('pending', 'sending')")).toEqual([]);
     await c.advanceTo("2099-11-06T12:00");
     expect((await c.received()).join("\n").toLowerCase()).not.toContain("trip went");
-    expect(await sql(c, "SELECT texts FROM outbox WHERE texts LIKE ?", `%${MARKER}%`)).toEqual([]);
+    expect(await sql(c, "SELECT texts FROM outbox WHERE texts LIKE '%trip went%'")).toEqual([]);
   });
 });
 
@@ -397,10 +397,11 @@ describe("plain words", () => {
 });
 
 /** A LINE or Telegram account as seen from the agent: a reply token that may have expired, and sends that may be in doubt. */
-function channelOf(outcome: (msg: OutboundMessage, now: EpochMs) => Delivery): ChannelAdapter & { readonly sent: string[] } {
+function channelOf(outcome: (msg: OutboundMessage, now: EpochMs) => Delivery): ChannelAdapter & { readonly sent: string[]; reset(): void } {
   const sent: string[] = [];
   return {
     sent,
+    reset: () => void sent.splice(0),
     receive: async () => ({ kind: "rejected", status: 404 }),
     async deliver(msg, now) {
       const d = outcome(msg, now);
@@ -410,7 +411,8 @@ function channelOf(outcome: (msg: OutboundMessage, now: EpochMs) => Delivery): C
   };
 }
 
-async function onChannel(user: string, channel: "line" | "telegram", adapter: ChannelAdapter) {
+/** The person's first message is a /forget status, which makes their agent without a model, so a test can set them up after. */
+async function onChannel(user: string, channel: "line" | "telegram", adapter: ChannelAdapter & { reset(): void }) {
   const c = await devChat(user, { model: scripted([]), at: "2099-11-04T10:00", channel });
   await runInDurableObject<Agent, void>(stubOf(c.agent), (a) => a.withDeps({ channels: { line: adapter, telegram: adapter, dev: adapter } }));
   const identity: Identity = { channel, channelUserId: user };
@@ -424,6 +426,8 @@ async function onChannel(user: string, channel: "line" | "telegram", adapter: Ch
     });
     await c.settle();
   };
+  await message("/forget status", false);
+  adapter.reset();
   return { c, message };
 }
 
@@ -445,13 +449,14 @@ describe("delivery of the forget's own messages", () => {
     expect(line.sent).toEqual([]);
 
     await message("/forget status", true);
-    expect(line.sent).toEqual([en.lastReceipt({ deleted: ["all"], backups: "expire" })]);
+    expect(line.sent).toEqual([FORGET_TEXT.th.lastReceipt({ deleted: ["all"], backups: "expire" })]);
   });
 
   test("a Telegram receipt whose send was in doubt isn't sent again by itself, and /forget status offers it", async () => {
-    let doubt = true;
+    let doubt = false;
     const tg = channelOf(() => (doubt ? ((doubt = false), { kind: "retry", afterMs: 30_000, detail: "502" }) : { kind: "sent", via: "push" }));
     const { c, message } = await onChannel("4242", "telegram", tg);
+    doubt = true;
     await message("/forget all", false);
     await c.advanceTo("2099-11-04T11:00");
     expect(tg.sent).toEqual([]);

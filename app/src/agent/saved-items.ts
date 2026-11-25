@@ -90,10 +90,13 @@ function itemText(sql: SqlStorage, item: SavedItem, a: AgentRow): string {
   }
 }
 
+/** What ends a page: how to ask for the next one, and what to do after the last. */
+export type SavedFooter = { readonly more: string; readonly done: string };
+
 export function renderSavedPage(
-  { sql, cursor, agent }: { sql: SqlStorage; cursor: SavedCursor; agent: AgentRow },
+  { sql, cursor, agent, footer }: { sql: SqlStorage; cursor: SavedCursor; agent: AgentRow; footer?: SavedFooter },
 ): SavedPage {
-  const t = labels[agent.language];
+  const t = { ...labels[agent.language], ...footer };
   let text = t.heading;
   let { item, offset } = cursor;
   let next: SavedCursor | null = null;

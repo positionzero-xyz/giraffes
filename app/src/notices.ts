@@ -78,7 +78,7 @@ export type Notices = {
   readonly ownCapReached: (capUsd: string) => string;
   readonly includedCapReached: string;
   readonly keyRefused: (provider: string) => string;
-  readonly keyNoCredit: (provider: string) => string;
+  readonly keyNoCredit: (provider: string, untilLocal: string | null) => string;
   readonly keyNoModel: (provider: string, model: string) => string;
   readonly keyRateLimited: (provider: string, untilLocal: string) => string;
   readonly keyUnreadable: string;
@@ -250,12 +250,12 @@ const en: Notices = {
   consentButton: "I'm 18+ and agree",
   privacy:
     "Before we start: I keep our chat and the notes I make about you so I can help you over time. Nobody else reads them, and you can ask me to forget something at any time. You need to be 18 or over. Tap the button to agree.",
-  welcome: "You're in. Tell me what you'd like a hand with, and I'll check in with you each morning.",
+  welcome: "You're in. Tell me what you'd like a hand with. I may send a morning check-in when I have AI access and something useful to share.",
   waitlist: {
     no_code: "Hi! I'm in a small invite-only beta for now. If you have an invite code, send it here.",
     bad_code: "That code doesn't work. Check it and send it again.",
     used: "That code has already been used. Ask the person who gave it to you for a new one.",
-    full: "The beta is full right now, so I've put you on the waiting list.",
+    full: "The beta is full right now. There's no date for new places yet. To check again, send your invite code here.",
   },
   alreadyIn: "You're already in the beta.",
   removed: "You're no longer in the beta, so I can't answer messages.",
@@ -281,7 +281,8 @@ const en: Notices = {
   ownCapReached: (cap) => `You've used the $${cap} monthly limit you set for your key. Send /key cap <dollars> to change it. It resets on the 1st.`,
   includedCapReached: "Your plan's AI allowance for this month is used up. It resets on the 1st.",
   keyRefused: (p) => `Your ${p} key was refused. Send /key to enter it again.`,
-  keyNoCredit: (p) => `Your ${p} account is out of credit. I can try the key again in an hour, or you can send /key to use another key.`,
+  keyNoCredit: (p, until) =>
+    `Your ${p} account is out of credit. ${until === null ? "" : `I can try the key again after ${until} your time. `}You can send /key to use another key.`,
   keyNoModel: (p, m) => `${p} no longer serves ${m}. Send /key to pick another model.`,
   keyRateLimited: (p, until) => (until ? `You've hit your ${p} usage limit. I'll use it again after ${until}.` : `You've hit your ${p} usage limit. I'll try it again later.`),
   keyUnreadable: "I lost access to your saved key on our side, sorry. Send /key to enter it again.",
@@ -319,7 +320,7 @@ const en: Notices = {
     baseUrl: "Base URL (https)",
     key: "API key",
     connect: "Connect",
-    checking: "Checking your key with one tiny request…",
+    checking: "Checking your key. This may use a few small requests on your provider account…",
     connected: "Connected. You can go back to the chat.",
     getKey: "Get a key",
     errors: {
@@ -444,12 +445,12 @@ const th: Notices = {
   consentButton: "อายุ 18+ และยอมรับ",
   privacy:
     "ก่อนเริ่มนะคะ: เราจะเก็บแชตและโน้ตเกี่ยวกับคุณไว้เพื่อช่วยคุณได้ต่อเนื่อง ไม่มีใครอื่นอ่าน และขอให้ลืมเรื่องไหนก็ได้ทุกเมื่อ ต้องมีอายุ 18 ปีขึ้นไป กดปุ่มด้านล่างเพื่อยอมรับค่ะ",
-  welcome: "เรียบร้อยค่ะ อยากให้ช่วยเรื่องไหนบอกได้เลย แล้วทุกเช้าจะทักมาถามนะคะ",
+  welcome: "เข้าร่วมเบต้าแล้วค่ะ อยากให้ช่วยเรื่องไหนบอกได้เลย ถ้าใช้ AI ได้และมีเรื่องที่น่าบอก อาจทักไปตอนเช้านะคะ",
   waitlist: {
     no_code: "สวัสดีค่ะ ตอนนี้เปิดให้ใช้เฉพาะคนที่ได้รับเชิญก่อน ถ้ามีรหัสเชิญ ส่งมาที่นี่ได้เลยค่ะ",
     bad_code: "รหัสนี้ใช้ไม่ได้ค่ะ ลองตรวจดูแล้วส่งมาใหม่อีกครั้งนะคะ",
     used: "รหัสนี้ถูกใช้ไปแล้วค่ะ ขอรหัสใหม่จากคนที่ให้มาได้เลยนะคะ",
-    full: "ตอนนี้ที่เต็มแล้วค่ะ เลยใส่ชื่อไว้ในรายชื่อรอให้แล้วนะคะ",
+    full: "ตอนนี้เบต้าเต็มแล้วค่ะ ยังไม่มีกำหนดเปิดรับเพิ่ม ถ้าอยากเช็กอีกครั้ง ส่งรหัสเชิญในแชตนี้ได้เลยค่ะ",
   },
   alreadyIn: "ตอนนี้ใช้งานอยู่แล้วค่ะ",
   removed: "ตอนนี้ไม่ได้อยู่ในรุ่นทดลองแล้ว เลยตอบข้อความไม่ได้ค่ะ",
@@ -475,7 +476,8 @@ const th: Notices = {
   ownCapReached: (cap) => `ใช้ key ของคุณครบวงเงิน $${cap} ต่อเดือนที่ตั้งไว้แล้วค่ะ ส่ง /key cap <จำนวนดอลลาร์> เพื่อเปลี่ยน วงเงินจะเริ่มใหม่วันที่ 1 ค่ะ`,
   includedCapReached: "โควตา AI ในแพ็กเกจของคุณเดือนนี้หมดแล้วค่ะ จะเริ่มใหม่วันที่ 1",
   keyRefused: (p) => `${p} ไม่รับ key ของคุณค่ะ ส่ง /key เพื่อใส่ใหม่นะคะ`,
-  keyNoCredit: (p) => `บัญชี ${p} ของคุณเครดิตหมดแล้วค่ะ จะลองใช้ key นี้ได้อีกครั้งในอีกหนึ่งชั่วโมง หรือส่ง /key เพื่อใช้ key อื่นก็ได้ค่ะ`,
+  keyNoCredit: (p, until) =>
+    `บัญชี ${p} ของคุณเครดิตหมดแล้วค่ะ ${until === null ? "" : `ลองใช้คีย์นี้อีกครั้งได้หลัง ${until} ตามเวลาของคุณค่ะ `}ส่ง /key เพื่อใช้คีย์อื่นได้ค่ะ`,
   keyNoModel: (p, m) => `${p} ไม่มีโมเดล ${m} ให้ใช้แล้วค่ะ ส่ง /key เพื่อเลือกโมเดลอื่นนะคะ`,
   keyRateLimited: (p, until) => (until ? `ใช้ ${p} ครบโควตาช่วงนี้แล้วค่ะ จะกลับมาใช้อีกครั้งหลัง ${until} นะคะ` : `ใช้ ${p} ครบโควตาช่วงนี้แล้วค่ะ จะลองใหม่ภายหลังนะคะ`),
   keyUnreadable: "ขอโทษค่ะ ฝั่งเราเปิด key ที่บันทึกไว้ไม่ได้แล้ว ส่ง /key เพื่อใส่ใหม่นะคะ",
@@ -513,7 +515,7 @@ const th: Notices = {
     baseUrl: "Base URL (https)",
     key: "API key",
     connect: "เชื่อมต่อ",
-    checking: "กำลังตรวจ key ด้วยคำขอเล็กๆ หนึ่งครั้งค่ะ…",
+    checking: "กำลังตรวจคีย์ค่ะ อาจส่งคำขอสั้น ๆ สองสามครั้งผ่านบัญชีของคุณกับผู้ให้บริการ…",
     connected: "เชื่อมต่อแล้วค่ะ กลับไปที่แชตได้เลย",
     getKey: "สมัครรับ key",
     errors: {

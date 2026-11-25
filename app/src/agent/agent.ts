@@ -43,9 +43,9 @@ import {
   type Step,
 } from "../box/machine";
 import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
-import { makeChannels, type ChannelRegistry } from "../channels/channel";
+import { makeChannels, tellOperator, type ChannelRegistry } from "../channels/channel";
 import { commandOf, type Command } from "./commands";
-import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env } from "../config";
+import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env, type OperatorChat } from "../config";
 import {
   assertNever,
   CHANNEL_LANGUAGE,
@@ -143,6 +143,7 @@ export type AgentDeps = {
   readonly clock: Clock;
   readonly box: BoxDeps | null;
   readonly billing: BillingDeps;
+  readonly operatorChat: OperatorChat | null;
   readonly admission: AdmissionMode;
 };
 
@@ -1436,6 +1437,7 @@ function defaultDeps(env: Env): AgentDeps {
     included: config.included,
     ledger: d1Ledger(env.LEDGER),
     channels: makeChannels(config),
+    operatorChat: config.operatorChat,
     clock: { now: () => Date.now() as EpochMs },
     box: boxDeps(config.box),
     billing: {

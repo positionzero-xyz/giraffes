@@ -92,7 +92,7 @@ describe("configuration", () => {
     expect(off.on && offeredPlans(off.stripe)).toEqual(["standard", "plus"]);
   });
 
-  test.each(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_STANDARD", "STRIPE_PRICE_PLUS", "STRIPE_PRICE_SEAT", "STRIPE_PORTAL_CONFIGURATION", "PUBLIC_URL"])(
+  test.each(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_STANDARD", "STRIPE_PRICE_PLUS", "STRIPE_PRICE_SEAT", "STRIPE_PORTAL_CONFIGURATION", "PUBLIC_URL", "OPERATOR_CHAT"])(
     "BILLING=on without %s fails at load",
     (name) => {
       const vars: Record<string, string> = { ...STRIPE_VARS };
@@ -436,7 +436,7 @@ describe("checkout and the portal", () => {
     await c.settle();
 
     expect(operator.delivered).toHaveLength(1);
-    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", expect.stringContaining("I've alerted the team to review it")]);
+    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", expect.stringContaining("as soon as I detected")]);
     expect(warnings).toHaveBeenCalledWith({ code: "stripe_duplicate_subscription" });
     expect(JSON.stringify(warnings.mock.calls)).not.toContain("sub_ike_");
     warnings.mockRestore();
@@ -445,27 +445,63 @@ describe("checkout and the portal", () => {
     expect([(await row("sub_ike_1"))?.status, (await row("sub_ike_2"))?.status]).toEqual(["active", "active"]);
   });
 
-  test("a failed operator delivery gives the person a fallback and a later webhook can alert the operator", async () => {
+  test.each([
+    { kind: "retry", language: "en", delivery: "delivery hasn't been confirmed", timing: "at least 30 seconds apart", billing: "payment statement" },
+    { kind: "in_doubt", language: "th", delivery: "ทีมอาจได้รับการแจ้งเตือนแล้ว", timing: "อย่างน้อย 30 วินาที", billing: "รายการเดินบัญชี" },
+  ] as const)("retries a $kind operator alert on the alarm and gives the person the next steps in $language", async ({ kind, language, delivery, timing, billing }) => {
     const kit = billingOn();
     const c = await devChat("june", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
-    const operator = scriptedChannel([{ kind: "retry", afterMs: 30_000 }]);
-    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
-      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
-    });
+    const operator = scriptedChannel([{ kind, afterMs: 30_000 }, { kind: "retry", afterMs: 30_000 }]);
+    const deliver = vi.spyOn(operator, "deliver");
     await c.say("/plan");
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent, state) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+      state.storage.sql.exec("UPDATE agent SET language = ?", language);
+    });
     await c.received();
     await pay(kit, c, "june", "standard");
     await c.received();
 
-    const second = { user: "june", sub: "sub_june_extra", plan: "included", status: "active" } as const;
+    const second = { id: "evt_june_extra", user: "june", sub: "sub_june_extra", plan: "included", status: "active", customer: "cus_june_extra" } as const;
     expect((await stripeChange(kit, second)).status).toBe(200);
     await c.settle();
-    expect(operator.delivered).toEqual([]);
-    expect(await c.received()).toEqual([expect.stringContaining("report it with /feedback")]);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    const messages = await c.received();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain(delivery);
+    expect(messages[0]).toContain(timing);
+    expect(messages[0]).toContain(billing);
+    expect(messages[0]).not.toContain("/plan");
 
-    expect((await stripeChange(kit, second)).status).toBe(200);
+    expect(await (await stripeChange(kit, second)).text()).toBe("duplicate");
+    await c.advanceTo("2099-11-04T10:01");
+    expect(operator.delivered).toEqual([expect.objectContaining({ text: expect.stringContaining("sub_june sub_june_extra"), at: local("2099-11-04T10:01") })]);
+    expect(deliver.mock.calls.map(([message, at]) => [message.id, at - local("2099-11-04T10:00")])).toEqual([
+      [expect.any(String), 0], [deliver.mock.calls[0]?.[0].id, 30_000], [deliver.mock.calls[0]?.[0].id, 60_000],
+    ]);
+    expect(await c.received()).toEqual([]);
+  });
+
+  test("does not re-alert or notify for the same subscriptions after Stripe event dedupe expires", async () => {
+    const kit = billingOn();
+    const c = await devChat("retained", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel();
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, "retained", "standard");
+    const extra = { user: "retained", sub: "sub_retained_2", plan: "included", status: "active" } as const;
+    await stripeChange(kit, extra);
     await c.settle();
-    expect(operator.delivered.map(({ text }) => text)).toEqual([expect.stringContaining("sub_june sub_june_extra")]);
+    expect(operator.delivered).toHaveLength(1);
+    c.clock.set(local("2099-11-20T10:00"));
+    await c.settle();
+    await c.received();
+
+    await stripeChange(kit, extra);
+    await c.settle();
+    expect(operator.delivered).toHaveLength(1);
     expect(await c.received()).toEqual([]);
   });
 });

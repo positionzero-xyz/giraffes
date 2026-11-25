@@ -2,16 +2,15 @@ import { z } from "zod";
 import { planAllowsBox, type Plan } from "../billing/plan";
 import type { BoxAgentRequest } from "../box/client";
 import type { BoxState } from "../box/machine";
-import { AGENT_SYSTEM } from "../agent/prompt";
-import { AGENT_TOOLS, BoxTurnOutputSchema, turnFromAgent } from "../agent/turn";
 import { assertNever, eventKey, mayspend, type AgentKey, type EpochMs, type MicroUsd } from "../domain";
 import { modelCallRow, type Backend, type ModelCallStatus } from "../ledger/ledger";
 import { NOTICES, type KeyPageError } from "../notices";
 import { OUTPUTS, outputOf, type Output } from "../agent/purposes";
+import { boxTurnAttempt, boxTurnRequest, BOX_TURN_ROUTE } from "./box-turn";
+import { fitPrompt, userBudget } from "./fit";
 import type { AgentStore, Reservation } from "../agent/store";
 import {
   jsonSchemaOf,
-  looseUser,
   readAttempt,
   runParse,
   type Attempt,
@@ -24,7 +23,7 @@ import {
   type SchemaMode,
   type WireResult,
 } from "../model/client";
-import { bytesOf, fitSections, type PromptParts } from "../model/prompt";
+import type { PromptParts } from "../model/prompt";
 import { PROVIDERS, type ModelRef } from "../model/providers";
 import { routeFor, type CallPurpose, type Purpose, type Route, type Source } from "../model/routes";
 import { costOf, estimate, fits, type SpendScope } from "../policy/spend";
@@ -179,12 +178,6 @@ function probeError(a: Attempt<unknown> | null): ProbeError {
   }
 }
 
-/** What a route takes for the user prompt: its budget less the system prompt and, in loose mode, the inlined schema. */
-function userBudget(route: Route, mode: SchemaMode, purpose: Purpose, system: string): number {
-  const schemaBytes = mode === "loose" ? bytesOf(looseUser("", jsonSchemaOf(OUTPUTS[purpose]))) : 0;
-  return route.promptBytes - bytesOf(system) - schemaBytes;
-}
-
 const HOUR_MS = 60 * 60_000;
 const MIN_MS = 60_000;
 
@@ -312,11 +305,8 @@ export class ModelAccess {
     }
   }
 
-  /** Null: even with every trimmable line dropped, the prompt doesn't fit the route. */
   #fit(route: Route, mode: SchemaMode, req: CallRequest<Purpose>): { readonly user: string; readonly trimmed: boolean } | null {
-    const budget = userBudget(route, mode, req.purpose, req.system);
-    const fitted = fitSections(req.prompt, budget);
-    return bytesOf(fitted.text) <= budget ? { user: fitted.text, trimmed: fitted.historyCut > 0 } : null;
+    return fitPrompt(route, mode, req.purpose, req.system, req.prompt);
   }
 
   #agent(): AgentKey {
@@ -336,13 +326,12 @@ export class ModelAccess {
 
   /** A turn as the person's own Claude Code session; its tool calls and reply become a turn output for the usual checks. */
   async #boxAgent(req: CallRequest<"turn">): Promise<LaneResult<"turn">> {
-    const route = routeFor({ kind: "box", provider: "claude" }, "turn");
-    const fitted = this.#fit(route, "strict", { ...req, prompt: { sections: req.prompt.sections.filter((s) => !s.history) } });
-    if (fitted === null) return { kind: "next", tooLong: true };
-    const answer = await this.deps.box.agent({ model: route.model, append: AGENT_SYSTEM, turn: fitted.user, tools: AGENT_TOOLS });
+    const route = BOX_TURN_ROUTE;
+    const request = boxTurnRequest(req.system, req.prompt);
+    if (request === null) return { kind: "next", tooLong: true };
+    const answer = await this.deps.box.agent(request);
     if (answer.kind === "moved_on") return { kind: "next", transient: answer.transient, told: answer.told };
-    const output = turnFromAgent(jsonOrNull(answer.reply.text));
-    const attempt = readAttempt(output === null ? answer.reply : { ...answer.reply, text: JSON.stringify(output) }, BoxTurnOutputSchema);
+    const attempt = boxTurnAttempt(answer.reply);
     this.#log(route, "box", "settled", 0 as MicroUsd, 0 as MicroUsd, attempt);
     const call: CallRecord = { lane: "box", model: route.ref, costMicro: 0 as MicroUsd };
     return { kind: "served", served: attempt.kind === "ok" ? { kind: "ok", value: attempt.value, call, trimmed: false } : { kind: "failed", call, trimmed: false } };
@@ -499,11 +488,3 @@ export class ModelAccess {
 }
 
 const isTurn = (req: CallRequest<Purpose>): req is CallRequest<"turn"> => req.purpose === "turn";
-
-function jsonOrNull(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}

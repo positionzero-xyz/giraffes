@@ -39,6 +39,14 @@ function jsonOrNull(text: string): unknown {
   }
 }
 
+/** The box's agent reply as a wire reply: its answer and tool calls become the text, beside the CLI's stop reason and usage. */
+export function readAgentBody(raw: unknown): Extract<WireResult, { kind: "reply" }> | null {
+  const body = AgentBody.safeParse(raw);
+  if (!body.success) return null;
+  const { usage, stop, ...structured } = body.data;
+  return readBridgeReply({ structured, usage, stop });
+}
+
 const reason = (err: unknown) => (err instanceof Error ? `${err.name}: ${err.message}` : String(err));
 
 export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; readonly healthMs: number } = BOX_TIMEOUTS): BoxClient {
@@ -58,13 +66,7 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
 
     parse: (url, token, req) => post(url, token, "parse", bridgeBody(req), readBridgeReply),
 
-    agent: (url, token, req) =>
-      post(url, token, "agent", JSON.stringify(req), (raw) => {
-        const body = AgentBody.safeParse(raw);
-        if (!body.success) return null;
-        const { usage, stop, ...structured } = body.data;
-        return readBridgeReply({ structured, usage, stop });
-      }),
+    agent: (url, token, req) => post(url, token, "agent", JSON.stringify(req), readAgentBody),
   };
 
   async function post(url: string, token: BoxToken, path: "parse" | "agent", body: string, read: (raw: unknown) => ReturnType<typeof readBridgeReply>): Promise<BoxReply> {

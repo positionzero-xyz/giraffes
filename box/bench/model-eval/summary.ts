@@ -1,10 +1,13 @@
 import { calibrationGate, itemScore, type Gate, type JudgeKey, type Scores } from "./judge.ts";
-import type { RunFile, RunRecord, Shape } from "./types.ts";
+import type { RunFile, RunRecord, RunStatus, Shape } from "./types.ts";
 import { SHAPES } from "./types.ts";
 
 export type JudgeScores = { readonly name: string; readonly scores: Scores };
 
 const LINE_REPLY_WINDOW_MS = 50_000;
+
+/** The model answered but the Worker would discard it, so the case failed; other non-ok statuses are inconclusive. */
+export const MODEL_FAILED: ReadonlySet<RunStatus> = new Set(["invalid_output", "cut_off", "refused"]);
 
 function median(xs: readonly number[]): number | null {
   if (xs.length === 0) return null;
@@ -21,6 +24,7 @@ export type Row = {
   readonly shape: Shape;
   readonly runs: number;
   readonly ok: number;
+  readonly graded: number;
   readonly casesPassed: number;
   readonly checksPassed: number;
   readonly checks: number;
@@ -54,6 +58,7 @@ export function rows(run: RunFile, key: JudgeKey | null, judges: readonly JudgeS
         shape,
         runs: rs.length,
         ok: ok.length,
+        graded: rs.filter((r) => r.status === "ok" || MODEL_FAILED.has(r.status)).length,
         casesPassed: ok.filter((r) => r.checks.every((c) => c.pass)).length,
         checksPassed: sum(ok.map((r) => r.checks.filter((c) => c.pass).length)),
         checks: sum(ok.map((r) => r.checks.length)),
@@ -84,7 +89,7 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
     "",
     `Commit ${run.meta.gitSha}. CLI ${run.meta.cliVersion ?? "unknown"} (${run.meta.cli}). Login ${run.meta.auth ? `${run.meta.auth.authMethod}, signed ${run.meta.auth.loggedIn ? "in" : "out"}` : "unknown"}. Now ${run.meta.now}${run.meta.nowPinned ? " (pinned)" : " (today)"} Asia/Bangkok.`,
     "",
-    "Cost is the CLI's total_cost_usd, an API-price equivalent, not plan usage. Only runs with status ok count toward checks and cases; the rest are inconclusive. Chat and reminder run on the product path; draft and build run on the planned contract.",
+    `Cost is the CLI's total_cost_usd, an API-price equivalent, not plan usage. A case passes only when its run is ok and every check passes. A reply the Worker would discard (${[...MODEL_FAILED].join(", ")}) counts as a failed case; other statuses are inconclusive and left out. Chat and reminder run on the product path; draft and build run on the planned contract.`,
     "",
     `| ${head.join(" | ")} |`,
     `| ${head.map(() => "---").join(" | ")} |`,
@@ -93,7 +98,7 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
         r.candidate,
         r.shape,
         `${r.ok}/${r.runs}`,
-        `${r.casesPassed}/${r.ok}`,
+        `${r.casesPassed}/${r.graded}`,
         `${r.checksPassed}/${r.checks}`,
         secs(r.medianWallMs),
         secs(r.medianFirstTextMs),
@@ -109,7 +114,9 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
   const notes: string[] = [];
   const mismatched = run.records.filter((r) => r.dateMismatch && r.shape === "reminder").length;
   if (mismatched) notes.push(`${mismatched} reminder runs saw a "now" on another date than the machine's, which the CLI also puts in its prompt. Read those reminder numbers with that in mind.`);
-  const failed = run.records.filter((r) => r.status !== "ok");
+  const discarded = run.records.filter((r) => MODEL_FAILED.has(r.status));
+  if (discarded.length) notes.push(`Replies the Worker would discard: ${discarded.map((r) => `${r.id} ${r.status}`).join(", ")}.`);
+  const failed = run.records.filter((r) => r.status !== "ok" && !MODEL_FAILED.has(r.status));
   if (failed.length) notes.push(`Inconclusive runs: ${failed.map((r) => `${r.id} ${r.status}`).join(", ")}.`);
   const long = run.records.filter((r) => r.shape === "draft" && r.status === "ok" && r.overReplyCap).length;
   if (run.records.some((r) => r.shape === "draft")) notes.push(`Drafts over the Worker's 600-character cut: ${long}.`);

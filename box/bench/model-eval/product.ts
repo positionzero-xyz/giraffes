@@ -1,6 +1,6 @@
 import type { AgentReply, AgentRequest, Usage } from "../../src/claude.ts";
 import type { Candidate, Observation, RunStatus, Wall, Wakeup } from "./types.ts";
-import { AGENT_SYSTEM, AGENT_TOOLS, BoxTurnOutputSchema, fromLocal, parseTimeZone, planTurn, renderPrompt, renderUser, toLocal, turnFromAgent } from "./worker.ts";
+import { AGENT_SYSTEM, AGENT_TOOLS, boxTurnAttempt, fromLocal, parseTimeZone, planTurn, readAgentBody, renderPrompt, renderUser, toLocal, UNREADABLE_REPLY } from "./worker.ts";
 
 export const TZ = "Asia/Bangkok";
 const tz = parseTimeZone(TZ);
@@ -48,12 +48,17 @@ export type TurnRead = {
   readonly costUsd: number | null;
 };
 
-/** A 200 reply from the box turn, read the way the Worker reads it and planned against the eval's view. */
+const FAILED: Readonly<Record<string, RunStatus>> = { refused_by_model: "refused", invalid: "invalid_output" };
+
+/** A 200 reply from the box turn, read through the Worker's own box client and decoder, then planned against the eval's view. */
 export function readTurn(body: Extract<AgentReply, { status: 200 }>["body"], message: string, now: Wall): TurnRead {
   const base = { calls: body.calls, refusedCalls: body.refusedCalls, usage: body.usage, costUsd: body.costUsd };
-  const parsed = BoxTurnOutputSchema.safeParse(turnFromAgent(body));
-  if (!parsed.success) return { status: "invalid_output", observation: { ...NO_OBSERVATION, text: body.text }, ...base };
-  const commit = planTurn(parsed.data, viewOf(message, now));
+  const attempt = boxTurnAttempt(readAgentBody(JSON.parse(JSON.stringify(body))) ?? UNREADABLE_REPLY);
+  if (attempt.kind !== "ok") {
+    const status = body.stop === "max_tokens" ? "cut_off" : (FAILED[attempt.kind] ?? "invalid_output");
+    return { status, observation: { ...NO_OBSERVATION, text: body.text }, ...base };
+  }
+  const commit = planTurn(attempt.value, viewOf(message, now));
   const wakeups: Wakeup[] = commit.wakeupsAdd.map((w: { dueAt: number; repeat: { every: Wakeup["repeat"] } | null; origin: string }) => ({
     at: toLocal(w.dueAt, tz),
     repeat: w.repeat?.every ?? null,

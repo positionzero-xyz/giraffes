@@ -1764,8 +1764,9 @@ export class AgentStore {
 
   /**
    * Opens a forget: the epoch moves on, so every result of work begun before now is stale, and the cutoff moves to the
-   * trigger's place in its provider's order. Every message not yet answered and every send not yet confirmed is closed,
-   * so neither recovery nor a retry can pick it up again. A second forget while one is open supersedes it.
+   * trigger's place in its provider's order. Work in flight, waiting events the cutoff covers, waiting wake-ups and every
+   * send not yet confirmed are closed, so neither recovery nor a retry can pick them up again. Events after the cutoff
+   * wait out the hold. A second forget while one is open supersedes it.
    */
   beginForget(trigger: ProviderOrder, now: EpochMs): { readonly op: string; readonly epoch: ForgetEpoch } {
     return this.tx(() => {
@@ -1774,10 +1775,22 @@ export class AgentStore {
       const epoch = (f.epoch + 1) as ForgetEpoch;
       const cutoff = laterCutoff(f.cutoff, trigger);
       this.sql.exec("UPDATE forget SET epoch = ?, op = ?, opened_at = ?, cutoff_at = ?, cutoff_seq = ?", epoch, op, now, cutoff.at, cutoff.seq);
+      const agent = this.agent();
+      const next: ForgetState = { epoch, op, cutoff };
+      const covered = this.sql
+        .exec<{ event_key: EventKey; payload: string; received_at: EpochMs }>("SELECT event_key, payload, received_at FROM inbox WHERE status = 'pending'")
+        .toArray()
+        .filter((r) => {
+          const event = fromJson<AgentEvent>(r.payload);
+          if (!agent || event.kind === "wakeup" || event.kind === "checkin") return true;
+          return coveredByForget({ agent: agent.key, identity: agent.identity, key: r.event_key, receivedAt: r.received_at, event }, next);
+        })
+        .map((r) => r.event_key);
       this.sql.exec(
         `UPDATE inbox SET status = 'failed', outcome = 'forgotten', finished_at = ?, catch_up = NULL, catch_up_budget = NULL
-         WHERE status IN ('pending', 'processing')`,
+         WHERE status = 'processing' OR event_key IN (SELECT value FROM json_each(?))`,
         now,
+        JSON.stringify(covered),
       );
       this.sql.exec("UPDATE inbox SET catch_up = NULL, catch_up_budget = NULL WHERE catch_up IS NOT NULL");
       this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'forgotten', closed_at = ? WHERE status IN ('pending', 'sending')", now);

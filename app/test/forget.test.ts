@@ -106,6 +106,25 @@ describe("work that began before a forget can't save or send after it", () => {
     expect(model.calls[1].user).not.toContain("where do I live");
   });
 
+  test("a message from after the cutoff, waiting when the forget began, is answered once the hold ends", async () => {
+    const model = scripted([hold(chat("You live at 12 Elm Street.")), chat("Tomorrow looks sunny.")]);
+    const c = await devChat("fence-after", { model, at: "2099-11-04T10:00" });
+    const t = c.clock.now();
+
+    await c.post("where do I live again?", { at: t });
+    await until(() => model.calls.length === 1);
+    await c.post("what's the weather tomorrow?", { at: (t + 5000) as EpochMs });
+    const { op } = await begin(c, { at: (t + 1000) as EpochMs, seq: null });
+    model.release();
+    await c.settle();
+    expect(await c.received()).toEqual([]);
+
+    await end(c, op);
+    await c.settle();
+    expect(await c.received()).toEqual(["Tomorrow looks sunny."]);
+    expect(model.calls[1].user).not.toContain("where do I live");
+  });
+
   test("a compaction in flight when the forget began doesn't save its summary", async () => {
     const model = scripted([chat("Noted.")], { compaction: [hold({ kind: "output", value: { summary: "Lives at 12 Elm Street." } })] });
     const c = await devChat("fence-compaction", { model, at: "2099-11-04T10:00" });

@@ -14,11 +14,14 @@ export type Delivery =
   | { readonly kind: "retry"; readonly afterMs: number; readonly detail: string }
   | { readonly kind: "in_doubt"; readonly afterMs: number; readonly detail: string }
   | { readonly kind: "failed"; readonly detail: string }
-  | { readonly kind: "recipient_gone" };
+  | { readonly kind: "recipient_gone" }
+  /** `live` turned false before a later request of this delivery, which was then not sent. */
+  | { readonly kind: "fenced" };
 
 export interface ChannelAdapter {
   receive(req: Request): Promise<Received>;
-  deliver(msg: OutboundMessage, now: EpochMs): Promise<Delivery>;
+  /** `live`, when given, is asked right before every request after the first; the caller asks it before calling. */
+  deliver(msg: OutboundMessage, now: EpochMs, live?: () => boolean): Promise<Delivery>;
 }
 
 export type ChannelRegistry = { readonly [K in ChannelId]: ChannelAdapter };

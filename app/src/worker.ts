@@ -75,6 +75,8 @@ async function routeRequest(req: Request, env: Env): Promise<Response> {
     if (url.pathname === "/dev/transcript") return transcript(env, url);
   }
   if (config.devMode && config.model.backend === "scripted" && req.method === "POST" && url.pathname === "/dev/script") return script(req, env);
+  if (config.devMode && config.model.backend === "scripted" && req.method === "POST" && url.pathname === "/dev/release") return release(req, env);
+  if (config.devMode && config.model.backend === "scripted" && req.method === "POST" && url.pathname === "/dev/forget") return forget(req, env);
   if (config.devMode && req.method === "POST" && url.pathname === "/dev/remove") return remove(req, env);
   if (config.devMode && req.method === "POST" && url.pathname === "/dev/fire") return fire(req, env);
   return new Response("not found", { status: 404 });
@@ -175,6 +177,28 @@ async function script(req: Request, env: Env): Promise<Response> {
   if (!body.success || !identity) return new Response("body must be {user, turns, compaction?}", { status: 400 });
   await agentStub(env, personAgentKey(identity)).script(body.data.turns, body.data.compaction);
   return new Response("ok");
+}
+
+const DevUser = z.object({ user: z.string() });
+
+async function release(req: Request, env: Env): Promise<Response> {
+  const body = DevUser.safeParse(await req.json().catch(() => null));
+  const identity = body.success ? devIdentity(body.data.user) : null;
+  if (!identity) return new Response("body must be {user}", { status: 400 });
+  await agentStub(env, personAgentKey(identity)).releaseScript();
+  return new Response("ok");
+}
+
+const DevForget = z.object({ user: z.string(), op: z.string().optional() });
+
+/** Dev only: without `op`, opens a forget at the time of the request; with it, ends that forget. */
+async function forget(req: Request, env: Env): Promise<Response> {
+  const body = DevForget.safeParse(await req.json().catch(() => null));
+  const identity = body.success ? devIdentity(body.data.user) : null;
+  if (!body.success || !identity) return new Response("body must be {user, op?}", { status: 400 });
+  const stub = agentStub(env, personAgentKey(identity));
+  if (body.data.op === undefined) return Response.json(await stub.beginForget({ at: Date.now() as EpochMs, seq: null }));
+  return Response.json({ ended: await stub.endForget(body.data.op) });
 }
 
 const Fire = z.object({ user: z.string(), key: z.string() });

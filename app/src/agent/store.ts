@@ -11,6 +11,7 @@ import { renderSavedPage, snapshotSavedItems, savedPageNotice, type SavedCursor,
 import type { BoxName } from "../box/names";
 import {
   assertNever,
+  buttonData,
   choiceToken,
   type Admission,
   type Cohort,
@@ -29,6 +30,7 @@ import {
   type EpochMs,
   type EventKey,
   type FactCause,
+  type ForgetEpoch,
   type FactKind,
   type Identity,
   type InboundEnvelope,
@@ -75,6 +77,7 @@ import {
   type UnaskedPurpose,
 } from "./tasks";
 import type { AdmissionChange, AdmissionCommit } from "./admission";
+import { coveredByForget, laterCutoff, type Claim, type ForgetState, type ProviderOrder } from "./forget";
 import { TURN, type Asked, type Batch, type BoxReplyBackfill, type BoxSession, type BoxSessionSeen, type InboxItem, type Outbound, type SeqTurn, type TurnCommit, type TurnRow } from "./turn";
 
 export type AgentRow = {
@@ -356,11 +359,11 @@ function toBox(r: BoxCols): Box {
   }
 }
 
-function button(choice: string | null, language: Language): Pick<OutboundMessage, "button"> {
+function button(choice: string | null, language: Language, epoch: ForgetEpoch): Pick<OutboundMessage, "button"> {
   const c = choice === null ? null : parseChoice(choice);
   if (c === null || choice === null) return {};
   const t = NOTICES[language];
-  return { button: { label: c.kind === "accept" ? t.acceptButton : c.kind === "consent" ? t.consentButton : t.backupButton, data: choice } };
+  return { button: { label: c.kind === "accept" ? t.acceptButton : c.kind === "consent" ? t.consentButton : t.backupButton, data: buttonData(choice, epoch) } };
 }
 
 function toAdmission(r: AdmissionCols | undefined): Admission {
@@ -423,8 +426,9 @@ export class AgentStore {
       readonly admit: Seat | null;
     },
     now: EpochMs,
-  ): "inserted" | "duplicate" {
+  ): "inserted" | "duplicate" | "stale" {
     return this.tx(() => {
+      if (coveredByForget(envelope, this.forget())) return "stale";
       if (envelope.event.kind === "message") {
         this.sql.exec(
           `INSERT INTO plan (one, trial_ends_at, updated_at) VALUES (1, ?, ?)
@@ -531,39 +535,46 @@ export class AgentStore {
     );
   }
 
-  claimBatch(now: EpochMs, catchUpBudget: string | null): Batch | null {
+  /** The next batch and the claim it was taken under; none while a forget is open. */
+  claimBatch(now: EpochMs, catchUpBudget: string | null): { readonly batch: Batch; readonly claim: Claim } | null {
     return this.tx(() => {
-      this.expireCatchUp("pending", now);
-      const retry = this.sql.exec<QueuedInboxCols>(
-        "SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox WHERE status = 'pending' AND catch_up IS NOT NULL ORDER BY seq",
-      ).toArray();
-      if (retry.length > 0) return retry[0].ready_at <= now ? this.claimRows(retry, true) : null;
-
-      const ready = this.sql
-        .exec<QueuedInboxCols>(
-          `SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox
-           WHERE status = 'pending' ORDER BY seq LIMIT ?`,
-          catchUpBudget === null ? TURN.maxBatchMessages : -1,
-        )
-        .toArray();
-      const [head] = ready;
-      const joins = (r: QueuedInboxCols) => r.kind === "message" && r.ready_at <= now && commandOf(fromJson<AgentEvent>(r.payload)) === null;
-      if (head && head.ready_at > now) return null;
-      if (head && !joins(head)) return this.claimRows([head], false);
-      const end = ready.findIndex((r) => !joins(r));
-      const messages = end === -1 ? ready : ready.slice(0, end);
-      const earlier = catchUpBudget !== null
-        ? this.sql.exec<QueuedInboxCols>(
-          `SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox
-           WHERE ${WAITING_FOR_ACCESS} AND catch_up_budget IS NOT ? ORDER BY seq`,
-          now - CATCH_UP_WINDOW_MS,
-          catchUpBudget,
-        ).toArray()
-        : [];
-      return earlier.length > 0
-        ? this.claimRows([...earlier, ...messages].sort((a, b) => a.seq - b.seq), true)
-        : this.claimRows(messages.slice(0, TURN.maxBatchMessages), false);
+      const claim = this.claim();
+      const batch = claim && this.nextBatch(now, catchUpBudget);
+      return claim && batch ? { batch, claim } : null;
     });
+  }
+
+  private nextBatch(now: EpochMs, catchUpBudget: string | null): Batch | null {
+    this.expireCatchUp("pending", now);
+    const retry = this.sql.exec<QueuedInboxCols>(
+      "SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox WHERE status = 'pending' AND catch_up IS NOT NULL ORDER BY seq",
+    ).toArray();
+    if (retry.length > 0) return retry[0].ready_at <= now ? this.claimRows(retry, true) : null;
+
+    const ready = this.sql
+      .exec<QueuedInboxCols>(
+        `SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox
+         WHERE status = 'pending' ORDER BY seq LIMIT ?`,
+        catchUpBudget === null ? TURN.maxBatchMessages : -1,
+      )
+      .toArray();
+    const [head] = ready;
+    const joins = (r: QueuedInboxCols) => r.kind === "message" && r.ready_at <= now && commandOf(fromJson<AgentEvent>(r.payload)) === null;
+    if (head && head.ready_at > now) return null;
+    if (head && !joins(head)) return this.claimRows([head], false);
+    const end = ready.findIndex((r) => !joins(r));
+    const messages = end === -1 ? ready : ready.slice(0, end);
+    const earlier = catchUpBudget !== null
+      ? this.sql.exec<QueuedInboxCols>(
+        `SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox
+         WHERE ${WAITING_FOR_ACCESS} AND catch_up_budget IS NOT ? ORDER BY seq`,
+        now - CATCH_UP_WINDOW_MS,
+        catchUpBudget,
+      ).toArray()
+      : [];
+    return earlier.length > 0
+      ? this.claimRows([...earlier, ...messages].sort((a, b) => a.seq - b.seq), true)
+      : this.claimRows(messages.slice(0, TURN.maxBatchMessages), false);
   }
 
   private claimRows(rows: readonly QueuedInboxCols[], catchUp: boolean): Batch | null {
@@ -786,9 +797,14 @@ export class AgentStore {
     return r ? { id: r.id, seenSeq: r.seen_seq, memory: r.memory, replyBackfill: fromJson(r.reply_backfill) } : null;
   }
 
-  commitTurn(commit: TurnCommit, logs: readonly LogRow[], now: EpochMs, box: Box | null = null, seen: BoxSessionSeen | null = null): void {
+  /**
+   * Saves a turn only while its batch is still claimed: a forget that began during the turn closed the batch's rows, so
+   * the turn's result is dropped whole. False when it was.
+   */
+  commitTurn(commit: TurnCommit, logs: readonly LogRow[], now: EpochMs, box: Box | null = null, seen: BoxSessionSeen | null = null): boolean {
     const [firstKey] = commit.batchKeys;
-    this.tx(() => {
+    return this.tx(() => {
+      if (!this.stillClaimed(commit.batchKeys)) return false;
       if (box) this.writeBox(box);
       const outboxId = crypto.randomUUID() as OutboxId;
       const tasks = this.applyTasks(commit.tasks, commit.trigger, commit.outbound ? outboxId : null, now);
@@ -853,7 +869,16 @@ export class AgentStore {
         JSON.stringify(commit.batchKeys),
       );
       this.insertLogs(logs, now);
+      return true;
     });
+  }
+
+  private stillClaimed(keys: readonly EventKey[]): boolean {
+    if (this.held()) return false;
+    const { n } = this.sql
+      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM inbox WHERE status = 'processing' AND event_key IN (SELECT value FROM json_each(?))", JSON.stringify(keys))
+      .one();
+    return n === new Set(keys).size;
   }
 
   private applyTasks(
@@ -1041,6 +1066,15 @@ export class AgentStore {
         .exec("SELECT 1 FROM agent WHERE claude_plan_at IS NOT NULL UNION ALL SELECT 1 FROM box WHERE reclaim_reason IS NOT 'removed'")
         .toArray().length > 0
     );
+  }
+
+  /** The volume the box's /health named; empty when its image names none, null when not read yet. */
+  boxVolume(): string | null {
+    return this.sql.exec<{ volume: string | null }>("SELECT volume FROM box").toArray()[0]?.volume ?? null;
+  }
+
+  setBoxVolume(name: BoxName, volume: string | null): void {
+    this.sql.exec("UPDATE box SET volume = ? WHERE name = ?", volume, name);
   }
 
   forgetClaudePlan(): void {
@@ -1233,6 +1267,7 @@ export class AgentStore {
   readyOutbox(now: EpochMs, limit: number): readonly OutboxRow[] {
     const agent = this.agent();
     if (!agent) return [];
+    const { epoch } = this.forget();
     return this.sql
       .exec<OutboxCols>(
         `SELECT id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, admitted_day, in_doubt, attempts, task_id, purpose, choice, reply_only,
@@ -1254,7 +1289,7 @@ export class AgentStore {
           taskId: r.task_id,
           purpose: r.purpose,
           replyOnly: r.reply_only === 1,
-          ...button(r.choice, agent.language),
+          ...button(r.choice, agent.language, epoch),
           ...(r.in_doubt === 0 && r.reply_token !== null && r.reply_expires !== null
             ? { reply: { token: r.reply_token, expiresAt: r.reply_expires } } : {}),
         };
@@ -1270,12 +1305,14 @@ export class AgentStore {
       .one().n;
   }
 
-  markSending(id: OutboxId, admittedDay: LocalDate | null): void {
-    this.sql.exec(
-      "UPDATE outbox SET status = 'sending', admitted_day = ?, attempts = attempts + 1 WHERE id = ?",
+  /** False when the row is no longer waiting or a forget began since `epoch`; nothing may then be sent for it. */
+  markSending(id: OutboxId, admittedDay: LocalDate | null, epoch: ForgetEpoch): boolean {
+    if (!this.live(epoch)) return false;
+    return this.sql.exec(
+      "UPDATE outbox SET status = 'sending', admitted_day = ?, attempts = attempts + 1 WHERE id = ? AND status = 'pending'",
       admittedDay,
       id,
-    );
+    ).rowsWritten > 0;
   }
 
   markSent(id: OutboxId, via: "reply" | "push", now: EpochMs, logs: readonly LogRow[], next: SavedCursor | null = null): void {
@@ -1295,23 +1332,28 @@ export class AgentStore {
         ).rowsWritten > 0;
         if (done) this.sql.exec("DELETE FROM saved_item");
       }
-      this.sql.exec("UPDATE outbox SET status = 'sent', via = ?, closed_at = ? WHERE id = ?", via, now, id);
+      this.sql.exec("UPDATE outbox SET status = 'sent', via = ?, closed_at = ? WHERE id = ? AND status = 'sending'", via, now, id);
       this.sql.exec("UPDATE outbox SET reply_token = NULL, reply_expires = NULL WHERE id = ? AND saved_item IS NOT NULL", id);
       this.insertLogs(logs, now);
     });
   }
 
-  reschedule(id: OutboxId, readyAt: EpochMs): void {
-    this.sql.exec("UPDATE outbox SET status = 'pending', ready_at = ? WHERE id = ?", readyAt, id);
+  /**
+   * Each delivery write names the state it expects the row in: `pending` before a send, `sending` after one. A row a forget
+   * dropped meanwhile is in neither, so a late result can't put it back in the queue or block the channel.
+   */
+  reschedule(id: OutboxId, readyAt: EpochMs, expect: "pending" | "sending"): void {
+    this.sql.exec("UPDATE outbox SET status = 'pending', ready_at = ? WHERE id = ? AND status = ?", readyAt, id, expect);
   }
 
   rescheduleInDoubt(id: OutboxId, readyAt: EpochMs): void {
-    this.sql.exec("UPDATE outbox SET status = 'pending', ready_at = ?, in_doubt = 1 WHERE id = ?", readyAt, id);
+    this.sql.exec("UPDATE outbox SET status = 'pending', ready_at = ?, in_doubt = 1 WHERE id = ? AND status = 'sending'", readyAt, id);
   }
 
-  drop(id: OutboxId, reason: "budget" | "blocked" | "quota" | "failed" | "removed", now: EpochMs, logs: readonly LogRow[]): void {
+  drop(id: OutboxId, reason: "budget" | "blocked" | "quota" | "failed" | "removed", now: EpochMs, logs: readonly LogRow[], expect: "pending" | "sending"): void {
     this.tx(() => {
-      this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = ?, closed_at = ? WHERE id = ?", reason, now, id);
+      const dropped = this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = ?, closed_at = ? WHERE id = ? AND status = ?", reason, now, id, expect).rowsWritten;
+      if (dropped === 0) return;
       this.sql.exec("UPDATE outbox SET reply_token = NULL, reply_expires = NULL WHERE id = ? AND saved_item IS NOT NULL", id);
       this.insertLogs(logs, now);
     });
@@ -1319,7 +1361,7 @@ export class AgentStore {
 
   recipientGone(id: OutboxId, now: EpochMs, logs: readonly LogRow[]): void {
     this.tx(() => {
-      this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'gone', closed_at = ? WHERE id = ?", now, id);
+      if (this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'gone', closed_at = ? WHERE id = ? AND status = 'sending'", now, id).rowsWritten === 0) return;
       this.sql.exec("UPDATE outbox SET reply_token = NULL, reply_expires = NULL WHERE id = ? AND saved_item IS NOT NULL", id);
       this.sql.exec("UPDATE agent SET status = 'blocked'");
       this.insertLogs(logs, now);
@@ -1530,7 +1572,7 @@ export class AgentStore {
   restKey(
     fault: KeyFault,
     until: EpochMs | null,
-    notice: { readonly key: EventKey; readonly message: NoteMessage },
+    notice: { readonly key: EventKey; readonly message: NoteMessage } | null,
     today: LocalDate,
     now: EpochMs,
     expectRevision: number,
@@ -1539,7 +1581,7 @@ export class AgentStore {
     return this.tx(() => {
       const current = this.key();
       if (current === null || current.revision !== expectRevision) return "stale";
-      const tell = current.health.kind === "ok" || current.health.toldOn !== today;
+      const tell = notice !== null && (current.health.kind === "ok" || current.health.toldOn !== today);
       this.sql.exec(
         "UPDATE model_key SET fault = ?, failures = MIN(failures + 1, ?), rest_until = ?, told_on = ?, unreadable_under = ? WHERE revision = ?",
         fault,
@@ -1591,8 +1633,9 @@ export class AgentStore {
     };
   }
 
-  commitCompaction(c: CompactionCommit, now: EpochMs): boolean {
+  commitCompaction(c: CompactionCommit, now: EpochMs, epoch: ForgetEpoch): boolean {
     return this.tx(() => {
+      if (!this.live(epoch)) return false;
       const swapped = this.sql.exec(
         `UPDATE memory SET summary = ?, through_turn_seq = ?, updated_at = ?, compaction_failures = 0, compaction_retry_at = 0
          WHERE through_turn_seq = ?`,
@@ -1694,6 +1737,70 @@ export class AgentStore {
       compactionRetryAt: compaction.retry_at > now && compactionDue(compaction.turns, compaction.notes) ? compaction.retry_at : null,
       boxAt: min("SELECT MIN(next_at) AS t FROM box"),
     };
+  }
+
+  forget(): ForgetState {
+    const r = this.sql
+      .exec<{ epoch: ForgetEpoch; op: string | null; cutoff_at: EpochMs | null; cutoff_seq: number | null }>("SELECT epoch, op, cutoff_at, cutoff_seq FROM forget")
+      .one();
+    return { epoch: r.epoch, op: r.op, cutoff: r.cutoff_at === null ? null : { at: r.cutoff_at, seq: r.cutoff_seq } };
+  }
+
+  /** True while no forget is open and none began since `epoch`. */
+  live(epoch: ForgetEpoch): boolean {
+    const f = this.forget();
+    return f.op === null && f.epoch === epoch;
+  }
+
+  /** What work starting now holds; none while a forget is open, since nothing ordinary may start then. */
+  claim(): Claim | null {
+    const f = this.forget();
+    return f.op === null ? { epoch: f.epoch, live: () => this.live(f.epoch) } : null;
+  }
+
+  held(): boolean {
+    return this.forget().op !== null;
+  }
+
+  /**
+   * Opens a forget: the epoch moves on, so every result of work begun before now is stale, and the cutoff moves to the
+   * trigger's place in its provider's order. Work in flight, waiting events the cutoff covers, waiting wake-ups and every
+   * send not yet confirmed are closed, so neither recovery nor a retry can pick them up again. Events after the cutoff
+   * wait out the hold. A second forget while one is open supersedes it.
+   */
+  beginForget(trigger: ProviderOrder, now: EpochMs): { readonly op: string; readonly epoch: ForgetEpoch } {
+    return this.tx(() => {
+      const f = this.forget();
+      const op = crypto.randomUUID();
+      const epoch = (f.epoch + 1) as ForgetEpoch;
+      const cutoff = laterCutoff(f.cutoff, trigger);
+      this.sql.exec("UPDATE forget SET epoch = ?, op = ?, opened_at = ?, cutoff_at = ?, cutoff_seq = ?", epoch, op, now, cutoff.at, cutoff.seq);
+      const agent = this.agent();
+      const next: ForgetState = { epoch, op, cutoff };
+      const covered = this.sql
+        .exec<{ event_key: EventKey; payload: string; received_at: EpochMs }>("SELECT event_key, payload, received_at FROM inbox WHERE status = 'pending'")
+        .toArray()
+        .filter((r) => {
+          const event = fromJson<AgentEvent>(r.payload);
+          if (!agent || event.kind === "wakeup" || event.kind === "checkin") return true;
+          return coveredByForget({ agent: agent.key, identity: agent.identity, key: r.event_key, receivedAt: r.received_at, event }, next);
+        })
+        .map((r) => r.event_key);
+      this.sql.exec(
+        `UPDATE inbox SET status = 'failed', outcome = 'forgotten', finished_at = ?, catch_up = NULL, catch_up_budget = NULL
+         WHERE status = 'processing' OR event_key IN (SELECT value FROM json_each(?))`,
+        now,
+        JSON.stringify(covered),
+      );
+      this.sql.exec("UPDATE inbox SET catch_up = NULL, catch_up_budget = NULL WHERE catch_up IS NOT NULL");
+      this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'forgotten', closed_at = ? WHERE status IN ('pending', 'sending')", now);
+      return { op, epoch };
+    });
+  }
+
+  /** Ends the hold only for the forget that is open; an older one's end changes nothing. */
+  endForget(op: string): boolean {
+    return this.sql.exec("UPDATE forget SET op = NULL, opened_at = NULL WHERE op = ?", op).rowsWritten > 0;
   }
 
   prune(now: EpochMs): void {

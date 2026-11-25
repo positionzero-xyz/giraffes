@@ -54,7 +54,7 @@ export function machineConfig(cfg: FlyConfig, token: BoxToken, volumeId: string)
     config: {
       image: cfg.image,
       guest: { cpu_kind: "shared", cpus: 1, memory_mb: 2048 },
-      env: { BOX_TOKEN: token },
+      env: { BOX_TOKEN: token, BOX_REQUIRE_EPOCH: "1" },
       mounts: [{ volume: volumeId, path: "/data" }],
       services: [
         {

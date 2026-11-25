@@ -8,6 +8,7 @@ import { assertNever, eventKey, mayspend, type AgentKey, type EpochMs, type Micr
 import { modelCallRow, type Backend, type ModelCallStatus } from "../ledger/ledger";
 import { NOTICES, type KeyPageError } from "../notices";
 import { OUTPUTS, outputOf, type Output } from "../agent/purposes";
+import type { Claim } from "../agent/forget";
 import type { AgentStore, Reservation } from "../agent/store";
 import {
   jsonSchemaOf,
@@ -113,16 +114,22 @@ export type Served<P extends Purpose> =
    * Nothing is connected, the plan's box isn't signed in, or every lane rests on a fault. `told`: this call already sent
    * the person a notice. `notice`: a resting key's problem, which the reply names.
    */
-  | { readonly kind: "no_access"; readonly why: Access["whenEmpty"]; readonly told: boolean; readonly notice: string | null; readonly waitForConnection: boolean };
+  | { readonly kind: "no_access"; readonly why: Access["whenEmpty"]; readonly told: boolean; readonly notice: string | null; readonly waitForConnection: boolean }
+  /** A forget began after the work that asked; no request was started for it from then on, and it must save nothing. */
+  | Fenced;
+
+type Fenced = { readonly kind: "fenced" };
+const FENCED: Fenced = { kind: "fenced" };
 
 export type BoxAnswer =
   | { readonly kind: "reply"; readonly reply: Extract<WireResult, { kind: "reply" }>; readonly session?: SessionUsed }
-  | { readonly kind: "moved_on"; readonly transient: boolean; readonly told: boolean };
+  | { readonly kind: "moved_on"; readonly transient: boolean; readonly told: boolean }
+  | Fenced;
 
 export interface BoxLane {
   state(): BoxState | null;
-  parse(req: { readonly purpose: CallPurpose; readonly model: string; readonly system: string; readonly user: string; readonly jsonSchema: JsonSchema }): Promise<BoxAnswer>;
-  agent(req: BoxAgentRequest): Promise<BoxAnswer>;
+  parse(req: { readonly purpose: CallPurpose; readonly model: string; readonly system: string; readonly user: string; readonly jsonSchema: JsonSchema }, claim: Claim): Promise<BoxAnswer>;
+  agent(req: BoxAgentRequest, claim: Claim): Promise<BoxAnswer>;
 }
 
 export type Clock = { now(): EpochMs };
@@ -144,6 +151,8 @@ export type CallRequest<P extends Purpose> = {
   readonly prompt: PromptParts;
   readonly plan: Plan;
   readonly box?: BoxTurnPrompt;
+  /** Checked before each lane and before each request a lane sends. */
+  readonly claim: Claim;
 };
 
 type Next = {
@@ -154,7 +163,7 @@ type Next = {
   readonly notice?: string;
   readonly tooLong?: boolean;
 };
-type LaneResult<P extends Purpose> = { readonly kind: "served"; readonly served: Served<P> } | Next;
+type LaneResult<P extends Purpose> = { readonly kind: "served"; readonly served: Served<P> } | Next | Fenced;
 
 export type ProbeResult = { readonly ok: true; readonly mode: SchemaMode } | { readonly ok: false; readonly error: Extract<KeyPageError, ProbeError> };
 type ProbeError = "bad_key" | "no_credit" | "bad_model" | "rate_limited" | "unreachable" | "no_json" | "over_cap";
@@ -237,8 +246,10 @@ export class ModelAccess {
     let tooLong = false;
     let notice: string | null = null;
     for (const lane of access.lanes) {
+      if (!req.claim.live()) return FENCED;
       const r = await this.#lane(lane, req);
       if (r.kind === "served") return r.served;
+      if (r.kind === "fenced") return r;
       transient ||= r.transient ?? false;
       told ||= r.told ?? false;
       tooLong ||= r.tooLong ?? false;
@@ -354,7 +365,8 @@ export class ModelAccess {
     const turn = this.#fit(route, "strict", { ...req, system: append, prompt: box.turn });
     const fresh = this.#fit(route, "strict", { ...req, system: append, prompt: box.fresh });
     if (turn === null || fresh === null) return { kind: "next", tooLong: true };
-    const answer = await this.deps.box.agent({ model: route.model, append, session, turn: turn.user, fresh: fresh.user, tools: AGENT_TOOLS });
+    const answer = await this.deps.box.agent({ model: route.model, append, session, turn: turn.user, fresh: fresh.user, tools: AGENT_TOOLS }, req.claim);
+    if (answer.kind === "fenced") return answer;
     if (answer.kind === "moved_on") return { kind: "next", transient: answer.transient, told: answer.told };
     const output = turnFromAgent(jsonOrNull(answer.reply.text));
     const attempt = readAttempt(output === null ? answer.reply : { ...answer.reply, text: JSON.stringify(output) }, BoxTurnOutputSchema);
@@ -369,7 +381,8 @@ export class ModelAccess {
     const route = routeFor({ kind: "box", provider: "claude" }, req.purpose);
     const fitted = this.#fit(route, "strict", req);
     if (fitted === null) return { kind: "next", tooLong: true };
-    const answer = await this.deps.box.parse({ purpose: req.purpose, model: route.model, system: req.system, user: fitted.user, jsonSchema: jsonSchemaOf(OUTPUTS[req.purpose]) });
+    const answer = await this.deps.box.parse({ purpose: req.purpose, model: route.model, system: req.system, user: fitted.user, jsonSchema: jsonSchemaOf(OUTPUTS[req.purpose]) }, req.claim);
+    if (answer.kind === "fenced") return answer;
     if (answer.kind === "moved_on") return { kind: "next", transient: answer.transient, told: answer.told };
     const attempt = readAttempt(answer.reply, outputOf(req.purpose));
     this.#log(route, "box", "settled", 0 as MicroUsd, 0 as MicroUsd, attempt);
@@ -388,16 +401,17 @@ export class ModelAccess {
     }
     const agent = this.#agent();
     const opened = keys.on ? await open(keys.secrets, agent, k) : ({ kind: "unreadable" } as const);
-    if (opened.kind === "unreadable") return this.#rested(k, "unreadable", null, false, secrets);
+    if (opened.kind === "unreadable") return this.#rested(k, "unreadable", null, false, req.claim, secrets);
     if (opened.kind === "resealed" && !store.reseal(opened.again, k.revision)) return { kind: "next", transient: true };
     const route = routeFor({ kind: "key", provider: k.provider, model: k.model }, req.purpose);
     const fitted = this.#fit(route, k.mode, req);
     if (fitted === null) return { kind: "next", tooLong: true };
     const client = this.deps.connect(endpointOf(k, opened.key, await sessionOf(agent)));
     const meter = this.#meter("byok", k.capMicro, "key");
-    const out = await runParse(client, { route, mode: k.mode, system: req.system, user: fitted.user, schema: outputOf(req.purpose) }, meter);
+    const out = await runParse(client, { route, mode: k.mode, system: req.system, user: fitted.user, schema: outputOf(req.purpose) }, meter, req.claim.live);
+    if (out.fenced) return FENCED;
     const last = out.last;
-    if (last?.kind === "fault") return this.#rested(k, last.fault, last.retryAfterMs, last.fault === "rate");
+    if (last?.kind === "fault") return this.#rested(k, last.fault, last.retryAfterMs, last.fault === "rate", req.claim);
     if (last?.kind === "ok" || last?.kind === "invalid" || last?.kind === "refused_by_model") store.keyHealthy(k.revision);
     return this.#outcome(out, route, "key", "byok", meter.spent, fitted.trimmed);
   }
@@ -407,7 +421,8 @@ export class ModelAccess {
     const fitted = this.#fit(route, inc.mode, req);
     if (fitted === null) return { kind: "next", tooLong: true };
     const meter = this.#meter("included", inc.capMicro, "included");
-    const out = await runParse(this.deps.connect(inc.endpoint), { route, mode: inc.mode, system: req.system, user: fitted.user, schema: outputOf(req.purpose) }, meter);
+    const out = await runParse(this.deps.connect(inc.endpoint), { route, mode: inc.mode, system: req.system, user: fitted.user, schema: outputOf(req.purpose) }, meter, req.claim.live);
+    if (out.fenced) return FENCED;
     const last = out.last;
     if (last?.kind === "fault") {
       diagnostic("included_provider_refused");
@@ -438,9 +453,10 @@ export class ModelAccess {
 
   /**
    * Rests the key and says what the lane did: nothing when the key was replaced or removed while this call ran (the
-   * batch retries on the new key), else the notice went out now, or the reply names the problem.
+   * batch retries on the new key), else the notice went out now, or the reply names the problem. A forget that began
+   * during the call still lets the key rest, but no notice is queued for work from before it.
    */
-  #rested(k: StoredKey, fault: KeyFault, retryAfterMs: number | null, transient: boolean, under: string | null = null): Next {
+  #rested(k: StoredKey, fault: KeyFault, retryAfterMs: number | null, transient: boolean, claim: Claim, under: string | null = null): Next {
     const { store, clock } = this.deps;
     const now = clock.now();
     const failures = k.health.kind === "resting" ? k.health.failures : 0;
@@ -448,7 +464,8 @@ export class ModelAccess {
     const until = rest.kind === "for" ? ((now + rest.ms) as EpochMs) : null;
     const text = this.#faultText(k, fault, until);
     const today = localDate(now, store.agent()?.tz ?? DEFAULT_TIME_ZONE);
-    const r = store.restKey(fault, until, { key: eventKey.access(`fault:${now}`), message: { texts: [text], note: text } }, today, now, k.revision, under);
+    const notice = claim.live() ? { key: eventKey.access(`fault:${now}`), message: { texts: [text] as const, note: text } } : null;
+    const r = store.restKey(fault, until, notice, today, now, k.revision, under);
     if (r === "stale") return { kind: "next", transient: true };
     return r === "told" ? { kind: "next", told: true, transient } : { kind: "next", notice: text, transient };
   }

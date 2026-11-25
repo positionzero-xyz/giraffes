@@ -9,6 +9,11 @@ let firstTextMs: number | null = null;
 let costUsd: number | null = null;
 let usage: unknown = null;
 let models: string[] = [];
+let sessionId: string | null = null;
+let stopReason: string | null = null;
+let rawOutput: string | null = null;
+const assistantModels = new Set<string>();
+let initModel: string | null = null;
 let killed = false;
 let partial = "";
 
@@ -21,10 +26,15 @@ const timer = setTimeout(() => {
 
 type Event = {
   type?: string;
-  message?: { content?: { type?: string; text?: string }[] };
+  subtype?: string;
+  model?: string;
+  message?: { model?: string; content?: { type?: string; text?: string }[] };
   total_cost_usd?: number;
   usage?: { input_tokens?: unknown; output_tokens?: unknown };
   modelUsage?: Record<string, unknown>;
+  session_id?: string;
+  stop_reason?: string;
+  result?: string;
 };
 
 function read(line: string) {
@@ -36,11 +46,18 @@ function read(line: string) {
   }
   if (typeof e !== "object" || e === null) return;
   const event = e as Event;
-  if (firstTextMs === null && event.type === "assistant" && event.message?.content?.some((b) => b.type === "text" && b.text?.trim())) firstTextMs = Date.now() - started;
+  if (event.type === "system" && event.subtype === "init" && typeof event.model === "string") initModel = event.model;
+  if (event.type === "assistant") {
+    if (typeof event.message?.model === "string" && event.message.model !== "<synthetic>") assistantModels.add(event.message.model);
+    if (firstTextMs === null && event.message?.content?.some((b) => b.type === "text" && b.text?.trim())) firstTextMs = Date.now() - started;
+  }
   if (event.type === "result") {
     costUsd = typeof event.total_cost_usd === "number" ? event.total_cost_usd : null;
     usage = typeof event.usage?.input_tokens === "number" && typeof event.usage.output_tokens === "number" ? event.usage : null;
     models = Object.keys(event.modelUsage ?? {});
+    sessionId = typeof event.session_id === "string" ? event.session_id : null;
+    stopReason = typeof event.stop_reason === "string" ? event.stop_reason : null;
+    rawOutput = typeof event.result === "string" ? event.result : null;
   }
 }
 
@@ -56,6 +73,8 @@ child.stdin.on("error", () => {});
 child.on("close", (code) => {
   clearTimeout(timer);
   read(partial + decoder.end());
-  appendFileSync(record, `${JSON.stringify({ args: args.slice(0, 2), firstTextMs, wallMs: Date.now() - started, killed, costUsd, usage, models })}\n`);
+  const reported = [...new Set([...models, ...assistantModels])];
+  if (!reported.length && initModel) reported.push(initModel);
+  appendFileSync(record, `${JSON.stringify({ args: args.slice(0, 2), firstTextMs, wallMs: Date.now() - started, killed, costUsd, usage, models: reported, sessionId, stopReason, rawOutput })}\n`);
   process.exitCode = killed ? 124 : (code ?? 1);
 });

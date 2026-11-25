@@ -57,6 +57,16 @@ function failedChecks(caseId: string, reply: Body): string[] {
 }
 
 describe("what the person would receive", () => {
+  it("fails an unrequested locale change even when Bangkok sees the right due time", () => {
+    const changed = body({ calls: [
+      { name: "set_locale", input: { timeZone: "Asia/Yangon", language: "th" } },
+      { name: "schedule_wakeup", input: { key: "gas-stove", at: "2026-11-26T09:50", note: "ปิดเตาแก๊ส", asked: true, task: "" } },
+    ] });
+    const r = readTurn(changed, CASES.find((c) => c.id === "reminder-in-20")!.make(NOW).message, NOW);
+    assert.equal(r.observation.wakeups[0]?.at, "2026-11-26T10:20");
+    assert.ok(failedChecks("reminder-in-20", changed).length);
+  });
+
   it("fails a chat turn that stays quiet", () => assert.ok(failedChecks("chat-advice", body({ text: "", calls: [] })).includes("replies")));
 
   it("passes a reminder set on the second try, and keeps the refused first call as a diagnostic", () => {

@@ -1,4 +1,5 @@
 import type { Usage } from "../../src/claude.ts";
+import type { TurnCommit } from "../../../app/src/agent/turn.ts";
 
 export const HARNESSES = ["claude-code"] as const;
 export type Harness = (typeof HARNESSES)[number];
@@ -17,41 +18,31 @@ export const CONTRACT: Readonly<Record<Shape, Contract>> = { chat: "product", re
 export type Wall = string & { readonly __wall: unique symbol };
 
 export type Phrase = { readonly label: string; readonly any: readonly string[] };
-export type Unit = "baht" | "percent" | "cm";
-/** One fact of a brief: stated, never claimed, every amount with a unit in `need` or `allow`, a December range, or an old and a new price. */
-export type Fact =
-  | { readonly kind: "says"; readonly label: string; readonly any: readonly string[] }
-  | { readonly kind: "never"; readonly label: string; readonly any: readonly string[] }
-  | { readonly kind: "amounts"; readonly label: string; readonly unit: Unit; readonly need: readonly number[]; readonly allow: readonly number[] }
-  | { readonly kind: "dates"; readonly label: string; readonly from: number; readonly to: number }
-  | { readonly kind: "was_now"; readonly label: string; readonly was: number; readonly now: number };
 export type Reading = { readonly label: string; readonly at: Wall };
 export type Repeat = "daily" | "weekdays" | "weekly";
+export type Stop = "end" | "refusal" | "max_tokens";
+export type Setup = "parcel" | "long" | "switch";
+export type FormDrive = "booking" | "expense";
+export type PageDrive = FormDrive | "order";
+export type StructuralSignal = "stop_reason" | "tool_rejection" | "reply_cap" | "schema_failure";
 
 export type Check =
   | { readonly kind: "thai"; readonly min: number }
-  | { readonly kind: "no_jargon" }
-  | { readonly kind: "mentions"; readonly what: string; readonly any: readonly string[] }
   | { readonly kind: "fits_reply" }
-  /** The model's own message reaches the person; a quiet turn or a notice alone fails. */
   | { readonly kind: "replies" }
-  /** One reminder, asked for, at one of `readings`, repeating exactly so, whose note names the job; the reply states no other time or cadence. */
-  | { readonly kind: "due_at"; readonly readings: readonly Reading[]; readonly repeat: Repeat | null; readonly about: readonly string[] }
-  /** Asks which time, or sets one asked-for one-off reminder on `date` within the hours and says when. */
-  | { readonly kind: "asks_or_assumes"; readonly date: string; readonly fromHour: number; readonly toHour: number; readonly about: readonly string[] }
-  | { readonly kind: "facts"; readonly facts: readonly Fact[] }
+  | { readonly kind: "stops_clean" }
+  | { readonly kind: "due_at"; readonly readings: readonly Reading[]; readonly repeat: Repeat | null; readonly cancel?: string; readonly notes?: number }
+  | { readonly kind: "asks_or_assumes"; readonly date: string; readonly fromHour: number; readonly toHour: number }
   | { readonly kind: "length"; readonly min: number; readonly max: number }
   | { readonly kind: "file"; readonly path: string }
-  | { readonly kind: "html_complete"; readonly path: string }
   | { readonly kind: "page_has"; readonly items: readonly Phrase[] }
   | { readonly kind: "loads_clean" }
-  | { readonly kind: "persists"; readonly shown: boolean }
-  /** Each dish's nearest price, before the next dish, is its own. */
+  | { readonly kind: "persists"; readonly drive: FormDrive; readonly shown: boolean }
   | { readonly kind: "priced"; readonly items: readonly (Phrase & { readonly price: number })[] }
-  /** The shown total grows by exactly the amount the driver entered, and stays so after a reload. */
-  | { readonly kind: "total_adds" };
+  | { readonly kind: "total_adds" }
+  | { readonly kind: "order_flow" };
 
-export type CheckResult = { readonly check: string; readonly pass: boolean; readonly detail: string };
+export type CheckResult = { readonly check: string; readonly pass: boolean; readonly detail: string; readonly available?: false };
 
 export type Wakeup = { readonly at: string; readonly repeat: Repeat | null; readonly asked: boolean; readonly note: string };
 
@@ -64,7 +55,14 @@ export type PersistReport = {
   readonly totalBefore: number | null;
   readonly totalAfter: number | null;
 };
-export type PageReport = { readonly loaded: boolean; readonly errors: readonly string[]; readonly text: string; readonly persist: PersistReport | null };
+export type PageReport = {
+  readonly loaded: boolean;
+  readonly errors: readonly string[];
+  readonly text: string;
+  readonly persist: PersistReport | null;
+  readonly priceGroups?: readonly string[];
+  readonly order?: { readonly ok: boolean; readonly detail: string };
+};
 
 /** `text` is what the checks grade: what the person receives on the product path, the full reply on the planned one. */
 export type Observation = {
@@ -76,6 +74,8 @@ export type Observation = {
   readonly rejected: readonly string[];
   readonly files: Readonly<Record<string, string>>;
   readonly page: PageReport | null;
+  readonly workerCommit?: TurnCommit | null;
+  readonly stop?: Stop;
 };
 
 export type Rubric = { readonly criteria: readonly { readonly key: string; readonly ask: string }[] };
@@ -84,7 +84,8 @@ export type Case = {
   readonly id: string;
   readonly shape: Shape;
   readonly brief: string;
-  readonly judged: boolean;
+  readonly judge: Rubric;
+  readonly setup?: Setup;
   readonly make: (now: Wall) => { readonly message: string; readonly checks: readonly Check[] };
 };
 
@@ -99,6 +100,15 @@ export type Tap = {
   readonly costUsd: number | null;
   readonly usage: Usage | null;
   readonly models: readonly string[];
+  readonly sessionId?: string | null;
+  readonly stopReason?: string | null;
+  readonly rawOutput?: string | null;
+};
+
+export type SessionStage = {
+  readonly requestedModel: string;
+  readonly resumed: boolean;
+  readonly tap: Tap | null;
 };
 
 export type RunRecord = {
@@ -131,6 +141,13 @@ export type RunRecord = {
   readonly costUsd: number | null;
   readonly models: readonly string[];
   readonly buildDir: string | null;
+  readonly rawOutput?: string | null;
+  readonly stopReason?: string | null;
+  readonly workerCommit?: TurnCommit | null;
+  readonly pageReport?: PageReport | null;
+  readonly structuralSignals?: readonly StructuralSignal[];
+  readonly sessionStages?: readonly SessionStage[];
+  readonly replay?: readonly string[];
 };
 
 export type RunMeta = {
@@ -142,6 +159,7 @@ export type RunMeta = {
   readonly now: Wall;
   readonly nowPinned: boolean;
   readonly argv: readonly string[];
+  readonly regradedAt?: string;
 };
 
 export type RunFile = { readonly meta: RunMeta; readonly records: RunRecord[] };

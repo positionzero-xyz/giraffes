@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { grade, thaiShare } from "../checks.ts";
+import { totalIn } from "../browser.ts";
 import { squash, statedRepeats, statedTimes, thaiNumber } from "../thai.ts";
 import type { Check, Observation, PageReport } from "../types.ts";
 
@@ -50,6 +51,15 @@ describe("every check passes its known-good and fails its known-bad", () => {
     const menu = { kind: "priced", items: [{ label: "pork", any: ["เรือหมู"], price: 50 }, { label: "beef", any: ["เรือเนื้อ"], price: 60 }, { label: "soup", any: ["เกาเหลา"], price: 55 }] } as const;
     both(menu, page({ text: "ก๋วยเตี๋ยวเรือหมู 50 บาท\nก๋วยเตี๋ยวเรือเนื้อ 60 บาท\nเกาเหลา 55 บาท" }), page({ text: "ก๋วยเตี๋ยวเรือหมู 60 บาท\nก๋วยเตี๋ยวเรือเนื้อ 55 บาท\nเกาเหลา 50 บาท" }));
     both(menu, page({ text: "เมนู\tราคา\nก๋วยเตี๋ยวเรือหมู\nเส้นเล็ก น้ำตก\t฿50\nก๋วยเตี๋ยวเรือเนื้อ\t฿60\nเกาเหลา\t฿55" }), page({ text: "ก๋วยเตี๋ยวเรือหมู\nก๋วยเตี๋ยวเรือเนื้อ\nเกาเหลา\n50 60 55" }));
+  });
+
+  it("binds the full decimal price and ignores a count next to a currency total", () => {
+    both(
+      { kind: "priced", items: [{ label: "pork", any: ["เรือหมู"], price: 50 }] },
+      page({ text: "ก๋วยเตี๋ยวเรือหมู ฿50.00" }),
+      page({ text: "ก๋วยเตี๋ยวเรือหมู 50.50 บาท" }),
+    );
+    assert.equal(totalIn("ยอดรวม 137 บาท\nรวม 1 รายการ"), 137);
   });
 
   it("loads_clean", () => both({ kind: "loads_clean" }, page({}), page({ errors: ["ReferenceError: total is not defined"] })));

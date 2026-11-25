@@ -14,8 +14,8 @@ registerHooks({
 
 const APP = "../../../app/src";
 export const { TURN_SYSTEM } = await import(`${APP}/agent/prompt.ts`);
-export const { planTurn, renderUser } = await import(`${APP}/agent/turn.ts`);
-export const { boxTurnAttempt, boxTurnRequest } = await import(`${APP}/access/box-turn.ts`);
+export const { planTurn, renderUser, TURN } = await import(`${APP}/agent/turn.ts`);
+export const { boxTurnAttempt, boxTurnRequest, BOX_TURN_ROUTE } = await import(`${APP}/access/box-turn.ts`);
 export const { CHANNEL_LANGUAGE } = await import(`${APP}/domain.ts`);
 export const { OUTREACH } = await import(`${APP}/policy/outreach.ts`);
 export const { checkinWakeup, SCHEDULE } = await import(`${APP}/policy/schedule.ts`);

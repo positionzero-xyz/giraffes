@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="th">
+<meta charset="utf-8">
+<form>
+  <label>ชื่อ <input name="name"></label>
+  <p>เบอร์โทร วันที่ เวลา</p>
+  <button>จอง</button>
+</form>
+<script>
+document.querySelector("form").onsubmit = (event) => {
+  event.preventDefault();
+  localStorage.setItem("booking", document.querySelector("input").value);
+};
+</script>
+</html>

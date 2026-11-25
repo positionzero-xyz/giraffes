@@ -17,6 +17,11 @@ async function graded(name: string, check: Check) {
 describe("build checks against a real headless browser", { skip: chrome ? false : "no Chrome or Edge found (set CHROME)" }, () => {
   it("a form that saves on submit persists", async () => assert.equal((await graded("form-saves", { kind: "persists", shown: false })).pass, true));
 
+  it("requires four working booking controls, not static labels", async () => {
+    const r = await graded("booking-no-controls", { kind: "persists", shown: false });
+    assert.equal(r.pass, false, r.detail);
+  });
+
   it("buttons with no form that save and redraw persist and show the entry", async () => {
     const r = await graded("buttons-list", { kind: "persists", shown: true });
     assert.equal(r.pass, true, r.detail);

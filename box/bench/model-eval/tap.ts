@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 
 const [record, timeout, bin, ...args] = process.argv.slice(2);
 const started = Date.now();
@@ -43,9 +44,10 @@ function read(line: string) {
   }
 }
 
+const decoder = new StringDecoder("utf8");
 child.stdout.on("data", (chunk: Buffer) => {
   process.stdout.write(chunk);
-  const lines = (partial + chunk.toString("utf8")).split("\n");
+  const lines = (partial + decoder.write(chunk)).split("\n");
   partial = lines.pop() ?? "";
   lines.forEach(read);
 });
@@ -53,7 +55,7 @@ process.stdin.pipe(child.stdin);
 child.stdin.on("error", () => {});
 child.on("close", (code) => {
   clearTimeout(timer);
-  read(partial);
+  read(partial + decoder.end());
   appendFileSync(record, `${JSON.stringify({ args: args.slice(0, 2), firstTextMs, wallMs: Date.now() - started, killed, costUsd, usage, models })}\n`);
   process.exitCode = killed ? 124 : (code ?? 1);
 });

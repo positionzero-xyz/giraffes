@@ -103,7 +103,8 @@ function run(cmd: readonly string[], cwd: string, stdin: string): Promise<string
     const [bin, ...args] = cmd;
     const proc = spawn(bin, args, { cwd, env: process.env, stdio: ["pipe", "pipe", "inherit"] });
     let out = "";
-    proc.stdout.on("data", (c: Buffer) => (out += c.toString("utf8")));
+    proc.stdout.setEncoding("utf8");
+    proc.stdout.on("data", (c: string) => (out += c));
     proc.on("close", () => done(out));
     proc.stdin.on("error", () => {});
     proc.stdin.end(stdin);

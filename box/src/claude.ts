@@ -64,8 +64,11 @@ function runClaude(
     signal?.addEventListener("abort", kill, { once: true });
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", (c: Buffer) => (stdout += c.toString("utf8")));
-    proc.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
+    // Decoded across chunks, so a Thai character cut between two reads stays whole.
+    proc.stdout.setEncoding("utf8");
+    proc.stderr.setEncoding("utf8");
+    proc.stdout.on("data", (c: string) => (stdout += c));
+    proc.stderr.on("data", (c: string) => (stderr += c));
     proc.on("error", (err) => (stderr += String(err)));
     proc.on("close", (code) => {
       clearTimeout(timer);

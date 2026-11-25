@@ -636,9 +636,9 @@ export class AgentStore {
    */
   remove(now: EpochMs): void {
     this.tx(() => {
+      this.deleteKey();
       if (this.admission().state === "removed") return;
       this.writeAdmission({ next: { state: "removed", at: now }, change: "removed", ensureCheckin: null }, now);
-      this.deleteKey();
       this.sql.exec("DELETE FROM key_ticket");
       const agent = this.agent()?.key;
       const unasked = this.sql

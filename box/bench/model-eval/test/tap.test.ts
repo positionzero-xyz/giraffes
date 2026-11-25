@@ -57,6 +57,21 @@ out({ type: "result", total_cost_usd: 0.002, modelUsage: { "claude-haiku-5-5": {
     assert.equal(r.record.killed, false);
   });
 
+  it("times Codex's first agent message the same way", async () => {
+    const child = fake(
+      "codex-stream",
+      `const out = (e) => process.stdout.write(JSON.stringify(e) + "\\n");
+out({ type: "turn.started" });
+out({ type: "item.completed", item: { type: "agent_message", text: "" } });
+await new Promise((r) => setTimeout(r, 300));
+out({ type: "item.completed", item: { type: "agent_message", text: "สวัสดี" } });
+out({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } });`,
+    );
+    const r = await run(child, 10_000);
+    assert.ok(r.record.firstTextMs >= 250, `first text at ${r.record.firstTextMs}ms`);
+    assert.equal(r.record.costUsd, null);
+  });
+
   it("kills a CLI that hangs past the timeout, with its own children", async () => {
     const pidFile = join(dir, "grandchild.pid");
     const child = fake(

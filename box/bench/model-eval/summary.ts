@@ -1,5 +1,5 @@
 import { calibrationGate, itemScore, type Gate, type JudgeKey, type Scores } from "./judge.ts";
-import type { RunFile, RunRecord, RunStatus, Shape } from "./types.ts";
+import type { Contract, RunFile, RunRecord, RunStatus, Shape } from "./types.ts";
 import { SHAPES } from "./types.ts";
 
 export type JudgeScores = { readonly name: string; readonly scores: Scores };
@@ -23,6 +23,7 @@ const sum = (xs: readonly number[]) => xs.reduce((a, b) => a + b, 0);
 export type Row = {
   readonly candidate: string;
   readonly shape: Shape;
+  readonly contract: Contract;
   readonly runs: number;
   readonly ok: number;
   readonly graded: number;
@@ -66,6 +67,7 @@ export function rows(run: RunFile, key: JudgeKey | null, judges: readonly JudgeS
       out.push({
         candidate,
         shape,
+        contract: rs[0].contract,
         runs: rs.length,
         ok: ok.length,
         graded: rs.filter((r) => r.status === "ok" || MODEL_FAILED.has(r.status)).length,
@@ -97,15 +99,22 @@ export function rows(run: RunFile, key: JudgeKey | null, judges: readonly JudgeS
 
 export function render(run: RunFile, key: JudgeKey | null, judges: readonly JudgeScores[], quarantined = 0): string {
   const table = rows(run, key, judges);
+  const claude = run.records.some((r) => r.harness === "claude-code");
+  const codex = run.meta.codex ?? null;
   const gates = new Map<string, Gate>(key ? judges.map((j) => [j.name, calibrationGate(key, j.scores)]) : []);
   const judgeCols = judges.map((j) => `judge ${j.name}${gates.get(j.name)?.proven ? "" : " (unproven)"}`);
-  const head = ["candidate", "shape", "ok/runs", "cases passed", "checks passed", "clean turns", "median CLI wall s", "median first internal text s", "timeouts", "CLI wall ≥ 50 s", "tokens in/out/cache read/cache write (runs reporting)", "cost USD (runs reporting)", ...judgeCols];
+  const head = ["candidate", "shape", "contract", "ok/runs", "cases passed", "checks passed", "clean turns", "median CLI wall s", "median first internal text s", "timeouts", "CLI wall ≥ 50 s", "tokens in/out/cache read/cache write (runs reporting)", "cost USD (runs reporting)", ...judgeCols];
   const lines = [
     `# Model eval ${run.meta.startedAt}`,
     "",
-    `Commit ${run.meta.gitSha}. CLI ${run.meta.cliVersion ?? "unknown"} (${run.meta.cli}). Login ${run.meta.auth ? `${run.meta.auth.authMethod}, signed ${run.meta.auth.loggedIn ? "in" : "out"}` : "unknown"}. Now ${run.meta.now}${run.meta.nowPinned ? " (pinned)" : " (today)"} Asia/Bangkok.`,
+    [
+      `Commit ${run.meta.gitSha}.`,
+      claude ? `Claude CLI ${run.meta.cliVersion ?? "unknown"} (${run.meta.cli}), login ${run.meta.auth ? `${run.meta.auth.authMethod}, signed ${run.meta.auth.loggedIn ? "in" : "out"}` : "unknown"}.` : "",
+      codex ? `Codex ${codex.version ?? "unknown"} (${codex.cli}) on profile ${codex.profile}, provider ${codex.provider}, in an isolated Codex home.` : "",
+      `Now ${run.meta.now}${run.meta.nowPinned ? " (pinned)" : " (today)"} Asia/Bangkok.`,
+    ].filter(Boolean).join(" "),
     "",
-    `Cost is the CLI's total_cost_usd, an API-price equivalent, not plan usage. A case passes only when its run is ok and every check passes. A reply the Worker would discard (${[...MODEL_FAILED].join(", ")}) counts as a failed case; other statuses are inconclusive and left out. Chat and reminder run on the product path; draft and build run on the planned contract. Wall time is the CLI subprocess alone, not inbound to delivery, so "CLI wall ≥ 50 s" (timeouts included) is a lower bound on replies that miss LINE's 50-second window. The first internal text is the CLI's first assistant text, which the Worker never sends; the person gets only the final reply.`,
+    `Cost is the Claude CLI's total_cost_usd, an API-price equivalent, not plan usage; Codex reports no cost. A case passes only when its run is ok and every check passes. A reply the Worker would discard (${[...MODEL_FAILED].join(", ")}) counts as a failed case; other statuses are inconclusive and left out. For Claude, chat and reminder run on the product path and draft and build on the planned contract. Giraffe has no Codex path, so every Codex row is planned, but each shape is graded the same way as Claude's. Wall time is the CLI subprocess alone, not inbound to delivery, so "CLI wall ≥ 50 s" (timeouts included) is a lower bound on replies that miss LINE's 50-second window. The first internal text is the CLI's first assistant text, which the Worker never sends; the person gets only the final reply.`,
     "",
     `| ${head.join(" | ")} |`,
     `| ${head.map(() => "---").join(" | ")} |`,
@@ -113,6 +122,7 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
       `| ${[
         r.candidate,
         r.shape,
+        r.contract,
         `${r.ok}/${r.runs}`,
         `${r.casesPassed}/${r.graded}`,
         `${r.checksPassed}/${r.checks}`,
@@ -130,6 +140,12 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
     `Known cost USD ${sum(run.records.map((r) => r.costUsd ?? 0)).toFixed(4)} over ${run.records.filter((r) => r.costUsd !== null).length} of ${run.records.length} runs; the rest reported none.`,
   ];
   const notes: string[] = [];
+  if (codex) {
+    for (const [mode, tools] of Object.entries(codex.tools)) notes.push(`Tools Codex offered on a ${mode === "turn" ? "chat, reminder or draft turn" : "build"} (read from its first request to a local server, which also refused its model catalog): ${tools?.join(", ") || "none"}.`);
+    notes.push("Codex token counts use Claude's meaning: in is the uncached input, cache read is Codex's cached input, and out includes reasoning. Codex doesn't report which model served a turn, and a Code Mode call shows in its events only through what it did.");
+  }
+  const strays = run.records.filter((r) => (r.otherTools ?? []).length > 0);
+  if (strays.length) notes.push(`Runs that used tools other than Giraffe's: ${strays.map((r) => `${r.id} (${r.otherTools.join(", ")})`).join(", ")}.`);
   const mismatched = run.records.filter((r) => r.dateMismatch && r.shape === "reminder").length;
   if (mismatched) notes.push(`${mismatched} reminder runs saw a "now" on another date than the machine's, which the CLI also puts in its prompt. Read those reminder numbers with that in mind.`);
   const discarded = run.records.filter((r) => MODEL_FAILED.has(r.status));

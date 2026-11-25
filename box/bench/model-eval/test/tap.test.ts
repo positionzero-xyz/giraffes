@@ -72,6 +72,21 @@ out({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } });`,
     assert.equal(r.record.costUsd, null);
   });
 
+  it("times OpenCode's first text part the same way", async () => {
+    const child = fake(
+      "opencode-stream",
+      `const out = (e) => process.stdout.write(JSON.stringify(e) + "\\n");
+out({ type: "step_start", part: { type: "step-start" } });
+out({ type: "text", part: { type: "text", text: " " } });
+await new Promise((r) => setTimeout(r, 300));
+out({ type: "text", part: { type: "text", text: "สวัสดี" } });
+out({ type: "step_finish", part: { type: "step-finish", reason: "stop", cost: 0.001 } });`,
+    );
+    const r = await run(child, 10_000);
+    assert.ok(r.record.firstTextMs >= 250, `first text at ${r.record.firstTextMs}ms`);
+    assert.equal(r.record.costUsd, null);
+  });
+
   it("kills a CLI that hangs past the timeout, with its own children", async () => {
     const pidFile = join(dir, "grandchild.pid");
     const child = fake(

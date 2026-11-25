@@ -1,0 +1,2 @@
+{"type":"step_start","timestamp":1795576262000,"sessionID":"ses_def5091ddffeRateLimitedXyz1","part":{"id":"prt_1","sessionID":"ses_def5091ddffeRateLimitedXyz1","messageID":"msg_1","type":"step-start"}}
+{"type":"error","timestamp":1795576262118,"sessionID":"ses_def5091ddffeRateLimitedXyz1","error":{"type":"provider.rate-limit","message":"Rate limit exceeded","status":429,"response":{"body":"{\"object\":\"error\",\"message\":\"Rate limit exceeded\",\"type\":\"rate_limited\",\"code\":\"1300\"}"}}}

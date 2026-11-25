@@ -36,6 +36,17 @@ describe("the summary", () => {
     assert.match(md, /b \(command_execution\)/);
   });
 
+  it("shows an OpenCode row's reported cost, its planned contract and the tools it offered", () => {
+    const opencodeMeta = { cli: "opencode.exe", version: "2.4.1", tools: { turn: ["giraffe_remember"], build: ["edit", "read", "write"] } };
+    const run = runOf([record({ id: "o", candidate: "opencode:mistral/deepseek-v4-1-flash-1017@low", harness: "opencode", model: "mistral/deepseek-v4-1-flash-1017", contract: "planned", costUsd: 0.0006 })]);
+    const md = render({ ...run, meta: { ...run.meta, opencode: opencodeMeta } }, null, []);
+    assert.equal(cells(md, "opencode:mistral/deepseek-v4-1-flash-1017@low")[2], "planned");
+    assert.equal(cells(md, "opencode:mistral/deepseek-v4-1-flash-1017@low").at(-1), "0.0006 (1/1)");
+    assert.match(md, /OpenCode 2\.4\.1 \(opencode\.exe\)/);
+    assert.match(md, /chat, reminder or draft turn .*stand-in provider.*: giraffe_remember\./);
+    assert.match(md, /build .*: edit, read, write\./);
+  });
+
   it("leaves Codex out of a Claude-only run", () => {
     const claudeOnly = render(runOf([record({})]), null, []);
     assert.doesNotMatch(claudeOnly, /Codex \d/);

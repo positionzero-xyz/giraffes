@@ -16,6 +16,31 @@ describe("the summary", () => {
     assert.equal(row.graded, 3);
     assert.match(render(run, null, []), /\| 1\/3 \|/);
   });
+
+  const cells = (md: string, candidate: string) => md.split("\n").find((l) => l.startsWith(`| ${candidate} |`))?.slice(2, -2).split(" | ") ?? [];
+
+  it("shows a Codex row's missing cost as unknown and its run as a planned contract", () => {
+    const codexMeta = { cli: "codex", version: "0.172.0", profile: "pool", provider: "cliproxy", tools: { turn: ["exec", "mcp__giraffe/remember"] } };
+    const run = runOf([
+      record({ id: "a", costUsd: 0.01 }),
+      record({ id: "b", candidate: "codex:gpt-6.2-sol@low", harness: "codex", model: "gpt-6.2-sol", contract: "planned", costUsd: null, otherTools: ["command_execution"] }),
+    ]);
+    const md = render({ ...run, meta: { ...run.meta, codex: codexMeta } }, null, []);
+    assert.equal(cells(md, "haiku@low")[2], "product");
+    assert.equal(cells(md, "haiku@low").at(-1), "0.0100 (1/1)");
+    assert.equal(cells(md, "codex:gpt-6.2-sol@low")[2], "planned");
+    assert.equal(cells(md, "codex:gpt-6.2-sol@low").at(-1), "unknown (0/1)");
+    assert.match(md, /Known cost USD 0\.0100 over 1 of 2 runs/);
+    assert.match(md, /Codex 0\.172\.0 \(codex\) on profile pool/);
+    assert.match(md, /chat, reminder or draft turn .*: exec, mcp__giraffe\/remember\./);
+    assert.match(md, /b \(command_execution\)/);
+  });
+
+  it("leaves Codex out of a Claude-only run", () => {
+    const claudeOnly = render(runOf([record({})]), null, []);
+    assert.doesNotMatch(claudeOnly, /Codex \d/);
+    assert.match(claudeOnly, /Claude CLI 1 \(claude\)/);
+  });
 });
 
 describe("the summary's timing", () => {

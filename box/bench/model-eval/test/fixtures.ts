@@ -20,6 +20,7 @@ export const record = (more: Partial<RunRecord>): RunRecord => ({
   overReplyCap: false,
   calls: [],
   refusedCalls: [],
+  otherTools: [],
   rejected: [],
   wakeups: [],
   checks: [{ check: "thai", pass: true, detail: "" }],
@@ -33,6 +34,6 @@ export const record = (more: Partial<RunRecord>): RunRecord => ({
 });
 
 export const runOf = (records: RunRecord[]): RunFile => ({
-  meta: { startedAt: "2026-11-26T03:00:00Z", gitSha: "abc", cliVersion: "1", cli: "claude", auth: null, now: "2026-11-26T10:00" as Wall, nowPinned: true, argv: [] },
+  meta: { startedAt: "2026-11-26T03:00:00Z", gitSha: "abc", cliVersion: "1", cli: "claude", auth: null, now: "2026-11-26T10:00" as Wall, nowPinned: true, argv: [], codex: null },
   records,
 });

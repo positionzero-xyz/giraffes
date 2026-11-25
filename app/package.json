@@ -6,7 +6,8 @@
     "dev": "wrangler dev",
     "bridge": "node dev/bridge.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepare": "node ../.githooks/install.mjs"
   },
   "dependencies": {
     "zod": "^4.6.7"

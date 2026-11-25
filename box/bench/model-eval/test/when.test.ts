@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Wall } from "../types.ts";
-import { addMinutes, dayAt, nextWeekReadings, nextWeekday, parseWall, thaiDate, todayAt } from "../when.ts";
+import { addMinutes, dayAt, nextWeekReadings, nextWeekday, parseWall, thaiDate, todayAt, weeklyReadings } from "../when.ts";
 
 const w = (s: string) => parseWall(s) ?? assert.fail(`bad wall ${s}`);
 
@@ -24,6 +24,18 @@ describe("wall-time answer keys", () => {
       { label: "next week", at: "2026-12-04T10:00" },
     ]);
     assert.deepEqual(nextWeekReadings(w("2026-11-27T10:00"), 4, "10:00"), [{ label: "next week", at: "2026-12-04T10:00" }]);
+  });
+
+  it("reads next Friday, said on a Friday before its hour, as the Friday a week on", () =>
+    assert.deepEqual(nextWeekReadings(w("2026-11-27T09:00"), 4, "10:00"), [{ label: "next week", at: "2026-12-04T10:00" }]));
+
+  it("lets a weekly routine asked for at its own minute start now or next week, as the Worker accepts either", () => {
+    assert.deepEqual(weeklyReadings(w("2026-11-30T08:00"), 0, "08:00"), [
+      { label: "starting now", at: "2026-11-30T08:00" },
+      { label: "next Monday 08:00", at: "2026-12-07T08:00" },
+    ]);
+    assert.deepEqual(weeklyReadings(w("2026-11-30T08:01"), 0, "08:00"), [{ label: "next Monday 08:00", at: "2026-12-07T08:00" }]);
+    assert.deepEqual(weeklyReadings(w("2026-11-30T07:59"), 0, "08:00"), [{ label: "next Monday 08:00", at: "2026-11-30T08:00" }]);
   });
 
   it("writes a late-December date in the Buddhist era", () => {

@@ -191,7 +191,9 @@ function judgesOf(runDir: string): { key: JudgeKey | null; judges: JudgeScores[]
 
 function writeSummary(runDir: string, file: RunFile): string {
   const { key, judges } = judgesOf(runDir);
-  const md = render(file, key, judges);
+  const quarantineFile = join(runDir, "judge-quarantine.json");
+  const quarantined = existsSync(quarantineFile) ? (JSON.parse(readFileSync(quarantineFile, "utf8")) as unknown[]).length : 0;
+  const md = render(file, key, judges, quarantined);
   writeFileSync(join(runDir, "summary.md"), md);
   return md;
 }
@@ -287,7 +289,7 @@ async function main() {
     }
   }
   const judged = writeJudgeBatch(runDir, file.records);
-  console.log(`judge batch: ${judged.items} items in ${join(runDir, "judge")}`);
+  console.log(`judge batch: ${judged.items} items in ${join(runDir, "judge")}, ${judged.quarantined} kept out for naming a model`);
   console.log(writeSummary(runDir, file));
 }
 

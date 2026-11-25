@@ -95,7 +95,7 @@ export function rows(run: RunFile, key: JudgeKey | null, judges: readonly JudgeS
   return out;
 }
 
-export function render(run: RunFile, key: JudgeKey | null, judges: readonly JudgeScores[]): string {
+export function render(run: RunFile, key: JudgeKey | null, judges: readonly JudgeScores[], quarantined = 0): string {
   const table = rows(run, key, judges);
   const gates = new Map<string, Gate>(key ? judges.map((j) => [j.name, calibrationGate(key, j.scores)]) : []);
   const judgeCols = judges.map((j) => `judge ${j.name}${gates.get(j.name)?.proven ? "" : " (unproven)"}`);
@@ -142,6 +142,7 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
   const read = (label: string) => friday.filter((d) => d.startsWith(label)).length;
   if (friday.length) notes.push(`"Next Friday" readings: coming ${read("coming")}, next week ${read("next week")}, neither ${friday.length - read("coming") - read("next week")}.`);
   for (const [name, g] of gates) notes.push(`Judge ${name} calibration good ${g.good.toFixed(2)}, flat ${g.flat.toFixed(2)}, bad ${g.bad.toFixed(2)}: ${g.proven ? "proven" : "unproven, so the table shows none of its scores"}.`);
+  if (quarantined) notes.push(`${quarantined} replies or pages named a model or its maker, so the judges never saw them; they are listed in judge-quarantine.json.`);
   if (judges.length === 0) notes.push("No judge scores yet. The judge batch is in judge/.");
   return `${[...lines, "", ...notes.map((n) => `- ${n}`)].join("\n")}\n`;
 }

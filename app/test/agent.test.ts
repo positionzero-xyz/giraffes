@@ -11,7 +11,7 @@ import { costOf } from "../src/policy/spend";
 import { fromLocal, toLocal } from "../src/policy/time";
 import type { Env } from "../src/config";
 import worker from "../src/worker";
-import { cancel, chat, devChat, hold, local, memoryLedger, quiet, routine, schedule, scripted, send, throws, turn, wall } from "./testkit";
+import { cancel, chat, devChat, hold, local, memoryLedger, NOTICE_URL, quiet, routine, schedule, scripted, send, throws, turn, wall } from "./testkit";
 
 const NOTICE = NOTICES.en;
 const inputThatSpendsTheCap = (DEV_CAP_MICRO * 1_000_000) / HAIKU_5_5.inputPerM;
@@ -541,17 +541,22 @@ describe("time zone and language", () => {
   }
 
   test.each([
-    { text: "/start", code: "th", notice: /^ต้องมี AI/ },
-    { text: "สวัสดี", code: "TH-th", notice: /^ต้องมี AI/ },
-    { text: "/key", code: "th", notice: /^ใส่ API key/ },
-    { text: "/key", code: "en-US", notice: /^Add your API key/ },
-    { text: "/key", code: "ja", notice: /^Add your API key/ },
-    { text: "/key", code: undefined, notice: /^Add your API key/ },
-    { text: "/key", code: 123, notice: /^Add your API key/ },
-  ])("a new Telegram person's $text notice uses their $code language before a model call", async ({ text, code, notice }) => {
+    { text: "/start", code: "th", lang: "th", notice: /^ต้องมี AI/ },
+    { text: "สวัสดี", code: "TH-th", lang: "th", notice: /^ต้องมี AI/ },
+    { text: "/key", code: "th", lang: "th", notice: /^ใส่ API key/ },
+    { text: "/key", code: "en-US", lang: "en", notice: /^Add your API key/ },
+    { text: "/key", code: "ja", lang: "en", notice: /^Add your API key/ },
+    { text: "/key", code: undefined, lang: "en", notice: /^Add your API key/ },
+    { text: "/key", code: 123, lang: "en", notice: /^Add your API key/ },
+  ] as const)("a new Telegram person's consent message and $text notice use their $code language before a model call", async ({ text, code, lang, notice }) => {
     const c = await devChat("777000111", { model: null, at: "2099-11-04T10:00", channel: "telegram" });
 
     await telegramMessage(777000111, 1, text, code);
+    await c.settle();
+    expect(await c.received()).toEqual([NOTICES[lang].privacy(NOTICE_URL)]);
+
+    await c.consent();
+    await telegramMessage(777000111, 2, text, code);
     await c.settle();
 
     expect(await c.received()).toEqual([expect.stringMatching(notice)]);
@@ -562,11 +567,15 @@ describe("time zone and language", () => {
     const model = scripted([turn({ actions: [locale("Asia/Bangkok", "en"), send("English from now on.")] })]);
     const c = await devChat("777000111", { model, at: "2099-11-04T10:00", channel: "telegram" });
 
-    await telegramMessage(777000111, 1, "คุยภาษาอังกฤษนะ", "th");
+    await telegramMessage(777000111, 1, "สวัสดี", "th");
+    await c.settle();
+    await c.consent();
+
+    await telegramMessage(777000111, 2, "คุยภาษาอังกฤษนะ", "th");
     await c.settle();
     expect(await c.received()).toEqual(["English from now on."]);
 
-    await telegramMessage(777000111, 2, "/key", "th");
+    await telegramMessage(777000111, 3, "/key", "th");
     await c.settle();
     expect(await c.received()).toEqual([expect.stringMatching(/^Add your API key/)]);
     model.assertDone();

@@ -384,6 +384,9 @@ export type BoxReplyStep =
   | { readonly kind: "refusal" }
   | { readonly kind: "status"; readonly status: number };
 
+/** `wrong_box` answers with a volume id other than the one /health named, as a box replaced underneath would. */
+export type EraseStep = "ok" | "fail" | "wrong_box" | "old_image";
+
 export type FakeBox = {
   readonly deps: BoxDeps;
   /** Apps the host has created; a step that died after creating one leaves it here, as a real crash would. */
@@ -403,6 +406,14 @@ export type FakeBox = {
     readonly at?: { readonly box: unknown; readonly epoch: unknown } | null;
   }[];
   readonly replies: BoxReplyStep[];
+  /** The epoch each POST /erase asked for, in order. */
+  readonly erases: number[];
+  /** How the next erases answer; once empty, each succeeds. */
+  readonly eraseSteps: EraseStep[];
+  /** The box's erase floor: the highest epoch an erase reached. */
+  floor: number;
+  /** While set, an erase waits for it before it answers. */
+  eraseHold: Promise<void> | null;
   readonly sessions: Set<string>;
   ignoresSession: boolean;
   signedIn: boolean;
@@ -434,6 +445,10 @@ export function fakeBox(
     healthCalls: [] as string[],
     parses: [] as FakeBox["parses"][number][],
     replies: [] as BoxReplyStep[],
+    erases: [] as number[],
+    eraseSteps: [] as EraseStep[],
+    floor: 0,
+    eraseHold: null as Promise<void> | null,
     sessions: new Set<string>(),
     ignoresSession: false,
     signedIn: opts.signedIn ?? false,
@@ -476,6 +491,18 @@ export function fakeBox(
     const authorization = new Headers(init?.headers).get("authorization");
     if (url.pathname === "/health") {
       return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test", ...(opts.volume ? { box: opts.volume } : {}) });
+    }
+    if (url.pathname === "/erase") {
+      const { epoch } = JSON.parse(String(init?.body)) as { epoch: number };
+      box.erases.push(epoch);
+      if (box.eraseHold) await box.eraseHold;
+      const step = box.eraseSteps.shift() ?? "ok";
+      if (step === "old_image") return new Response("not found", { status: 404 });
+      if (step === "fail") return Response.json({ error: "erase_incomplete" }, { status: 500 });
+      box.floor = Math.max(box.floor, epoch);
+      box.sessions.clear();
+      const id = step === "wrong_box" ? "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b" : opts.volume;
+      return Response.json({ box: id, floor: box.floor });
     }
     if (url.pathname === "/parse" || url.pathname === "/agent") {
       const agent = url.pathname === "/agent";

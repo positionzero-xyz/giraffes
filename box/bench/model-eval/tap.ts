@@ -23,6 +23,7 @@ type Event = {
   type?: string;
   message?: { content?: { type?: string; text?: string }[] };
   item?: { type?: string; text?: string };
+  part?: { type?: string; text?: string };
   total_cost_usd?: number;
   usage?: { input_tokens?: unknown; output_tokens?: unknown };
   modelUsage?: Record<string, unknown>;
@@ -39,7 +40,8 @@ function read(line: string) {
   const event = e as Event;
   const claudeText = event.type === "assistant" && event.message?.content?.some((b) => b.type === "text" && b.text?.trim());
   const codexText = event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text?.trim();
-  if (firstTextMs === null && (claudeText || codexText)) firstTextMs = Date.now() - started;
+  const opencodeText = event.type === "text" && event.part?.text?.trim();
+  if (firstTextMs === null && (claudeText || codexText || opencodeText)) firstTextMs = Date.now() - started;
   if (event.type === "result") {
     costUsd = typeof event.total_cost_usd === "number" ? event.total_cost_usd : null;
     usage = typeof event.usage?.input_tokens === "number" && typeof event.usage.output_tokens === "number" ? event.usage : null;

@@ -101,6 +101,7 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
   const table = rows(run, key, judges);
   const claude = run.records.some((r) => r.harness === "claude-code");
   const codex = run.meta.codex ?? null;
+  const opencode = run.meta.opencode ?? null;
   const gates = new Map<string, Gate>(key ? judges.map((j) => [j.name, calibrationGate(key, j.scores)]) : []);
   const judgeCols = judges.map((j) => `judge ${j.name}${gates.get(j.name)?.proven ? "" : " (unproven)"}`);
   const head = ["candidate", "shape", "contract", "ok/runs", "cases passed", "checks passed", "clean turns", "median CLI wall s", "median first internal text s", "timeouts", "CLI wall ≥ 50 s", "tokens in/out/cache read/cache write (runs reporting)", "cost USD (runs reporting)", ...judgeCols];
@@ -111,10 +112,11 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
       `Commit ${run.meta.gitSha}.`,
       claude ? `Claude CLI ${run.meta.cliVersion ?? "unknown"} (${run.meta.cli}), login ${run.meta.auth ? `${run.meta.auth.authMethod}, signed ${run.meta.auth.loggedIn ? "in" : "out"}` : "unknown"}.` : "",
       codex ? `Codex ${codex.version ?? "unknown"} (${codex.cli}) on profile ${codex.profile}, provider ${codex.provider}, in an isolated Codex home.` : "",
+      opencode ? `OpenCode ${opencode.version ?? "unknown"} (${opencode.cli}) with a private config folder and the providers already signed in on this machine.` : "",
       `Now ${run.meta.now}${run.meta.nowPinned ? " (pinned)" : " (today)"} Asia/Bangkok.`,
     ].filter(Boolean).join(" "),
     "",
-    `Cost is the Claude CLI's total_cost_usd, an API-price equivalent, not plan usage; Codex reports no cost. A case passes only when its run is ok and every check passes. A reply the Worker would discard (${[...MODEL_FAILED].join(", ")}) counts as a failed case; other statuses are inconclusive and left out. For Claude, chat and reminder run on the product path and draft and build on the planned contract. Giraffe has no Codex path, so every Codex row is planned, but each shape is graded the same way as Claude's. Wall time is the CLI subprocess alone, not inbound to delivery, so "CLI wall ≥ 50 s" (timeouts included) is a lower bound on replies that miss LINE's 50-second window. The first internal text is the CLI's first assistant text, which the Worker never sends; the person gets only the final reply.`,
+    `Cost is the Claude CLI's total_cost_usd, an API-price equivalent, not plan usage; Codex reports no cost; OpenCode's is its own figure from its price list, not the provider's bill. A case passes only when its run is ok and every check passes. A reply the Worker would discard (${[...MODEL_FAILED].join(", ")}) counts as a failed case; other statuses are inconclusive and left out. For Claude, chat and reminder run on the product path and draft and build on the planned contract. Giraffe has no Codex or OpenCode path, so every such row is planned, but each shape is graded the same way as Claude's. Wall time is the CLI subprocess alone, not inbound to delivery, so "CLI wall ≥ 50 s" (timeouts included) is a lower bound on replies that miss LINE's 50-second window. The first internal text is the CLI's first assistant text, which the Worker never sends; the person gets only the final reply.`,
     "",
     `| ${head.join(" | ")} |`,
     `| ${head.map(() => "---").join(" | ")} |`,
@@ -143,6 +145,10 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
   if (codex) {
     for (const [mode, tools] of Object.entries(codex.tools)) notes.push(`Tools Codex offered on a ${mode === "turn" ? "chat, reminder or draft turn" : "build"} (read from its first request to a local server, which also refused its model catalog): ${tools?.join(", ") || "none"}.`);
     notes.push("Codex token counts use Claude's meaning: in is the uncached input, cache read is Codex's cached input, and out includes reasoning. Codex doesn't report which model served a turn, and a Code Mode call shows in its events only through what it did.");
+  }
+  if (opencode) {
+    for (const [mode, tools] of Object.entries(opencode.tools)) notes.push(`Tools OpenCode offered on a ${mode === "turn" ? "chat, reminder or draft turn" : "build"} (read from its first request to a stand-in provider on a local server, not the real one): ${tools?.join(", ") || "none"}.`);
+    notes.push("OpenCode token counts use Claude's meaning: in is the uncached input, and out adds OpenCode's separate reasoning count to its output count. The served model and variant come from each run's session export.");
   }
   const strays = run.records.filter((r) => (r.otherTools ?? []).length > 0);
   if (strays.length) notes.push(`Runs that used tools other than Giraffe's: ${strays.map((r) => `${r.id} (${r.otherTools.join(", ")})`).join(", ")}.`);

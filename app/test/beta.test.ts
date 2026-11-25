@@ -62,7 +62,10 @@ describe("admission to the beta", () => {
     expect(await enrolled("p:telegram:5531")).toBeNull();
 
     await c.tap("c");
-    expect(await c.received()).toEqual([t.privacy, t.welcome]);
+    expect(await c.received()).toEqual([
+      t.privacy,
+      "You're in. Tell me what you'd like a hand with. I may send a morning check-in when I have AI access and something useful to share.",
+    ]);
     const s = await c.snapshot();
     expect(s.admission).toMatchObject({ state: "admitted", seat: { cohort: "recruit", half: "intl_telegram", code: CODE, inviter: null } });
     expect(s.pendingWakeups.map((w) => w.kind)).toEqual(["checkin"]);
@@ -96,7 +99,10 @@ describe("admission to the beta", () => {
 
     expect(await said("901", "ZZZZZZ")).toEqual({ received: [t.waitlist.bad_code], admission: { state: "waitlisted", reason: "bad_code", toldOn: "2099-11-04" } });
     expect(await said("902", "/join used22")).toEqual({ received: [t.waitlist.used], admission: { state: "waitlisted", reason: "used", toldOn: "2099-11-04" } });
-    expect(await said("903", CODE)).toEqual({ received: [t.waitlist.full], admission: { state: "waitlisted", reason: "full", toldOn: "2099-11-04" } });
+    expect(await said("903", CODE)).toEqual({
+      received: ["The beta is full right now. There's no date for new places yet. To check again, send your invite code here."],
+      admission: { state: "waitlisted", reason: "full", toldOn: "2099-11-04" },
+    });
   });
 
   test("a beta that filled up between the code and consent waitlists the person as full", async () => {
@@ -110,6 +116,26 @@ describe("admission to the beta", () => {
     expect((await c.received()).at(-1)).toBe(t.waitlist.full);
     expect((await c.snapshot()).admission).toMatchObject({ state: "waitlisted", reason: "full" });
     expect(await enrolled("p:telegram:5532")).toBeNull();
+  });
+
+  test("the Thai welcome says morning check-ins depend on AI access and having something useful to share", async () => {
+    await mint(CODE, "recruit", "th_line");
+    const c = await devChat("U00000000000000000000000000000a02", { model: null, at: "2099-11-04T10:00", channel: "line", admission: "beta" });
+    await c.say(CODE);
+    await c.tap("c");
+    expect((await c.received()).at(-1)).toBe(
+      "เข้าร่วมเบต้าแล้วค่ะ อยากให้ช่วยเรื่องไหนบอกได้เลย ถ้าใช้ AI ได้และมีเรื่องที่น่าบอก อาจทักไปตอนเช้านะคะ",
+    );
+  });
+
+  test("the Thai notice for a full beta tells the person how to check again", async () => {
+    await mint(CODE, "recruit", "th_line");
+    await fillRecruits();
+    const c = await devChat("U00000000000000000000000000000a03", { model: null, at: "2099-11-04T10:00", channel: "line", admission: "beta" });
+    await c.say(CODE);
+    expect(await c.received()).toEqual([
+      "ตอนนี้เบต้าเต็มแล้วค่ะ ยังไม่มีกำหนดเปิดรับเพิ่ม ถ้าอยากเช็กอีกครั้ง ส่งรหัสเชิญในแชตนี้ได้เลยค่ะ",
+    ]);
   });
 
   test("a D1 it can't reach holds the answer for a retry, then says to try again, and admits nobody", async () => {

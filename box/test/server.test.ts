@@ -143,6 +143,12 @@ describe("auth", () => {
     assert.doesNotMatch(page.text, /<script[^>]+src=/, "no external scripts");
   });
 
+  it("tells people who signed in to wait for confirmation in chat in English and Thai", async () => {
+    const page = await call("GET", "/signin");
+    assert.ok(page.text.includes("Signed in to Claude. Give Giraffe about a minute to connect your plan. Wait for the confirmation in chat before sending a message."));
+    assert.ok(page.text.includes("ลงชื่อเข้าใช้ Claude แล้ว ให้เวลา Giraffe เชื่อมแพ็กเกจประมาณหนึ่งนาที รอข้อความยืนยันในแชตแล้วค่อยส่งข้อความนะคะ"));
+  });
+
   it("refuses to start without BOX_TOKEN", () => {
     const { BOX_TOKEN: _, ...env } = process.env;
     const run = spawnSync(process.execPath, [MAIN], { env: { ...env, BOX_PORT: "0" }, encoding: "utf8", timeout: 10_000 });

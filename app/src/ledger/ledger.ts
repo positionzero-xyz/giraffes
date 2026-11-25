@@ -1,145 +1,24 @@
+import { z } from "zod";
 import {
   assertNever,
-  type AgentEventKind,
+  CHANNEL_IDS, COHORTS, FACTS, TASK_KINDS, WAITLIST_REASONS,
   type AgentKey,
   type ChannelId,
   type EpochMs,
   type Cohort,
-  type FactCause,
-  type FactKind,
   type Half,
   type InviteCode,
-  type LocalDate,
   type MicroUsd,
-  type TaskKind,
-  type TaskRef,
   type UtcMonth,
 } from "../domain";
-import { TASK_REJECTIONS, type UnaskedPurpose } from "../agent/tasks";
-import type { AdmissionChange, InviteCheck, SeatAnswer } from "../agent/admission";
+import { TASK_REJECTIONS, UNASKED_PURPOSES } from "../agent/tasks";
+import { ADMISSION_CHANGES, type InviteCheck, type SeatAnswer } from "../agent/admission";
 import type { BoxHostKind } from "../box/host";
 import type { BoxName } from "../box/names";
 import type { Usage } from "../model/client";
-import type { ModelRef } from "../model/providers";
-import type { CallPurpose } from "../model/routes";
+import { PURPOSES, type CallPurpose } from "../model/routes";
 import type { QuotaReading } from "../policy/quota";
 import { REMINDER_REJECTIONS } from "../policy/schedule";
-
-export type LogRow =
-  | {
-      readonly stream: "feedback";
-      readonly id: string;
-      readonly agent: AgentKey;
-      readonly channel: ChannelId;
-      readonly at: EpochMs;
-      readonly text: string;
-      readonly cohort: Cohort | null;
-    }
-  | {
-      readonly stream: "agent";
-      readonly id: string;
-      readonly agent: AgentKey;
-      readonly channel: ChannelId;
-      readonly firstSeenAt: EpochMs;
-    }
-  | {
-      readonly stream: "turn";
-      readonly id: string;
-      readonly agent: AgentKey;
-      readonly eventKind: AgentEventKind;
-      readonly batchSize: number;
-      readonly outcome: TurnOutcome;
-      readonly refusedForBudget: boolean;
-      readonly costMicro: MicroUsd;
-      /** A turn not yet in the summary was left out of the prompt; absent on rows queued before it was logged. */
-      readonly historyTrimmed?: boolean;
-      readonly attempts: number;
-      readonly startedAt: EpochMs;
-      readonly finishedAt: EpochMs;
-    }
-  | {
-      readonly stream: "model_call";
-      readonly id: string;
-      readonly agent: AgentKey;
-      readonly purpose: CallPurpose;
-      readonly model: ModelRef;
-      readonly backend: Backend;
-      readonly status: ModelCallStatus;
-      readonly estimateMicro: MicroUsd;
-      readonly costMicro: MicroUsd;
-      readonly inputTokens: number;
-      readonly outputTokens: number;
-      readonly cacheReadTokens: number;
-      readonly cacheWriteTokens: number;
-      readonly at: EpochMs;
-    }
-  | {
-      readonly stream: "unasked";
-      readonly id: string;
-      readonly agent: AgentKey;
-      readonly triggerKind: AgentEventKind;
-      readonly text: string;
-      readonly status: UnaskedStatus;
-      readonly day: LocalDate | null;
-      readonly at: EpochMs;
-      /** `<agent>|t<task id>`; null when the message is about no task. */
-      readonly taskId: string | null;
-      readonly purpose: UnaskedPurpose;
-    }
-  | {
-      readonly stream: "task";
-      /** `<agent>|t<task id>`, deterministic so a re-flush is a no-op. */
-      readonly id: string;
-      readonly agent: AgentKey;
-      readonly ref: TaskRef;
-      readonly kind: TaskKind;
-      readonly title: string;
-      readonly causeKind: FactCause["kind"];
-      readonly openedAt: EpochMs;
-    }
-  | {
-      readonly stream: "task_fact";
-      /** `<agent>|f<fact id>`. */
-      readonly id: string;
-      readonly agent: AgentKey;
-      readonly taskId: string;
-      readonly kind: FactKind;
-      readonly ref: string;
-      readonly detail: string;
-      /** This fact moved the task to completed. At most one fact per task has it. */
-      readonly completes: boolean;
-      readonly personDecision: boolean;
-      readonly causeKind: FactCause["kind"];
-      readonly causeAt: EpochMs;
-      readonly at: EpochMs;
-    }
-  | {
-      readonly stream: "admission";
-      readonly id: string;
-      readonly agent: AgentKey;
-      readonly change: AdmissionChange;
-      /** The waitlist reason, or the cohort a person was admitted to. */
-      readonly reason: string | null;
-      readonly channel: ChannelId;
-      readonly at: EpochMs;
-    }
-  | {
-      readonly stream: "lifecycle";
-      readonly id: string;
-      readonly agent: AgentKey;
-      readonly change: "follow" | "block";
-      readonly source: "channel" | "delivery";
-      readonly at: EpochMs;
-    }
-  | {
-      readonly stream: "rejection";
-      readonly id: string;
-      readonly agent: AgentKey;
-      readonly turnId: string;
-      readonly action: string;
-      readonly reason: ActionRejection;
-      readonly at: EpochMs;
-    };
 
 export const MODEL_CALL_STATUSES = [
   "settled",
@@ -176,11 +55,52 @@ export type ActionRejection = (typeof ACTION_REJECTIONS)[number];
 export const UNASKED_STATUSES = ["sent", "dropped_budget", "dropped_blocked", "dropped_quota", "dropped_removed", "failed"] as const;
 export type UnaskedStatus = (typeof UNASKED_STATUSES)[number];
 
+const eventKind = z.enum(["message", "choice", "lifecycle", "wakeup", "checkin"]);
+const causeKind = z.enum([...eventKind.options, "prune"]);
+const identity = { id: z.string(), agent: z.custom<AgentKey>((v) => typeof v === "string") };
+const integer = z.number().int();
+const at = z.custom<EpochMs>((v) => typeof v === "number" && Number.isSafeInteger(v));
+const micro = z.custom<MicroUsd>((v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0);
+
+export const logSchema = z.discriminatedUnion("stream", [
+  z.object({ stream: z.literal("feedback"), ...identity, channel: z.enum(CHANNEL_IDS), at, cohort: z.enum(COHORTS).nullable() }),
+  z.object({ stream: z.literal("agent"), ...identity, channel: z.enum(CHANNEL_IDS), firstSeenAt: at }),
+  z.object({
+    stream: z.literal("turn"), ...identity, eventKind, batchSize: integer, outcome: z.enum(TURN_OUTCOMES),
+    refusedForBudget: z.boolean(), costMicro: micro, historyTrimmed: z.boolean().optional(), attempts: integer, startedAt: at, finishedAt: at,
+  }),
+  z.object({
+    stream: z.literal("model_call"), ...identity, purpose: z.enum([...PURPOSES, "probe", "planning"]),
+    backend: z.enum(BACKENDS).default("api"), status: z.enum(MODEL_CALL_STATUSES), estimateMicro: micro, costMicro: micro,
+    inputTokens: integer, outputTokens: integer, cacheReadTokens: integer, cacheWriteTokens: integer, at,
+  }),
+  z.object({
+    stream: z.literal("unasked"), ...identity, triggerKind: eventKind, status: z.enum(UNASKED_STATUSES),
+    day: z.iso.date().nullable(), at, taskId: z.string().nullable().default(null), purpose: z.enum(UNASKED_PURPOSES).default("unlinked"),
+  }),
+  z.object({ stream: z.literal("task"), ...identity, kind: z.enum(TASK_KINDS), causeKind, openedAt: at }),
+  z.object({
+    stream: z.literal("task_fact"), ...identity, taskId: z.string(), kind: z.custom<keyof typeof FACTS>((v) => typeof v === "string" && Object.hasOwn(FACTS, v)),
+    completes: z.boolean(), personDecision: z.boolean(), causeKind, causeAt: at, at,
+  }),
+  z.object({
+    stream: z.literal("admission"), ...identity, change: z.enum(ADMISSION_CHANGES),
+    reason: z.enum([...WAITLIST_REASONS, ...COHORTS]).nullable(), channel: z.enum(CHANNEL_IDS), at,
+  }),
+  z.object({ stream: z.literal("lifecycle"), ...identity, change: z.enum(["follow", "block"]), source: z.enum(["channel", "delivery"]), at }),
+  z.object({ stream: z.literal("rejection"), ...identity, turnId: z.string(), reason: z.enum(ACTION_REJECTIONS), at }),
+]);
+
+export type LogRow = z.infer<typeof logSchema>;
+
+export function diagnosticRow(raw: unknown): LogRow {
+  return logSchema.parse(raw);
+}
+
 export function modelCallRow(input: {
   readonly id: string;
   readonly agent: AgentKey;
   readonly purpose: CallPurpose;
-  readonly model: ModelRef;
   readonly backend: Backend;
   readonly status: ModelCallStatus;
   readonly estimate: MicroUsd;
@@ -193,7 +113,6 @@ export function modelCallRow(input: {
     id: input.id,
     agent: input.agent,
     purpose: input.purpose,
-    model: input.model,
     backend: input.backend,
     status: input.status,
     estimateMicro: input.estimate,
@@ -237,8 +156,8 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
   switch (row.stream) {
     case "feedback":
       return db
-        .prepare("INSERT INTO feedback (id, agent_key, channel, at, text, cohort) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")
-        .bind(row.id, row.agent, row.channel, row.at, row.text, row.cohort);
+        .prepare("INSERT INTO feedback (id, agent_key, channel, at, text, cohort) VALUES (?, ?, ?, ?, '', ?) ON CONFLICT (id) DO NOTHING")
+        .bind(row.id, row.agent, row.channel, row.at, row.cohort);
     case "agent":
       return db
         .prepare("INSERT INTO agent (id, agent_key, channel, first_seen_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")
@@ -269,14 +188,13 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
         .prepare(
           `INSERT INTO model_call (id, agent_key, purpose, model, backend, status, estimate_micro, cost_micro,
              input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         )
         .bind(
           row.id,
           row.agent,
           row.purpose,
-          row.model,
           row.backend,
           row.status,
           row.estimateMicro,
@@ -291,22 +209,22 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
       return db
         .prepare(
           `INSERT INTO unasked_message (id, agent_key, trigger_kind, text, status, day, at, task_id, purpose)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, '', ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         )
-        .bind(row.id, row.agent, row.triggerKind, row.text, row.status, row.day, row.at, row.taskId, row.purpose);
+        .bind(row.id, row.agent, row.triggerKind, row.status, row.day, row.at, row.taskId, row.purpose);
     case "task":
       return db
         .prepare(
-          `INSERT INTO task (id, agent_key, ref, kind, title, cause_kind, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO task (id, agent_key, ref, kind, title, cause_kind, opened_at) VALUES (?, ?, '', ?, '', ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         )
-        .bind(row.id, row.agent, row.ref, row.kind, row.title, row.causeKind, row.openedAt);
+        .bind(row.id, row.agent, row.kind, row.causeKind, row.openedAt);
     case "task_fact":
       return db
         .prepare(
           `INSERT INTO task_fact (id, agent_key, task_id, kind, ref, detail, completes, person_decision, cause_kind, cause_at, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, '', '{}', ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         )
         .bind(
@@ -314,8 +232,6 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
           row.agent,
           row.taskId,
           row.kind,
-          row.ref,
-          row.detail,
           row.completes ? 1 : 0,
           row.personDecision ? 1 : 0,
           row.causeKind,
@@ -332,8 +248,8 @@ function insertFor(db: D1Database, row: LogRow): D1PreparedStatement {
         .bind(row.id, row.agent, row.change, row.reason, row.channel, row.at);
     case "rejection":
       return db
-        .prepare("INSERT INTO action_rejection (id, agent_key, turn_id, action, reason, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")
-        .bind(row.id, row.agent, row.turnId, row.action, row.reason, row.at);
+        .prepare("INSERT INTO action_rejection (id, agent_key, turn_id, action, reason, at) VALUES (?, ?, ?, '', ?, ?) ON CONFLICT (id) DO NOTHING")
+        .bind(row.id, row.agent, row.turnId, row.reason, row.at);
     default:
       return assertNever(row);
   }

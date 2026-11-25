@@ -1,3 +1,4 @@
+import { diagnostic, type DrainPhase } from "../diagnostics";
 import { DurableObject } from "cloudflare:workers";
 import { draftKey, issueTicket, redactSecrets, seal, type KeyFields } from "../access/key";
 import {
@@ -41,9 +42,9 @@ import {
   type Step,
 } from "../box/machine";
 import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
-import { makeChannels, tellOperator, type ChannelRegistry } from "../channels/channel";
+import { makeChannels, type ChannelRegistry } from "../channels/channel";
 import { commandOf, type Command } from "./commands";
-import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env, type OperatorChat } from "../config";
+import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env } from "../config";
 import {
   assertNever,
   CHANNEL_LANGUAGE,
@@ -140,7 +141,6 @@ export type AgentDeps = {
   readonly box: BoxDeps | null;
   readonly billing: BillingDeps;
   readonly admission: AdmissionMode;
-  readonly operatorChat: OperatorChat | null;
 };
 
 export type BillingDeps = {
@@ -207,6 +207,7 @@ export class Agent extends DurableObject<Env> {
   /** In memory on purpose: losing it on a restart costs one more try of a box that may still be wedged. */
   #skipBoxUntil = 0;
   readonly #instance = crypto.randomUUID();
+  readonly #devSavedPages = new Map<string, string>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -233,7 +234,9 @@ export class Agent extends DurableObject<Env> {
   }
 
   billingEvent(e: BillingEvent): Promise<"applied" | "duplicate" | "ignored"> {
-    const run = this.#billing.then(() => this.#billingEvent(e));
+    const run = this.#billing.then(() => this.#billingEvent(e)).catch(() => {
+      throw new Error("billing event failed");
+    });
     this.#billing = run.catch(() => undefined);
     return run;
   }
@@ -243,11 +246,11 @@ export class Agent extends DurableObject<Env> {
     const { config, store, stripe } = this.#deps.billing;
     if (!config.on || !stripe) throw new Error("a Stripe event reached a DO with billing off");
     const fetched = await stripe.subscription(e.subscription);
-    if (!fetched.ok) throw new Error(`subscription read failed: ${fetched.detail}`);
+    if (!fetched.ok) throw new Error("subscription read failed");
     const read = parseSubscription(fetched.value, config.rules);
-    if (read.kind === "invalid") throw new Error(`subscription read failed: ${read.reason}`);
+    if (read.kind === "invalid") throw new Error("subscription unreadable");
     if (read.kind === "not_ours" || read.subscription.owner !== e.owner) {
-      console.warn("stripe event ignored", e.id, read.kind === "not_ours" ? read.reason : "owner differs from the event's");
+      diagnostic("stripe_event_ignored");
       this.#store.billingEventDone(e.id, this.#deps.clock.now());
       return "ignored";
     }
@@ -268,7 +271,7 @@ export class Agent extends DurableObject<Env> {
     const now = this.#deps.clock.now();
     const owned = await store.owned(owner, now);
     if (owned.length < 2) return;
-    console.error("person owns more than one paying subscription", owner, owned.join(" "));
+    diagnostic("stripe_duplicate_subscription");
     await store.recordDuplicate(owner, owned, now);
     const a = this.#store.agent();
     const text = a ? NOTICES[a.language].duplicate : null;
@@ -280,7 +283,9 @@ export class Agent extends DurableObject<Env> {
   async refreshPlan(agent: AgentKey): Promise<void> {
     const { config, store } = this.#deps.billing;
     const now = this.#deps.clock.now();
-    const standing = await store.standing(agent, now);
+    const standing = await store.standing(agent, now).catch(() => {
+      throw new Error("billing standing unavailable");
+    });
     const before = this.#plan(now);
     const after = planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, config.on, config.rules);
     const a = this.#store.agent();
@@ -305,8 +310,8 @@ export class Agent extends DurableObject<Env> {
     let standing: Standing;
     try {
       standing = await store.standing(agent, now);
-    } catch (err) {
-      console.warn("standing unreadable, using the last refreshed plan", err);
+    } catch {
+      diagnostic("stripe_standing_unavailable");
       return this.#plan(now);
     }
     return planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, true, config.rules);
@@ -330,7 +335,10 @@ export class Agent extends DurableObject<Env> {
     return {
       agent: a ? { key: a.key, status: a.status, tz: a.tz, language: a.language } : null,
       turns: this.#store.recentTurns(50),
-      outbox: this.#store.recentOutbox(50),
+      outbox: this.#store.recentOutbox(50).map((row) => {
+        const page = this.#devSavedPages.get(row.id);
+        return page === undefined ? row : { ...row, texts: [page] };
+      }),
       pendingWakeups: this.#store.pendingWakeups(),
       memoryNotes: this.#store.memoryNotes(20),
       unaskedSentToday: a ? this.#store.unaskedAdmitted(localDate(now, a.tz)) : 0,
@@ -486,7 +494,7 @@ export class Agent extends DurableObject<Env> {
     const clock = this.#deps.clock;
     const started = clock.now();
     try {
-      await this.#phase("turns", async () => {
+      await this.#phase("drain_turns_failed", async () => {
         const poisoned = this.#store.recover(started, this.#instance);
         if (poisoned) this.#commitPoison(poisoned);
         this.#fireDueWakeups();
@@ -500,22 +508,22 @@ export class Agent extends DurableObject<Env> {
           this.#fireDueWakeups();
         }
       });
-      await this.#phase("box", () => this.#stepBox());
-      await this.#phase("delivery", () => this.#deliverReady());
-      await this.#phase("log flush", () => this.#flushLogs());
-      await this.#phase("compaction", () => this.#compactIfDue());
-      await this.#phase("prune", async () => this.#store.prune(clock.now()));
+      await this.#phase("drain_box_failed", () => this.#stepBox());
+      await this.#phase("drain_delivery_failed", () => this.#deliverReady());
+      await this.#phase("drain_log_flush_failed", () => this.#flushLogs());
+      await this.#phase("drain_compaction_failed", () => this.#compactIfDue());
+      await this.#phase("drain_prune_failed", async () => this.#store.prune(clock.now()));
     } finally {
       await this.#rearm();
     }
   }
 
-  async #phase(name: string, run: () => Promise<void>): Promise<void> {
+  async #phase(name: DrainPhase, run: () => Promise<void>): Promise<void> {
     try {
       await run();
-    } catch (err) {
+    } catch {
       // Not rethrown: our re-arm is the retry policy, not Cloudflare's alarm backoff.
-      console.error(`drain ${name} failed`, err);
+      diagnostic(name);
     }
   }
 
@@ -554,11 +562,19 @@ export class Agent extends DurableObject<Env> {
 
   async #turn(batch: Batch, catchUpPlan: Plan | null): Promise<void> {
     const a = this.#agent();
+    const item = batch.items[0];
+    const first = item.event;
+    const command = commandOf(first);
+    if (command?.kind === "memory" || command?.kind === "memory_next") {
+      return this.#store.queueSavedPage({
+        key: item.key, restart: command.kind === "memory", now: this.#deps.clock.now(),
+        reply: first.kind === "message" ? first.reply : undefined,
+        replyOnly: a.identity.channel === "line" && !mayspend(this.#store.admission()),
+      });
+    }
     const view = this.#view(batch, a);
     const bypass = bypassModel(view);
     if (bypass) return this.#commit(planWithoutModel(view, bypass), view, a.key, { kind: "none" });
-    const first = batch.items[0].event;
-    const command = commandOf(first);
     if (command?.kind === "key_remove") return this.#keyCommand(command, view, a.key);
     if (!mayspend(view.admission)) return this.#admission(view, a);
     if (first.kind === "choice" && first.choice.kind === "consent") {
@@ -622,8 +638,8 @@ export class Agent extends DurableObject<Env> {
     if (fits || view.recent.length === 0) return view;
     try {
       if (!(await this.#compactStep(plan, true))) return view;
-    } catch (err) {
-      console.error("compaction before a turn failed", err);
+    } catch {
+      diagnostic("turn_compaction_failed");
       return view;
     }
     return this.#view(batch, a);
@@ -663,8 +679,8 @@ export class Agent extends DurableObject<Env> {
         const a = this.#store.agent();
         return box && a && boxServes(this.#deps.box, a.key) ? box.state : null;
       },
-      parse: (req) => this.#onBox(req.purpose, req.model, (client, url, token) => client.parse(url, token, { model: req.model, system: req.system, user: req.user, jsonSchema: req.jsonSchema })),
-      agent: (req) => this.#onBox("turn", req.model, (client, url, token) => client.agent(url, token, req)),
+      parse: (req) => this.#onBox(req.purpose, (client, url, token) => client.parse(url, token, { model: req.model, system: req.system, user: req.user, jsonSchema: req.jsonSchema })),
+      agent: (req) => this.#onBox("turn", (client, url, token) => client.agent(url, token, req)),
     };
   }
 
@@ -698,8 +714,8 @@ export class Agent extends DurableObject<Env> {
           step.kind === "check"
             ? { kind: "checked", check: await this.#deps.ledger.checkInvite({ code: step.code, agent: a.key, caps: ADMISSION.caps }) }
             : { kind: "claimed", seat: await this.#deps.ledger.claimSeat({ agent: a.key, code: step.code, channel: a.identity.channel, at: now, caps: ADMISSION.caps }) };
-      } catch (err) {
-        console.warn("admission check failed", err);
+      } catch {
+        diagnostic("admission_failed");
         return this.#admissionUnavailable(view, a.key);
       }
       step = planAdmission(view, answer);
@@ -721,7 +737,7 @@ export class Agent extends DurableObject<Env> {
     this.#store.releaseBatch(keys, (now + MODEL_RETRY_BASE_MS * 2 ** (attempts - 1)) as EpochMs, [], now);
   }
 
-  async #command(command: Command, view: TurnView, a: AgentRow): Promise<void> {
+  async #command(command: Exclude<Command, { kind: "memory" | "memory_next" }>, view: TurnView, a: AgentRow): Promise<void> {
     const agent = a.key;
     if (this.#deps.admission === "beta" && (command.kind === "invite" || command.kind === "join")) return this.#betaCommand(command, view, agent);
     switch (command.kind) {
@@ -736,7 +752,7 @@ export class Agent extends DurableObject<Env> {
       case "pasted_key":
         return this.#keyCommand(command, view, agent);
       case "feedback":
-        return this.#feedback(command.text, view, a);
+        return this.#feedback(command.submitted, view, a);
       case "plan":
       case "invite":
       case "join":
@@ -746,8 +762,8 @@ export class Agent extends DurableObject<Env> {
         let reply: { readonly text: string; readonly note: string };
         try {
           reply = await this.#billingCommand(command, view, agent);
-        } catch (err) {
-          console.warn("billing command failed", command.kind, err);
+        } catch {
+          diagnostic("billing_command_failed");
           reply = { text: t.billingBusy, note: t.billingBusy };
         }
         return this.#reply(view, agent, reply.text, reply.note);
@@ -757,21 +773,20 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
-  #feedback(text: string, view: TurnView, a: AgentRow): void {
+  #feedback(submitted: boolean, view: TurnView, a: AgentRow): void {
     const t = NOTICES[view.language];
     const item = view.batch.items[0];
-    const logs: LogRow[] = text === "" ? [] : [
+    const logs: LogRow[] = submitted ? [
       {
         stream: "feedback",
         id: `${a.key}|${item.key}`,
         agent: a.key,
         channel: a.identity.channel,
         at: item.receivedAt,
-        text,
         cohort: mayspend(view.admission) ? view.admission.seat.cohort : null,
       },
-    ];
-    const commit = planWithoutModel(view, { kind: "feedback", text: text === "" ? t.feedbackUsage : t.feedbackThanks });
+    ] : [];
+    const commit = planWithoutModel(view, { kind: "feedback", text: submitted ? t.feedbackThanks : t.feedbackUsage });
     this.#commit(commit, view, a.key, { kind: "none" }, null, logs);
   }
 
@@ -843,8 +858,8 @@ export class Agent extends DurableObject<Env> {
         if (r === "limit") return this.#reply(view, agent, t.inviteLimit(ADMISSION.invitesPerPerson));
         if (r === "not_enrolled") return this.#reply(view, agent, t.inviteNotEnrolled);
       }
-    } catch (err) {
-      console.warn("invite failed", err);
+    } catch {
+      diagnostic("invite_failed");
     }
     return this.#reply(view, agent, t.billingBusy);
   }
@@ -911,7 +926,7 @@ export class Agent extends DurableObject<Env> {
     const customer = await store.customer(id);
     const portal = stripe && customer ? await stripe.portal(customer) : null;
     if (!portal?.ok) {
-      console.warn("portal link failed", id, portal ? portal.detail : "no customer");
+      diagnostic("stripe_portal_failed");
       return { text: `${status}\n${t.noPortal}`, note: `${status}\n${t.noPortal}` };
     }
     return { text: `${status}\n${t.manage(portal.value.url)}`, note: `${status}\n${t.manage(MANAGE_NOTE)}` };
@@ -930,7 +945,7 @@ export class Agent extends DurableObject<Env> {
     for (const { id, result } of expiries) {
       if (result.ok) this.#store.checkoutClosed(id);
       else {
-        console.warn("checkout expiry failed", id, result.detail);
+        diagnostic("stripe_checkout_expiry_failed");
         expired = false;
       }
     }
@@ -944,7 +959,7 @@ export class Agent extends DurableObject<Env> {
     const links: Partial<Record<PaidPlan, string>> = {};
     for (const { plan, result } of results) {
       if (!result.ok) {
-        console.warn("checkout failed", plan, result.detail);
+        diagnostic("stripe_checkout_failed");
         continue;
       }
       this.#store.checkoutOpened(result.value.id, key, now);
@@ -965,8 +980,8 @@ export class Agent extends DurableObject<Env> {
     let claim: "granted" | "full";
     try {
       claim = await this.#deps.ledger.claimBox({ agent, name, host: deps.host.kind, at: now, max: deps.maxBoxes });
-    } catch (err) {
-      console.warn("box claim failed", err);
+    } catch {
+      diagnostic("box_claim_failed");
       return this.#boxReply(view, agent, null, { box: null, say: "busy" });
     }
     if (claim === "full") return this.#boxReply(view, agent, deps, { box: null, say: "full" });
@@ -1039,7 +1054,7 @@ export class Agent extends DurableObject<Env> {
   async #reclaim(deps: BoxDeps, step: Extract<Step, { kind: "reclaim" }>): Promise<void> {
     const destroyed = await deps.host.destroy(step.box.name);
     if (!destroyed.ok) {
-      console.warn("box reclaim failed", step.box.name, destroyed.detail);
+      diagnostic("box_reclaim_failed");
       return;
     }
     await this.#deps.ledger.releaseBox(this.#agent().key, this.#deps.clock.now());
@@ -1050,7 +1065,7 @@ export class Agent extends DurableObject<Env> {
 
   async #ensure(deps: BoxDeps, step: EnsureStep): Promise<void> {
     const ensured = await deps.host.ensure(step.box.name, await boxToken(deps.secret, step.box.name));
-    if (!ensured.ok) return console.warn("box ensure failed", step.box.name, ensured.detail);
+    if (!ensured.ok) return diagnostic("box_ensure_failed");
     this.#store.applyBox(afterEnsure(step, deps.host.image), null, [], this.#deps.clock.now());
   }
 
@@ -1064,7 +1079,7 @@ export class Agent extends DurableObject<Env> {
     return health.kind === "unavailable" ? { kind: "down", retryable: true, detail: health.detail } : health;
   }
 
-  async #onBox(purpose: CallPurpose, model: string, send: (client: BoxClient, url: string, token: BoxToken) => Promise<BoxReply>): Promise<BoxAnswer> {
+  async #onBox(purpose: CallPurpose, send: (client: BoxClient, url: string, token: BoxToken) => Promise<BoxReply>): Promise<BoxAnswer> {
     const deps = this.#deps.box;
     const box = this.#store.box();
     const agent = this.#agent().key;
@@ -1073,7 +1088,7 @@ export class Agent extends DurableObject<Env> {
     const res = await send(deps.client, box.url, await boxToken(deps.secret, box.name));
     const now = this.#deps.clock.now();
     const missed = (status: "rejected" | "unavailable"): LogRow =>
-      modelCallRow({ id: crypto.randomUUID(), agent, purpose, model: `claude-plan:${model}`, backend: "box", status, estimate: NO_COST, cost: NO_COST, usage: null, at: now });
+      modelCallRow({ id: crypto.randomUUID(), agent, purpose, backend: "box", status, estimate: NO_COST, cost: NO_COST, usage: null, at: now });
     switch (res.kind) {
       case "reply":
         return { kind: "reply", reply: res.reply, session: res.session };
@@ -1086,7 +1101,7 @@ export class Agent extends DurableObject<Env> {
         this.#store.applyBox(needsEnsure(box, now), null, [missed("rejected")], now);
         return { kind: "moved_on", transient: true, told: false };
       case "unavailable":
-        console.warn("box unavailable", res.detail);
+        diagnostic("box_unavailable");
         this.#skipBoxUntil = now + BOX.skipAfterUnavailableMs;
         this.#store.appendLogs([missed("unavailable")], now);
         return { kind: "moved_on", transient: true, told: false };
@@ -1127,7 +1142,6 @@ export class Agent extends DurableObject<Env> {
               id: row.id,
               agent: a.key,
               triggerKind: row.triggerKind,
-              text: row.texts.join("\n"),
               status,
               day,
               at: now,
@@ -1137,7 +1151,7 @@ export class Agent extends DurableObject<Env> {
           ]
         : [];
 
-    if (!row.replyOnly && !mayspend(this.#store.admission())) return this.#store.drop(row.id, "removed", now, unaskedLog("dropped_removed", null));
+    if (row.saved === null && !row.replyOnly && !mayspend(this.#store.admission())) return this.#store.drop(row.id, "removed", now, unaskedLog("dropped_removed", null));
     if (row.attempts >= MAX_DELIVERY_ATTEMPTS) return this.#store.drop(row.id, "failed", now, unaskedLog("failed", row.admittedDay));
     if (a.status === "blocked") return this.#store.drop(row.id, "blocked", now, unaskedLog("dropped_blocked", null));
 
@@ -1165,23 +1179,33 @@ export class Agent extends DurableObject<Env> {
       }
     }
 
+    const page = row.saved === null ? null : this.#store.savedPage(row.saved, a);
+    const texts: readonly [string, ...string[]] | null = page ? [page.text] : row.saved === null ? row.texts : null;
+    if (texts === null) return this.#store.drop(row.id, "failed", now, []);
     this.#store.markSending(row.id, day);
-    const delivery = await this.#deps.channels[row.to.channel].deliver(row, now);
+    const delivery = await this.#deps.channels[row.to.channel].deliver({ ...row, texts }, now);
     const after = this.#deps.clock.now();
     switch (delivery.kind) {
       case "sent":
-        return this.#store.markSent(row.id, delivery.via, after, unaskedLog("sent", day));
+        if (page && row.to.channel === "dev" && this.env.DEV_MODE === "1") {
+          this.#devSavedPages.set(row.id, page.text);
+          if (this.#devSavedPages.size > 50) {
+            const oldest = this.#devSavedPages.keys().next();
+            if (!oldest.done) this.#devSavedPages.delete(oldest.value);
+          }
+        }
+        return this.#store.markSent(row.id, delivery.via, after, unaskedLog("sent", day), page?.next);
       case "retry":
       case "in_doubt": {
         const at = (after + delivery.afterMs) as EpochMs;
         if (row.attempts + 1 < MAX_DELIVERY_ATTEMPTS) {
           return delivery.kind === "in_doubt" ? this.#store.rescheduleInDoubt(row.id, at) : this.#store.reschedule(row.id, at);
         }
-        console.warn("delivery gave up", row.id, delivery.detail);
+        diagnostic("delivery_exhausted");
         return this.#store.drop(row.id, "failed", after, unaskedLog("failed", day));
       }
       case "failed":
-        console.warn("delivery failed", row.id, delivery.detail);
+        diagnostic("delivery_failed");
         return this.#store.drop(row.id, "failed", after, unaskedLog("failed", day));
       case "recipient_gone":
         return this.#store.recipientGone(row.id, after, [
@@ -1196,8 +1220,8 @@ export class Agent extends DurableObject<Env> {
   async #lineQuota(): Promise<QuotaReading | null> {
     try {
       return await this.#deps.ledger.lineQuota();
-    } catch (err) {
-      console.warn("LINE quota reading unavailable", err);
+    } catch {
+      diagnostic("line_quota_unavailable");
       return null;
     }
   }
@@ -1234,26 +1258,16 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #flushLogs(): Promise<void> {
-    const { channels, operatorChat } = this.#deps;
     for (let i = 0; i < LOG_BATCHES_PER_DRAIN; i++) {
       const rows = this.#store.pendingLogs(this.#deps.clock.now(), LOG_BATCH);
       if (rows.length === 0) return;
       try {
         await this.#deps.ledger.append(rows);
-      } catch (err) {
-        console.warn("log flush failed", err);
+      } catch {
+        diagnostic("ledger_flush_failed");
         return this.#store.logsFailed(this.#deps.clock.now());
       }
       this.#store.logsShipped(rows);
-      if (operatorChat !== null) {
-        for (const row of rows) {
-          if (row.stream !== "feedback") continue;
-          const from = `Feedback from ${row.agent} (${row.cohort === null ? "no cohort" : `beta: ${row.cohort}`}):`;
-          const quote = "> ";
-          const body = row.text.split(/\r\n|[\r\n\u0085\u2028\u2029]/u).map((line) => quote + line).join("\n");
-          await tellOperator(channels, operatorChat, `${from}\n${body}`, this.#deps.clock.now(), quote);
-        }
-      }
       if (rows.length < LOG_BATCH) return;
     }
   }
@@ -1294,6 +1308,10 @@ const usd = (micro: MicroUsd): string => (micro / 1_000_000).toFixed(2);
 function withoutSecrets(envelope: InboundEnvelope): InboundEnvelope {
   const e = envelope.event;
   if (e.kind !== "message") return envelope;
+  const command = commandOf(e);
+  if (command?.kind === "feedback") {
+    return { ...envelope, event: { ...e, text: command.submitted ? "/feedback submitted" : "/feedback" } };
+  }
   const r = redactSecrets(e.text);
   return r.found ? { ...envelope, event: { ...e, text: r.text, redacted: true } } : envelope;
 }
@@ -1344,6 +1362,5 @@ function defaultDeps(env: Env): AgentDeps {
       stripe: config.billing.on ? stripeApi(config.billing.stripe, config.billing.rules, (input, init) => fetch(input, init)) : null,
     },
     admission: config.admission,
-    operatorChat: config.operatorChat,
   };
 }

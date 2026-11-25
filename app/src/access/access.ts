@@ -1,3 +1,4 @@
+import { diagnostic } from "../diagnostics";
 import { z } from "zod";
 import { planAllowsBox, type Plan } from "../billing/plan";
 import type { BoxAgentRequest, SessionUsed } from "../box/client";
@@ -340,7 +341,7 @@ export class ModelAccess {
     const now = this.deps.clock.now();
     const u = attempt && "usage" in attempt ? attempt.usage : null;
     this.deps.store.appendLogs(
-      [modelCallRow({ id: crypto.randomUUID(), agent: this.#agent(), purpose: route.purpose, model: route.ref, backend, status, estimate: est, cost, usage: u, at: now })],
+      [modelCallRow({ id: crypto.randomUUID(), agent: this.#agent(), purpose: route.purpose, backend, status, estimate: est, cost, usage: u, at: now })],
       now,
     );
   }
@@ -409,7 +410,7 @@ export class ModelAccess {
     const out = await runParse(this.deps.connect(inc.endpoint), { route, mode: inc.mode, system: req.system, user: fitted.user, schema: outputOf(req.purpose) }, meter);
     const last = out.last;
     if (last?.kind === "fault") {
-      console.error("the included tier's provider refused our key", inc.endpoint.provider, last.fault);
+      diagnostic("included_provider_refused");
       return last.fault === "payment" ? { kind: "next", overCap: "included_ceiling" } : { kind: "next", transient: true };
     }
     return this.#outcome(out, route, "included", "included", meter.spent, fitted.trimmed);
@@ -505,7 +506,7 @@ export class ModelAccess {
         store.settle(
           r,
           cost,
-          [modelCallRow({ id: r.id, agent: this.#agent(), purpose: r.purpose, model: r.model, backend, status, estimate: r.estimate, cost, usage, at: now })],
+          [modelCallRow({ id: r.id, agent: this.#agent(), purpose: r.purpose, backend, status, estimate: r.estimate, cost, usage, at: now })],
           now,
         );
       },

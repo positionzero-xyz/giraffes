@@ -39,8 +39,8 @@ describe("a task completes only on evidence", () => {
       ["proposed", "1.1", false, false],
       ["plan_accepted", "1.1", true, true],
     ]);
-    expect(c.logs("task_fact").filter((f) => f.completes).map((f) => [f.taskId, f.kind, f.causeKind, JSON.parse(f.detail)])).toEqual([
-      ["p:dev:tia|t1", "plan_accepted", "choice", { via: "tap", version: 1 }],
+    expect(c.logs("task_fact").filter((f) => f.completes).map((f) => [f.taskId, f.kind, f.causeKind])).toEqual([
+      ["p:dev:tia|t1", "plan_accepted", "choice"],
     ]);
     expect(c.logs("unasked").map((u) => [u.status, u.purpose, u.taskId])).toEqual([["sent", "task_followup", "p:dev:tia|t1"]]);
     model.assertDone();
@@ -136,7 +136,8 @@ describe("why an unasked message was sent", () => {
 
     await c.advanceTo("2099-11-04T18:00");
 
-    expect(c.logs("unasked").map((u) => [u.text, u.purpose, u.taskId])).toEqual([["Do those dates still work?", "task_followup", "p:dev:xia|t1"]]);
+    expect((await c.received()).at(-1)).toBe("Do those dates still work?");
+    expect(c.logs("unasked").map((u) => [u.purpose, u.taskId])).toEqual([["task_followup", "p:dev:xia|t1"]]);
   });
 
   test("a check-in about no task is unlinked", async () => {

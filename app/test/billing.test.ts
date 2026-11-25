@@ -411,15 +411,16 @@ describe("checkout and the portal", () => {
     const c = await devChat("ike", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
     await c.say("/plan");
     await c.received();
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
     await stripeChange(kit, { user: "ike", sub: "sub_ike_1", plan: "standard", status: "active" });
     await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "included", status: "active" });
     await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "included", status: "active" });
     await c.settle();
 
     expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", NOTICE.duplicate]);
-    expect(errors.mock.calls.flat().join(" ")).toContain("sub_ike_1 sub_ike_2");
-    errors.mockRestore();
+    expect(warnings).toHaveBeenCalledWith({ code: "stripe_duplicate_subscription" });
+    expect(JSON.stringify(warnings.mock.calls)).not.toContain("sub_ike_");
+    warnings.mockRestore();
     const found = await env.LEDGER.prepare("SELECT owner_key, subscription_ids FROM billing_duplicate").all();
     expect(found.results).toEqual([{ owner_key: "p:dev:ike", subscription_ids: "sub_ike_1 sub_ike_2" }]);
     expect([(await row("sub_ike_1"))?.status, (await row("sub_ike_2"))?.status]).toEqual(["active", "active"]);
@@ -521,7 +522,7 @@ describe("stripe webhook", () => {
     const e = subscriptionEvent({ user: "jan", sub: "sub_jan", plan: "included", status: "active" });
     kit.stripe.subscriptions.set("sub_jan", e.data.object);
 
-    await expect(postStripe(e)).rejects.toThrow();
+    expect((await postStripe(e)).status).toBe(500);
     expect(await row("sub_jan")).toBeNull();
     kit.stripe.readsFailing = false;
     expect(await (await postStripe(e)).text()).toBe("applied");
@@ -723,7 +724,7 @@ describe("plus seats", () => {
 
     const ended = subscriptionEvent({ user: "tia", sub: "sub_tia", plan: "plus", status: "canceled", type: "customer.subscription.deleted" });
     kit.stripe.subscriptions.set("sub_tia", ended.data.object);
-    await expect(postStripe(ended)).rejects.toThrow();
+    expect((await postStripe(ended)).status).toBe(500);
     expect(await (await postStripe(ended)).text()).toBe("applied");
     await owner.settle();
     await member.settle();

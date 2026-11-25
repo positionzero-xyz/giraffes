@@ -902,7 +902,7 @@ export function logsForTurn(input: {
     },
   ];
   rows.push(
-    ...commit.rejected.map((r, i): LogRow => ({ stream: "rejection", id: `${turnId}|${i}`, agent, turnId, action: r.action, reason: r.reason, at: input.now })),
+    ...commit.rejected.map((r, i): LogRow => ({ stream: "rejection", id: `${turnId}|${i}`, agent, turnId, reason: r.reason, at: input.now })),
   );
   if (commit.reachability !== null) {
     rows.push({

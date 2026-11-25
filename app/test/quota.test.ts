@@ -76,11 +76,11 @@ describe("LINE quota", () => {
     line.used = 800;
     await hourly(LINE_VARS, "2099-11-20T00:00:00Z");
     await hourly(LINE_VARS, "2099-11-20T01:00:00Z");
-    expect(warn.mock.calls.filter(([m]) => String(m).includes("80%"))).toHaveLength(1);
+    expect(warn.mock.calls).toEqual([[{ code: "line_quota", value: 70 }]]);
 
     line.quota = { type: "none" };
     await hourly(LINE_VARS, "2099-11-21T00:00:00Z");
-    expect(warn.mock.calls.filter(([m]) => String(m).includes("LINE messages"))).toHaveLength(1);
+    expect(warn).toHaveBeenCalledTimes(1);
     expect(await readings()).toHaveLength(3);
     expect(line.alerts).toEqual([]);
   });

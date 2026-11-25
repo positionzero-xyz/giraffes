@@ -475,10 +475,10 @@ describe("a turn on the person's own Claude Code session", () => {
     const s = await c.snapshot();
     expect(s.pendingWakeups.filter((w) => w.kind === "reminder")).toEqual([]);
     expect(s.memoryNotes).toEqual([]);
-    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([
-      ["schedule_wakeup:call-clinic", "tool_refused"],
-      ["schedule_wakeup:check-in", "tool_refused"],
-      ["remember", "tool_refused"],
+    expect(c.logs("rejection").map((l) => l.reason)).toEqual([
+      "tool_refused",
+      "tool_refused",
+      "tool_refused",
     ]);
   });
 
@@ -512,7 +512,7 @@ describe("a turn on the person's own Claude Code session", () => {
 
     expect(await c.received()).toEqual(["Set for Friday at 9.\n(One attempt to set that reminder failed.)"]);
     expect((await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder").map((w) => w.key)).toEqual(["clinic"]);
-    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([["schedule_wakeup:clinic", "tool_refused"]]);
+    expect(c.logs("rejection").map((l) => l.reason)).toEqual(["tool_refused"]);
   });
 
   test("the session holds the conversation, so a turn sends only the context and what is new", async () => {
@@ -598,8 +598,8 @@ describe("a turn on the person's own Claude Code session", () => {
       ["proposed", false, false],
       ["plan_accepted", true, true],
     ]);
-    expect(c.logs("task_fact").filter((f) => f.completes).map((f) => [f.kind, f.causeKind, JSON.parse(f.detail)])).toEqual([
-      ["plan_accepted", "choice", { via: "tap", version: 1 }],
+    expect(c.logs("task_fact").filter((f) => f.completes).map((f) => [f.kind, f.causeKind])).toEqual([
+      ["plan_accepted", "choice"],
     ]);
     expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "task_followup"]]);
   });
@@ -631,7 +631,7 @@ describe("a turn on the person's own Claude Code session", () => {
     expect(await c.received()).toEqual(["I'll sketch a plan for you."]);
     expect(c.channel.delivered.at(-1)).not.toHaveProperty("button");
     expect((await c.snapshot()).tasks).toEqual([]);
-    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([[`task_propose:${TRIP}`, "tool_refused"]]);
+    expect(c.logs("rejection").map((l) => l.reason)).toEqual(["tool_refused"]);
   });
 });
 

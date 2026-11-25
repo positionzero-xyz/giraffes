@@ -227,8 +227,11 @@ JOIN beta b;
 
 -- Every task a participant completed. Integer division truncates toward zero, so the at >= week0 guard keeps a
 -- completion from before the start out of week 0.
-CREATE VIEW IF NOT EXISTS completion AS
-SELECT p.agent_key, p.cohort, p.half, f.task_id, f.kind AS evidence, json_extract(f.detail, '$.via') AS via, t.kind AS task_kind, f.at,
+DROP VIEW IF EXISTS completion;
+CREATE VIEW completion AS
+SELECT p.agent_key, p.cohort, p.half, f.task_id, f.kind AS evidence,
+       CASE WHEN f.kind = 'plan_accepted' THEN CASE f.cause_kind WHEN 'choice' THEN 'tap' WHEN 'message' THEN 'typed' END END AS via,
+       t.kind AS task_kind, f.at,
        (f.at - p.week0) / 604800000 AS week
 FROM task_fact f
 JOIN participant p USING (agent_key)
@@ -397,3 +400,187 @@ SELECT gate, COALESCE(CASE gate
   WHEN 'gate_survey' THEN (SELECT very * 1.0 / NULLIF(active, 0) >= 0.4 FROM gate_survey)
 END, 0) AS passed
 FROM gates ORDER BY n;
+
+-- Apply the guards before clearing historical values so a legacy writer cannot put them back.
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_agent_insert
+BEFORE INSERT ON agent
+WHEN NEW.channel NOT IN ('line', 'telegram', 'dev')
+  OR typeof(NEW.first_seen_at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_agent_update
+BEFORE UPDATE ON agent
+WHEN NEW.channel NOT IN ('line', 'telegram', 'dev')
+  OR typeof(NEW.first_seen_at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_turn_log_insert
+BEFORE INSERT ON turn_log
+WHEN NEW.event_kind NOT IN ('message', 'choice', 'lifecycle', 'wakeup', 'checkin')
+  OR typeof(NEW.batch_size) != 'integer'
+  OR typeof(NEW.cost_micro) != 'integer'
+  OR typeof(NEW.attempts) != 'integer'
+  OR typeof(NEW.started_at) != 'integer'
+  OR typeof(NEW.finished_at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_turn_log_update
+BEFORE UPDATE ON turn_log
+WHEN NEW.event_kind NOT IN ('message', 'choice', 'lifecycle', 'wakeup', 'checkin')
+  OR typeof(NEW.batch_size) != 'integer'
+  OR typeof(NEW.cost_micro) != 'integer'
+  OR typeof(NEW.attempts) != 'integer'
+  OR typeof(NEW.started_at) != 'integer'
+  OR typeof(NEW.finished_at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_model_call_insert
+BEFORE INSERT ON model_call
+WHEN NEW.model IS NOT ''
+  OR typeof(NEW.estimate_micro) != 'integer'
+  OR typeof(NEW.cost_micro) != 'integer'
+  OR typeof(NEW.input_tokens) != 'integer'
+  OR typeof(NEW.output_tokens) != 'integer'
+  OR typeof(NEW.cache_read_tokens) != 'integer'
+  OR typeof(NEW.cache_write_tokens) != 'integer'
+  OR typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_model_call_update
+BEFORE UPDATE ON model_call
+WHEN NEW.model IS NOT ''
+  OR typeof(NEW.estimate_micro) != 'integer'
+  OR typeof(NEW.cost_micro) != 'integer'
+  OR typeof(NEW.input_tokens) != 'integer'
+  OR typeof(NEW.output_tokens) != 'integer'
+  OR typeof(NEW.cache_read_tokens) != 'integer'
+  OR typeof(NEW.cache_write_tokens) != 'integer'
+  OR typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_unasked_message_insert
+BEFORE INSERT ON unasked_message
+WHEN NEW.text IS NOT ''
+  OR NEW.trigger_kind NOT IN ('message', 'choice', 'lifecycle', 'wakeup', 'checkin')
+  OR (NEW.day IS NOT NULL AND NEW.day IS NOT date(NEW.day, '+0 days'))
+  OR typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_unasked_message_update
+BEFORE UPDATE ON unasked_message
+WHEN NEW.text IS NOT ''
+  OR NEW.trigger_kind NOT IN ('message', 'choice', 'lifecycle', 'wakeup', 'checkin')
+  OR (NEW.day IS NOT NULL AND NEW.day IS NOT date(NEW.day, '+0 days'))
+  OR typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_task_insert
+BEFORE INSERT ON task
+WHEN NEW.ref IS NOT ''
+  OR NEW.title IS NOT ''
+  OR NEW.cause_kind NOT IN ('message', 'choice', 'lifecycle', 'wakeup', 'checkin', 'prune')
+  OR typeof(NEW.opened_at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_task_update
+BEFORE UPDATE ON task
+WHEN NEW.ref IS NOT ''
+  OR NEW.title IS NOT ''
+  OR NEW.cause_kind NOT IN ('message', 'choice', 'lifecycle', 'wakeup', 'checkin', 'prune')
+  OR typeof(NEW.opened_at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_task_fact_insert
+BEFORE INSERT ON task_fact
+WHEN NEW.ref IS NOT ''
+  OR NEW.detail IS NOT '{}'
+  OR NEW.kind NOT IN ('opened', 'proposed', 'plan_accepted', 'closed', 'expired', 'group_outcome', 'job_started', 'booking_made', 'booking_confirmed', 'booking_denied', 'approved')
+  OR NEW.cause_kind NOT IN ('message', 'choice', 'lifecycle', 'wakeup', 'checkin', 'prune')
+  OR typeof(NEW.at) != 'integer'
+  OR typeof(NEW.cause_at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_task_fact_update
+BEFORE UPDATE ON task_fact
+WHEN NEW.ref IS NOT ''
+  OR NEW.detail IS NOT '{}'
+  OR NEW.kind NOT IN ('opened', 'proposed', 'plan_accepted', 'closed', 'expired', 'group_outcome', 'job_started', 'booking_made', 'booking_confirmed', 'booking_denied', 'approved')
+  OR NEW.cause_kind NOT IN ('message', 'choice', 'lifecycle', 'wakeup', 'checkin', 'prune')
+  OR typeof(NEW.at) != 'integer'
+  OR typeof(NEW.cause_at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_lifecycle_insert
+BEFORE INSERT ON lifecycle
+WHEN typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_lifecycle_update
+BEFORE UPDATE ON lifecycle
+WHEN typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_action_rejection_insert
+BEFORE INSERT ON action_rejection
+WHEN NEW.action IS NOT ''
+  OR typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_action_rejection_update
+BEFORE UPDATE ON action_rejection
+WHEN NEW.action IS NOT ''
+  OR typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_admission_log_insert
+BEFORE INSERT ON admission_log
+WHEN NEW.channel NOT IN ('line', 'telegram', 'dev')
+  OR (NEW.reason IS NOT NULL AND NEW.reason NOT IN ('no_code', 'bad_code', 'used', 'full', 'recruit', 'joiner', 'staff'))
+  OR typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_admission_log_update
+BEFORE UPDATE ON admission_log
+WHEN NEW.channel NOT IN ('line', 'telegram', 'dev')
+  OR (NEW.reason IS NOT NULL AND NEW.reason NOT IN ('no_code', 'bad_code', 'used', 'full', 'recruit', 'joiner', 'staff'))
+  OR typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_feedback_insert
+BEFORE INSERT ON feedback
+WHEN NEW.text IS NOT ''
+  OR typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_feedback_update
+BEFORE UPDATE ON feedback
+WHEN NEW.text IS NOT ''
+  OR typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_safety_incident_insert
+BEFORE INSERT ON safety_incident
+WHEN NEW.detail IS NOT ''
+  OR typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+CREATE TRIGGER IF NOT EXISTS diagnostic_safety_incident_update
+BEFORE UPDATE ON safety_incident
+WHEN NEW.detail IS NOT ''
+  OR typeof(NEW.at) != 'integer'
+BEGIN SELECT RAISE(ABORT, 'invalid diagnostic row'); END;
+
+UPDATE model_call SET model = '' WHERE model != '';
+
+UPDATE unasked_message SET text = '' WHERE text != '';
+
+UPDATE task SET ref = '', title = '' WHERE ref != '' OR title != '';
+
+UPDATE task_fact SET ref = '', detail = '{}' WHERE ref != '' OR detail != '{}';
+
+UPDATE action_rejection SET action = '' WHERE action != '';
+
+UPDATE feedback SET text = '' WHERE text != '';
+
+UPDATE safety_incident SET detail = '' WHERE detail != '';

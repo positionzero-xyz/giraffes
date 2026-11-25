@@ -1,3 +1,4 @@
+import { diagnostic } from "./diagnostics";
 import { z } from "zod";
 import chatPage from "../dev/chat.html";
 import keyPage from "./access/page.html";
@@ -27,43 +28,57 @@ const DONE_PAGE = `<!doctype html><html lang="en"><meta charset="utf-8"><meta na
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
-    const config = loadConfig(env);
-    const url = new URL(req.url);
-
-    const channel = req.method === "POST" ? url.pathname.match(WEBHOOK)?.[1] : undefined;
-    if (channel !== undefined && isChannelId(channel)) {
-      const adapter = makeChannels(config)[channel];
-      const received = await adapter.receive(req);
-      if (received.kind === "rejected") return new Response(null, { status: received.status });
-      await Promise.all(received.envelopes.map((e) => agentStub(env, e.agent).enqueue(e)));
-      return new Response("ok");
+    try {
+      return await routeRequest(req, env);
+    } catch {
+      diagnostic("request_failed");
+      return new Response("internal error", { status: 500 });
     }
-
-    if (config.keys.on && url.pathname === "/key") {
-      if (req.method === "GET") return new Response(KEY_PAGE, { headers: KEY_PAGE_HEADERS });
-      if (req.method === "POST") return keyForm(req, env, config.keys);
-    }
-
-    if (config.billing.on) {
-      if (req.method === "POST" && url.pathname === "/webhook/stripe") return stripeWebhook(req, env, config.billing);
-      if (req.method === "GET" && url.pathname === DONE_PATH) return new Response(DONE_PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
-    }
-
-    if (config.devMode && req.method === "GET") {
-      if (url.pathname === "/dev") return new Response(chatPage, { headers: { "content-type": "text/html; charset=utf-8" } });
-      if (url.pathname === "/dev/transcript") return transcript(env, url);
-    }
-    if (config.devMode && config.model.backend === "scripted" && req.method === "POST" && url.pathname === "/dev/script") return script(req, env);
-    if (config.devMode && req.method === "POST" && url.pathname === "/dev/remove") return remove(req, env);
-    if (config.devMode && req.method === "POST" && url.pathname === "/dev/fire") return fire(req, env);
-    return new Response("not found", { status: 404 });
   },
 
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
-    const config = loadConfig(env);
-    if (config.line) await checkLineQuota(config, config.line.accessToken, env, controller.scheduledTime as EpochMs);
+    try {
+      const config = loadConfig(env);
+      if (config.line) await checkLineQuota(config, config.line.accessToken, env, controller.scheduledTime as EpochMs);
+    } catch {
+      diagnostic("line_quota_unavailable");
+      throw new Error("LINE quota check failed");
+    }
   },
 } satisfies ExportedHandler<Env>;
+
+async function routeRequest(req: Request, env: Env): Promise<Response> {
+  const config = loadConfig(env);
+  const url = new URL(req.url);
+
+  const channel = req.method === "POST" ? url.pathname.match(WEBHOOK)?.[1] : undefined;
+  if (channel !== undefined && isChannelId(channel)) {
+    const adapter = makeChannels(config)[channel];
+    const received = await adapter.receive(req);
+    if (received.kind === "rejected") return new Response(null, { status: received.status });
+    await Promise.all(received.envelopes.map((e) => agentStub(env, e.agent).enqueue(e)));
+    return new Response("ok");
+  }
+
+  if (config.keys.on && url.pathname === "/key") {
+    if (req.method === "GET") return new Response(KEY_PAGE, { headers: KEY_PAGE_HEADERS });
+    if (req.method === "POST") return keyForm(req, env, config.keys);
+  }
+
+  if (config.billing.on) {
+    if (req.method === "POST" && url.pathname === "/webhook/stripe") return stripeWebhook(req, env, config.billing);
+    if (req.method === "GET" && url.pathname === DONE_PATH) return new Response(DONE_PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
+  }
+
+  if (config.devMode && req.method === "GET") {
+    if (url.pathname === "/dev") return new Response(chatPage, { headers: { "content-type": "text/html; charset=utf-8" } });
+    if (url.pathname === "/dev/transcript") return transcript(env, url);
+  }
+  if (config.devMode && config.model.backend === "scripted" && req.method === "POST" && url.pathname === "/dev/script") return script(req, env);
+  if (config.devMode && req.method === "POST" && url.pathname === "/dev/remove") return remove(req, env);
+  if (config.devMode && req.method === "POST" && url.pathname === "/dev/fire") return fire(req, env);
+  return new Response("not found", { status: 404 });
+}
 
 async function checkLineQuota(config: Config, accessToken: string, env: Env, now: EpochMs): Promise<void> {
   const ledger = d1Ledger(env.LEDGER);
@@ -72,7 +87,7 @@ async function checkLineQuota(config: Config, accessToken: string, env: Env, now
   for (const percent of alertsDue(reading, await ledger.lineQuotaAlerts(reading.month))) {
     const text = quotaAlert(reading, percent);
     const via = config.operatorChat === null ? "log" : await tellOperator(makeChannels(config), config.operatorChat, text, now);
-    if (via === "log") console.warn(text);
+    if (via === "log") diagnostic("line_quota", percent);
     if (via !== null) await ledger.lineQuotaAlerted(reading.month, percent, via, now);
   }
 }
@@ -143,7 +158,7 @@ async function stripeWebhook(req: Request, env: Env, billing: Extract<Config["bi
   const parsed = parseEvent(raw);
   switch (parsed.kind) {
     case "invalid":
-      console.warn("stripe event rejected", parsed.reason);
+      diagnostic("stripe_event_rejected");
       return new Response(parsed.reason, { status: 400 });
     case "ignored":
       return new Response(`ignored: ${parsed.reason}`);

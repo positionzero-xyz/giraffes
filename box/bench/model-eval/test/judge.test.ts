@@ -6,6 +6,8 @@ import { describe, it } from "node:test";
 import { CASES } from "../cases.ts";
 import { grade } from "../checks.ts";
 import { CALIBRATION, CALIBRATION_CASE, calibrationGate, ingestScores, readScores, writeJudgeBatch, type JudgeKey } from "../judge.ts";
+import { render } from "../summary.ts";
+import { runOf } from "./fixtures.ts";
 import type { RunRecord, Wall } from "../types.ts";
 
 const record = (id: string, reply: string): RunRecord => ({
@@ -79,6 +81,30 @@ describe("the judge hand-off", () => {
     const { [b.chat]: _, ...missing } = draftScores(5, 3, 1, b);
     assert.throws(() => readScores(b.key, missing), /has no scores/);
     assert.throws(() => readScores(b.key, { ...draftScores(5, 3, 1, b), [b.chat]: { helpful: 6, natural_thai: 4 } }), /helpful is 6/);
+  });
+
+  it("refuses a score file with a key the item's rubric doesn't have", () => {
+    const b = batch();
+    const scores = draftScores(2, 3, 1, b);
+    assert.throws(() => readScores(b.key, { ...scores, [b.level("good")]: { ...scores[b.level("good")], bonus: 100 } }), /bonus/);
+    assert.throws(() => readScores(b.key, { ...scores, [b.chat]: { helpful: 4, natural_thai: 4, persuasive: 5 } }), /persuasive/);
+  });
+
+  it("ranks the trio on its rubric's keys alone", () => {
+    const b = batch();
+    const scores = draftScores(2, 3, 1, b);
+    const padded = { ...scores, [b.level("good")]: { ...scores[b.level("good")], bonus: 100 } };
+    assert.equal(calibrationGate(b.key, padded).proven, false);
+  });
+
+  it("shows no candidate mean for a judge that failed calibration, only its calibration scores", () => {
+    const b = batch();
+    const run = runOf([record("haiku@low:chat-advice:1", "ลองยืดคอค้างไว้ 10 วินาที")]);
+    const md = render(run, b.key, [{ name: "flipped", scores: draftScores(2, 3, 1, b) }]);
+    const row = md.split("\n").find((l) => l.startsWith("| haiku@low | chat"));
+    assert.ok(row, md);
+    assert.doesNotMatch(row, /4\.00/);
+    assert.match(md, /flipped calibration good 2\.00, flat 3\.00, bad 1\.00/);
   });
 
   it("stores ingested scores per judge", () => {

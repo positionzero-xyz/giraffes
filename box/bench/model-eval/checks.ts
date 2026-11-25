@@ -121,14 +121,20 @@ const PRICE = /(?<![\d.])(\d+)(?:\.\d+)? ?(?:บาท|฿|\.-)|฿ ?(\d+)/;
 function pricesOf(text: string, item: Phrase, all: readonly Phrase[]): number[] {
   const t = plain(text);
   const at = (p: Phrase, from: number) => Math.min(...p.any.map((a) => t.indexOf(plain(a), from)).filter((i) => i >= 0), Number.POSITIVE_INFINITY);
-  const prices: number[] = [];
+  const priced: number[] = [];
+  const bare: number[] = [];
   for (let start = at(item, 0); Number.isFinite(start); start = at(item, start + 1)) {
     const end = Math.min(start + 60, ...all.filter((p) => p !== item).map((p) => at(p, start + 1)));
     const span = t.slice(start, end);
-    const m = PRICE.exec(span) ?? /(?<![\d.])(\d+)(?![\d])/.exec(span);
-    if (m) prices.push(Number(m[1] ?? m[2]));
+    const m = PRICE.exec(span);
+    if (m) priced.push(Number(m[1] ?? m[2]));
+    else {
+      const n = /(?<![\d.])(\d+)(?![\d])/.exec(span);
+      if (n) bare.push(Number(n[1]));
+    }
   }
-  return prices;
+  // A bare number beside a dish, such as an order counter's 0, is its price only when no mention of it says บาท or ฿.
+  return priced.length ? priced : bare;
 }
 
 export function grade(c: Check, o: Observation): CheckResult {

@@ -12,12 +12,14 @@ COPY package.json package-lock.json /opt/box/
 RUN cd /opt/box && npm ci --omit=dev && npm cache clean --force \
  && ln -s /opt/box/node_modules/.bin/claude /usr/local/bin/claude \
  && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
- && claude --version
-COPY entrypoint.sh /opt/box/
+ && claude --version \
+ && rm -rf /tmp/* /var/tmp/*
+COPY entrypoint.sh lockdown.sh /opt/box/
 COPY src/ /opt/box/src/
 
 ENV HOME=/data/home \
     CLAUDE_CONFIG_DIR=/data/claude \
+    BOX_STATE_DIR=/data/box-state \
     DISABLE_AUTOUPDATER=1 \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     BOX_PORT=8789

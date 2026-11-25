@@ -4,7 +4,6 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const LOG = process.argv[2];
 const PORT = Number(process.argv[3] ?? 8788);
 const DUMP_DIR = process.argv[4];
-// Optional, read on every request: {"calls":[{"name","input"}],"text"} makes the model call Giraffe's tools in order, then answer `text`.
 const SCRIPT_FILE = process.argv[5];
 let seq = 0;
 
@@ -78,9 +77,10 @@ function reply(body) {
     ["content_block_stop", { index: 0 }],
     ["message_delta", { delta: { stop_reason: "tool_use" }, usage: { output_tokens: 20 } }],
     ["message_stop", {}]];
+  const holdMs = scripted ? (SCRIPT.holdMs ?? 0) : 0;
   if (scripted && results < SCRIPT.calls.length) {
     const call = SCRIPT.calls[results];
-    return { events: toolCall(`mcp__giraffe__${call.name}`, call.input) };
+    return { events: toolCall(`mcp__giraffe__${call.name}`, call.input), holdMs };
   }
   const finalText = scripted ? SCRIPT.text : "ok";
   if (structured && !sawTool) {
@@ -93,7 +93,7 @@ function reply(body) {
     ["content_block_delta", { index: 0, delta: { type: "text_delta", text: finalText } }],
     ["content_block_stop", { index: 0 }],
     ["message_delta", { delta: { stop_reason: "end_turn" }, usage: { output_tokens: 2 } }],
-    ["message_stop", {}]] };
+    ["message_stop", {}]], holdMs };
 }
 
 http.createServer((req, res) => {
@@ -113,7 +113,7 @@ http.createServer((req, res) => {
       tools: (body.tools ?? []).map((x) => x.name), messages: (body.messages ?? []).length, model: body.model, stream: body.stream,
       ...(out?.answered ? { answered: out.answered } : {}),
     }) + "\n");
-    if (out) return sse(res, out.events);
+    if (out) return out.holdMs ? setTimeout(() => sse(res, out.events), out.holdMs) : sse(res, out.events);
     if (path === "/v1/messages") {
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ id: "msg_mock", type: "message", role: "assistant", model: body.model, content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 2 } }));

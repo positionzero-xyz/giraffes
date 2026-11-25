@@ -124,7 +124,8 @@ function pricesOf(text: string, item: Phrase, all: readonly Phrase[]): number[] 
   const priced: number[] = [];
   const bare: number[] = [];
   for (let start = at(item, 0); Number.isFinite(start); start = at(item, start + 1)) {
-    const end = Math.min(start + 60, ...all.filter((p) => p !== item).map((p) => at(p, start + 1)));
+    const total = { label: "total", any: ["รวม", "total"] };
+    const end = Math.min(start + 60, ...[...all.filter((p) => p !== item), total].map((p) => at(p, start + 1)));
     const span = t.slice(start, end);
     const m = PRICE.exec(span);
     if (m) priced.push(Number(m[1] ?? m[2]));

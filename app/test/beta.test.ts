@@ -5,7 +5,7 @@ import { loadConfig, type Env } from "../src/config";
 import { AgentStore } from "../src/agent/store";
 import { eventKey, type AgentKey, type InviteCode } from "../src/domain";
 import { NOTICES } from "../src/notices";
-import { chat, devChat, fakeBox, fakeProvider, local, memoryLedger, type DevChat, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
+import { chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, type DevChat, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
 
 const t = NOTICES.en;
 const CODE = "K7P3QZ" as InviteCode;
@@ -195,6 +195,61 @@ describe("admission to the beta", () => {
     expect(provider.seen).toHaveLength(0);
     expect((await c.snapshot()).access.key).toBeNull();
     expect(await doRows(c.agent, "SELECT * FROM key_ticket")).toEqual([]);
+  });
+
+  test("removing a person deletes their saved key", async () => {
+    const c = await devChat("rem4", { model: scripted([]), at: "2099-11-04T10:00", admission: "beta" });
+    await c.say("/key");
+    await c.received();
+    await giveKey(c.agent);
+
+    await c.remove();
+
+    expect(await doRows(c.agent, "SELECT * FROM model_key")).toEqual([]);
+    expect((await c.snapshot()).access.key).toBeNull();
+  });
+
+  test("a removed person who still has a key can delete it with /key remove, and only that command is answered", async () => {
+    const model = scripted([]);
+    const c = await devChat("rem5", { model, at: "2099-11-04T10:00", admission: "beta" });
+    await c.say("/key");
+    await c.received();
+    await c.remove();
+    await giveKey(c.agent);
+
+    await c.say("/key remove");
+    await c.say("/key remove");
+    await c.say("/key");
+
+    expect(await c.received()).toEqual([t.keyRemoved, t.noKey, t.removed]);
+    expect(await doRows(c.agent, "SELECT * FROM model_key")).toEqual([]);
+    expect(JSON.stringify((await c.snapshot()).turns)).not.toContain("/key remove");
+    expect(model.calls).toHaveLength(0);
+  });
+
+  test("removing a person again deletes a key they still had", async () => {
+    const c = await devChat("rem6", { model: scripted([]), at: "2099-11-04T10:00", admission: "beta" });
+    await c.say("/key");
+    await c.received();
+    await c.remove();
+    await giveKey(c.agent);
+
+    await c.remove();
+
+    expect(await doRows(c.agent, "SELECT * FROM model_key")).toEqual([]);
+    expect(c.logs("admission").map((r) => r.change)).toEqual(["consented", "removed"]);
+  });
+
+  test("a waitlisted person can send /key remove and is told they have no key, and it stays out of their history", async () => {
+    const c = await devChat("wait1", { model: scripted([]), at: "2099-11-04T10:00", channel: "telegram", admission: "beta" });
+    await c.say("hello");
+    expect((await c.snapshot()).admission).toMatchObject({ state: "waitlisted" });
+    await c.received();
+
+    await c.say("/key remove");
+
+    expect(await c.received()).toEqual([t.noKey]);
+    expect((await c.snapshot()).turns).toEqual([]);
   });
 
   test("a removed person's box is neither provisioned further nor advanced", async () => {

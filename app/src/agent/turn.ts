@@ -766,7 +766,8 @@ function textWithoutModel(view: TurnView, notice: string | null): string | null 
  */
 export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit {
   const t: Notices = NOTICES[view.language];
-  const keepInHistory = why.kind !== "feedback";
+  const replyOutsideBeta = why.kind === "command" && !mayspend(view.admission);
+  const keepInHistory = why.kind !== "feedback" && !replyOutsideBeta;
   const waitForAccess: TurnCommit["waitForAccess"] =
     why.kind === "no_access" && why.waitForConnection ? { kind: "connection" }
     : why.kind === "over_cap" && why.catchUpBudget != null ? { kind: "budget", budget: why.catchUpBudget }
@@ -826,12 +827,13 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
   const turns = keepInHistory && !waitForAccess ? personTurns(view) : [];
   const kept = joined(note ?? text);
   if (keepInHistory && kept !== null) turns.push({ role: "note", text: kept, at: view.now, eventKey: view.batch.items[0].key });
+  const out = outbound(said === null ? [] : [said], askedOf(intentOf(trigger(view)), purposeOf(view, fx.commit, null)), view, { link: null, choice: null });
   return {
     batchKeys: batchKeys(view),
     outcome,
     ...(waitForAccess ? { waitForAccess } : {}),
     turns,
-    outbound: outbound(said === null ? [] : [said], askedOf(intentOf(trigger(view)), purposeOf(view, fx.commit, null)), view, { link: null, choice: null }),
+    outbound: out && replyOutsideBeta ? { ...out, replyOnly: true } : out,
     wakeupsCancel: [],
     wakeupsAdd: [],
     wakeupsRetime: [],

@@ -475,6 +475,7 @@ describe("the provider cutoff", () => {
 
   test("a LINE event from before the cutoff is refused before it is stored, on its first delivery, at the same time, and after its row was pruned", async () => {
     const c = await devChat("Ucutoffline", { model: scripted([chat("Got it."), chat("Hello again!")]), channel: "line", at: "2099-11-04T10:00" });
+    await c.consent();
     const t0 = c.clock.now();
     expect(await enqueue(lineEnvelope(c, "seen-before", t0))).toBe("queued");
     await c.settle();

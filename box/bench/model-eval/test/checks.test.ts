@@ -62,6 +62,20 @@ describe("every check passes its known-good and fails its known-bad", () => {
 describe("text helpers", () => {
   it("squashes spaces, dashes and Thai digits", () => assert.equal(squash("๑ – ๗ ธ.ค."), "1-7ธ.ค."));
   it("counts letters only for the Thai share", () => assert.equal(thaiShare("ก ข 123 !! 😀"), 1));
+
+  it("counts letters of every script against the Thai share, accented ones too", () => {
+    assert.ok(thaiShare("ขอบคุณ Спасибо 감사합니다") < 0.5);
+    assert.ok(thaiShare("ขอบคุณ crème brûlée café") < thaiShare("ขอบคุณ creme brulee cafe") + 0.001);
+    assert.ok(thaiShare("ขอบคุณ crème brûlée café") < 0.5);
+  });
+
+  it("counts Thai vowel and tone marks as no letters, so a word's share doesn't depend on its marks", () =>
+    assert.equal(thaiShare("ที่นี่ hi"), thaiShare("ทน hi")));
+
+  it("leaves the brand and channel names a Thai post uses out of the share", () => {
+    assert.equal(thaiShare("ทักมาทาง LINE OA หรือสั่งใน Shopee ได้เลย"), 1);
+    assert.ok(thaiShare("ทักมาทาง LINE OA หรือสั่งใน Shopee ได้เลย hello friends") < 1);
+  });
   it("reads Thai number words, including the spoken thousands", () => {
     assert.deepEqual(["หกสิบห้า", "ยี่สิบเอ็ด", "สามร้อยเก้าสิบ", "หนึ่งพันห้าร้อย", "พันห้า", "พันสอง"].map(thaiNumber), [65, 21, 390, 1500, 1500, 1200]);
     assert.equal(thaiNumber("สองสาม"), null);

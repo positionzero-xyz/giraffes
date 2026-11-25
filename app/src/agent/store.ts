@@ -296,8 +296,8 @@ type PlanCols = {
 export type NoteMessage = { readonly texts: readonly [string, ...string[]]; readonly note: string };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const DEDUPE_WINDOW_MS = 14 * DAY_MS;
-const OUTBOX_KEEP_MS = 30 * DAY_MS;
+export const DEDUPE_WINDOW_MS = 14 * DAY_MS;
+export const OUTBOX_KEEP_MS = 30 * DAY_MS;
 const LOG_RETRY_BASE_MS = 10_000;
 const LOG_RETRY_MAX_MS = 60 * 60 * 1000;
 const COMPACTION_RETRY_BASE_MS = 5 * 60 * 1000;

@@ -21,6 +21,7 @@ import {
   local,
   memoryLedger,
   openTask,
+  PRIVACY_VARS,
   propose,
   stripeChange,
   quiet,
@@ -184,7 +185,7 @@ const token = "box-token" as BoxToken;
 const posts = (rs: readonly FlyRequest[]) => rs.filter((r) => r.method === "POST").map((r) => [r.path, r.body]);
 
 describe("the static host shares one Claude login", () => {
-  const live = (vars: Record<string, string>): Env => ({ MODEL_BACKEND: "live", KEY_SECRET: TEST_KEY_SECRET, PUBLIC_URL: "https://giraffes.test", ...vars }) as unknown as Env;
+  const live = (vars: Record<string, string>): Env => ({ MODEL_BACKEND: "live", KEY_SECRET: TEST_KEY_SECRET, PUBLIC_URL: "https://giraffes.test", ...PRIVACY_VARS, ...vars }) as unknown as Env;
   const shared = { BOX_HOST: "static", BOX_SECRET, BOX_STATIC_URL: "https://box.example.test" };
 
   test("outside DEV_MODE it needs BOX_STATIC_OWNER, which must be an agent key", () => {

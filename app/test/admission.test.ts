@@ -3,6 +3,7 @@ import { planAdmission, type AdmissionView } from "../src/agent/admission";
 import type { InboxItem } from "../src/agent/turn";
 import type { Admission, AgentEvent, EpochMs, EventKey, InviteCode, LocalDate, TimeZone } from "../src/domain";
 import { NOTICES } from "../src/notices";
+import { NOTICE_URL } from "./testkit";
 
 const t = NOTICES.en;
 const NOW = Date.parse("2099-11-04T10:00:00+07:00") as EpochMs;
@@ -15,7 +16,7 @@ const consent: AgentEvent = { kind: "choice", choice: { kind: "consent" }, at: N
 
 function view(admission: Admission, event: AgentEvent, now: EpochMs = NOW): AdmissionView {
   const item: InboxItem = { key: "tg:1" as EventKey, event, attempts: 1, receivedAt: now };
-  return { now, tz: "Asia/Bangkok" as TimeZone, language: "en", checkinLocal: "09:00", admission, batch: { items: [item] } };
+  return { now, tz: "Asia/Bangkok" as TimeZone, language: "en", checkinLocal: "09:00", admission, batch: { items: [item] }, privacyUrl: NOTICE_URL };
 }
 
 const stranger: Admission = { state: "stranger" };
@@ -34,7 +35,7 @@ describe("a code is checked when it is presented", () => {
     expect(step).toEqual({
       kind: "commit",
       commit: { next: { state: "consenting", code, at: NOW }, change: "consenting", ensureCheckin: null },
-      text: t.privacy,
+      text: t.privacy(NOTICE_URL),
       consent: true,
     });
   });
@@ -104,7 +105,7 @@ describe("the seat is claimed at consent", () => {
     expect(planAdmission(view(consenting, message("what is this?")), null)).toEqual({
       kind: "commit",
       commit: { next: consenting, change: null, ensureCheckin: null },
-      text: t.privacy,
+      text: t.privacy(NOTICE_URL),
       consent: true,
     });
   });

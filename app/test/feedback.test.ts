@@ -2,7 +2,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
 import { d1Ledger } from "../src/ledger/ledger";
 import { NOTICES } from "../src/notices";
-import { chat, devChat, local, memoryLedger, scripted, scriptedChannel } from "./testkit";
+import { chat, devChat, local, memoryLedger, NOTICE_URL, scripted, scriptedChannel } from "./testkit";
 
 const at = "2099-11-04T10:00";
 const fakeKey = "sk-fake-feedback-fixture";
@@ -31,7 +31,7 @@ describe("/feedback", () => {
     ).run();
     await c.say("/join FEED23");
     await c.tap("c");
-    expect(await c.received()).toEqual([NOTICES.en.privacy, NOTICES.en.welcome]);
+    expect(await c.received()).toEqual([NOTICES.en.privacy(NOTICE_URL), NOTICES.en.welcome]);
 
     const receivedAt = local("2099-11-04T09:59");
     await c.say(`/feedback ${text}\nKey: ${fakeKey}`, { at: receivedAt });

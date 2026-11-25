@@ -5,7 +5,7 @@ import { loadConfig, type Env } from "../src/config";
 import { AgentStore } from "../src/agent/store";
 import { eventKey, type AgentKey, type InviteCode } from "../src/domain";
 import { NOTICES } from "../src/notices";
-import { chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, type DevChat, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
+import { chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, NOTICE_URL, type DevChat, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
 
 const t = NOTICES.en;
 const CODE = "K7P3QZ" as InviteCode;
@@ -58,11 +58,11 @@ describe("admission to the beta", () => {
     const c = await devChat("5531", { model, at: "2099-11-04T10:00", channel: "telegram", admission: "beta" });
 
     await c.event(follow(c, CODE));
-    expect(c.channel.delivered.at(-1)).toMatchObject({ text: t.privacy, button: { label: t.consentButton, data: "c" } });
+    expect(c.channel.delivered.at(-1)).toMatchObject({ text: t.privacy(NOTICE_URL), button: { label: t.consentButton, data: "c" } });
     expect(await enrolled("p:telegram:5531")).toBeNull();
 
     await c.tap("c");
-    expect(await c.received()).toEqual([t.privacy, t.welcome]);
+    expect(await c.received()).toEqual([t.privacy(NOTICE_URL), t.welcome]);
     const s = await c.snapshot();
     expect(s.admission).toMatchObject({ state: "admitted", seat: { cohort: "recruit", half: "intl_telegram", code: CODE, inviter: null } });
     expect(s.pendingWakeups.map((w) => w.kind)).toEqual(["checkin"]);

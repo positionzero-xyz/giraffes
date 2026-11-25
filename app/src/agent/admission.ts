@@ -42,6 +42,7 @@ export type AdmissionView = {
   readonly checkinLocal: TimeOfDay;
   readonly admission: Admission;
   readonly batch: Batch;
+  readonly privacyUrl: string;
 };
 
 export type AdmissionAnswer = { readonly kind: "checked"; readonly check: InviteCheck } | { readonly kind: "claimed"; readonly seat: SeatAnswer };
@@ -82,9 +83,9 @@ export function planAdmission(view: AdmissionView, answer: AdmissionAnswer | nul
   const code = codeIn(view.batch);
   if (code !== null) {
     if (answer?.kind !== "checked") return { kind: "check", code };
-    return answer.check.kind === "ok" ? say({ state: "consenting", code, at: view.now }, "consenting", t.privacy, true) : waitlist(answer.check.kind);
+    return answer.check.kind === "ok" ? say({ state: "consenting", code, at: view.now }, "consenting", t.privacy(view.privacyUrl), true) : waitlist(answer.check.kind);
   }
-  if (a.state === "consenting") return say(a, null, t.privacy, true);
+  if (a.state === "consenting") return say(a, null, t.privacy(view.privacyUrl), true);
   if (a.state === "waitlisted" && a.toldOn === today) return say(a, null, null);
   const reason = a.state === "waitlisted" ? a.reason : "no_code";
   return say({ state: "waitlisted", reason, toldOn: today }, a.state === "stranger" ? "waitlisted" : null, t.waitlist[reason]);

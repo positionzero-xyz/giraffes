@@ -11,6 +11,7 @@ cd "$app"
 say() { printf '\n== %s\n' "$*"; }
 run() { if [ $dry = 1 ]; then printf '   would run: %s\n' "$*"; else "$@"; fi; }
 ask() { local v; read -r -p "$1 [$2]: " v; printf '%s' "${v:-$2}"; }
+ask_required() { local v=""; while [ -z "$v" ]; do read -r -p "$1: " v; done; printf '%s' "$v"; }
 ask_secret() { local v; read -r -s -p "$1 (input hidden, Enter to skip): " v; echo >&2; printf '%s' "$v"; }
 random() { node -e 'console.log(require("crypto").randomBytes(32).toString("base64url"))'; }
 put() {
@@ -83,6 +84,8 @@ say "Secrets"
 if [ $dry = 1 ]; then existing="[]"; else existing=$(npx wrangler secret list 2>/dev/null || echo "[]"); fi
 put_once KEY_SECRET "$(random)"
 put PUBLIC_URL "$url"
+if has PRIVACY_CONTROLLER; then echo "   kept PRIVACY_CONTROLLER"; else put PRIVACY_CONTROLLER "$(ask_required "Operator's legal name and address, shown on the privacy notice")"; fi
+if has PRIVACY_CONTACT; then echo "   kept PRIVACY_CONTACT"; else put PRIVACY_CONTACT "$(ask_required "Email for privacy requests, shown on the privacy notice")"; fi
 if has FLY_API_TOKEN || [ $dry = 1 ]; then put_once FLY_API_TOKEN dry; else put FLY_API_TOKEN "$(fly tokens create org --org "$org" --name giraffes-worker --expiry 8760h)"; fi
 put_once BOX_SECRET "$(random)"
 put_once BOX_HOST fly

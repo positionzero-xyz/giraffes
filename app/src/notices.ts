@@ -60,7 +60,7 @@ export type Notices = {
   readonly planChanged: string;
   readonly acceptButton: string;
   readonly consentButton: string;
-  readonly privacy: string;
+  readonly privacy: (noticeUrl: string) => string;
   readonly welcome: string;
   readonly waitlist: Readonly<Record<WaitlistReason, string>>;
   readonly alreadyIn: string;
@@ -236,9 +236,16 @@ const en: Notices = {
   planAccepted: (title) => `(Plan accepted: ${title}.)`,
   planChanged: "(That plan has changed since, so I didn't accept it. Tap Accept on the newest one.)",
   acceptButton: "Accept plan",
-  consentButton: "I'm 18+ and agree",
-  privacy:
-    "Before we start: I keep our chat and the notes I make about you so I can help you over time. Nobody else reads them, and you can ask me to forget something at any time. You need to be 18 or over. Tap the button to agree.",
+  consentButton: "I'm 20+ and agree",
+  privacy: (notice) => `Before we start, here is how your messages are handled.
+• I keep our chat and the notes, reminders and tasks I make for you, so I can help over time. Send /memory to see your notes, reminders and tasks.
+• To answer you, I send your messages and what I've saved to the AI you connect, such as Anthropic or your Claude plan. LINE or Telegram also carries every message.
+• Our own logs keep times and counts, never your words.
+• Some of these services are outside Thailand.
+• If you share health or other private details, I keep them the same way, only to help you.
+• You need to be 20 or over.
+Who runs Giraffe, how long things are kept, and how to ask for a copy or to delete them: ${notice}
+Tap the button to agree.`,
   welcome: "You're in. Tell me what you'd like a hand with, and I'll check in with you each morning.",
   waitlist: {
     no_code: "Hi! I'm in a small invite-only beta for now. If you have an invite code, send it here.",
@@ -421,9 +428,16 @@ const th: Notices = {
   planAccepted: (title) => `(รับแผนแล้วค่ะ: ${title})`,
   planChanged: "(แผนนั้นเปลี่ยนไปแล้ว เลยยังไม่ได้รับไว้ค่ะ กดยอมรับที่แผนล่าสุดได้เลยนะคะ)",
   acceptButton: "ยอมรับแผนนี้",
-  consentButton: "อายุ 18+ และยอมรับ",
-  privacy:
-    "ก่อนเริ่มนะคะ: เราจะเก็บแชตและโน้ตเกี่ยวกับคุณไว้เพื่อช่วยคุณได้ต่อเนื่อง ไม่มีใครอื่นอ่าน และขอให้ลืมเรื่องไหนก็ได้ทุกเมื่อ ต้องมีอายุ 18 ปีขึ้นไป กดปุ่มด้านล่างเพื่อยอมรับค่ะ",
+  consentButton: "อายุ 20+ และยอมรับ",
+  privacy: (notice) => `ก่อนเริ่ม ขอแจ้งให้ทราบว่าข้อความของคุณจะถูกจัดการอย่างไรนะคะ
+• เราเก็บแชต รวมถึงโน้ต การเตือน และงานที่บันทึกไว้ให้คุณ เพื่อช่วยคุณได้ต่อเนื่อง ส่ง /memory เพื่อดูโน้ต การเตือน และงานของคุณ
+• เพื่อตอบคุณ ข้อความและสิ่งที่บันทึกไว้จะถูกส่งไปยัง AI ที่คุณเชื่อมไว้ เช่น Anthropic หรือแพ็กเกจ Claude ของคุณ และ LINE หรือ Telegram ก็รับส่งทุกข้อความด้วย
+• บันทึกของเราเก็บแค่เวลาและจำนวนครั้ง ไม่เก็บข้อความของคุณ
+• บางบริการเหล่านี้อยู่นอกประเทศไทย
+• ถ้าคุณเล่าเรื่องสุขภาพหรือเรื่องส่วนตัวที่อ่อนไหว เราจะเก็บไว้แบบเดียวกัน เพื่อช่วยคุณเท่านั้น
+• ต้องมีอายุ 20 ปีขึ้นไป
+ใครดูแล Giraffe เก็บข้อมูลนานเท่าไร และวิธีขอสำเนาหรือขอให้ลบ อ่านได้ที่: ${notice}
+กดปุ่มด้านล่างเพื่อยอมรับค่ะ`,
   welcome: "เรียบร้อยค่ะ อยากให้ช่วยเรื่องไหนบอกได้เลย แล้วทุกเช้าจะทักมาถามนะคะ",
   waitlist: {
     no_code: "สวัสดีค่ะ ตอนนี้เปิดให้ใช้เฉพาะคนที่ได้รับเชิญก่อน ถ้ามีรหัสเชิญ ส่งมาที่นี่ได้เลยค่ะ",

@@ -1,23 +1,29 @@
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentArgs, agentTurn, authStatus, cliVersion, type SessionStore, type Usage } from "../../src/claude.ts";
-import { findChrome, inspect } from "./browser.ts";
+import { authStatus, cliVersion, type Usage } from "../../src/claude.ts";
+import { findChrome } from "./browser.ts";
+import { readPlants } from "./calibration.ts";
 import { BUILD_SYSTEM, selectCases } from "./cases.ts";
-import { grade, REPLY_CAP } from "./checks.ts";
+import { grade, REPLY_CAP, structuralSignals } from "./checks.ts";
+import { buildEvidence, readJson, readTap, scoreNames } from "./evidence.ts";
 import { ingestScores, readScores, writeJudgeBatch, type JudgeKey } from "./judge.ts";
-import { agentRequest, effortOf, failedTurn, NO_OBSERVATION, readTurn, TZ } from "./product.ts";
+import { CONTROL_MODEL, effortOf, failedTurn, NO_OBSERVATION, readTurn, TZ } from "./product.ts";
+import { regradeRun } from "./regrade.ts";
+import { dryProduct, runSession, SWITCH } from "./sessions.ts";
 import { render, type JudgeScores } from "./summary.ts";
-import { CONTRACT, EFFORTS, HARNESSES, SHAPES, type Candidate, type Case, type Check, type Effort, type Observation, type RunFile, type RunRecord, type RunStatus, type Shape, type Tap, type Wall } from "./types.ts";
+import { CONTRACT, EFFORTS, HARNESSES, SHAPES, type Candidate, type Case, type Check, type Observation, type RunFile, type RunRecord, type RunStatus, type SessionStage, type Shape, type Tap, type Wall } from "./types.ts";
 import { dateOf, parseWall, todayAt } from "./when.ts";
 
 const USAGE = `usage:
   node bench/model-eval/eval.ts [--candidates haiku@default,haiku@low,...] [--shapes chat,reminder,draft,build]
-    [--cases <id,...> | <n per shape>] [--reps 1] [--out <dir>] [--now YYYY-MM-DDTHH:mm] [--claude <cli>] [--chrome <browser>] [--dry]
+    [--cases <id,...> | <n per shape>] [--reps 1] [--out <dir>] [--now YYYY-MM-DDTHH:mm]
+    [--claude <cli>] [--chrome <browser>] [--calibration <file.json>] [--long] [--dry]
   node bench/model-eval/eval.ts score --run <run dir> --judge <name> --scores <file.json>
+  node bench/model-eval/eval.ts regrade --run <run dir> [--out <new dir>] [--chrome <browser>] [--calibration <file.json>]
 A candidate is [harness:]model@effort; claude-code is the only harness. --dry prints every command and spends nothing.`;
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -26,7 +32,7 @@ const NOW_TIME = "10:00";
 const TURN_TAP_MS = 119_000;
 const BUILD_TIMEOUT_MS = 300_000;
 const BUILD_TOOLS = "Read,Write,Edit";
-const DEFAULT_CANDIDATES = "haiku@default,haiku@low,haiku@medium,haiku@high,sonnet@low,sonnet@medium,opus@low,opus@medium";
+const DEFAULT_CANDIDATES = `${CONTROL_MODEL}@default,haiku@low,haiku@medium,haiku@high,sonnet@low,sonnet@medium,opus@low,opus@medium`;
 
 function fail(message: string): never {
   console.error(message);
@@ -41,9 +47,10 @@ function flag(name: string, fallback: string): string {
 
 function parseCandidate(raw: string): Candidate {
   const m = /^(?:([a-z-]+):)?([A-Za-z0-9._-]+)@([a-z]+)$/.exec(raw.trim());
-  const harness = m?.[1] ?? "claude-code";
-  if (!m || !HARNESSES.includes(harness as Candidate["harness"]) || !EFFORTS.includes(m[3] as Effort)) fail(`not a candidate: ${raw}\n${USAGE}`);
-  return { harness: harness as Candidate["harness"], model: m[2], effort: m[3] as Effort };
+  const harness = HARNESSES.find((h) => h === (m?.[1] ?? "claude-code"));
+  const effort = EFFORTS.find((e) => e === m?.[3]);
+  if (!m || !harness || !effort) fail(`not a candidate: ${raw}\n${USAGE}`);
+  return { harness, model: m[2], effort };
 }
 
 const label = (c: Candidate) => `${c.model}@${c.effort}`;
@@ -69,12 +76,6 @@ function buildArgs(c: Candidate): string[] {
   ];
 }
 
-function readTap(file: string): Tap | null {
-  if (!existsSync(file)) return null;
-  const first = readFileSync(file, "utf8").split("\n")[0];
-  return first ? (JSON.parse(first) as Tap) : null;
-}
-
 type Outcome = {
   readonly status: RunStatus;
   readonly observation: Observation;
@@ -84,47 +85,45 @@ type Outcome = {
   readonly costUsd: number | null;
   readonly tap: Tap | null;
   readonly buildDir: string | null;
+  readonly sessionStages?: readonly SessionStage[];
+  readonly error?: string;
 };
 
 async function productTurn(cli: string, c: Candidate, k: Case, message: string, now: Wall, tapFile: string): Promise<Outcome> {
-  let id: string | null = null;
-  const sessions: SessionStore = { get: () => id, set: (v) => void (id = v) };
-  const reply = await agentTurn([process.execPath, TAP, tapFile, String(TURN_TAP_MS), cli], agentRequest(c, message, now), sessions);
-  const tap = readTap(tapFile);
-  if (reply.status !== 200) {
-    return { ...failedTurn(reply.status, tap), tap, buildDir: null };
+  const session = await runSession((file) => [process.execPath, TAP, file, String(TURN_TAP_MS), cli], tapFile, c, message, now, k.setup);
+  const sessionStages = session.stages.length ? session.stages : undefined;
+  if ("error" in session) {
+    const tap = readTap(tapFile);
+    return { ...failedTurn(502, tap), status: "harness_error", tap, buildDir: null, sessionStages, error: session.error };
   }
-  const read = readTurn(reply.body, message, now, CONTRACT[k.shape]);
-  return { ...read, costUsd: tap?.costUsd ?? read.costUsd, tap, buildDir: null };
+  const { reply, tap } = session;
+  const read = reply.status === 200 ? readTurn(reply.body, message, now, CONTRACT[k.shape], k.setup) : failedTurn(reply.status, tap);
+  return { ...read, costUsd: tap?.costUsd ?? read.costUsd, tap, buildDir: null, sessionStages };
 }
 
 function run(cmd: readonly string[], cwd: string, stdin: string): Promise<string> {
-  return new Promise((done) => {
+  return new Promise((done, reject) => {
     const [bin, ...args] = cmd;
     const proc = spawn(bin, args, { cwd, env: process.env, stdio: ["pipe", "pipe", "inherit"] });
     let out = "";
     proc.stdout.setEncoding("utf8");
     proc.stdout.on("data", (c: string) => (out += c));
+    proc.on("error", reject);
     proc.on("close", () => done(out));
     proc.stdin.on("error", () => {});
     proc.stdin.end(stdin);
   });
 }
 
-const PAGE_FILES = /\.(html?|css|js|json)$/i;
-
-function readFiles(dir: string): Record<string, string> {
-  const files: Record<string, string> = {};
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
-    if (PAGE_FILES.test(name) && statSync(path).isFile() && statSync(path).size < 1_000_000) files[name] = readFileSync(path, "utf8");
-  }
-  return files;
-}
-
 async function buildTurn(cli: string, chrome: string | null, c: Candidate, message: string, checks: readonly Check[], tapFile: string, keep: string): Promise<Outcome> {
   const work = mkdtempSync(join(tmpdir(), "giraffe-build-"));
-  const stdout = await run([process.execPath, TAP, tapFile, String(BUILD_TIMEOUT_MS), cli, ...buildArgs(c)], work, message);
+  let stdout: string;
+  try {
+    stdout = await run([process.execPath, TAP, tapFile, String(BUILD_TIMEOUT_MS), cli, ...buildArgs(c)], work, message);
+    cpSync(work, keep, { recursive: true });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
   const tap = readTap(tapFile);
   const result = stdout
     .split("\n")
@@ -136,9 +135,6 @@ async function buildTurn(cli: string, chrome: string | null, c: Candidate, messa
       }
     })
     .findLast((e) => e?.type === "result");
-  mkdirSync(keep, { recursive: true });
-  cpSync(work, keep, { recursive: true });
-  rmSync(work, { recursive: true, force: true });
   const usage: Usage | null = result?.usage ?? tap?.usage ?? null;
   const base = { calls: [], refusedCalls: [], usage, costUsd: tap?.costUsd ?? null, tap, buildDir: keep };
   if (tap?.killed) return { status: "timeout", observation: NO_OBSERVATION, ...base };
@@ -146,25 +142,26 @@ async function buildTurn(cli: string, chrome: string | null, c: Candidate, messa
     const auth = await authStatus([cli]);
     return { status: auth?.loggedIn === false ? "signed_out" : "claude_failed", observation: NO_OBSERVATION, ...base };
   }
-  const files = readFiles(keep);
-  const drive = checks.some((k) => k.kind === "persists" || k.kind === "total_adds");
-  const page = chrome && files["index.html"] ? await inspect(chrome, join(keep, "index.html"), drive) : null;
+  const evidence = await buildEvidence(chrome, keep, checks);
   const text = String(result.result ?? "");
-  return { status: "ok", observation: { text, raw: text, answered: text.trim() !== "", wakeups: [], rejected: [], files, page }, ...base };
+  return { status: "ok", observation: { ...NO_OBSERVATION, text, raw: text, ...evidence }, ...base };
 }
 
 const quote = (a: string) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replaceAll("'", "'\\''")}'`);
 
+const candidatesFor = (k: Case, candidates: readonly Candidate[]) => k.setup === "switch" ? [SWITCH] : candidates;
+
 function printDry(cli: string, candidates: readonly Candidate[], cases: readonly Case[], reps: number, now: Wall) {
-  for (const c of candidates) {
-    for (const k of cases) {
+  for (const k of cases) {
+    for (const c of candidatesFor(k, candidates)) {
       const { message } = k.make(now);
-      const req = agentRequest(c, message, now);
-      const args = k.shape === "build" ? buildArgs(c) : agentArgs(req, "<tools.json>", { id: "<new session id>", resume: false });
-      const stdin = k.shape === "build" ? message : JSON.stringify({ type: "user", message: { role: "user", content: req.turn } });
       console.log(`# ${label(c)} ${k.id} x${reps} (${CONTRACT[k.shape]}, cwd ${k.shape === "build" ? "a fresh empty temp folder" : "the box's empty folder"})`);
-      console.log([cli, ...args].map(quote).join(" "));
-      console.log(`# stdin: ${stdin}\n`);
+      const commands = k.shape === "build" ? [{ args: buildArgs(c), stdin: message, description: undefined }] : dryProduct(c, message, now, k.setup);
+      for (const { args, stdin, description } of commands) {
+        if (description) console.log(`# ${description}`);
+        console.log([cli, ...args].map(quote).join(" "));
+        console.log(`# stdin: ${stdin}\n`);
+      }
     }
   }
 }
@@ -179,12 +176,9 @@ function gitSha(): string {
 
 function judgesOf(runDir: string): { key: JudgeKey | null; judges: JudgeScores[] } {
   const keyFile = join(runDir, "judge-key.json");
-  const key = existsSync(keyFile) ? (JSON.parse(readFileSync(keyFile, "utf8")) as JudgeKey) : null;
-  const dir = join(runDir, "scores");
-  const judges = existsSync(dir)
-    ? readdirSync(dir)
-        .filter((f) => f.endsWith(".json"))
-        .map((f) => ({ name: f.slice(0, -5), scores: key ? readScores(key, JSON.parse(readFileSync(join(dir, f), "utf8"))) : {} }))
+  const key = existsSync(keyFile) ? readJson(runDir, "judge-key.json") as JudgeKey : null;
+  const judges = key
+    ? scoreNames(runDir).map((name) => ({ name, scores: readScores(key, readJson(join(runDir, "scores"), `${name}.json`)) }))
     : [];
   return { key, judges };
 }
@@ -198,6 +192,15 @@ function writeSummary(runDir: string, file: RunFile): string {
   return md;
 }
 
+function saveRun(runDir: string, file: RunFile) {
+  writeFileSync(join(runDir, "run.json"), `${JSON.stringify(file, null, 2)}\n`);
+}
+
+function extraPlants() {
+  const file = flag("calibration", "");
+  return file ? readPlants(JSON.parse(readFileSync(file, "utf8"))) : [];
+}
+
 async function main() {
   if (process.argv[2] === "score") {
     const runDir = resolve(flag("run", "") || fail(USAGE));
@@ -206,12 +209,26 @@ async function main() {
     console.log(writeSummary(runDir, JSON.parse(readFileSync(join(runDir, "run.json"), "utf8"))));
     return;
   }
+  if (process.argv[2] === "regrade") {
+    const source = resolve(flag("run", "") || fail(USAGE));
+    const out = resolve(flag("out", join(source, `regrade-${randomBytes(4).toString("hex")}`)));
+    const plants = extraPlants();
+    const run = readJson(source, "run.json") as RunFile;
+    const file = await regradeRun(run, source, findChrome(flag("chrome", "") || process.env.CHROME));
+    mkdirSync(out);
+    saveRun(out, file);
+    writeJudgeBatch(out, file.records, plants);
+    console.log(`regraded ${file.records.length} records into ${out}`);
+    console.log(writeSummary(out, file));
+    return;
+  }
 
   const candidates = flag("candidates", DEFAULT_CANDIDATES).split(",").map(parseCandidate);
   const shapes = flag("shapes", SHAPES.join(",")).split(",") as Shape[];
   if (shapes.some((s) => !SHAPES.includes(s))) fail(`shapes are ${SHAPES.join(", ")}`);
   const casesArg = flag("cases", "");
-  const cases = selectCases(shapes, casesArg === "" ? null : /^\d+$/.test(casesArg) ? Number(casesArg) : casesArg.split(","));
+  const cases = selectCases(shapes, casesArg === "" ? null : /^\d+$/.test(casesArg) ? Number(casesArg) : casesArg.split(","), process.argv.includes("--long"));
+  if (!cases.length) fail("no cases selected");
   const reps = Number(flag("reps", "1"));
   if (!Number.isInteger(reps) || reps < 1) fail(USAGE);
   const pinned = flag("now", "");
@@ -221,8 +238,10 @@ async function main() {
 
   if (process.argv.includes("--dry")) return printDry(cli, candidates, cases, reps, now);
 
-  const chrome = shapes.includes("build") ? findChrome(flag("chrome", "") || process.env.CHROME) : null;
-  if (shapes.includes("build") && !chrome) fail("build checks need Chrome or Edge: pass --chrome <path>");
+  const plants = extraPlants();
+  const hasBuilds = cases.some((k) => k.shape === "build");
+  const chrome = hasBuilds ? findChrome(flag("chrome", "") || process.env.CHROME) : null;
+  if (hasBuilds && !chrome) fail("build checks need Chrome or Edge: pass --chrome <path>");
   const auth = await authStatus([cli]);
   if (!auth?.loggedIn) fail(`the CLI at ${cli} is not signed in`);
 
@@ -233,11 +252,11 @@ async function main() {
     meta: { startedAt: new Date().toISOString(), gitSha: gitSha(), cliVersion: await cliVersion([cli]), cli, auth: { loggedIn: auth.loggedIn, authMethod: auth.authMethod }, now, nowPinned: pinned !== "", argv: process.argv.slice(2) },
     records: [],
   };
-  console.log(`run ${runDir}: ${candidates.length} candidates x ${cases.length} cases x ${reps} reps, now ${now}`);
+  console.log(`run ${runDir}: ${cases.reduce((n, k) => n + candidatesFor(k, candidates).length, 0) * reps} cases including repeats, now ${now}`);
 
   for (let rep = 1; rep <= reps; rep++) {
     for (const k of cases) {
-      for (const c of candidates) {
+      for (const c of candidatesFor(k, candidates)) {
         const id = `${label(c)}:${k.id}:${rep}`;
         const safe = id.replace(/[^\w.-]+/g, "_");
         const tapFile = join(runDir, "taps", `${safe}.jsonl`);
@@ -250,7 +269,8 @@ async function main() {
             return { status: "harness_error", observation: NO_OBSERVATION, calls: [], refusedCalls: [], usage: tap?.usage ?? null, costUsd: tap?.costUsd ?? null, tap, buildDir: null };
           },
         );
-        const record: RunRecord = {
+        const raw = out.tap?.rawOutput ?? out.observation.raw;
+        const evidence: RunRecord = {
           id,
           candidate: label(c),
           harness: c.harness,
@@ -265,9 +285,9 @@ async function main() {
           dateMismatch: machineDate !== dateOf(now),
           status: out.status,
           message,
-          reply: out.observation.raw,
+          reply: out.observation.raw.trim(),
           delivered: out.status === "ok" && CONTRACT[k.shape] === "product" ? out.observation.text : null,
-          overReplyCap: out.observation.raw.length > REPLY_CAP,
+          overReplyCap: k.shape !== "build" && raw.trim().length > REPLY_CAP,
           calls: out.calls,
           refusedCalls: out.refusedCalls,
           rejected: out.observation.rejected,
@@ -279,16 +299,24 @@ async function main() {
           costUsd: out.costUsd,
           models: out.tap?.models ?? [],
           buildDir: out.buildDir,
+          rawOutput: out.tap?.rawOutput ?? (out.status === "ok" ? out.observation.raw : null),
+          reportedModel: out.tap?.reportedModel ?? null,
+          stopReason: out.tap?.stopReason ?? out.observation.stop ?? null,
+          workerCommit: out.observation.workerCommit ?? null,
+          pageReport: out.observation.page,
+          sessionStages: out.sessionStages,
+          error: out.error,
         };
+        const record = { ...evidence, structuralSignals: structuralSignals(evidence) };
         file.records.push(record);
-        writeFileSync(join(runDir, "run.json"), `${JSON.stringify(file, null, 2)}\n`);
+        saveRun(runDir, file);
         const passed = record.checks.filter((r) => r.pass).length;
         const wall = record.wallMs === null ? "no time" : `${(record.wallMs / 1000).toFixed(1)}s`;
         console.log(`${id} ${record.status} ${passed}/${record.checks.length} checks ${wall} ${record.costUsd === null ? "cost unknown" : `$${record.costUsd.toFixed(4)}`}`);
       }
     }
   }
-  const judged = writeJudgeBatch(runDir, file.records);
+  const judged = writeJudgeBatch(runDir, file.records, plants);
   console.log(`judge batch: ${judged.items} items in ${join(runDir, "judge")}, ${judged.quarantined} kept out for naming a model`);
   console.log(writeSummary(runDir, file));
 }

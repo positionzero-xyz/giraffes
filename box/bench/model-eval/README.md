@@ -1,44 +1,40 @@
 # Model eval
 
-This harness measures how well a model and effort level do Giraffe's own jobs in Thai. It runs each case through the same path a person's text takes, or through the planned contract for jobs the product doesn't ship yet, and grades the result.
+Run the eval to compare models on Giraffe's Thai conversations, reminders, drafts, and small builds.
 
-## Shapes
+## Choose cases and preview the commands
 
-| Shape | Cases | Runs through | Deterministic checks (`checks.ts`) | Judged |
-| --- | --- | --- | --- | --- |
-| `chat` | 4 | `agentTurn`, fed what `#boxAgent` sends, then `planTurn` | `thai`, `no_jargon`, `mentions`, `fits_reply`, `worker_accepts` | yes |
-| `reminder` | 6 | the same, with "now" at 10:00 Bangkok | `due_at` (with `repeat`), or `asks_or_assumes` for a vague time, plus the chat checks except `mentions` | no |
-| `draft` | 4 | the same turn; the checks read the full reply, and `overReplyCap` records whether the Worker would cut it | `thai`, `length`, `facts` | yes |
-| `build` | 3 | a separate `claude -p` in an empty folder, file tools only | `file`, `html_complete`, `page_has`, `loads_clean`, and `persists` for the two interactive pages | yes |
-
-Chat and reminder are the product path. Draft and build are a planned contract: the product doesn't ship them yet.
-
-"Now" is today at 10:00 Asia/Bangkok, because the CLI also puts the machine's date in its system prompt. `--now` pins it, and every record whose date differs from the machine's is flagged.
-
-## Run
-
-Run from `box/` with a signed-in CLI. The pinned box CLI is the default, and it uses your local login.
+Install the locked dependencies with `npm ci` in both `app/` and `box/`. Run these commands from `box/`.
 
 ```sh
-npm ci                      # in box/ and in app/
-node bench/model-eval/eval.ts --candidates haiku@low,haiku@medium --cases 1 --dry
-node bench/model-eval/eval.ts --candidates haiku@low,haiku@medium --cases 1 --out <dir>
+node bench/model-eval/eval.ts --cases 1 --dry
+node bench/model-eval/eval.ts --long --cases chat-long-resume,chat-switch-model --dry
 ```
 
-A candidate is `model@effort`, where effort is `default` (no flag, so the CLI picks) or one of `low`, `medium`, `high`, `xhigh`, `max`. With no `--candidates`, the first-run matrix of eight Claude candidates runs. `--cases` takes case ids or a count per shape, and `--reps` repeats each case.
+A candidate is `model@effort`. The default control uses the Worker's model ID `claude-haiku-5-5` and omits the effort flag. The shared box code translates the ID to the Claude Code alias for product turns. The run records the IDs that the CLI reports. Use `--candidates` to set the matrix, `--cases` for a list of IDs or a count per shape, and `--reps` to repeat cases. Use `--now YYYY-MM-DDTHH:mm` to pin the Bangkok clock. The default is 10:00 today in Bangkok.
 
-Each run writes `run.json` (one record per case, candidate and rep), `summary.md`, the timing taps, each build's files, and a judge batch.
+Chat and reminders use the box request builder, response decoder, and Worker planner. Drafts use the same turn path and grade the full draft. Builds have a separate file-writing contract and run in a fresh folder with file tools. Launch a live run by removing `--dry` and passing `--out <parent dir>`. It needs a signed-in CLI and, for builds, Chrome or Edge. The stated CLI times exclude LINE delivery.
 
-## Judges
+`--long` enables the session cases. The history case seeds one box session for each selected candidate, then resumes after reported input and cache tokens reach 90,000. The switch case starts on Haiku and resumes the same session on Sonnet. The record keeps CLI wall time, cache reads, and cache writes for each stage.
 
-`judge/` holds a shuffled batch under random ids, with three hand-written calibration drafts mixed in. `judge-key.json` maps ids back to runs and sits outside `judge/`, so give judges only that folder. Ingest each judge's scores, then read the rebuilt summary:
+## Grade a run
+
+The summary reports deterministic results and quality results separately. Quality requires passing the deterministic checks and receiving yes on every case question from a calibrated `gemini-4-neon` judge. An optional second judge has its own column. Scores on outputs from the judge's own model family appear separately.
+
+Give each judge only the `judge/` directory. It contains case-specific questions and random IDs. Keep the key, expected planted answers, model IDs, and quarantine file outside that hand-off.
 
 ```sh
-node bench/model-eval/eval.ts score --run <run dir> --judge <name> --scores <file.json>
+node bench/model-eval/eval.ts score --run <run dir> --judge gemini-4-neon --scores <file.json>
 ```
 
-A judge counts only if it scores the calibration drafts good above flat above bad. Otherwise the summary marks it unproven.
+The score file must fill the template with JSON booleans. The judge must match the labelled planted answers and rank the three calibration drafts in order. An uncalibrated judge's scores are excluded from candidate results.
 
-## Tests
+To add held-out items, pass `--calibration <file.json>` on a run or regrade. The file is an array of objects with `id`, `caseId`, `reply`, and `expected`. The last field maps one or more question keys from `cases.ts` to booleans. Use `html` for builds. Reminder items can include `now`, `message`, `wakeups`, `notes`, and `cancelled` as evidence.
 
-`npm test` in `box/` proves every check on a known-good and a known-bad fixture, the answer keys at pinned dates, the timing tap's timeout, the browser driver on two page styles, and the judge gate both ways.
+## Regrade saved results
+
+```sh
+node bench/model-eval/eval.ts regrade --run <run dir> --out <new dir>
+```
+
+Regrading reads saved model output, Worker commits, and build files without calling a model. It writes a new result and a new judge batch. Older runs may contain only reply text and calls. The summary identifies reconstructed and missing evidence. Missing checks remain pending. Run `npm test` in `box/` to verify the graders, including the headless browser fixtures.

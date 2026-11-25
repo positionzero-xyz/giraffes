@@ -10,7 +10,11 @@ const DOM = String.raw`
   const caption = (el) => (el.innerText || el.value || el.getAttribute("aria-label") || "").trim();
   const rendered = () => [...document.querySelectorAll("body *")]
     .filter((el) => visible(el) && typeof el.innerText === "string")
-    .map((el) => el.innerText.trim())
+    .map((el) => {
+      const next = el.nextElementSibling;
+      if (el.matches("dt") && next?.matches("dd") && visible(next)) return el.innerText.trim() + "\n" + next.innerText.trim();
+      return el.innerText.trim();
+    })
     .filter((text) => text && text.length <= 320)
     .reverse();
 `;
@@ -120,7 +124,7 @@ export function formEvidence(entered: readonly Entered[], stored: readonly (stri
   })));
   const complete = parsed.some((values) => entered.every((field) => matched(values, field)));
   const missing = entered.filter((field) => !parsed.some((values) => matched(values, field))).map((field) => field.value);
-  return { complete, shown, missing, reason: complete || shown ? "complete entry after reload" : "nothing saved as one complete entry" };
+  return { complete, shown, missing, reason: complete ? "complete entry after reload" : "nothing saved as one complete entry" };
 }
 
 export function clickItem(names: readonly string[]): string {

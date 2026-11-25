@@ -103,6 +103,7 @@ export type Tap = {
   readonly sessionId?: string | null;
   readonly stopReason?: string | null;
   readonly rawOutput?: string | null;
+  readonly reportedModel?: string | null;
 };
 
 export type SessionStage = {
@@ -142,12 +143,14 @@ export type RunRecord = {
   readonly models: readonly string[];
   readonly buildDir: string | null;
   readonly rawOutput?: string | null;
+  readonly reportedModel?: string | null;
   readonly stopReason?: string | null;
   readonly workerCommit?: TurnCommit | null;
   readonly pageReport?: PageReport | null;
   readonly structuralSignals?: readonly StructuralSignal[];
   readonly sessionStages?: readonly SessionStage[];
   readonly replay?: readonly string[];
+  readonly error?: string;
 };
 
 export type RunMeta = {

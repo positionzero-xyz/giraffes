@@ -170,7 +170,7 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
   const discarded = run.records.filter((r) => MODEL_FAILED.has(r.status));
   if (discarded.length) notes.push(`Replies the Worker would discard: ${discarded.map((r) => `${r.id} ${r.status}`).join(", ")}.`);
   const failed = run.records.filter((r) => r.status !== "ok" && !MODEL_FAILED.has(r.status));
-  if (failed.length) notes.push(`Inconclusive runs: ${failed.map((r) => `${r.id} ${r.status}`).join(", ")}.`);
+  if (failed.length) notes.push(`Inconclusive runs: ${failed.map((r) => `${r.id} ${r.status}${r.error ? ` (${r.error})` : ""}`).join(", ")}.`);
   const drafts = run.records.filter((r) => r.shape === "draft");
   if (drafts.length) notes.push(`Drafts over the Worker's 600-character cut: ${drafts.filter((r) => r.status === "ok" && r.overReplyCap).length}.`);
   const friday = run.records.filter((r) => r.caseId === "reminder-next-friday" && r.status === "ok").map((r) => r.checks.find((c) => c.check === "due_at")?.detail ?? "");
@@ -188,12 +188,12 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
   const failures = run.records.filter((r) => book.quality(r) === "fail");
   if (failures.length) notes.push(
     "Structural signals on failed cases:",
-    ...failures.map((r) => `${r.id}: ${r.structuralSignals?.join(", ") || "none recorded"}.`),
+    ...failures.map((r) => `${r.id}: ${r.structuralSignals ? r.structuralSignals.join(", ") || "none" : "unavailable"}.`),
   );
   for (const r of run.records.filter((r) => r.sessionStages?.length)) {
     const stages = r.sessionStages ?? [];
     const details = stages.map(({ requestedModel, resumed, tap }) =>
-      `${requestedModel} ${resumed ? "resumed" : "new/unconfirmed"}: ${secs(tap?.wallMs ?? null)} s, cache ${tap?.usage?.cache_read_input_tokens ?? "?"}/${tap?.usage?.cache_creation_input_tokens ?? "?"}`,
+      `${tap?.reportedModel ?? requestedModel} ${resumed ? "resumed" : "new/unconfirmed"}: ${secs(tap?.wallMs ?? null)} s, cache ${tap?.usage?.cache_read_input_tokens ?? "?"}/${tap?.usage?.cache_creation_input_tokens ?? "?"}`,
     );
     notes.push(`${r.id} CLI wall and cache read/write per turn: ${details.join("; ")}.`);
   }

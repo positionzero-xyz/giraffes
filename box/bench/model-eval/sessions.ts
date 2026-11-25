@@ -66,6 +66,9 @@ export async function runSession(command: Command, tapFile: string, c: Candidate
   if (first.reply.status !== 200 || first.reply.body.stop !== "end" || !sessions.get() || first.tap?.sessionId !== sessions.get()) {
     return { stages, error: "could not seed the box session" };
   }
+  if (setup === "switch" && !first.tap?.reportedModel?.includes("haiku")) {
+    return { stages, error: "CLI did not report Haiku for the seed turn" };
+  }
   if (setup === "long") {
     let observed = input(first.tap);
     for (let i = 0; observed < TARGET && i < SEED_TURNS; i++) {
@@ -78,5 +81,8 @@ export async function runSession(command: Command, tapFile: string, c: Candidate
 
   const final = await turn(c, message, tapFile);
   if (final.reply.status === 200 && !stages.at(-1)?.resumed) return { stages, error: "CLI did not report the same session on the final turn" };
+  if (setup === "switch" && final.reply.status === 200 && !final.tap?.reportedModel?.includes("sonnet")) {
+    return { stages, error: "CLI did not report Sonnet for the resumed turn" };
+  }
   return final;
 }

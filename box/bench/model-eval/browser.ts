@@ -172,8 +172,8 @@ async function driveForm(page: Page, drive: FormDrive, totalBefore: number | nul
   const after = await page.eval<{ stored: string[]; rows: string[]; groups: string[] }>(AFTER_RELOAD);
   const facts = formEvidence(submitted.entered, after.stored, after.rows);
   return {
-    ok: facts.complete || facts.shown, shown: facts.shown, reason: facts.reason,
-    missing: facts.complete || facts.shown ? [] : facts.missing, totalBefore, totalAfter: totalIn(after.groups),
+    ok: facts.complete, shown: facts.shown, reason: facts.reason,
+    missing: facts.complete ? [] : facts.missing, totalBefore, totalAfter: totalIn(after.groups),
   };
 }
 
@@ -186,13 +186,14 @@ async function driveOrder(page: Page): Promise<NonNullable<PageReport["order"]>>
       await settle(150);
     }
     if (!await page.eval<boolean>(clickItem(dish.any))) return { ok: false, detail: `no add action for ${dish.label}` };
+    const menu = await page.eval<Snapshot>(SNAPSHOT);
     if (!await page.eval<boolean>(switchView("order"))) return { ok: false, detail: "no link to the order view" };
     await settle(150);
     chosen.push(dish);
     expected += dish.price;
     const view = await page.eval<Snapshot>(SNAPSHOT);
     const total = totalIn(view.groups);
-    if (total !== expected || !chosen.every((item) => item.any.some((name) => view.text.includes(name)))) {
+    if (view.text === menu.text || total !== expected || !chosen.every((item) => item.any.some((name) => view.text.includes(name)))) {
       return { ok: false, detail: `order view after adding ${dish.label}: total ${total ?? "missing"}, expected ${expected} with all selected items` };
     }
   }

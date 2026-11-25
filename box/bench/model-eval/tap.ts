@@ -14,6 +14,7 @@ let stopReason: string | null = null;
 let rawOutput: string | null = null;
 const assistantModels = new Set<string>();
 let initModel: string | null = null;
+let lastAssistantModel: string | null = null;
 let killed = false;
 let partial = "";
 
@@ -48,7 +49,10 @@ function read(line: string) {
   const event = e as Event;
   if (event.type === "system" && event.subtype === "init" && typeof event.model === "string") initModel = event.model;
   if (event.type === "assistant") {
-    if (typeof event.message?.model === "string" && event.message.model !== "<synthetic>") assistantModels.add(event.message.model);
+    if (typeof event.message?.model === "string" && event.message.model !== "<synthetic>") {
+      lastAssistantModel = event.message.model;
+      assistantModels.add(lastAssistantModel);
+    }
     if (firstTextMs === null && event.message?.content?.some((b) => b.type === "text" && b.text?.trim())) firstTextMs = Date.now() - started;
   }
   if (event.type === "result") {
@@ -70,11 +74,13 @@ child.stdout.on("data", (chunk: Buffer) => {
 });
 process.stdin.pipe(child.stdin);
 child.stdin.on("error", () => {});
+child.on("error", (error) => console.error(error.message));
 child.on("close", (code) => {
   clearTimeout(timer);
   read(partial + decoder.end());
   const reported = [...new Set([...models, ...assistantModels])];
   if (!reported.length && initModel) reported.push(initModel);
-  appendFileSync(record, `${JSON.stringify({ args: args.slice(0, 2), firstTextMs, wallMs: Date.now() - started, killed, costUsd, usage, models: reported, sessionId, stopReason, rawOutput })}\n`);
+  const reportedModel = lastAssistantModel ?? (reported.length === 1 ? reported[0] : initModel);
+  appendFileSync(record, `${JSON.stringify({ args: args.slice(0, 2), firstTextMs, wallMs: Date.now() - started, killed, costUsd, usage, models: reported, reportedModel, sessionId, stopReason, rawOutput })}\n`);
   process.exitCode = killed ? 124 : (code ?? 1);
 });

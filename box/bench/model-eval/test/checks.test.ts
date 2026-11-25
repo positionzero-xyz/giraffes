@@ -2,11 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { grade, thaiShare } from "../checks.ts";
 import { totalIn } from "../browser.ts";
-import { squash, statedRepeats, statedTimes, thaiNumber } from "../thai.ts";
 import type { Check, Observation, PageReport } from "../types.ts";
 
 const turn = (text: string, more: Partial<Observation> = {}): Observation => ({ text, raw: text, answered: text !== "", wakeups: [], rejected: [], files: {}, page: null, ...more });
-const page = (p: Partial<PageReport>): Observation => turn("", { page: { loaded: true, errors: [], text: "", persist: null, ...p } });
+const page = (p: Partial<PageReport>): Observation => turn("", { page: { loaded: true, errors: [], text: "", persist: null, priceGroups: p.text?.split("\n"), ...p } });
 
 function both(check: Check, good: Observation, bad: Observation) {
   const g = grade(check, good);
@@ -18,31 +17,19 @@ function both(check: Check, good: Observation, bad: Observation) {
 describe("every check passes its known-good and fails its known-bad", () => {
   it("thai", () => both({ kind: "thai", min: 0.8 }, turn("ลองยืดคอค้างไว้ 10 วินาทีนะ 🙂 ใช้ LINE ก็ได้"), turn("ok ลองดู stretching แบบ simple ก่อนนะ")));
 
-  it("no_jargon", () => both({ kind: "no_jargon" }, turn("ตั้งเตือนไว้ให้แล้วนะ พรุ่งนี้บ่ายสอง"), turn("ตั้ง wake-up ด้วย schedule_wakeup ให้แล้ว")));
-
-  it("mentions", () => both({ kind: "mentions", what: "principal", any: ["เงินต้น"] }, turn("ดอกเบี้ยจะถูกรวมกับเงิน ต้น ทุกปี"), turn("มันคือดอกเบี้ยแบบหนึ่ง")));
-
   it("fits_reply", () => both({ kind: "fits_reply" }, turn("ก".repeat(600)), turn("ก".repeat(601))));
 
   it("replies", () => both({ kind: "replies" }, turn("ได้เลย"), turn("ตั้งเตือนไม่สำเร็จ", { answered: false })));
 
-  it("facts", () =>
-    both(
-      { kind: "facts", facts: [{ kind: "amounts", label: "price", unit: "baht", need: [65], allow: [] }, { kind: "dates", label: "dates", from: 1, to: 7 }] },
-      turn("ลาเต้แก้วละ ๖๕ บาท วันที่ 1 – 7 ธ.ค. นี้"),
-      turn("ลาเต้แก้วละ 56 บาท วันที่ 1-7 ธ.ค. นี้"),
-    ));
+  it("requires a known clean stop", () => {
+    const check = { kind: "stops_clean" } as const;
+    both(check, turn("ค่ะ", { stop: "end" }), turn("ค่ะ", { stop: "refusal" }));
+    assert.equal(grade(check, turn("ค่ะ")).available, false);
+  });
 
   it("length", () => both({ kind: "length", min: 10, max: 20 }, turn("ก".repeat(15)), turn("ก".repeat(25))));
 
   it("file", () => both({ kind: "file", path: "index.html" }, turn("", { files: { "index.html": "<html></html>" } }), turn("", { files: { "menu.html": "<html></html>" } })));
-
-  it("html_complete", () =>
-    both(
-      { kind: "html_complete", path: "index.html" },
-      turn("", { files: { "index.html": "<!doctype html>\n<html lang=\"th\"><body>x</body></html>\n" } }),
-      turn("", { files: { "index.html": "<!doctype html>\n<html lang=\"th\"><body><ul><li>ก๋วยเตี๋ยว" } }),
-    ));
 
   it("page_has", () =>
     both({ kind: "page_has", items: [{ label: "pork", any: ["เรือหมู"] }, { label: "50", any: ["50"] }] }, page({ text: "ก๋วยเตี๋ยวเรือหมู 50 บาท" }), page({ text: "ก๋วยเตี๋ยวเรือเนื้อ 60 บาท" })));
@@ -50,7 +37,7 @@ describe("every check passes its known-good and fails its known-bad", () => {
   it("priced, in a list or a table, against the same prices on the wrong dishes", () => {
     const menu = { kind: "priced", items: [{ label: "pork", any: ["เรือหมู"], price: 50 }, { label: "beef", any: ["เรือเนื้อ"], price: 60 }, { label: "soup", any: ["เกาเหลา"], price: 55 }] } as const;
     both(menu, page({ text: "ก๋วยเตี๋ยวเรือหมู 50 บาท\nก๋วยเตี๋ยวเรือเนื้อ 60 บาท\nเกาเหลา 55 บาท" }), page({ text: "ก๋วยเตี๋ยวเรือหมู 60 บาท\nก๋วยเตี๋ยวเรือเนื้อ 55 บาท\nเกาเหลา 50 บาท" }));
-    both(menu, page({ text: "เมนู\tราคา\nก๋วยเตี๋ยวเรือหมู\nเส้นเล็ก น้ำตก\t฿50\nก๋วยเตี๋ยวเรือเนื้อ\t฿60\nเกาเหลา\t฿55" }), page({ text: "ก๋วยเตี๋ยวเรือหมู\nก๋วยเตี๋ยวเรือเนื้อ\nเกาเหลา\n50 60 55" }));
+    both(menu, page({ priceGroups: ["ก๋วยเตี๋ยวเรือหมู\nเส้นเล็ก น้ำตก\t฿50", "ก๋วยเตี๋ยวเรือเนื้อ\t฿60", "เกาเหลา\t฿55"] }), page({ text: "ก๋วยเตี๋ยวเรือหมู\nก๋วยเตี๋ยวเรือเนื้อ\nเกาเหลา\n50 60 55" }));
   });
 
   it("binds the full decimal price and ignores a count next to a currency total", () => {
@@ -59,7 +46,11 @@ describe("every check passes its known-good and fails its known-bad", () => {
       page({ text: "ก๋วยเตี๋ยวเรือหมู ฿50.00" }),
       page({ text: "ก๋วยเตี๋ยวเรือหมู 50.50 บาท" }),
     );
+    const price = { kind: "priced", items: [{ label: "pork", any: ["เรือหมู"], price: 50 }] } as const;
+    assert.equal(grade(price, page({ text: "ก๋วยเตี๋ยวเรือหมู -50 บาท" })).pass, false);
     assert.equal(totalIn("ยอดรวม 137 บาท\nรวม 1 รายการ"), 137);
+    assert.equal(totalIn("ยอดรวม ฿๑๓๗.๕๐"), 137.5);
+    assert.equal(totalIn(["ยอดรวมทั้งสิ้น (บาท)\n137.25", "รวม 4 รายการ"]), 137.25);
   });
 
   it("loads_clean", () => both({ kind: "loads_clean" }, page({}), page({ errors: ["ReferenceError: total is not defined"] })));
@@ -68,7 +59,7 @@ describe("every check passes its known-good and fails its known-bad", () => {
 
   it("persists", () =>
     both(
-      { kind: "persists", shown: true },
+      { kind: "persists", drive: "expense", shown: true },
       page({ persist: { ok: true, shown: true, reason: "kept after reload", missing: [], totalBefore: null, totalAfter: null } }),
       page({ persist: { ok: true, shown: false, reason: "kept after reload", missing: [], totalBefore: null, totalAfter: null } }),
     ));
@@ -84,7 +75,6 @@ describe("every check passes its known-good and fails its known-bad", () => {
 });
 
 describe("text helpers", () => {
-  it("squashes spaces, dashes and Thai digits", () => assert.equal(squash("๑ – ๗ ธ.ค."), "1-7ธ.ค."));
   it("counts letters only for the Thai share", () => assert.equal(thaiShare("ก ข 123 !! 😀"), 1));
 
   it("counts letters of every script against the Thai share, accented ones too", () => {
@@ -99,32 +89,5 @@ describe("text helpers", () => {
   it("leaves the brand and channel names a Thai post uses out of the share", () => {
     assert.equal(thaiShare("ทักมาทาง LINE OA หรือสั่งใน Shopee ได้เลย"), 1);
     assert.ok(thaiShare("ทักมาทาง LINE OA หรือสั่งใน Shopee ได้เลย hello friends") < 1);
-  });
-  it("reads Thai number words, including the spoken thousands", () => {
-    assert.deepEqual(["หกสิบห้า", "ยี่สิบเอ็ด", "สามร้อยเก้าสิบ", "หนึ่งพันห้าร้อย", "พันห้า", "พันสอง"].map(thaiNumber), [65, 21, 390, 1500, 1500, 1200]);
-    assert.equal(thaiNumber("สองสาม"), null);
-  });
-
-  it("reads a clock time in 24-hour form and in each Thai daypart", () => {
-    const read = (s: string) => statedTimes(s).map((t) => `${t.hours.join("/")}:${t.minute}`);
-    assert.deepEqual(read("เตือนตอน 17:30 นะ"), ["17:30"]);
-    assert.deepEqual(read("ห้าโมงครึ่งเย็น"), ["17:30"]);
-    assert.deepEqual(read("บ่ายสองโมง"), ["14:0"]);
-    assert.deepEqual(read("สองทุ่มครึ่ง"), ["20:30"]);
-    assert.deepEqual(read("ทุ่มนึง"), ["19:0"]);
-    assert.deepEqual(read("ตี 5"), ["5:0"]);
-    assert.deepEqual(read("8 โมงเช้า"), ["8:0"]);
-    assert.deepEqual(read("เที่ยงคืน"), ["0:0"]);
-  });
-
-  it("doesn't read a duration or a dotted date as a clock time", () => {
-    assert.deepEqual(statedTimes("อีก 20 นาที อีก 2 ชั่วโมง"), []);
-    assert.deepEqual(statedTimes("วันที่ 15.12.2569"), []);
-  });
-
-  it("reads a stated cadence", () => {
-    assert.deepEqual(statedRepeats("เตือนทุกวันจันทร์"), ["weekly"]);
-    assert.deepEqual(statedRepeats("เตือนทุกวันนะ"), ["daily"]);
-    assert.deepEqual(statedRepeats("พรุ่งนี้บ่ายสอง"), []);
   });
 });

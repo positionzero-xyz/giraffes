@@ -16,10 +16,10 @@ function driveFor(checks: readonly Check[]): PageDrive | null {
   return form?.kind === "persists" ? form.drive : null;
 }
 
-export async function buildEvidence(chrome: string, dir: string, checks: readonly Check[]) {
+export async function buildEvidence(chrome: string | null, dir: string, checks: readonly Check[]) {
   const index = join(dir, "index.html");
   const files: Record<string, string> = existsSync(index) ? { "index.html": readFileSync(index, "utf8") } : {};
-  const page = files["index.html"]?.trim() ? await inspect(chrome, index, driveFor(checks)) : null;
+  const page = chrome && files["index.html"]?.trim() ? await inspect(chrome, index, driveFor(checks)) : null;
   return { files, page };
 }
 

@@ -5,7 +5,7 @@ import { CASES } from "./cases.ts";
 import { grade, REPLY_CAP, structuralSignals } from "./checks.ts";
 import { buildEvidence, readTap } from "./evidence.ts";
 import { NO_OBSERVATION, observationOfCommit, readTurn } from "./product.ts";
-import { CONTRACT, type CheckResult, type Observation, type RunFile, type RunRecord, type Stop } from "./types.ts";
+import { CONTRACT, type CheckResult, type Observation, type RunFile, type RunRecord, type RunStatus, type Stop } from "./types.ts";
 import { parseWall } from "./when.ts";
 
 const byId = new Map(CASES.map((c) => [c.id, c]));
@@ -32,15 +32,18 @@ export async function regradeRecord(r: RunRecord, source: string, chrome: string
   const raw = r.rawOutput ?? tap?.rawOutput ?? r.reply;
   const stop = workerStop(stopReason);
   let o: Observation = { ...NO_OBSERVATION, raw, text: raw.trim(), stop };
-  let status = r.status;
+  let status: RunStatus = r.status;
   let buildDir = r.buildDir;
   if (c.shape === "build") {
-    buildDir = r.buildDir ? join(source, "builds", basename(r.buildDir)) : null;
-    if (buildDir && existsSync(buildDir) && chrome) {
-      o = { ...o, ...await buildEvidence(chrome, buildDir, checks) };
-    } else {
-      replay.push("build files or browser unavailable");
+    const localBuild = r.buildDir ? join(source, "builds", basename(r.buildDir)) : null;
+    buildDir = localBuild && existsSync(localBuild) ? localBuild : r.buildDir && existsSync(r.buildDir) ? r.buildDir : null;
+    if (buildDir) o = { ...o, ...await buildEvidence(chrome, buildDir, checks) };
+    if (r.pageReport && !o.page) {
+      o = { ...o, page: r.pageReport };
+      replay.push("used the saved browser observation");
     }
+    if (!buildDir) replay.push("build files unavailable");
+    if ((!buildDir || !chrome) && !o.page) replay.push("rendered build evidence unavailable");
   } else if (r.workerCommit) {
     o = observationOfCommit(r.workerCommit, raw, stop, contract);
   } else if (typeof r.message === "string" && typeof raw === "string" && Array.isArray(r.calls) && Array.isArray(r.refusedCalls)) {
@@ -56,17 +59,17 @@ export async function regradeRecord(r: RunRecord, source: string, chrome: string
   } else {
     replay.push("Worker commit and replay inputs absent");
   }
-  if (c.shape !== "build" && r.rawOutput === undefined && tap?.rawOutput === undefined) replay.push("only the legacy reply string survives");
+  if (c.shape !== "build" && r.rawOutput == null && tap?.rawOutput == null) replay.push("only the legacy reply string survives");
   const checked = checks.map((ch) => {
-    if (c.shape === "build" && replay.length) return unavailable(ch.kind, replay[0]);
+    if (c.shape === "build" && ch.kind === "file" && !buildDir) return unavailable(ch.kind, "build files unavailable");
+    if (c.shape === "build" && ch.kind !== "file" && (!buildDir || !chrome) && !o.page) return unavailable(ch.kind, "rendered build evidence unavailable");
     if (c.shape !== "build" && !o.workerCommit && ch.kind === "replies") return unavailable(ch.kind, "Worker delivery unavailable");
     return grade(ch, o);
   });
-  if (c.shape === "draft" && stop === undefined) checked.push(unavailable("stops_clean", "original stop reason absent"));
   const record = {
     ...r, status, buildDir, reply: raw.trim(), delivered: contract === "product" && o.workerCommit ? o.text : (r.delivered ?? null),
     overReplyCap: c.shape !== "build" && raw.trim().length > REPLY_CAP, wakeups: o.wakeups, rejected: o.rejected,
-    ...(stopReason === undefined ? {} : { stopReason }), workerCommit: o.workerCommit ?? null,
+    ...(stopReason === undefined ? {} : { stopReason }), workerCommit: r.workerCommit ?? null,
     pageReport: o.page, checks: checked, replay,
   };
   return { ...record, structuralSignals: structuralSignals(record) };

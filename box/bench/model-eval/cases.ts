@@ -12,7 +12,7 @@ const reminder = (note: string, confirmation: string) => judge({ note, confirmat
 const PRODUCT: readonly Check[] = [{ kind: "replies" }, { kind: "fits_reply" }, { kind: "stops_clean" }];
 const CHAT: readonly Check[] = [...PRODUCT, { kind: "thai", min: 0.8 }];
 const REMINDER: readonly Check[] = [...PRODUCT, { kind: "thai", min: 0.6 }];
-const DRAFT = (min: number, max: number): readonly Check[] => [{ kind: "thai", min: 0.85 }, { kind: "length", min, max }];
+const DRAFT = (min: number, max: number): readonly Check[] => [{ kind: "stops_clean" }, { kind: "thai", min: 0.85 }, { kind: "length", min, max }];
 const BUILD: readonly Check[] = [{ kind: "file", path: "index.html" }, { kind: "loads_clean" }];
 
 const fixed = (message: string, checks: readonly Check[]) => () => ({ message, checks });

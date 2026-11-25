@@ -45,8 +45,8 @@ for await (const c of process.stdin) input += c;
 const out = (e) => process.stdout.write(JSON.stringify(e) + "\\n");
 out({ type: "system" });
 await new Promise((r) => setTimeout(r, 300));
-out({ type: "assistant", message: { content: [{ type: "text", text: "echo " + input }] } });
-out({ type: "result", total_cost_usd: 0.002, modelUsage: { "claude-haiku-5-5": {} } });`,
+out({ type: "assistant", message: { model: "claude-haiku-5-5", content: [{ type: "text", text: "echo " + input }] } });
+out({ type: "result", total_cost_usd: 0.002, modelUsage: { "claude-haiku-5-5": {} }, session_id: "saved-session", stop_reason: "end_turn", result: " echo " + input + " " });`,
     );
     const r = await run(child, 10_000, "hi");
     assert.equal(r.code, 0);
@@ -54,6 +54,10 @@ out({ type: "result", total_cost_usd: 0.002, modelUsage: { "claude-haiku-5-5": {
     assert.ok(r.record.firstTextMs >= 250, `first text at ${r.record.firstTextMs}ms`);
     assert.equal(r.record.costUsd, 0.002);
     assert.deepEqual(r.record.models, ["claude-haiku-5-5"]);
+    assert.equal(r.record.reportedModel, "claude-haiku-5-5");
+    assert.equal(r.record.sessionId, "saved-session");
+    assert.equal(r.record.stopReason, "end_turn");
+    assert.equal(r.record.rawOutput, " echo hi ");
     assert.equal(r.record.killed, false);
   });
 

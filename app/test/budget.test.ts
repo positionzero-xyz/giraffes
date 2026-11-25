@@ -188,7 +188,7 @@ describe("compaction folds only what it saw", () => {
       for (let i = 0; i < 70; i++) state.storage.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES ('person', ?, ?, ?)", `short ${i}`, NOW, `dev:s${i}`);
       const plan = planCompaction(store.compactionInput(), 20_000)!;
       const text = renderPrompt(plan.prompt);
-      store.commitCompaction(compactionCommit(plan, { summary: "summary" }), NOW);
+      store.commitCompaction(compactionCommit(plan, { summary: "summary" }), NOW, store.forget().epoch);
       return { text, rows: state.storage.sql.exec<{ text: string }>("SELECT text FROM turn").toArray().map((r) => r.text) };
     });
 

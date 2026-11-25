@@ -1,6 +1,6 @@
 import { diagnostic } from "../diagnostics";
 import { z } from "zod";
-import { LANGUAGES, eventKey, parseChoice, parseInviteCode, personAgentKey, type ChannelEvent, type EpochMs, type Language, type OutboundMessage } from "../domain";
+import { LANGUAGES, eventKey, parseButton, parseInviteCode, personAgentKey, type ChannelEvent, type EpochMs, type Language, type OutboundMessage } from "../domain";
 import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
 
 const Chat = z.object({ id: z.number().int(), type: z.string() });
@@ -24,8 +24,8 @@ const MEDIA = ["photo", "sticker", "voice", "audio", "video", "video_note", "ani
 function toEvent(u: Update, now: EpochMs): TelegramEvent | null {
   const tap = u.callback_query;
   if (tap?.message?.chat.type === "private") {
-    const choice = tap.data === undefined ? null : parseChoice(tap.data);
-    return choice ? { chatId: tap.message.chat.id, at: now, event: { kind: "choice", choice, at: now }, languageCode: tap.from?.language_code } : null;
+    const b = tap.data === undefined ? null : parseButton(tap.data);
+    return b ? { chatId: tap.message.chat.id, at: now, event: { kind: "choice", choice: b.choice, at: now, ...(b.epoch === 0 ? {} : { epoch: b.epoch }) }, languageCode: tap.from?.language_code } : null;
   }
   if (u.message && u.message.chat.type === "private") {
     const m = u.message;

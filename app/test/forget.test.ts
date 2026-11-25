@@ -48,8 +48,12 @@ function gate(): { readonly wait: Promise<void>; readonly open: () => void } {
 }
 
 const stubOf = (agent: AgentKey) => env.AGENT.get(env.AGENT.idFromName(agent));
-const begin = (c: DevChat, trigger: ProviderOrder = { at: c.clock.now(), seq: null }) =>
-  runInDurableObject<Agent, { op: string; epoch: ForgetEpoch }>(stubOf(c.agent), (a) => a.beginForget(trigger));
+/** Opens a forget at the clock's time, then moves the clock a second on, so what the person sends next is after the cutoff. */
+async function begin(c: DevChat, trigger: ProviderOrder = { at: c.clock.now(), seq: null }) {
+  const opened = await runInDurableObject<Agent, { op: string; epoch: ForgetEpoch }>(stubOf(c.agent), (a) => a.beginForget(trigger));
+  c.clock.set((c.clock.now() + 1000) as EpochMs);
+  return opened;
+}
 const end = (c: DevChat, op: string) => runInDurableObject<Agent, boolean>(stubOf(c.agent), (a) => a.endForget(op));
 const sql = <T>(c: DevChat, query: string, ...params: unknown[]) =>
   runInDurableObject<Agent, T[]>(stubOf(c.agent), (_a, state) => state.storage.sql.exec(query, ...params).toArray() as T[]);

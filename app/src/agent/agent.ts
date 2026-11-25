@@ -16,7 +16,7 @@ import { NO_STANDING, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan,
 import { INVITE_FOR_MS, MANAGE_NOTE, planChanged, planChoices, planStatus, type Links } from "../billing/say";
 import { d1Billing, type BillingStore } from "../billing/store";
 import { offeredPlans, parseSubscription, stripeApi, type BillingEvent, type StripeApi } from "../billing/stripe";
-import { boxClient, type BoxClient, type BoxReply } from "../box/client";
+import { boxClient, type BoxAt, type BoxClient, type BoxReply } from "../box/client";
 import { flyHost } from "../box/fly";
 import { staticHost, type BoxHost, type BoxHostKind, type Fetch } from "../box/host";
 import {
@@ -69,7 +69,7 @@ import {
 } from "../domain";
 import { d1Ledger, modelCallRow, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
 import { NOTICES, type KeyPageError } from "../notices";
-import { scripted, scriptedConnect, type ScriptStep } from "../model/scripted";
+import { scripted, scriptedConnect, type ScriptedModel, type ScriptStep } from "../model/scripted";
 import { connect, type Connect } from "../model/client";
 import { bytesOf, renderPrompt, type PromptParts } from "../model/prompt";
 import { PROVIDERS } from "../model/providers";
@@ -81,7 +81,7 @@ import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../poli
 import { ADMISSION, planAdmission, type AdmissionAnswer, type AdmissionMode, type AdmissionStep } from "./admission";
 import { COMPACTION, compactionCommit, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
-import type { ProviderOrder } from "./forget";
+import type { Claim, ProviderOrder } from "./forget";
 import { migrate } from "./schema";
 import {
   AgentStore,
@@ -210,6 +210,7 @@ export class Agent extends DurableObject<Env> {
   #skipBoxUntil = 0;
   readonly #instance = crypto.randomUUID();
   readonly #devSavedPages = new Map<string, string>();
+  #devModel: ScriptedModel | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -218,7 +219,8 @@ export class Agent extends DurableObject<Env> {
     this.#deps = defaultDeps(env);
   }
 
-  async enqueue(given: InboundEnvelope): Promise<"queued" | "duplicate"> {
+  /** "stale": the person's last forget already covers this event, so nothing of it was stored. */
+  async enqueue(given: InboundEnvelope): Promise<"queued" | "duplicate" | "stale"> {
     const now = this.#deps.clock.now();
     const envelope = withoutSecrets(given);
     const first = {
@@ -229,7 +231,8 @@ export class Agent extends DurableObject<Env> {
       trialEndsAt: this.#deps.billing.config.on ? trialEnd(now, this.#deps.billing.config.rules) : null,
       admit: this.#deps.admission === "open" || envelope.identity.channel === "dev" ? STAFF : null,
     };
-    if (this.#store.enqueue(envelope, first, now) === "duplicate") return "duplicate";
+    const stored = this.#store.enqueue(envelope, first, now);
+    if (stored !== "inserted") return stored;
     await this.#armNoLaterThan(now);
     this.ctx.waitUntil(this.alarm());
     return "queued";
@@ -382,9 +385,12 @@ export class Agent extends DurableObject<Env> {
 
   async serve(req: ServeRequest): Promise<Served<Purpose> | { readonly kind: "not_owner" }> {
     if (!this.#store.ownsGroup(req.group, req.ownershipVersion)) return { kind: "not_owner" };
+    const refused = { kind: "no_access", why: "nothing", told: false, notice: null, waitForConnection: false } as const;
+    const claim = this.#store.claim();
+    if (!claim) return refused;
     const plan = await this.#planNow(this.#agent().key, this.#deps.clock.now());
-    if (plan.kind === "lapsed") return { kind: "no_access", why: "nothing", told: false, notice: null, waitForConnection: false };
-    return this.#access().call({ purpose: req.purpose, system: req.system, prompt: req.prompt, plan });
+    if (plan.kind === "lapsed") return refused;
+    return this.#access().call({ purpose: req.purpose, system: req.system, prompt: req.prompt, plan, claim });
   }
 
   /**
@@ -500,12 +506,20 @@ export class Agent extends DurableObject<Env> {
 
   /**
    * Dev only: this person gets a dev lane whose next turns and compactions return these outputs, so a `wrangler dev`
-   * run can prove model-driven paths without a model. Until a script is posted, a dev person has no access at all.
+   * run can prove model-driven paths without a model. Until a script is posted, a dev person has no access at all. An
+   * entry `{"hold": output}` stays in flight until `releaseScript`.
    */
   script(turns: readonly unknown[], compaction: readonly unknown[]): void {
     const output = (value: unknown): ScriptStep => ({ kind: "output", value });
-    const model = scripted(turns.map(output), { compaction: compaction.map(output) });
+    const step = (value: unknown): ScriptStep =>
+      typeof value === "object" && value !== null && "hold" in value ? { kind: "hold", then: output(value.hold) } : output(value);
+    const model = scripted(turns.map(step), { compaction: compaction.map(step) });
+    this.#devModel = model;
     this.withDeps({ connect: scriptedConnect(model, this.#deps.connect), included: devLane(DEV_URL_SCRIPTED) });
+  }
+
+  releaseScript(): void {
+    this.#devModel?.release();
   }
 
   async #runDrain(): Promise<void> {
@@ -513,15 +527,16 @@ export class Agent extends DurableObject<Env> {
     const started = clock.now();
     try {
       await this.#phase("drain_turns_failed", async () => {
+        if (this.#store.held()) return;
         const poisoned = this.#store.recover(started, this.#instance);
         if (poisoned) this.#commitPoison(poisoned);
         this.#fireDueWakeups();
         while (clock.now() - started < DRAIN_BUDGET_MS) {
           const now = clock.now();
           const catchUp = await this.#catchUpAccess(now);
-          const batch = this.#store.claimBatch(clock.now(), catchUp?.budget ?? null);
-          if (!batch) break;
-          await this.#turn(batch, catchUp?.plan ?? null);
+          const claimed = this.#store.claimBatch(clock.now(), catchUp?.budget ?? null);
+          if (!claimed) break;
+          await this.#turn(claimed.batch, claimed.claim, catchUp?.plan ?? null);
           await this.#deliverReady();
           this.#fireDueWakeups();
         }
@@ -530,7 +545,9 @@ export class Agent extends DurableObject<Env> {
       await this.#phase("drain_delivery_failed", () => this.#deliverReady());
       await this.#phase("drain_log_flush_failed", () => this.#flushLogs());
       await this.#phase("drain_compaction_failed", () => this.#compactIfDue());
-      await this.#phase("drain_prune_failed", async () => this.#store.prune(clock.now()));
+      await this.#phase("drain_prune_failed", async () => {
+        if (!this.#store.held()) this.#store.prune(clock.now());
+      });
     } finally {
       await this.#rearm();
     }
@@ -548,7 +565,7 @@ export class Agent extends DurableObject<Env> {
   #fireDueWakeups(): void {
     const now = this.#deps.clock.now();
     const a = this.#store.agent();
-    if (!a || this.#store.channelEventWaiting()) return;
+    if (!a || this.#store.held() || this.#store.channelEventWaiting()) return;
     const status = this.#store.admission().state === "removed" ? "blocked" : a.status;
     for (const firing of planFiring(now, a.tz, status, a.checkinLocal, this.#store.dueWakeups(now))) {
       this.#store.applyFiring(firing, now);
@@ -578,7 +595,7 @@ export class Agent extends DurableObject<Env> {
     };
   }
 
-  async #turn(batch: Batch, catchUpPlan: Plan | null): Promise<void> {
+  async #turn(batch: Batch, claim: Claim, catchUpPlan: Plan | null): Promise<void> {
     const a = this.#agent();
     const item = batch.items[0];
     const first = item.event;
@@ -606,11 +623,11 @@ export class Agent extends DurableObject<Env> {
       return this.#commit(planWithoutModel(view, { kind: "lapsed", alreadyToldToday }), view, a.key, { kind: "none" });
     }
 
-    const shown = await this.#historyThatFits(batch, a, view, plan);
+    const shown = await this.#historyThatFits(batch, a, view, plan, claim);
     const box = renderBoxTurn(shown, this.#store.boxSession());
     const access = this.#access();
     const catchUpBudget = batch.items[0].catchUp ? access.catchUpBudget(plan, this.#deps.clock.now()) ?? "unavailable" : null;
-    const served = await access.call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan, box });
+    const served = await access.call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan, box, claim });
     const historyTrimmed = shown.historyLeftOut > 0 || ((served.kind === "ok" || served.kind === "failed") && served.trimmed);
     switch (served.kind) {
       case "ok": {
@@ -641,6 +658,8 @@ export class Agent extends DurableObject<Env> {
       }
       case "unavailable":
         return this.#modelUnavailable(view, a.key);
+      case "fenced":
+        return;
       default:
         return assertNever(served);
     }
@@ -650,12 +669,12 @@ export class Agent extends DurableObject<Env> {
    * When the history not yet in the summary doesn't fit the smallest budget among the person's lanes, one compaction
    * step runs first, in this drain. If compaction is backing off or fails, the turn shows the newest history that fits.
    */
-  async #historyThatFits(batch: Batch, a: AgentRow, view: TurnView, plan: Plan): Promise<TurnView> {
+  async #historyThatFits(batch: Batch, a: AgentRow, view: TurnView, plan: Plan, claim: Claim): Promise<TurnView> {
     const budget = this.#access().budget("turn", TURN_SYSTEM, plan);
     const fits = view.historyLeftOut === 0 && bytesOf(renderPrompt(renderUser(view))) <= (budget ?? Infinity);
     if (fits || view.recent.length === 0) return view;
     try {
-      if (!(await this.#compactStep(plan, true))) return view;
+      if (!(await this.#compactStep(plan, true, claim))) return view;
     } catch {
       diagnostic("turn_compaction_failed");
       return view;
@@ -682,7 +701,7 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #catchUpAccess(now: EpochMs): Promise<CatchUpAccess | null> {
-    if (!this.#store.hasWaitingRequests(now)) return null;
+    if (this.#store.held() || !this.#store.hasWaitingRequests(now)) return null;
     const a = this.#store.agent();
     if (a?.status !== "active") return null;
     const plan = await this.#planNow(a.key, now);
@@ -697,8 +716,9 @@ export class Agent extends DurableObject<Env> {
         const a = this.#store.agent();
         return box && a && boxServes(this.#deps.box, a.key) ? box.state : null;
       },
-      parse: (req) => this.#onBox(req.purpose, (client, url, token) => client.parse(url, token, { model: req.model, system: req.system, user: req.user, jsonSchema: req.jsonSchema })),
-      agent: (req) => this.#onBox("turn", (client, url, token) => client.agent(url, token, req)),
+      parse: (req, claim) =>
+        this.#onBox(req.purpose, claim, (client, url, token, at) => client.parse(url, token, { model: req.model, system: req.system, user: req.user, jsonSchema: req.jsonSchema, at })),
+      agent: (req, claim) => this.#onBox("turn", claim, (client, url, token, at) => client.agent(url, token, { ...req, at })),
     };
   }
 
@@ -1085,6 +1105,7 @@ export class Agent extends DurableObject<Env> {
     const ensured = await deps.host.ensure(step.box.name, await boxToken(deps.secret, step.box.name));
     if (!ensured.ok) return diagnostic("box_ensure_failed");
     this.#store.applyBox(afterEnsure(step, deps.host.image), null, [], this.#deps.clock.now());
+    this.#store.setBoxVolume(step.box.name, null);
   }
 
   async #probe(deps: BoxDeps, step: ProbeStep): Promise<Probe> {
@@ -1094,16 +1115,33 @@ export class Agent extends DurableObject<Env> {
       if (!ensured.ok) return { kind: "down", retryable: ensured.retryable, detail: ensured.detail };
     }
     const health = await deps.client.health(step.box.url, token);
+    if (health.kind === "up") this.#store.setBoxVolume(step.box.name, health.box ?? "");
     return health.kind === "unavailable" ? { kind: "down", retryable: true, detail: health.detail } : health;
   }
 
-  async #onBox(purpose: CallPurpose, send: (client: BoxClient, url: string, token: BoxToken) => Promise<BoxReply>): Promise<BoxAnswer> {
+  /**
+   * Every request names the box's volume, read once from /health, and the epoch of the work that sends it, so an image
+   * with erase refuses work from before its last erase. The claim is checked again after each await, right before a fetch.
+   */
+  async #onBox(
+    purpose: CallPurpose,
+    claim: Claim,
+    send: (client: BoxClient, url: string, token: BoxToken, at: BoxAt | undefined) => Promise<BoxReply>,
+  ): Promise<BoxAnswer> {
     const deps = this.#deps.box;
     const box = this.#store.box();
     const agent = this.#agent().key;
     if (!boxServes(deps, agent) || box?.state !== "signed_in") return { kind: "moved_on", transient: false, told: false };
     if (this.#deps.clock.now() < this.#skipBoxUntil) return { kind: "moved_on", transient: true, told: false };
-    const res = await send(deps.client, box.url, await boxToken(deps.secret, box.name));
+    const token = await boxToken(deps.secret, box.name);
+    let volume = this.#store.boxVolume();
+    if (volume === null) {
+      if (!claim.live()) return { kind: "fenced" };
+      const health = await deps.client.health(box.url, token);
+      if (health.kind === "up") this.#store.setBoxVolume(box.name, (volume = health.box ?? ""));
+    }
+    if (!claim.live()) return { kind: "fenced" };
+    const res = await send(deps.client, box.url, token, volume ? { box: volume, epoch: claim.epoch } : undefined);
     const now = this.#deps.clock.now();
     const missed = (status: "rejected" | "unavailable"): LogRow =>
       modelCallRow({ id: crypto.randomUUID(), agent, purpose, backend: "box", status, estimate: NO_COST, cost: NO_COST, usage: null, at: now });
@@ -1112,10 +1150,12 @@ export class Agent extends DurableObject<Env> {
         return { kind: "reply", reply: res.reply, session: res.session };
       case "signed_out": {
         const t = onSignedOut(box, now, this.#store.key()?.backup === true);
-        this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [missed("rejected")], now);
+        const message = await this.#outboxMessage(deps, t.box, t.say);
+        this.#store.applyBox(t.box, claim.live() ? message : null, [missed("rejected")], now);
         return { kind: "moved_on", transient: false, told: true };
       }
       case "stale":
+        this.#store.setBoxVolume(box.name, null);
         this.#store.appendLogs([missed("rejected")], now);
         return { kind: "moved_on", transient: true, told: false };
       case "unauthorized":
@@ -1149,10 +1189,12 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #deliverReady(): Promise<void> {
-    for (const row of this.#store.readyOutbox(this.#deps.clock.now(), DELIVERY_BATCH)) await this.#deliver(row);
+    const claim = this.#store.claim();
+    if (!claim) return;
+    for (const row of this.#store.readyOutbox(this.#deps.clock.now(), DELIVERY_BATCH)) await this.#deliver(row, claim);
   }
 
-  async #deliver(row: OutboxRow): Promise<void> {
+  async #deliver(row: OutboxRow, claim: Claim): Promise<void> {
     const now = this.#deps.clock.now();
     const a = this.#agent();
     const unaskedLog = (status: UnaskedStatus, day: OutboxRow["admittedDay"]): LogRow[] =>
@@ -1172,9 +1214,9 @@ export class Agent extends DurableObject<Env> {
           ]
         : [];
 
-    if (row.saved === null && !row.replyOnly && !mayspend(this.#store.admission())) return this.#store.drop(row.id, "removed", now, unaskedLog("dropped_removed", null));
-    if (row.attempts >= MAX_DELIVERY_ATTEMPTS) return this.#store.drop(row.id, "failed", now, unaskedLog("failed", row.admittedDay));
-    if (a.status === "blocked") return this.#store.drop(row.id, "blocked", now, unaskedLog("dropped_blocked", null));
+    if (row.saved === null && !row.replyOnly && !mayspend(this.#store.admission())) return this.#store.drop(row.id, "removed", now, unaskedLog("dropped_removed", null), "pending");
+    if (row.attempts >= MAX_DELIVERY_ATTEMPTS) return this.#store.drop(row.id, "failed", now, unaskedLog("failed", row.admittedDay), "pending");
+    if (a.status === "blocked") return this.#store.drop(row.id, "blocked", now, unaskedLog("dropped_blocked", null), "pending");
 
     let day = row.admittedDay;
     if (row.intent === "unasked") {
@@ -1189,9 +1231,9 @@ export class Agent extends DurableObject<Env> {
       });
       switch (verdict.verdict) {
         case "defer":
-          return this.#store.reschedule(row.id, verdict.until);
+          return this.#store.reschedule(row.id, verdict.until, "pending");
         case "drop":
-          return this.#store.drop(row.id, verdict.reason, now, unaskedLog(DROPPED[verdict.reason], null));
+          return this.#store.drop(row.id, verdict.reason, now, unaskedLog(DROPPED[verdict.reason], null), "pending");
         case "send":
           day = verdict.day;
           break;
@@ -1202,9 +1244,9 @@ export class Agent extends DurableObject<Env> {
 
     const page = row.saved === null ? null : this.#store.savedPage(row.saved, a);
     const texts: readonly [string, ...string[]] | null = page ? [page.text] : row.saved === null ? row.texts : null;
-    if (texts === null) return this.#store.drop(row.id, "failed", now, []);
-    this.#store.markSending(row.id, day);
-    const delivery = await this.#deps.channels[row.to.channel].deliver({ ...row, texts }, now);
+    if (texts === null) return this.#store.drop(row.id, "failed", now, [], "pending");
+    if (!this.#store.markSending(row.id, day, claim.epoch)) return;
+    const delivery = await this.#deps.channels[row.to.channel].deliver({ ...row, texts }, now, claim.live);
     const after = this.#deps.clock.now();
     switch (delivery.kind) {
       case "sent":
@@ -1220,19 +1262,21 @@ export class Agent extends DurableObject<Env> {
       case "in_doubt": {
         const at = (after + delivery.afterMs) as EpochMs;
         if (row.attempts + 1 < MAX_DELIVERY_ATTEMPTS) {
-          return delivery.kind === "in_doubt" ? this.#store.rescheduleInDoubt(row.id, at) : this.#store.reschedule(row.id, at);
+          return delivery.kind === "in_doubt" ? this.#store.rescheduleInDoubt(row.id, at) : this.#store.reschedule(row.id, at, "sending");
         }
         diagnostic("delivery_exhausted");
-        return this.#store.drop(row.id, "failed", after, unaskedLog("failed", day));
+        return this.#store.drop(row.id, "failed", after, unaskedLog("failed", day), "sending");
       }
       case "failed":
         diagnostic("delivery_failed");
-        return this.#store.drop(row.id, "failed", after, unaskedLog("failed", day));
+        return this.#store.drop(row.id, "failed", after, unaskedLog("failed", day), "sending");
       case "recipient_gone":
         return this.#store.recipientGone(row.id, after, [
           ...unaskedLog("dropped_blocked", day),
           { stream: "lifecycle", id: `gone:${row.id}`, agent: a.key, change: "block", source: "delivery", at: after },
         ]);
+      case "fenced":
+        return;
       default:
         return assertNever(delivery);
     }
@@ -1249,17 +1293,18 @@ export class Agent extends DurableObject<Env> {
 
   async #compactIfDue(): Promise<void> {
     const a = this.#store.agent();
-    if (!a || !mayspend(this.#store.admission())) return;
+    const claim = this.#store.claim();
+    if (!a || !claim || !mayspend(this.#store.admission())) return;
     const person = this.#plan(this.#deps.clock.now());
     if (person.kind === "lapsed") return;
-    await this.#compactStep(person, false);
+    await this.#compactStep(person, false, claim);
   }
 
   /**
    * One compaction page sized to the smallest budget among the person's lanes; true when it was committed. `force`:
    * the next turn's history doesn't fit, so fold even below the count that otherwise triggers it.
    */
-  async #compactStep(person: Plan, force: boolean): Promise<boolean> {
+  async #compactStep(person: Plan, force: boolean, claim: Claim): Promise<boolean> {
     if (this.#store.compactionRetryAt() > this.#deps.clock.now()) return false;
     const budget = this.#access().budget("compaction", COMPACTION_SYSTEM, person);
     if (budget === null) return false;
@@ -1267,13 +1312,14 @@ export class Agent extends DurableObject<Env> {
     if (!plan) return false;
     let served: Served<"compaction">;
     try {
-      served = await this.#access().call({ purpose: "compaction", system: COMPACTION_SYSTEM, prompt: plan.prompt, plan: person });
+      served = await this.#access().call({ purpose: "compaction", system: COMPACTION_SYSTEM, prompt: plan.prompt, plan: person, claim });
     } catch (err) {
       this.#store.compactionFailed(this.#deps.clock.now());
       throw err;
     }
     const now = this.#deps.clock.now();
-    if (served.kind === "ok") return this.#store.commitCompaction(compactionCommit(plan, served.value), now);
+    if (served.kind === "fenced") return false;
+    if (served.kind === "ok") return this.#store.commitCompaction(compactionCommit(plan, served.value), now, claim.epoch);
     if (served.kind !== "no_access") this.#store.compactionFailed(now);
     return false;
   }
@@ -1298,14 +1344,15 @@ export class Agent extends DurableObject<Env> {
     const catchUp = await this.#catchUpAccess(now);
     const r = this.#store.readiness(now);
     const a = this.#store.agent();
-    const fireTimes = a && !r.channelEventWaiting ? r.earliestWakeups.map((w) => fireAt(w, a.tz)) : [];
+    const held = this.#store.held();
+    const fireTimes = a && !held && !r.channelEventWaiting ? r.earliestWakeups.map((w) => fireAt(w, a.tz)) : [];
     const t = nextAlarm({
       now,
-      inboxReadyAt: r.inboxReadyAt ?? (catchUp ? now : null),
+      inboxReadyAt: held ? null : (r.inboxReadyAt ?? (catchUp ? now : null)),
       wakeupFireAt: fireTimes.length > 0 ? (Math.min(...fireTimes) as EpochMs) : null,
-      outboxReadyAt: r.outboxReadyAt,
+      outboxReadyAt: held ? null : r.outboxReadyAt,
       logsReadyAt: r.logsReadyAt,
-      compactionRetryAt: r.compactionRetryAt,
+      compactionRetryAt: held ? null : r.compactionRetryAt,
       boxAt: this.#deps.box && mayspend(this.#store.admission()) ? r.boxAt : null,
     });
     if (t === null) await this.ctx.storage.deleteAlarm();

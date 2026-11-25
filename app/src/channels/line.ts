@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { boundedRequestBody } from "../body";
-import { eventKey, parseChoice, personAgentKey, type ChannelEvent, type EpochMs, type InboundEnvelope, type OutboundMessage } from "../domain";
+import { eventKey, parseButton, personAgentKey, type ChannelEvent, type EpochMs, type InboundEnvelope, type OutboundMessage } from "../domain";
 import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
 
 const API = "https://api.line.me/v2/bot/message";
@@ -49,9 +49,10 @@ function toEvent(e: WebhookEvent): ChannelEvent | null {
     case "unfollow": // on LINE, unfollowing is blocking
       return { kind: "lifecycle", change: "block", at };
     case "postback": {
-      const choice = e.postback ? parseChoice(e.postback.data) : null;
-      if (!choice) return null;
-      return reply ? { kind: "choice", choice, at, reply } : { kind: "choice", choice, at };
+      const b = e.postback ? parseButton(e.postback.data) : null;
+      if (!b) return null;
+      const tap = { kind: "choice", choice: b.choice, at, ...(b.epoch === 0 ? {} : { epoch: b.epoch }) } as const;
+      return reply ? { ...tap, reply } : tap;
     }
     default:
       return null;
@@ -128,12 +129,13 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
       return { kind: "accepted", envelopes, ignored: body.data.events.length - envelopes.length };
     },
 
-    async deliver(msg: OutboundMessage, now: EpochMs): Promise<Delivery> {
+    async deliver(msg: OutboundMessage, now: EpochMs, live: () => boolean = () => true): Promise<Delivery> {
       const messages = toMessages(msg);
       if (msg.reply && now < msg.reply.expiresAt - REPLY_TOKEN_SAFETY_MS) {
         const replied = await reply(msg.reply.token, messages);
         if (replied !== null) return replied;
         if (msg.replyOnly) return { kind: "failed", detail: "reply_only: the reply token was refused" };
+        if (!live()) return { kind: "fenced" };
         const pushed = await push(msg, messages);
         return pushed.kind === "retry" ? { ...pushed, kind: "in_doubt" } : pushed;
       }

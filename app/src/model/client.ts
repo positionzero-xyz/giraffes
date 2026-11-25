@@ -450,12 +450,16 @@ export type ParseRequest<T> = {
   readonly schema: z.ZodType<T>;
 };
 
-export type Parsed<T> = { readonly last: Attempt<T> | null; readonly overCap: boolean; readonly attempts: number };
+/** `fenced`: `live` turned false, so the next attempt was never sent. */
+export type Parsed<T> = { readonly last: Attempt<T> | null; readonly overCap: boolean; readonly attempts: number; readonly fenced?: true };
 
 const utf8 = new TextEncoder();
 
-/** Strict: one attempt. Loose: one attempt, then one repair when the JSON or its shape is wrong. */
-export async function runParse<T>(client: ModelClient, req: ParseRequest<T>, meter: Meter): Promise<Parsed<T>> {
+/**
+ * Strict: one attempt. Loose: one attempt, then one repair when the JSON or its shape is wrong. `live` is asked right
+ * before each attempt is reserved and sent, with no await between, so a forget that began meanwhile stops it.
+ */
+export async function runParse<T>(client: ModelClient, req: ParseRequest<T>, meter: Meter, live: () => boolean = () => true): Promise<Parsed<T>> {
   const schema = jsonSchemaOf(req.schema);
   let repair: WireRequest["repair"] = null;
   let last: Attempt<T> | null = null;
@@ -466,6 +470,7 @@ export async function runParse<T>(client: ModelClient, req: ParseRequest<T>, met
     const extra = repair ? repair.previous + repair.issues + REPAIR_INSTRUCTION : "";
     const bytes = utf8.encode(req.system + user + extra).length;
     if (repair && bytes > req.route.promptBytes) break;
+    if (!live()) return { last, overCap: false, attempts: sent, fenced: true };
     const reserved = meter.reserve(req.route, bytes);
     if (!reserved) return { last, overCap: true, attempts: sent };
     sent++;

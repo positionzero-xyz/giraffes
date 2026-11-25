@@ -228,7 +228,7 @@ describe("fly host", () => {
           config: {
             image: "registry.fly.io/giraffes-box:1",
             guest: { cpu_kind: "shared", cpus: 1, memory_mb: 2048 },
-            env: { BOX_TOKEN: "box-token" },
+            env: { BOX_TOKEN: "box-token", BOX_REQUIRE_EPOCH: "1" },
             mounts: [{ volume: fly.volumes.get(app)![0].id, path: "/data" }],
             services: [
               {
@@ -827,6 +827,7 @@ describe("connecting a Claude plan", () => {
           resumed: false,
           fresh: expect.stringContaining("Person: hello"),
         },
+        at: null,
       },
     ]);
     expect(model.calls).toHaveLength(0);

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import type { AgentReply } from "../../../src/claude.ts";
+import { CASES } from "../cases.ts";
+import { grade } from "../checks.ts";
 import { agentRequest, readTurn } from "../product.ts";
 import type { Wall } from "../types.ts";
 
@@ -43,5 +45,36 @@ describe("the request a box turn sends", () => {
     assert.deepEqual(agentRequest({ harness: "claude-code", model: capture.request.model, effort: "default" }, capture.message, capture.now), capture.request);
     const low = agentRequest({ harness: "claude-code", model: "opus", effort: "low" }, capture.message, capture.now);
     assert.deepEqual(low, { ...capture.request, model: "opus", effort: "low" });
+  });
+});
+
+function failedChecks(caseId: string, reply: Body): string[] {
+  const k = CASES.find((c) => c.id === caseId) ?? assert.fail(caseId);
+  const { message, checks } = k.make(NOW);
+  const r = readTurn(reply, message, NOW);
+  assert.equal(r.status, "ok");
+  return checks.map((c) => grade(c, r.observation)).filter((g) => !g.pass).map((g) => g.check);
+}
+
+describe("what the person would receive", () => {
+  it("fails a chat turn that stays quiet", () => assert.ok(failedChecks("chat-advice", body({ text: "", calls: [] })).includes("replies")));
+
+  it("passes a reminder set on the second try, and keeps the refused first call as a diagnostic", () => {
+    const repaired = body({
+      refusedCalls: [{ name: "schedule_wakeup", input: { key: "gas-stove", at: "10:20", asked: true }, problems: ["at: Invalid"] }],
+    });
+    assert.deepEqual(failedChecks("reminder-in-20", repaired), []);
+    const r = readTurn(repaired, "อีก 20 นาทีเตือนให้ไปปิดเตาแก๊สด้วยนะ", NOW);
+    assert.ok(r.observation.rejected.length > 0);
+    assert.notEqual(r.observation.text, r.observation.raw, "the Worker's own notice is part of what the person reads");
+    assert.ok(r.observation.text.startsWith(r.observation.raw));
+  });
+
+  it("grades a chat reply on what the Worker delivers, cut to the reply limit, and flags the overlong draft", () => {
+    const long = `ลองยืดคอค้างไว้ 10 วินาทีนะ ${"ค่อยๆ หายใจเข้าออกช้าๆ ".repeat(40)}`;
+    const r = readTurn(body({ text: long, calls: [] }), "นั่งทำงานหน้าคอมทั้งวันจนปวดคอกับไหล่มากเลย", NOW);
+    assert.ok(r.observation.text.length <= 600);
+    assert.equal(r.observation.raw, long.trim());
+    assert.ok(failedChecks("chat-advice", body({ text: long, calls: [] })).includes("fits_reply"));
   });
 });

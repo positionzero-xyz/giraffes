@@ -83,6 +83,7 @@ import { COMPACTION, compactionCommit, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import { forgetCommandOf, type Claim, type ProviderOrder } from "./forget";
 import { backupsWithin, HOST_BACKUP_DAYS } from "./backups";
+import type { Backups } from "./forget-text";
 import { migrate } from "./schema";
 import {
   AgentStore,
@@ -1322,7 +1323,8 @@ export class Agent extends DurableObject<Env> {
   async #eraseBox(epoch: ForgetEpoch): Promise<{ readonly volume: string | null } | null> {
     const deps = this.#deps.box;
     const box = this.#store.box();
-    if (!box || !boxServes(deps, this.#agent().key)) return { volume: null };
+    if (!box) return { volume: null };
+    if (!boxServes(deps, this.#agent().key)) return null;
     if (box.state === "provisioning" || box.state === "reclaiming") return null;
     const token = await boxToken(deps.secret, box.name);
     let volume = this.#store.boxVolume();
@@ -1345,7 +1347,7 @@ export class Agent extends DurableObject<Env> {
   }
 
   /** Whether every backup copy at our hosts has a documented expiry within the receipt's window. */
-  #backups() {
+  #backups(): Backups {
     const host = this.#deps.box?.host.kind ?? null;
     const box = this.#store.claudePlan() || this.#store.box() !== null;
     return backupsWithin([HOST_BACKUP_DAYS.durableObject, ...(box && host !== null ? HOST_BACKUP_DAYS[host] : [])]);

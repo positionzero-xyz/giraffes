@@ -766,9 +766,8 @@ function textWithoutModel(view: TurnView, notice: string | null): string | null 
  */
 export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit {
   const t: Notices = NOTICES[view.language];
-  /** Someone outside the beta reaches a command only with one they may always send, such as /key remove. */
-  const outsider = why.kind === "command" && !mayspend(view.admission);
-  const keepInHistory = why.kind !== "feedback" && !outsider;
+  const replyOutsideBeta = why.kind === "command" && !mayspend(view.admission);
+  const keepInHistory = why.kind !== "feedback" && !replyOutsideBeta;
   const waitForAccess: TurnCommit["waitForAccess"] =
     why.kind === "no_access" && why.waitForConnection ? { kind: "connection" }
     : why.kind === "over_cap" && why.catchUpBudget != null ? { kind: "budget", budget: why.catchUpBudget }
@@ -834,7 +833,7 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     outcome,
     ...(waitForAccess ? { waitForAccess } : {}),
     turns,
-    outbound: out && outsider ? { ...out, replyOnly: true } : out,
+    outbound: out && replyOutsideBeta ? { ...out, replyOnly: true } : out,
     wakeupsCancel: [],
     wakeupsAdd: [],
     wakeupsRetime: [],

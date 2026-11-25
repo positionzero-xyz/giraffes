@@ -2,7 +2,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import type { AgentKey } from "../src/domain";
 import { NOTICES } from "../src/notices";
-import { chat, devChat, NOTICE_URL, scripted } from "./testkit";
+import { billingOn, chat, devChat, local, NOTICE_URL, scripted } from "./testkit";
 
 const doRows = (agent: AgentKey, sql: string): Promise<unknown[]> =>
   runInDurableObject(env.AGENT.get(env.AGENT.idFromName(agent)), (_a, state) => state.storage.sql.exec(sql).toArray());
@@ -68,6 +68,20 @@ describe("open admission asks for consent before anything else", () => {
     expect(await c.received()).toEqual([NOTICES.en.removed, NOTICES.en.removed]);
     expect((await c.snapshot()).admission).toMatchObject({ state: "removed" });
     expect(c.logs("admission").map((r) => r.change)).toEqual(["consented", "removed"]);
+  });
+
+  test("with billing on, the trial starts at the consent tap, so a person who taps weeks after writing still gets all of it", async () => {
+    const kit = billingOn();
+    const c = await devChat("6106", { model: scripted([chat("Hi!")]), at: "2099-11-04T10:00", channel: "telegram", billing: kit.deps });
+    const t = NOTICES.en;
+
+    await c.say("hello");
+    c.clock.set(local("2099-11-25T10:00"));
+    await c.tap("c2");
+
+    expect((await c.snapshot()).plan).toEqual({ kind: "trial", endsAt: local("2099-12-09T10:00") });
+    await c.say("hello again");
+    expect(await c.received()).toEqual([t.privacy(NOTICE_URL), t.welcome, "Hi!"]);
   });
 
   test("a dev person is still admitted at first contact", async () => {

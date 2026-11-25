@@ -738,7 +738,8 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #admission(view: TurnView, a: AgentRow): Promise<void> {
-    const admission = { ...view, privacyUrl: this.#deps.privacyUrl };
+    const billing = this.#deps.billing.config;
+    const admission = { ...view, privacyUrl: this.#deps.privacyUrl, trialEndsAt: billing.on ? trialEnd(view.now, billing.rules) : null };
     let step: AdmissionStep = this.#deps.admission === "open" ? planOpenAdmission(admission) : planAdmission(admission, null);
     if (step.kind !== "commit") {
       const now = this.#deps.clock.now();
@@ -763,7 +764,7 @@ export class Agent extends DurableObject<Env> {
     const now = this.#deps.clock.now();
     const attempts = Math.max(...view.batch.items.map((i) => i.attempts));
     if (attempts >= TURN.maxModelAttempts) {
-      const unchanged = { next: view.admission, change: null, ensureCheckin: null };
+      const unchanged = { next: view.admission, change: null, ensureCheckin: null, trialEndsAt: null };
       const why = { kind: "admission", commit: unchanged, text: NOTICES[view.language].billingBusy, consent: false } as const;
       return this.#commit(planWithoutModel(view, why), view, agent, { kind: "none" });
     }

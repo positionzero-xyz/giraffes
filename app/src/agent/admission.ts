@@ -35,6 +35,8 @@ export type AdmissionCommit = {
   /** Logged; null when nothing a gate reads changed, such as a daily reminder to send a code. */
   readonly change: AdmissionChange | null;
   readonly ensureCheckin: NewWakeup | null;
+  /** Set when this commit admits the person while billing is on: their trial starts at admission. */
+  readonly trialEndsAt: EpochMs | null;
 };
 
 export type AdmissionView = {
@@ -45,6 +47,8 @@ export type AdmissionView = {
   readonly admission: Admission;
   readonly batch: Batch;
   readonly privacyUrl: string;
+  /** When a trial that started now would end; null while billing is off. */
+  readonly trialEndsAt: EpochMs | null;
 };
 
 export type AdmissionAnswer = { readonly kind: "checked"; readonly check: InviteCheck } | { readonly kind: "claimed"; readonly seat: SeatAnswer };
@@ -59,11 +63,23 @@ export type AdmissionStep =
  * A code is checked when it is presented and the seat is claimed when the person consents. Anyone not admitted
  * is told to send a code at most once per local day.
  */
-const say = (next: Admission, change: AdmissionChange | null, text: string | null, consent = false, ensureCheckin: NewWakeup | null = null): AdmissionStep => ({
+const say = (next: Admission, change: AdmissionChange | null, text: string | null, consent = false): AdmissionStep => ({
   kind: "commit",
-  commit: { next, change, ensureCheckin },
+  commit: { next, change, ensureCheckin: null, trialEndsAt: null },
   text,
   consent,
+});
+
+const admit = (view: AdmissionView, seat: Seat): AdmissionStep => ({
+  kind: "commit",
+  commit: {
+    next: { state: "admitted", seat, at: view.now },
+    change: "consented",
+    ensureCheckin: checkinWakeup(view.now, view.tz, view.checkinLocal),
+    trialEndsAt: view.trialEndsAt,
+  },
+  text: NOTICES[view.language].welcome,
+  consent: false,
 });
 
 const consentedIn = (batch: Batch) => batch.items.some((i) => i.event.kind === "choice" && i.event.choice.kind === "consent");
@@ -81,7 +97,7 @@ export function planAdmission(view: AdmissionView, answer: AdmissionAnswer | nul
     if (answer?.kind !== "claimed") return { kind: "claim", code: a.code };
     const seat = answer.seat;
     if (seat.kind !== "granted") return waitlist(seat.kind);
-    return say({ state: "admitted", seat: seat.seat, at: view.now }, "consented", t.welcome, false, checkinWakeup(view.now, view.tz, view.checkinLocal));
+    return admit(view, seat.seat);
   }
 
   const code = codeIn(view.batch);
@@ -114,8 +130,6 @@ export function planOpenAdmission(view: AdmissionView): AdmissionStep {
   const first = view.batch.items[0].event;
   if (first.kind === "wakeup" || first.kind === "checkin" || a.state === "admitted") return say(a, null, null);
   if (a.state === "removed") return say(a, null, t.removed);
-  if (consentedIn(view.batch)) {
-    return say({ state: "admitted", seat: STAFF, at: view.now }, "consented", t.welcome, false, checkinWakeup(view.now, view.tz, view.checkinLocal));
-  }
+  if (consentedIn(view.batch)) return admit(view, STAFF);
   return say(a, null, t.privacy(view.privacyUrl), true);
 }

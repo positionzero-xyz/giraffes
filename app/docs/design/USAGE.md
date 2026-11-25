@@ -136,7 +136,7 @@ A box still `signed_out` 48 hours after its first link, never signed in, is recl
 
 ## Call site 7: a person pays
 
-With `BILLING=on` and `ADMISSION=open` (`BOX.md`, "Plans and billing", has the contract), the person's first message with billing on started a 14-day trial. They send `/plan`.
+With `BILLING=on` and `ADMISSION=open` (`BOX.md`, "Plans and billing", has the contract), the person's consent tap started a 14-day trial. They send `/plan`.
 
 1. The command runs without the model. It reads the person's standing from D1, says the plan and the days left, expires the Checkout sessions an earlier `/plan` handed out, and adds one new Stripe Checkout link per plan, created with the idempotency key `<agent key>|<message key>|<plan>`. A person who already pays gets a customer portal link instead.
 2. The person pays. Stripe posts `checkout.session.completed` and `customer.subscription.created` to `/webhook/stripe`, in either order. The Worker checks the signature, reads only the subscription id and the owner from each, and calls the owner's `Agent.billingEvent`.

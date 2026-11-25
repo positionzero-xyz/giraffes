@@ -1272,7 +1272,7 @@ export class Agent extends DurableObject<Env> {
       case "retry":
       case "in_doubt": {
         const at = (after + delivery.afterMs) as EpochMs;
-        // Telegram has no idempotency key: after a send that may have gone out, the receipt waits for /forget status instead of going twice.
+        // A receipt that may have gone out isn't sent twice, since Telegram has no idempotency key; /forget status offers it.
         if (row.privacy === "receipt" && (delivery.kind === "in_doubt" || row.to.channel === "telegram")) {
           return this.#store.drop(row.id, "failed", after, [], "sending");
         }

@@ -27,8 +27,17 @@ export function nextWeekday(w: Wall, weekday: number, hhmm: string): Wall {
   return same > w ? same : dayAt(w, days + 7, hhmm);
 }
 
+const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+/** A weekly routine's first time: the next one, or now as well when asked at its very minute, since the Worker takes a reminder due this minute. */
+export function weeklyReadings(w: Wall, weekday: number, hhmm: string): Reading[] {
+  const next = { label: `next ${DAYS[weekday]} ${hhmm}`, at: nextWeekday(w, weekday, hhmm) };
+  return mondayIndex(w) === weekday && w.slice(11) === hhmm ? [{ label: "starting now", at: w }, next] : [next];
+}
+
+/** "Next Friday" names a later day than today: the coming one, or the one a week after it. */
 export function nextWeekReadings(w: Wall, weekday: number, hhmm: string): Reading[] {
-  const coming = nextWeekday(w, weekday, hhmm);
+  const coming = dayAt(w, (weekday - mondayIndex(w) + 7) % 7 || 7, hhmm);
   const nextWeek = dayAt(w, weekday - mondayIndex(w) + 7, hhmm);
   return coming === nextWeek ? [{ label: "next week", at: nextWeek }] : [{ label: "coming", at: coming }, { label: "next week", at: nextWeek }];
 }

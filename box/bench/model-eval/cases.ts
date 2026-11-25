@@ -1,5 +1,5 @@
 import type { Case, Check, Fact, Phrase, Rubric, Shape, Wall } from "./types.ts";
-import { addMinutes, dateOf, dayAt, nextWeekReadings, nextWeekday, thaiDate } from "./when.ts";
+import { addMinutes, dateOf, dayAt, nextWeekReadings, thaiDate, weeklyReadings } from "./when.ts";
 
 const p = (label: string, ...any: string[]): Phrase => ({ label, any });
 const says = (label: string, ...any: string[]): Fact => ({ kind: "says", label, any });
@@ -90,7 +90,7 @@ export const CASES: readonly Case[] = [
     judged: false,
     make: (now) => ({
       message: "ช่วยเตือนส่งรายงานให้หัวหน้าทุกวันจันทร์ 8 โมงเช้าหน่อย",
-      checks: [...REMINDER, { kind: "due_at", readings: [{ label: "next Monday 08:00", at: nextWeekday(now, 0, "08:00") }], repeat: "weekly", about: ["รายงาน", "report"] }],
+      checks: [...REMINDER, { kind: "due_at", readings: weeklyReadings(now, 0, "08:00"), repeat: "weekly", about: ["รายงาน", "report"] }],
     }),
   },
   {

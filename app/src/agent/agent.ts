@@ -271,17 +271,26 @@ export class Agent extends DurableObject<Env> {
     return "applied";
   }
 
-  /** Two paying subscriptions need a person to decide which to refund, so nothing is cancelled here. */
   async #flagDuplicate(owner: AgentKey): Promise<void> {
-    const { store } = this.#deps.billing;
+    const { billing: { store }, channels, operatorChat } = this.#deps;
     const now = this.#deps.clock.now();
     const owned = await store.owned(owner, now);
     if (owned.length < 2) return;
+    const ids = owned.join(" ");
     diagnostic("stripe_duplicate_subscription");
     await store.recordDuplicate(owner, owned, now);
+    const alertKey = `duplicate-alert:${ids}`;
+    let alerted = this.#store.billingEventSeen(alertKey);
+    if (!alerted && operatorChat !== null) {
+      const via = await tellOperator(channels, operatorChat, `Duplicate paid plans for ${owner}\nSubscriptions: ${ids}\nReview the subscriptions and any extra charges.`, now);
+      if (via !== null) {
+        this.#store.billingEventDone(alertKey, this.#deps.clock.now());
+        alerted = true;
+      }
+    }
     const a = this.#store.agent();
-    const text = a ? NOTICES[a.language].duplicate : null;
-    this.#store.notifyOnce(`duplicate:${owned.join(" ")}`, eventKey.billing("duplicate"), text ? { texts: [text], note: text } : null, now);
+    const text = a ? NOTICES[a.language][alerted ? "duplicateAlerted" : "duplicate"] : null;
+    this.#store.notifyOnce(`duplicate:${ids}`, eventKey.billing("duplicate"), text ? { texts: [text], note: text } : null, now);
     await this.#armNoLaterThan(now);
     this.ctx.waitUntil(this.alarm());
   }

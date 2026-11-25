@@ -43,6 +43,7 @@ export type Notices = {
   readonly manage: (link: string) => string;
   readonly noPortal: string;
   readonly duplicate: string;
+  readonly duplicateAlerted: string;
   readonly invite: (code: string) => string;
   readonly inviteNotOwner: string;
   readonly inviteFull: (seats: number) => string;
@@ -190,7 +191,8 @@ const en: Notices = {
   noLinks: "I couldn't make the payment links just now. Send /plan again in a minute.",
   manage: (link) => `To change or cancel your plan: ${link}`,
   noPortal: "I couldn't make the link to manage your plan just now. Send /plan again in a minute.",
-  duplicate: "It looks like you're paying for more than one plan at once. We'll sort out the duplicate for you.",
+  duplicate: "It looks like you have more than one paid plan. You can check your billing now with /plan. If you see an extra charge, report it with /feedback.",
+  duplicateAlerted: "It looks like you have more than one paid plan. I've alerted the team to review it. They'll check for extra charges and decide whether to cancel a plan or issue a refund. You can check your billing now with /plan.",
   invite: (code) => `Ask the person you want to add to send me this within 7 days. It works once.\n/join ${code}`,
   inviteNotOwner: "Only the owner of a Plus plan can invite people. Send /plan to see the plans.",
   inviteFull: (seats) => `All ${seats} places on your Plus plan are taken.`,
@@ -375,7 +377,8 @@ const th: Notices = {
   noLinks: "ตอนนี้สร้างลิงก์ชำระเงินไม่ได้ค่ะ ส่ง /plan อีกครั้งในอีกสักครู่นะคะ",
   manage: (link) => `เปลี่ยนหรือยกเลิกแพ็กเกจได้ที่: ${link}`,
   noPortal: "ตอนนี้สร้างลิงก์จัดการแพ็กเกจไม่ได้ค่ะ ส่ง /plan อีกครั้งในอีกสักครู่นะคะ",
-  duplicate: "ดูเหมือนตอนนี้จ่ายอยู่มากกว่าหนึ่งแพ็กเกจ เดี๋ยวทางเราจะจัดการรายการที่ซ้ำให้ค่ะ",
+  duplicate: "ดูเหมือนว่าคุณมีแพ็กเกจแบบชำระเงินมากกว่าหนึ่งแพ็กเกจ พิมพ์ /plan เพื่อตรวจสอบการเรียกเก็บเงินได้เลยค่ะ หากพบยอดที่ถูกเรียกเก็บเกิน ให้แจ้งผ่าน /feedback ค่ะ",
+  duplicateAlerted: "ดูเหมือนว่าคุณมีแพ็กเกจแบบชำระเงินมากกว่าหนึ่งแพ็กเกจ แจ้งทีมให้ตรวจสอบแล้วค่ะ ทีมจะตรวจสอบยอดที่เรียกเก็บเกินและพิจารณาว่าควรยกเลิกแพ็กเกจหรือคืนเงินหรือไม่ พิมพ์ /plan เพื่อตรวจสอบการเรียกเก็บเงินได้เลยค่ะ",
   invite: (code) => `ให้คนที่อยากเพิ่มส่งข้อความนี้มาภายใน 7 วัน ใช้ได้ครั้งเดียวค่ะ\n/join ${code}`,
   inviteNotOwner: "เฉพาะเจ้าของแพ็กเกจ Plus เท่านั้นที่เชิญคนได้ค่ะ ส่ง /plan เพื่อดูแพ็กเกจ",
   inviteFull: (seats) => `ที่ในแพ็กเกจ Plus เต็มครบ ${seats} ที่แล้วค่ะ`,

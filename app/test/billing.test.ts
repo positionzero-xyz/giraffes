@@ -167,7 +167,7 @@ describe("stripe boundary", () => {
     const cancelled = await worker.fetch(new Request(String(cancel_url)), bindings);
     expect(cancelled.status).toBe(200);
     expect(cancelled.headers.get("content-type")).toContain("text/html");
-    expect(await cancelled.text()).toContain("You weren’t charged for this checkout.");
+    expect(await cancelled.text()).toContain("You weren't charged for this checkout.");
     expect(await (await worker.fetch(new Request(String(success_url)), bindings)).text()).toContain("All done.");
   });
 
@@ -436,13 +436,37 @@ describe("checkout and the portal", () => {
     await c.settle();
 
     expect(operator.delivered).toHaveLength(1);
-    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", expect.stringContaining("I’ve alerted the team to review it")]);
+    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", expect.stringContaining("I've alerted the team to review it")]);
     expect(warnings).toHaveBeenCalledWith({ code: "stripe_duplicate_subscription" });
     expect(JSON.stringify(warnings.mock.calls)).not.toContain("sub_ike_");
     warnings.mockRestore();
     const found = await env.LEDGER.prepare("SELECT owner_key, subscription_ids FROM billing_duplicate").all();
     expect(found.results).toEqual([{ owner_key: "p:dev:ike", subscription_ids: "sub_ike_1 sub_ike_2" }]);
     expect([(await row("sub_ike_1"))?.status, (await row("sub_ike_2"))?.status]).toEqual(["active", "active"]);
+  });
+
+  test("a failed operator delivery gives the person a fallback and a later webhook can alert the operator", async () => {
+    const kit = billingOn();
+    const c = await devChat("june", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel([{ kind: "retry", afterMs: 30_000 }]);
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await c.say("/plan");
+    await c.received();
+    await pay(kit, c, "june", "standard");
+    await c.received();
+
+    const second = { user: "june", sub: "sub_june_extra", plan: "included", status: "active" } as const;
+    expect((await stripeChange(kit, second)).status).toBe(200);
+    await c.settle();
+    expect(operator.delivered).toEqual([]);
+    expect(await c.received()).toEqual([expect.stringContaining("report it with /feedback")]);
+
+    expect((await stripeChange(kit, second)).status).toBe(200);
+    await c.settle();
+    expect(operator.delivered.map(({ text }) => text)).toEqual([expect.stringContaining("sub_june sub_june_extra")]);
+    expect(await c.received()).toEqual([]);
   });
 });
 

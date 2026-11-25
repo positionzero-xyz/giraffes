@@ -1,3 +1,4 @@
+import { wrongFact } from "./facts.ts";
 import { says, squash, statedRepeats, statedTimes } from "./thai.ts";
 import type { Check, CheckResult, Observation, Phrase, Wakeup } from "./types.ts";
 
@@ -67,8 +68,8 @@ const GRADERS: { readonly [K in Check["kind"]]: Grader<K> } = {
     return says(o.text, h, m) ? { pass: true, detail: `assumed ${w.at} and said so` } : { pass: false, detail: `set ${w.at} without saying when` };
   },
   facts: (c, o) => {
-    const gone = missing(o.text, c.facts);
-    return { pass: gone.length === 0, detail: gone.length ? `missing ${gone.join(", ")}` : `all ${c.facts.length}` };
+    const wrong = c.facts.flatMap((f) => wrongFact(f, o.text) ?? []);
+    return { pass: wrong.length === 0, detail: wrong.length ? wrong.join("; ") : `all ${c.facts.length}` };
   },
   length: (c, o) => ({ pass: o.text.length >= c.min && o.text.length <= c.max, detail: `${o.text.length} chars (${c.min}-${c.max})` }),
   file: (c, o) => ({ pass: (o.files[c.path] ?? "").trim().length > 0, detail: c.path in o.files ? `${o.files[c.path].length} chars` : "absent" }),

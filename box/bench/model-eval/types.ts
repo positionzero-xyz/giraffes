@@ -17,6 +17,14 @@ export const CONTRACT: Readonly<Record<Shape, Contract>> = { chat: "product", re
 export type Wall = string & { readonly __wall: unique symbol };
 
 export type Phrase = { readonly label: string; readonly any: readonly string[] };
+export type Unit = "baht" | "percent" | "cm";
+/** One fact of a brief: stated, never claimed, every amount with a unit in `need` or `allow`, a December range, or an old and a new price. */
+export type Fact =
+  | { readonly kind: "says"; readonly label: string; readonly any: readonly string[] }
+  | { readonly kind: "never"; readonly label: string; readonly any: readonly string[] }
+  | { readonly kind: "amounts"; readonly label: string; readonly unit: Unit; readonly need: readonly number[]; readonly allow: readonly number[] }
+  | { readonly kind: "dates"; readonly label: string; readonly from: number; readonly to: number }
+  | { readonly kind: "was_now"; readonly label: string; readonly was: number; readonly now: number };
 export type Reading = { readonly label: string; readonly at: Wall };
 export type Repeat = "daily" | "weekdays" | "weekly";
 
@@ -30,7 +38,7 @@ export type Check =
   | { readonly kind: "due_at"; readonly readings: readonly Reading[]; readonly repeat: Repeat | null; readonly about: readonly string[] }
   /** Asks which time, or sets one asked-for one-off reminder on `date` within the hours and says when. */
   | { readonly kind: "asks_or_assumes"; readonly date: string; readonly fromHour: number; readonly toHour: number; readonly about: readonly string[] }
-  | { readonly kind: "facts"; readonly facts: readonly Phrase[] }
+  | { readonly kind: "facts"; readonly facts: readonly Fact[] }
   | { readonly kind: "length"; readonly min: number; readonly max: number }
   | { readonly kind: "file"; readonly path: string }
   | { readonly kind: "html_complete"; readonly path: string }

@@ -28,7 +28,7 @@ describe("every check passes its known-good and fails its known-bad", () => {
 
   it("facts", () =>
     both(
-      { kind: "facts", facts: [{ label: "price", any: ["65"] }, { label: "dates", any: ["1-7 ธ"] }] },
+      { kind: "facts", facts: [{ kind: "amounts", label: "price", unit: "baht", need: [65], allow: [] }, { kind: "dates", label: "dates", from: 1, to: 7 }] },
       turn("ลาเต้แก้วละ ๖๕ บาท วันที่ 1 – 7 ธ.ค. นี้"),
       turn("ลาเต้แก้วละ 56 บาท วันที่ 1-7 ธ.ค. นี้"),
     ));

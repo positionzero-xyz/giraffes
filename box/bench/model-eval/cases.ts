@@ -1,7 +1,10 @@
-import type { Case, Check, Phrase, Rubric, Shape, Wall } from "./types.ts";
+import type { Case, Check, Fact, Phrase, Rubric, Shape, Wall } from "./types.ts";
 import { addMinutes, dateOf, dayAt, nextWeekReadings, nextWeekday, thaiDate } from "./when.ts";
 
 const p = (label: string, ...any: string[]): Phrase => ({ label, any });
+const says = (label: string, ...any: string[]): Fact => ({ kind: "says", label, any });
+const never = (label: string, ...any: string[]): Fact => ({ kind: "never", label, any });
+const DELIVERY = never("delivery", "เดลิเวอรี่", "เดลิเวอรี", "delivery", "ส่งถึงบ้าน", "grab", "lineman", "foodpanda", "สั่งออนไลน์");
 
 const CHAT: readonly Check[] = [{ kind: "thai", min: 0.8 }, { kind: "no_jargon" }, { kind: "fits_reply" }, { kind: "worker_accepts" }];
 const REMINDER: readonly Check[] = [{ kind: "thai", min: 0.6 }, { kind: "no_jargon" }, { kind: "fits_reply" }, { kind: "worker_accepts" }];
@@ -135,12 +138,16 @@ export const CASES: readonly Case[] = [
         {
           kind: "facts",
           facts: [
-            p("shop name", "บ้านดอยคอฟฟี่"),
-            p("buy one get one", "1แถม1", "1แก้วแถม1", "แถมอีก1", "ฟรีอีก1", "ฟรี1แก้ว"),
-            p("price 65", "65"),
-            p("1 to 7 December", "1-7ธ", "1ถึง7ธ", "1ธ.ค.-7ธ.ค", "1ธันวาคม-7ธันวาคม", "1-7ธันวา"),
-            p("in store only", "หน้าร้าน"),
-            p("Nimman branch", "นิมมาน"),
+            says("shop name", "บ้านดอยคอฟฟี่"),
+            says("iced latte", "ลาเต้เย็น", "ไอซ์ลาเต้", "icedlatte", "ลาเต้แบบเย็น"),
+            never("another drink", "ชาเขียว", "ชาไทย", "ชานม", "ชาเย็น", "โกโก้", "อเมริกาโน่", "มอคค่า"),
+            says("buy one get one", "1แถม1", "1แก้วแถม1", "แถมอีก1", "ฟรีอีก1", "ฟรี1แก้ว", "แถมฟรี1", "แถมฟรีอีก1"),
+            { kind: "amounts", label: "price", unit: "baht", need: [65], allow: [130, 32.5] },
+            { kind: "dates", label: "1 to 7 December", from: 1, to: 7 },
+            says("in store only", "เฉพาะหน้าร้าน", "เฉพาะที่หน้าร้าน", "หน้าร้านเท่านั้น", "ที่ร้านเท่านั้น", "เฉพาะที่ร้าน"),
+            DELIVERY,
+            says("Nimman branch", "นิมมาน"),
+            never("every branch", "ทุกสาขา"),
           ],
         },
       ],
@@ -158,12 +165,16 @@ export const CASES: readonly Case[] = [
         {
           kind: "facts",
           facts: [
-            p("salon name", "ซาลอนมะลิ"),
-            p("20% off", "20%", "ลด20"),
-            p("was 1,500", "1,500", "1500"),
-            p("now 1,200", "1,200", "1200"),
-            p("book ahead", "จอง"),
-            p("closed Wednesdays", "พุธ"),
+            says("salon name", "ซาลอนมะลิ"),
+            says("December", "ธันวา", "ธ.ค."),
+            { kind: "amounts", label: "discount", unit: "percent", need: [20], allow: [] },
+            { kind: "amounts", label: "price", unit: "baht", need: [1500, 1200], allow: [300] },
+            { kind: "was_now", label: "1,500 down to 1,200", was: 1500, now: 1200 },
+            says("book ahead", "จอง"),
+            says("through LINE", "line", "ไลน์"),
+            never("another way to book", "โทรจอง", "จองทางโทร", "โทรมาจอง", "walk-in", "วอล์คอิน", "วอล์กอิน", "ไม่ต้องจอง", "inbox", "อินบ็อกซ์"),
+            says("closed Wednesdays", "ปิดทุกวันพุธ", "หยุดทุกวันพุธ", "ปิดวันพุธ", "หยุดวันพุธ", "ปิดทุกพุธ", "หยุดทุกพุธ"),
+            never("open every day", "เปิดทุกวัน"),
           ],
         },
       ],
@@ -181,15 +192,17 @@ export const CASES: readonly Case[] = [
         {
           kind: "facts",
           facts: [
-            p("cotton", "ฝ้าย"),
-            p("hand-woven", "ทอมือ"),
-            p("from Nan", "น่าน"),
-            p("30 x 35 cm", "30x35", "30×35", "30*35"),
-            p("indigo", "คราม"),
-            p("brown", "น้ำตาล"),
-            p("cream", "ครีม"),
-            p("390 baht", "390"),
-            p("machine washable", "ซักเครื่อง"),
+            says("cotton", "ฝ้าย"),
+            says("hand-woven", "ทอมือ"),
+            says("from Nan", "น่าน"),
+            says("30 x 35 cm", "30x35", "30×35", "30*35", "30ซม.x35", "30ซม.×35", "30cmx35"),
+            { kind: "amounts", label: "size", unit: "cm", need: [], allow: [30, 35] },
+            says("indigo", "คราม"),
+            says("brown", "น้ำตาล"),
+            says("cream", "ครีม"),
+            { kind: "amounts", label: "price", unit: "baht", need: [390], allow: [] },
+            says("machine washable", "ซักเครื่อง"),
+            never("hand wash only", "ห้ามซักเครื่อง", "ซักมือเท่านั้น", "ห้ามซัก"),
           ],
         },
       ],
@@ -202,7 +215,18 @@ export const CASES: readonly Case[] = [
     judged: true,
     make: fixed(
       "มีลูกค้ารีวิว 1 ดาวว่า 'รอข้าวนานเกือบชั่วโมง พนักงานไม่สนใจ' ช่วยร่างคำตอบแบบสุภาพให้ร้านหน่อย ร้านชื่อ 'ครัวคุณยาย' อยากขอโทษและให้ส่วนลด 15% ครั้งหน้า",
-      [...DRAFT(80, 800), { kind: "facts", facts: [p("apology", "ขอโทษ", "ขออภัย"), p("15% off", "15%", "ลด15"), p("restaurant name", "ครัวคุณยาย")] }],
+      [
+        ...DRAFT(80, 800),
+        {
+          kind: "facts",
+          facts: [
+            says("apology", "ขอโทษ", "ขออภัย"),
+            { kind: "amounts", label: "discount", unit: "percent", need: [15], allow: [] },
+            says("next visit", "ครั้งหน้า", "ครั้งถัดไป", "คราวหน้า", "ครั้งต่อไป", "โอกาสหน้า", "มาใหม่", "กลับมา"),
+            says("restaurant name", "ครัวคุณยาย"),
+          ],
+        },
+      ],
     ),
   },
   {
@@ -250,6 +274,10 @@ export const RUBRICS: Readonly<Record<Shape, Rubric | null>> = {
       { key: "natural_thai", ask: "Does it read like natural Thai a local business would post, with no stray English or stiff phrasing?" },
       { key: "persuasive", ask: "Would it make a customer want to act (visit, book, buy, come back)?" },
       { key: "fits_channel", ask: "Does its length, tone and format fit the channel named in the brief?" },
+      {
+        key: "facts_right",
+        ask: "Is every fact in the brief stated and right (the product, each price and which is which, dates, branch, channel, conditions), with nothing invented or contradicted?",
+      },
     ],
   },
   build: {

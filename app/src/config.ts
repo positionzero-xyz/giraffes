@@ -317,6 +317,8 @@ export function loadConfig(env: Env): Config {
     }
     return { botToken, webhookSecret };
   });
+  const operator = operatorChat(env.OPERATOR_CHAT, { line: line !== null, telegram: telegram !== null });
+  if (billing.on && operator === null) throw new Error("BILLING=on requires OPERATOR_CHAT");
   return {
     devMode,
     model,
@@ -324,7 +326,7 @@ export function loadConfig(env: Env): Config {
     included: includedConfig(env, model),
     line,
     telegram,
-    operatorChat: operatorChat(env.OPERATOR_CHAT, { line: line !== null, telegram: telegram !== null }),
+    operatorChat: operator,
     box: boxConfig(env, devMode),
     billing,
     admission: admissionMode(env.ADMISSION, billing),

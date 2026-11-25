@@ -530,6 +530,14 @@ export const MIGRATIONS: readonly string[] = [
   INSERT INTO forget (one) VALUES (1);
   ALTER TABLE box ADD COLUMN volume TEXT;
   `,
+  `
+  CREATE TABLE billing_alert (
+    subscription_ids TEXT PRIMARY KEY,
+    delivery_id      TEXT NOT NULL,
+    ready_at         INTEGER,
+    notified        INTEGER NOT NULL DEFAULT 0
+  );
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

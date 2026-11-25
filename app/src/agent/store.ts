@@ -1159,6 +1159,23 @@ export class AgentStore {
     this.sql.exec("INSERT OR IGNORE INTO billing_event (id, at) VALUES (?, ?)", id, now);
   }
 
+  queueBillingAlert(ids: string, now: EpochMs): void {
+    this.sql.exec("INSERT OR IGNORE INTO billing_alert (subscription_ids, delivery_id, ready_at) VALUES (?, ?, ?)", ids, crypto.randomUUID(), now);
+  }
+
+  nextBillingAlert() {
+    return this.sql.exec<{ subscription_ids: string; delivery_id: OutboxId; ready_at: EpochMs; notified: number }>(
+      "SELECT subscription_ids, delivery_id, ready_at, notified FROM billing_alert WHERE ready_at IS NOT NULL ORDER BY ready_at, subscription_ids LIMIT 1",
+    ).toArray()[0] ?? null;
+  }
+
+  finishBillingAlertAttempt(ids: string, readyAt: EpochMs | null, message: NoteMessage | null, now: EpochMs): void {
+    this.tx(() => {
+      if (message && this.agent()) this.insertMessage(eventKey.billing("duplicate"), message, now);
+      this.sql.exec("UPDATE billing_alert SET ready_at = ?, notified = 1 WHERE subscription_ids = ?", readyAt, ids);
+    });
+  }
+
   appendLogs(logs: readonly LogRow[], now: EpochMs): void {
     this.tx(() => this.insertLogs(logs, now));
   }

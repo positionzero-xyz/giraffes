@@ -42,8 +42,8 @@ export type Notices = {
   readonly noLinks: string;
   readonly manage: (link: string) => string;
   readonly noPortal: string;
-  readonly duplicate: string;
   readonly duplicateAlerted: string;
+  readonly duplicateRetrying: (deliveryUncertain: boolean, retrySeconds: number) => string;
   readonly invite: (code: string) => string;
   readonly inviteNotOwner: string;
   readonly inviteFull: (seats: number) => string;
@@ -191,8 +191,9 @@ const en: Notices = {
   noLinks: "I couldn't make the payment links just now. Send /plan again in a minute.",
   manage: (link) => `To change or cancel your plan: ${link}`,
   noPortal: "I couldn't make the link to manage your plan just now. Send /plan again in a minute.",
-  duplicate: "It looks like you have more than one paid plan. You can check your billing now with /plan. If you see an extra charge, report it with /feedback.",
-  duplicateAlerted: "It looks like you have more than one paid plan. I've alerted the team to review it. They'll check for extra charges and decide whether to cancel a plan or issue a refund. You can check your billing now with /plan.",
+  duplicateAlerted: "It looks like you have more than one paid plan. I've alerted our billing team. They can review it now and decide whether to cancel a plan or issue a refund. Check your payment statement for extra charges in the meantime.",
+  duplicateRetrying: (deliveryUncertain, retrySeconds) =>
+    `It looks like you have more than one paid plan. ${deliveryUncertain ? "The billing team may already have received the alert." : "I sent a billing alert, but delivery hasn't been confirmed."} I'll keep trying to alert the team, with attempts scheduled at least ${retrySeconds} seconds apart. You can check your payment statement for extra charges now.`,
   invite: (code) => `Ask the person you want to add to send me this within 7 days. It works once.\n/join ${code}`,
   inviteNotOwner: "Only the owner of a Plus plan can invite people. Send /plan to see the plans.",
   inviteFull: (seats) => `All ${seats} places on your Plus plan are taken.`,
@@ -377,8 +378,9 @@ const th: Notices = {
   noLinks: "ตอนนี้สร้างลิงก์ชำระเงินไม่ได้ค่ะ ส่ง /plan อีกครั้งในอีกสักครู่นะคะ",
   manage: (link) => `เปลี่ยนหรือยกเลิกแพ็กเกจได้ที่: ${link}`,
   noPortal: "ตอนนี้สร้างลิงก์จัดการแพ็กเกจไม่ได้ค่ะ ส่ง /plan อีกครั้งในอีกสักครู่นะคะ",
-  duplicate: "ดูเหมือนว่าคุณมีแพ็กเกจแบบชำระเงินมากกว่าหนึ่งแพ็กเกจ พิมพ์ /plan เพื่อตรวจสอบการเรียกเก็บเงินได้เลยค่ะ หากพบยอดที่ถูกเรียกเก็บเกิน ให้แจ้งผ่าน /feedback ค่ะ",
-  duplicateAlerted: "ดูเหมือนว่าคุณมีแพ็กเกจแบบชำระเงินมากกว่าหนึ่งแพ็กเกจ แจ้งทีมให้ตรวจสอบแล้วค่ะ ทีมจะตรวจสอบยอดที่เรียกเก็บเกินและพิจารณาว่าควรยกเลิกแพ็กเกจหรือคืนเงินหรือไม่ พิมพ์ /plan เพื่อตรวจสอบการเรียกเก็บเงินได้เลยค่ะ",
+  duplicateAlerted: "ดูเหมือนว่าคุณมีแพ็กเกจแบบชำระเงินมากกว่าหนึ่งแพ็กเกจ แจ้งทีมดูแลการชำระเงินแล้วค่ะ ทีมตรวจสอบได้เลยว่าควรยกเลิกแพ็กเกจหรือคืนเงินหรือไม่ ระหว่างนี้คุณตรวจสอบยอดที่ถูกเรียกเก็บเกินได้จากรายการเดินบัญชีค่ะ",
+  duplicateRetrying: (deliveryUncertain, retrySeconds) =>
+    `ดูเหมือนว่าคุณมีแพ็กเกจแบบชำระเงินมากกว่าหนึ่งแพ็กเกจ ${deliveryUncertain ? "ทีมอาจได้รับการแจ้งเตือนแล้วค่ะ" : "พยายามแจ้งทีมแล้ว แต่ยังยืนยันไม่ได้ว่าทีมได้รับค่ะ"} ระบบจะพยายามแจ้งทีมต่อไป โดยเว้นอย่างน้อย ${retrySeconds} วินาทีระหว่างแต่ละครั้ง คุณตรวจสอบยอดที่ถูกเรียกเก็บเกินได้จากรายการเดินบัญชีตอนนี้เลยค่ะ`,
   invite: (code) => `ให้คนที่อยากเพิ่มส่งข้อความนี้มาภายใน 7 วัน ใช้ได้ครั้งเดียวค่ะ\n/join ${code}`,
   inviteNotOwner: "เฉพาะเจ้าของแพ็กเกจ Plus เท่านั้นที่เชิญคนได้ค่ะ ส่ง /plan เพื่อดูแพ็กเกจ",
   inviteFull: (seats) => `ที่ในแพ็กเกจ Plus เต็มครบ ${seats} ที่แล้วค่ะ`,

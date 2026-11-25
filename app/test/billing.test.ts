@@ -436,7 +436,7 @@ describe("checkout and the portal", () => {
     await c.settle();
 
     expect(operator.delivered).toHaveLength(1);
-    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", expect.stringContaining("as soon as I detected")]);
+    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", expect.stringContaining("They can review it now")]);
     expect(warnings).toHaveBeenCalledWith({ code: "stripe_duplicate_subscription" });
     expect(JSON.stringify(warnings.mock.calls)).not.toContain("sub_ike_");
     warnings.mockRestore();

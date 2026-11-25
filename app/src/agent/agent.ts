@@ -43,7 +43,7 @@ import {
   type Step,
 } from "../box/machine";
 import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
-import { makeChannels, tellOperator, type ChannelRegistry } from "../channels/channel";
+import { CHANNEL_RETRY_MS, makeChannels, type ChannelRegistry } from "../channels/channel";
 import { commandOf, type Command } from "./commands";
 import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env, type OperatorChat } from "../config";
 import {
@@ -241,9 +241,13 @@ export class Agent extends DurableObject<Env> {
   }
 
   billingEvent(e: BillingEvent): Promise<"applied" | "duplicate" | "ignored"> {
-    const run = this.#billing.then(() => this.#billingEvent(e)).catch(() => {
+    return this.#runBilling(() => this.#billingEvent(e)).catch(() => {
       throw new Error("billing event failed");
     });
+  }
+
+  #runBilling<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.#billing.then(work);
     this.#billing = run.catch(() => undefined);
     return run;
   }
@@ -273,27 +277,37 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #flagDuplicate(owner: AgentKey): Promise<void> {
-    const { billing: { store }, channels, operatorChat } = this.#deps;
+    const { store } = this.#deps.billing;
     const now = this.#deps.clock.now();
     const owned = await store.owned(owner, now);
     if (owned.length < 2) return;
     const ids = owned.join(" ");
     diagnostic("stripe_duplicate_subscription");
     await store.recordDuplicate(owner, owned, now);
-    const alertKey = `duplicate-alert:${ids}`;
-    let alerted = this.#store.billingEventSeen(alertKey);
-    if (!alerted && operatorChat !== null) {
-      const via = await tellOperator(channels, operatorChat, `Duplicate paid plans for ${owner}\nSubscriptions: ${ids}\nReview the subscriptions and any extra charges.`, now);
-      if (via !== null) {
-        this.#store.billingEventDone(alertKey, this.#deps.clock.now());
-        alerted = true;
-      }
-    }
-    const a = this.#store.agent();
-    const text = a ? NOTICES[a.language][alerted ? "duplicateAlerted" : "duplicate"] : null;
-    this.#store.notifyOnce(`duplicate:${ids}`, eventKey.billing("duplicate"), text ? { texts: [text], note: text } : null, now);
     await this.#armNoLaterThan(now);
+    this.#store.queueBillingAlert(ids, now);
+    await this.#deliverBillingAlert();
     this.ctx.waitUntil(this.alarm());
+  }
+
+  async #deliverBillingAlert(): Promise<void> {
+    const { channels, clock, operatorChat } = this.#deps;
+    const alert = this.#store.nextBillingAlert();
+    const now = clock.now();
+    if (operatorChat === null || alert === null || alert.ready_at > now) return;
+    const result = await channels[operatorChat.channel].deliver({
+      id: alert.delivery_id,
+      to: operatorChat,
+      texts: [`Duplicate paid plans\nSubscriptions: ${alert.subscription_ids}\nReview the subscriptions and any extra charges.`],
+      intent: "requested",
+    }, now).catch(() => ({ kind: "in_doubt", afterMs: CHANNEL_RETRY_MS } as const));
+    const after = clock.now();
+    const retryAt = result.kind === "sent" ? null : (after + Math.max(CHANNEL_RETRY_MS, "afterMs" in result ? result.afterMs : 300_000)) as EpochMs;
+    if (retryAt !== null) diagnostic(result.kind === "in_doubt" ? "operator_alert_unconfirmed" : "operator_alert_failed");
+    const person = this.#store.agent();
+    const notices = person && alert.notified === 0 ? NOTICES[person.language] : null;
+    const text = notices && (result.kind === "sent" ? notices.duplicateAlerted : notices.duplicateRetrying(result.kind === "in_doubt", CHANNEL_RETRY_MS / 1000));
+    this.#store.finishBillingAlertAttempt(alert.subscription_ids, retryAt, text ? { texts: [text], note: text } : null, after);
   }
 
   async refreshPlan(agent: AgentKey): Promise<void> {
@@ -537,6 +551,9 @@ export class Agent extends DurableObject<Env> {
     const clock = this.#deps.clock;
     const started = clock.now();
     try {
+      if (this.#deps.operatorChat && (this.#store.nextBillingAlert()?.ready_at ?? Infinity) <= started) {
+        await this.#phase("drain_billing_alert_failed", () => this.#runBilling(() => this.#deliverBillingAlert()));
+      }
       await this.#phase("drain_turns_failed", async () => {
         if (this.#store.held()) return;
         const poisoned = this.#store.recover(started, this.#instance);
@@ -1366,6 +1383,7 @@ export class Agent extends DurableObject<Env> {
       inboxReadyAt: held ? null : (r.inboxReadyAt ?? (catchUp ? now : null)),
       wakeupFireAt: fireTimes.length > 0 ? (Math.min(...fireTimes) as EpochMs) : null,
       outboxReadyAt: held ? null : r.outboxReadyAt,
+      billingAlertAt: this.#deps.operatorChat ? this.#store.nextBillingAlert()?.ready_at ?? null : null,
       logsReadyAt: r.logsReadyAt,
       compactionRetryAt: held ? null : r.compactionRetryAt,
       boxAt: this.#deps.box && mayspend(this.#store.admission()) ? r.boxAt : null,

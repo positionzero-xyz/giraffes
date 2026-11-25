@@ -1,17 +1,17 @@
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentArgs, agentTurn, authStatus, cliVersion, type AgentRequest, type Cli, type SessionStore, type Usage } from "../../src/claude.ts";
+import { agentArgs, agentTurn, authStatus, cliVersion, type SessionStore, type Usage } from "../../src/claude.ts";
 import { findChrome, inspect } from "./browser.ts";
 import { BUILD_SYSTEM, selectCases } from "./cases.ts";
 import { grade, REPLY_CAP } from "./checks.ts";
 import { ingestScores, writeJudgeBatch, type JudgeKey } from "./judge.ts";
+import { agentRequest, effortOf, NO_OBSERVATION, readTurn, TZ } from "./product.ts";
 import { render, type JudgeScores } from "./summary.ts";
-import { CONTRACT, EFFORTS, HARNESSES, SHAPES, type Candidate, type Case, type Check, type Effort, type Observation, type RunFile, type RunRecord, type RunStatus, type Shape, type Tap, type Wall, type Wakeup } from "./types.ts";
+import { CONTRACT, EFFORTS, HARNESSES, SHAPES, type Candidate, type Case, type Check, type Effort, type Observation, type RunFile, type RunRecord, type RunStatus, type Shape, type Tap, type Wall } from "./types.ts";
 import { dateOf, parseWall, todayAt } from "./when.ts";
 
 const USAGE = `usage:
@@ -22,7 +22,6 @@ A candidate is [harness:]model@effort; claude-code is the only harness. --dry pr
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const TAP = join(HERE, "tap.ts");
-const TZ = "Asia/Bangkok";
 const NOW_TIME = "10:00";
 const TURN_TAP_MS = 119_000;
 const BUILD_TIMEOUT_MS = 300_000;
@@ -48,59 +47,9 @@ function parseCandidate(raw: string): Candidate {
 }
 
 const label = (c: Candidate) => `${c.model}@${c.effort}`;
-const effortOf = (c: Candidate) => (c.effort === "default" ? undefined : c.effort);
 
 // The CLI the harness drives is the person's local login; a parent Claude Code session's own variables must not leak in.
 for (const k of Object.keys(process.env)) if (k.startsWith("CLAUDE") && k !== "CLAUDE_CONFIG_DIR") delete process.env[k];
-
-registerHooks({
-  resolve(specifier, context, next) {
-    try {
-      return next(specifier, context);
-    } catch (err) {
-      if (/^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier)) return next(`${specifier}.ts`, context);
-      throw err;
-    }
-  },
-});
-
-const APP = "../../../app/src";
-const { AGENT_SYSTEM } = await import(`${APP}/agent/prompt.ts`);
-const { AGENT_TOOLS, BoxTurnOutputSchema, planTurn, renderUser, turnFromAgent } = await import(`${APP}/agent/turn.ts`);
-const { renderPrompt } = await import(`${APP}/model/prompt.ts`);
-const { fromLocal, toLocal, parseTimeZone } = await import(`${APP}/policy/time.ts`);
-
-const tz = parseTimeZone(TZ);
-
-function viewOf(message: string, now: Wall) {
-  const at = fromLocal(now, tz);
-  return {
-    now: at,
-    tz,
-    language: "th",
-    status: "active",
-    statusAt: 0,
-    checkinLocal: "09:00",
-    admission: { state: "admitted", seat: { cohort: "staff", half: null, code: null, inviter: null }, at: 0 },
-    batch: { items: [{ key: "eval:0", event: { kind: "message", text: message }, attempts: 1, receivedAt: at }] },
-    summary: "",
-    notes: [],
-    recent: [],
-    historyLeftOut: 0,
-    pending: [],
-    openTasks: [],
-    acceptable: null,
-    tapped: [],
-    unaskedLeftToday: 3,
-  };
-}
-
-function agentRequest(c: Candidate, message: string, now: Wall): AgentRequest {
-  const parts = renderUser(viewOf(message, now));
-  const turn = renderPrompt({ sections: parts.sections.filter((s: { history?: boolean }) => !s.history) });
-  const effort = effortOf(c);
-  return { model: c.model, append: AGENT_SYSTEM, turn, tools: AGENT_TOOLS, ...(effort ? { effort } : {}) };
-}
 
 function buildArgs(c: Candidate): string[] {
   const effort = effortOf(c);
@@ -126,8 +75,6 @@ function readTap(file: string): Tap | null {
   return first ? (JSON.parse(first) as Tap) : null;
 }
 
-const NO_OBSERVATION: Observation = { text: "", wakeups: [], rejected: [], files: {}, page: null };
-
 type Outcome = {
   readonly status: RunStatus;
   readonly observation: Observation;
@@ -148,18 +95,8 @@ async function productTurn(cli: string, c: Candidate, message: string, now: Wall
     const status: RunStatus = tap?.killed ? "timeout" : reply.status === 409 ? "signed_out" : "claude_failed";
     return { status, observation: NO_OBSERVATION, calls: [], refusedCalls: [], usage: null, costUsd: tap?.costUsd ?? null, tap, buildDir: null };
   }
-  const body = reply.body;
-  const base = { calls: body.calls, refusedCalls: body.refusedCalls, usage: body.usage, costUsd: tap?.costUsd ?? body.costUsd, tap, buildDir: null };
-  const parsed = BoxTurnOutputSchema.safeParse(turnFromAgent(body));
-  if (!parsed.success) return { status: "invalid_output", observation: { ...NO_OBSERVATION, text: body.text }, ...base };
-  const commit = planTurn(parsed.data, viewOf(message, now));
-  const wakeups: Wakeup[] = commit.wakeupsAdd.map((w: { dueAt: number; repeat: { every: Wakeup["repeat"] } | null; origin: string }) => ({
-    at: toLocal(w.dueAt, tz),
-    repeat: w.repeat?.every ?? null,
-    asked: w.origin === "person",
-  }));
-  const rejected = commit.rejected.map((r: { action: string; reason: string }) => `${r.action} ${r.reason}`);
-  return { status: "ok", observation: { text: body.text.trim(), wakeups, rejected, files: {}, page: null }, ...base };
+  const read = readTurn(reply.body, message, now);
+  return { ...read, costUsd: tap?.costUsd ?? read.costUsd, tap, buildDir: null };
 }
 
 function run(cmd: readonly string[], cwd: string, stdin: string): Promise<string> {

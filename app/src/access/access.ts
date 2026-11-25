@@ -112,7 +112,7 @@ export type Served<P extends Purpose> =
    * Nothing is connected, the plan's box isn't signed in, or every lane rests on a fault. `told`: this call already sent
    * the person a notice. `notice`: a resting key's problem, which the reply names.
    */
-  | { readonly kind: "no_access"; readonly why: Access["whenEmpty"]; readonly told: boolean; readonly notice: string | null };
+  | { readonly kind: "no_access"; readonly why: Access["whenEmpty"]; readonly told: boolean; readonly notice: string | null; readonly waitForConnection: boolean };
 
 export type BoxAnswer =
   | { readonly kind: "reply"; readonly reply: Extract<WireResult, { kind: "reply" }>; readonly session?: SessionUsed }
@@ -248,7 +248,16 @@ export class ModelAccess {
     if (tooLong) return { kind: "too_long" };
     if (overCap) return { kind: "over_cap", scope: overCap };
     const boxWaiting = access.whenEmpty === "box_not_ready" || (access.lanes.length > 0 && access.lanes.every((l) => l.kind === "box"));
-    return { kind: "no_access", why: boxWaiting ? "box_not_ready" : "nothing", told, notice };
+    const waitForConnection = access.lanes.length === 0 || (boxWaiting && this.deps.box.state() === "signed_out");
+    return { kind: "no_access", why: boxWaiting ? "box_not_ready" : "nothing", told, notice, waitForConnection };
+  }
+
+  catchUpBudget(plan: Plan, now: EpochMs): string | null {
+    const { lanes } = this.#access(plan);
+    if (lanes.some((lane) => lane.kind === "box")) return "box";
+    const key = lanes.find((lane) => lane.kind === "key");
+    if (!key || !this.deps.keys.on || key.key.health.kind !== "ok") return null;
+    return `key:${utcMonth(now)}:${key.key.revision}:${key.key.capMicro}`;
   }
 
   /**

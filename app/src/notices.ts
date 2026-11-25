@@ -71,6 +71,8 @@ export type Notices = {
 
   readonly noAccess: (offer: { readonly box: boolean; readonly key: boolean; readonly included: boolean }) => string;
   readonly boxNotReady: string;
+  readonly boxSignedOut: string;
+  readonly catchUp: string;
   readonly ownCapReached: (capUsd: string) => string;
   readonly includedCapReached: string;
   readonly keyRefused: (provider: string) => string;
@@ -215,7 +217,7 @@ const en: Notices = {
     still_setting_up: () => "Your Claude connection is still being set up. I'll send the sign-in link when it's ready.",
     link: (link) => `Sign in to Claude here to connect your plan. The link works for 30 minutes.\n${link}`,
     signed_out_link: (link) =>
-      `Your Claude plan is signed out, so I can't answer until you sign in again. Sign in here. If you sent me something, send it again after you sign in. The link works for 30 minutes.\n${link}`,
+      `Your Claude plan is signed out. Once you sign in, I'll answer requests from the last 24 hours. The link works for 30 minutes.\n${link}`,
     signed_out_backup: (link) =>
       `Your Claude plan is signed out, so your backup key answers for now. Sign in again here. The link works for 30 minutes.\n${link}`,
     connected: () => "Your Claude plan is connected. Your messages now use your Claude plan.",
@@ -258,14 +260,17 @@ const en: Notices = {
           ...(o.box ? ["• Have Claude Pro or Max? Send /claude to connect it."] : []),
           ...(o.key ? ["• Have an API key? Send /key. OpenCode Go ($10 a month, opencode.ai/go) works well. A Mistral key works too, either a Studio API key or the key from your Vibe plan, and students and teachers pay less (mistral.ai/pricing)."] : []),
           ...(o.included ? ["• Or get AI included with a plan: send /plan."] : []),
+          ...(o.box || o.key ? ["Once you connect your own AI, I'll answer requests from the last 24 hours."] : []),
           "Your reminders still go out either way.",
         ].join("\n")
       : "I can't connect an AI for you yet. Your reminders still go out.",
-  boxNotReady: "Your Claude plan isn't signed in right now, so I can't answer yet. Send /claude for a sign-in link.",
+  boxNotReady: "Your Claude plan isn't ready to answer yet. Send /claude to check the connection.",
+  boxSignedOut: "Your Claude plan isn't signed in. Once you sign in, I'll answer requests from the last 24 hours. Send /claude for a sign-in link.",
+  catchUp: "Here's my answer to what you sent earlier.",
   ownCapReached: (cap) => `You've used the $${cap} monthly limit you set for your key. Send /key cap <dollars> to change it. It resets on the 1st.`,
   includedCapReached: "Your plan's AI allowance for this month is used up. It resets on the 1st.",
   keyRefused: (p) => `Your ${p} key was refused. Send /key to enter it again.`,
-  keyNoCredit: (p) => `Your ${p} account is out of credit. I'll try it again in an hour, or send /key to use another key.`,
+  keyNoCredit: (p) => `Your ${p} account is out of credit. I can try the key again in an hour, or you can send /key to use another key.`,
   keyNoModel: (p, m) => `${p} no longer serves ${m}. Send /key to pick another model.`,
   keyRateLimited: (p, until) => (until ? `You've hit your ${p} usage limit. I'll use it again after ${until}.` : `You've hit your ${p} usage limit. I'll try it again later.`),
   keyUnreadable: "I lost access to your saved key on our side, sorry. Send /key to enter it again.",
@@ -397,7 +402,7 @@ const th: Notices = {
     still_setting_up: () => "ยังตั้งค่าการเชื่อม Claude อยู่ค่ะ พร้อมเมื่อไหร่จะส่งลิงก์เข้าสู่ระบบให้",
     link: (link) => `เข้าสู่ระบบ Claude ที่ลิงก์นี้เพื่อเชื่อมแพ็กเกจได้เลยค่ะ ลิงก์ใช้ได้ 30 นาที\n${link}`,
     signed_out_link: (link) =>
-      `แพ็กเกจ Claude ออกจากระบบอยู่ เลยยังตอบไม่ได้จนกว่าจะเข้าสู่ระบบอีกครั้งค่ะ เข้าสู่ระบบได้ที่ลิงก์นี้ ถ้าส่งอะไรมา รบกวนส่งอีกครั้งหลังเข้าสู่ระบบนะคะ ลิงก์ใช้ได้ 30 นาที\n${link}`,
+      `แพ็กเกจ Claude ออกจากระบบอยู่ค่ะ เมื่อเข้าสู่ระบบแล้ว จะตอบคำขอที่คุณส่งมาในช่วง 24 ชั่วโมงที่ผ่านมานะคะ ลิงก์ใช้ได้ 30 นาที\n${link}`,
     signed_out_backup: (link) =>
       `แพ็กเกจ Claude ออกจากระบบอยู่ ตอนนี้เลยใช้คีย์สำรองของคุณตอบไปก่อนค่ะ เข้าสู่ระบบอีกครั้งได้ที่ลิงก์นี้ ใช้ได้ 30 นาที\n${link}`,
     connected: () => "เชื่อมแพ็กเกจ Claude แล้วค่ะ จากนี้ข้อความจะใช้แพ็กเกจ Claude ของคุณ",
@@ -440,14 +445,17 @@ const th: Notices = {
           ...(o.box ? ["• มี Claude Pro หรือ Max ไหมคะ ส่ง /claude เพื่อเชื่อมต่อ"] : []),
           ...(o.key ? ["• มี API key ไหมคะ ส่ง /key ได้เลย OpenCode Go (เดือนละ $10 ที่ opencode.ai/go) ใช้ได้ดีค่ะ key ของ Mistral ก็ใช้ได้ค่ะ จะเป็น API key จาก Studio หรือ key จากแพ็กเกจ Vibe ก็ได้ และนักเรียนนักศึกษากับครูได้ราคาพิเศษค่ะ (mistral.ai/pricing)"] : []),
           ...(o.included ? ["• หรือเลือกแพ็กเกจที่รวม AI ไว้ให้ ส่ง /plan"] : []),
+          ...(o.box || o.key ? ["เมื่อเชื่อมต่อ AI ของคุณแล้ว จะตอบคำขอที่คุณส่งมาในช่วง 24 ชั่วโมงที่ผ่านมานะคะ"] : []),
           "การแจ้งเตือนที่คุณขอไว้ยังส่งถึงคุณตามปกติค่ะ",
         ].join("\n")
       : "ตอนนี้ยังเชื่อม AI ให้ไม่ได้ค่ะ แต่การแจ้งเตือนที่คุณขอไว้ยังส่งถึงคุณตามปกตินะคะ",
-  boxNotReady: "ตอนนี้ Claude ของคุณยังไม่ได้ลงชื่อเข้าใช้ เลยยังตอบไม่ได้ค่ะ ส่ง /claude เพื่อรับลิงก์ลงชื่อเข้าใช้นะคะ",
+  boxNotReady: "ตอนนี้แพ็กเกจ Claude ของคุณยังไม่พร้อมตอบค่ะ ส่ง /claude เพื่อตรวจสอบการเชื่อมต่อได้เลยนะคะ",
+  boxSignedOut: "ตอนนี้ Claude ของคุณยังไม่ได้ลงชื่อเข้าใช้ค่ะ เมื่อลงชื่อเข้าใช้แล้ว จะตอบคำขอที่คุณส่งมาในช่วง 24 ชั่วโมงที่ผ่านมานะคะ ส่ง /claude เพื่อรับลิงก์ลงชื่อเข้าใช้ค่ะ",
+  catchUp: "ขอตอบข้อความที่คุณส่งมาก่อนหน้านี้นะคะ",
   ownCapReached: (cap) => `ใช้ key ของคุณครบวงเงิน $${cap} ต่อเดือนที่ตั้งไว้แล้วค่ะ ส่ง /key cap <จำนวนดอลลาร์> เพื่อเปลี่ยน วงเงินจะเริ่มใหม่วันที่ 1 ค่ะ`,
   includedCapReached: "โควตา AI ในแพ็กเกจของคุณเดือนนี้หมดแล้วค่ะ จะเริ่มใหม่วันที่ 1",
   keyRefused: (p) => `${p} ไม่รับ key ของคุณค่ะ ส่ง /key เพื่อใส่ใหม่นะคะ`,
-  keyNoCredit: (p) => `บัญชี ${p} ของคุณเครดิตหมดแล้วค่ะ จะลองใหม่อีกครั้งในอีกหนึ่งชั่วโมง หรือส่ง /key เพื่อใช้ key อื่นก็ได้ค่ะ`,
+  keyNoCredit: (p) => `บัญชี ${p} ของคุณเครดิตหมดแล้วค่ะ จะลองใช้ key นี้ได้อีกครั้งในอีกหนึ่งชั่วโมง หรือส่ง /key เพื่อใช้ key อื่นก็ได้ค่ะ`,
   keyNoModel: (p, m) => `${p} ไม่มีโมเดล ${m} ให้ใช้แล้วค่ะ ส่ง /key เพื่อเลือกโมเดลอื่นนะคะ`,
   keyRateLimited: (p, until) => (until ? `ใช้ ${p} ครบโควตาช่วงนี้แล้วค่ะ จะกลับมาใช้อีกครั้งหลัง ${until} นะคะ` : `ใช้ ${p} ครบโควตาช่วงนี้แล้วค่ะ จะลองใหม่ภายหลังนะคะ`),
   keyUnreadable: "ขอโทษค่ะ ฝั่งเราเปิด key ที่บันทึกไว้ไม่ได้แล้ว ส่ง /key เพื่อใส่ใหม่นะคะ",

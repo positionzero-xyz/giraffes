@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import type { AgentReply } from "../../../src/claude.ts";
 import { CASES } from "../cases.ts";
 import { grade } from "../checks.ts";
-import { agentRequest, readTurn } from "../product.ts";
+import { agentRequest, failedTurn, readTurn } from "../product.ts";
 import type { Wall } from "../types.ts";
 
 const NOW = "2026-11-26T10:00" as Wall;
@@ -76,5 +76,21 @@ describe("what the person would receive", () => {
     assert.ok(r.observation.text.length <= 600);
     assert.equal(r.observation.raw, long.trim());
     assert.ok(failedChecks("chat-advice", body({ text: long, calls: [] })).includes("fits_reply"));
+  });
+});
+
+describe("a box turn that failed", () => {
+  it("keeps the usage and cost the tap saw on the failed result", () => {
+    const usage = { input_tokens: 900, output_tokens: 30, cache_creation_input_tokens: 0, cache_read_input_tokens: 100 };
+    const r = failedTurn(502, { firstTextMs: null, wallMs: 4_000, killed: false, costUsd: 0.004, models: [], usage });
+    assert.equal(r.status, "claude_failed");
+    assert.deepEqual(r.usage, usage);
+    assert.equal(r.costUsd, 0.004);
+  });
+
+  it("calls a run the tap killed a timeout, with nothing known about its spend", () => {
+    const r = failedTurn(502, { firstTextMs: null, wallMs: 119_000, killed: true, costUsd: null, models: [], usage: null });
+    assert.equal(r.status, "timeout");
+    assert.equal(r.costUsd, null);
   });
 });

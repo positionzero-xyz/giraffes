@@ -74,3 +74,22 @@ setTimeout(() => {}, 60000);`,
     assert.equal(alive(Number(readFileSync(pidFile, "utf8"))), false, "the CLI's own child is gone too");
   });
 });
+
+describe("the tap on a failed result", () => {
+  it("keeps the usage and cost of a billed error result", async () => {
+    const child = fake(
+      "billed-error",
+      `process.stdout.write(JSON.stringify({ type: "result", is_error: true, subtype: "error_during_execution", total_cost_usd: 0.004, usage: { input_tokens: 900, output_tokens: 30, cache_creation_input_tokens: 0, cache_read_input_tokens: 100 } }) + "\n");
+process.exitCode = 1;`,
+    );
+    const r = await run(child, 10_000);
+    assert.equal(r.record.costUsd, 0.004);
+    assert.deepEqual(r.record.usage, { input_tokens: 900, output_tokens: 30, cache_creation_input_tokens: 0, cache_read_input_tokens: 100 });
+  });
+
+  it("records no usage or cost, rather than zero, when the CLI never reached a result", async () => {
+    const r = await run(fake("silent", "process.exitCode = 1;"), 10_000);
+    assert.equal(r.record.costUsd, null);
+    assert.equal(r.record.usage, null);
+  });
+});

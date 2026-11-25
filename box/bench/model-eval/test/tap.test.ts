@@ -79,7 +79,7 @@ describe("the tap on a failed result", () => {
   it("keeps the usage and cost of a billed error result", async () => {
     const child = fake(
       "billed-error",
-      `process.stdout.write(JSON.stringify({ type: "result", is_error: true, subtype: "error_during_execution", total_cost_usd: 0.004, usage: { input_tokens: 900, output_tokens: 30, cache_creation_input_tokens: 0, cache_read_input_tokens: 100 } }) + "\n");
+      `process.stdout.write(JSON.stringify({ type: "result", is_error: true, subtype: "error_during_execution", total_cost_usd: 0.004, usage: { input_tokens: 900, output_tokens: 30, cache_creation_input_tokens: 0, cache_read_input_tokens: 100 } }) + "\\n");
 process.exitCode = 1;`,
     );
     const r = await run(child, 10_000);

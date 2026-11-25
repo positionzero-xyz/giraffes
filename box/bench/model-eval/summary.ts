@@ -4,6 +4,7 @@ import { SHAPES } from "./types.ts";
 
 export type JudgeScores = { readonly name: string; readonly scores: Scores };
 
+/** LINE takes a reply token only strictly before 50 s from the inbound event; CLI time alone is a lower bound on that. */
 const LINE_REPLY_WINDOW_MS = 50_000;
 
 /** The model answered but the Worker would discard it, so the case failed; other non-ok statuses are inconclusive. */
@@ -32,9 +33,14 @@ export type Row = {
   readonly cleanTurns: number | null;
   readonly medianWallMs: number | null;
   readonly medianFirstTextMs: number | null;
-  readonly overWindow: number;
-  readonly tokens: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number };
-  readonly costUsd: number;
+  readonly timeouts: number;
+  /** Runs whose CLI time alone reached LINE's cut-off, timeouts included; null for a page build, which no LINE reply carries. */
+  readonly missedLineWindow: number | null;
+  /** Null when no run reported any. */
+  readonly tokens: { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number } | null;
+  readonly usageKnown: number;
+  readonly costUsd: number | null;
+  readonly costKnown: number;
   readonly judges: Readonly<Record<string, number | null>>;
 };
 
@@ -55,7 +61,8 @@ export function rows(run: RunFile, key: JudgeKey | null, judges: readonly JudgeS
       const rs = run.records.filter((r) => r.candidate === candidate && r.shape === shape);
       if (rs.length === 0) continue;
       const ok = rs.filter((r) => r.status === "ok");
-      const walls = ok.map((r) => r.wallMs);
+      const used = rs.flatMap((r) => (r.usage ? [r.usage] : []));
+      const costs = rs.flatMap((r) => (r.costUsd === null ? [] : [r.costUsd]));
       out.push({
         candidate,
         shape,
@@ -66,16 +73,21 @@ export function rows(run: RunFile, key: JudgeKey | null, judges: readonly JudgeS
         checksPassed: sum(ok.map((r) => r.checks.filter((c) => c.pass).length)),
         checks: sum(ok.map((r) => r.checks.length)),
         cleanTurns: ok.some((r) => r.contract === "product") ? ok.filter((r) => r.contract === "product" && r.rejected.length === 0).length : null,
-        medianWallMs: median(walls),
+        medianWallMs: median(ok.flatMap((r) => (r.wallMs === null ? [] : [r.wallMs]))),
         medianFirstTextMs: median(ok.flatMap((r) => (r.firstTextMs === null ? [] : [r.firstTextMs]))),
-        overWindow: walls.filter((w) => w > LINE_REPLY_WINDOW_MS).length,
-        tokens: {
-          input: sum(rs.map((r) => r.usage?.input_tokens ?? 0)),
-          output: sum(rs.map((r) => r.usage?.output_tokens ?? 0)),
-          cacheRead: sum(rs.map((r) => r.usage?.cache_read_input_tokens ?? 0)),
-          cacheWrite: sum(rs.map((r) => r.usage?.cache_creation_input_tokens ?? 0)),
-        },
-        costUsd: sum(rs.map((r) => r.costUsd ?? 0)),
+        timeouts: rs.filter((r) => r.status === "timeout").length,
+        missedLineWindow: shape === "build" ? null : rs.filter((r) => r.status === "timeout" || (r.wallMs !== null && r.wallMs >= LINE_REPLY_WINDOW_MS)).length,
+        tokens: used.length
+          ? {
+              input: sum(used.map((u) => u.input_tokens)),
+              output: sum(used.map((u) => u.output_tokens)),
+              cacheRead: sum(used.map((u) => u.cache_read_input_tokens ?? 0)),
+              cacheWrite: sum(used.map((u) => u.cache_creation_input_tokens ?? 0)),
+            }
+          : null,
+        usageKnown: used.length,
+        costUsd: costs.length ? sum(costs) : null,
+        costKnown: costs.length,
         judges: Object.fromEntries(judges.map((j) => [j.name, key ? judgeMean(ok, key, j.scores) : null])),
       });
     }
@@ -87,13 +99,13 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
   const table = rows(run, key, judges);
   const gates = new Map<string, Gate>(key ? judges.map((j) => [j.name, calibrationGate(key, j.scores)]) : []);
   const judgeCols = judges.map((j) => `judge ${j.name}${gates.get(j.name)?.proven ? "" : " (unproven)"}`);
-  const head = ["candidate", "shape", "ok/runs", "cases passed", "checks passed", "clean turns", "median wall s", "median first text s", "over 50 s", "tokens in/out/cache read/cache write", "cost USD", ...judgeCols];
+  const head = ["candidate", "shape", "ok/runs", "cases passed", "checks passed", "clean turns", "median CLI wall s", "median first internal text s", "timeouts", "CLI wall ≥ 50 s", "tokens in/out/cache read/cache write (runs reporting)", "cost USD (runs reporting)", ...judgeCols];
   const lines = [
     `# Model eval ${run.meta.startedAt}`,
     "",
     `Commit ${run.meta.gitSha}. CLI ${run.meta.cliVersion ?? "unknown"} (${run.meta.cli}). Login ${run.meta.auth ? `${run.meta.auth.authMethod}, signed ${run.meta.auth.loggedIn ? "in" : "out"}` : "unknown"}. Now ${run.meta.now}${run.meta.nowPinned ? " (pinned)" : " (today)"} Asia/Bangkok.`,
     "",
-    `Cost is the CLI's total_cost_usd, an API-price equivalent, not plan usage. A case passes only when its run is ok and every check passes. A reply the Worker would discard (${[...MODEL_FAILED].join(", ")}) counts as a failed case; other statuses are inconclusive and left out. Chat and reminder run on the product path; draft and build run on the planned contract.`,
+    `Cost is the CLI's total_cost_usd, an API-price equivalent, not plan usage. A case passes only when its run is ok and every check passes. A reply the Worker would discard (${[...MODEL_FAILED].join(", ")}) counts as a failed case; other statuses are inconclusive and left out. Chat and reminder run on the product path; draft and build run on the planned contract. Wall time is the CLI subprocess alone, not inbound to delivery, so "CLI wall ≥ 50 s" (timeouts included) is a lower bound on replies that miss LINE's 50-second window. The first internal text is the CLI's first assistant text, which the Worker never sends; the person gets only the final reply.`,
     "",
     `| ${head.join(" | ")} |`,
     `| ${head.map(() => "---").join(" | ")} |`,
@@ -107,14 +119,15 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
         r.cleanTurns === null ? "-" : `${r.cleanTurns}/${r.ok}`,
         secs(r.medianWallMs),
         secs(r.medianFirstTextMs),
-        String(r.overWindow),
-        `${r.tokens.input}/${r.tokens.output}/${r.tokens.cacheRead}/${r.tokens.cacheWrite}`,
-        r.costUsd.toFixed(4),
+        String(r.timeouts),
+        r.missedLineWindow === null ? "n/a" : String(r.missedLineWindow),
+        r.tokens === null ? `unknown (0/${r.runs})` : `${r.tokens.input}/${r.tokens.output}/${r.tokens.cacheRead}/${r.tokens.cacheWrite} (${r.usageKnown}/${r.runs})`,
+        r.costUsd === null ? `unknown (0/${r.runs})` : `${r.costUsd.toFixed(4)} (${r.costKnown}/${r.runs})`,
         ...judges.map((j) => (r.judges[j.name] == null ? "-" : (r.judges[j.name] as number).toFixed(2))),
       ].join(" | ")} |`,
     ),
     "",
-    `Total cost USD ${sum(run.records.map((r) => r.costUsd ?? 0)).toFixed(4)} over ${run.records.length} runs.`,
+    `Known cost USD ${sum(run.records.map((r) => r.costUsd ?? 0)).toFixed(4)} over ${run.records.filter((r) => r.costUsd !== null).length} of ${run.records.length} runs; the rest reported none.`,
   ];
   const notes: string[] = [];
   const mismatched = run.records.filter((r) => r.dateMismatch && r.shape === "reminder").length;

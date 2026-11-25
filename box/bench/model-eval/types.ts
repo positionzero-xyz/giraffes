@@ -79,7 +79,15 @@ export type Case = {
 /** `cut_off` and `refused`: the CLI answered but stopped at the output limit or refused, which the Worker treats as a failed turn. */
 export type RunStatus = "ok" | "timeout" | "claude_failed" | "signed_out" | "invalid_output" | "cut_off" | "refused" | "harness_error";
 
-export type Tap = { readonly firstTextMs: number | null; readonly wallMs: number; readonly killed: boolean; readonly costUsd: number | null; readonly models: readonly string[] };
+/** What the tap saw of one CLI run. `firstTextMs` is the first assistant text, which the Worker never sends; null spend means none was reported. */
+export type Tap = {
+  readonly firstTextMs: number | null;
+  readonly wallMs: number;
+  readonly killed: boolean;
+  readonly costUsd: number | null;
+  readonly usage: Usage | null;
+  readonly models: readonly string[];
+};
 
 export type RunRecord = {
   readonly id: string;
@@ -105,7 +113,7 @@ export type RunRecord = {
   readonly rejected: readonly string[];
   readonly wakeups: readonly Wakeup[];
   readonly checks: readonly CheckResult[];
-  readonly wallMs: number;
+  readonly wallMs: number | null;
   readonly firstTextMs: number | null;
   readonly usage: Usage | null;
   readonly costUsd: number | null;

@@ -6,6 +6,7 @@ const started = Date.now();
 const child = spawn(bin, args, { stdio: ["pipe", "pipe", "inherit"] });
 let firstTextMs: number | null = null;
 let costUsd: number | null = null;
+let usage: unknown = null;
 let models: string[] = [];
 let killed = false;
 let partial = "";
@@ -17,6 +18,14 @@ const timer = setTimeout(() => {
   else child.kill("SIGKILL");
 }, Number(timeout));
 
+type Event = {
+  type?: string;
+  message?: { content?: { type?: string; text?: string }[] };
+  total_cost_usd?: number;
+  usage?: { input_tokens?: unknown; output_tokens?: unknown };
+  modelUsage?: Record<string, unknown>;
+};
+
 function read(line: string) {
   let e: unknown;
   try {
@@ -25,10 +34,11 @@ function read(line: string) {
     return;
   }
   if (typeof e !== "object" || e === null) return;
-  const event = e as { type?: string; message?: { content?: { type?: string; text?: string }[] }; total_cost_usd?: number; modelUsage?: Record<string, unknown> };
+  const event = e as Event;
   if (firstTextMs === null && event.type === "assistant" && event.message?.content?.some((b) => b.type === "text" && b.text?.trim())) firstTextMs = Date.now() - started;
   if (event.type === "result") {
     costUsd = typeof event.total_cost_usd === "number" ? event.total_cost_usd : null;
+    usage = typeof event.usage?.input_tokens === "number" && typeof event.usage.output_tokens === "number" ? event.usage : null;
     models = Object.keys(event.modelUsage ?? {});
   }
 }
@@ -44,6 +54,6 @@ child.stdin.on("error", () => {});
 child.on("close", (code) => {
   clearTimeout(timer);
   read(partial);
-  appendFileSync(record, `${JSON.stringify({ args: args.slice(0, 2), firstTextMs, wallMs: Date.now() - started, killed, costUsd, models })}\n`);
+  appendFileSync(record, `${JSON.stringify({ args: args.slice(0, 2), firstTextMs, wallMs: Date.now() - started, killed, costUsd, usage, models })}\n`);
   process.exitCode = killed ? 124 : (code ?? 1);
 });

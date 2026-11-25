@@ -9,7 +9,7 @@ import { findChrome, inspect } from "./browser.ts";
 import { BUILD_SYSTEM, selectCases } from "./cases.ts";
 import { grade, REPLY_CAP } from "./checks.ts";
 import { ingestScores, readScores, writeJudgeBatch, type JudgeKey } from "./judge.ts";
-import { agentRequest, effortOf, NO_OBSERVATION, readTurn, TZ } from "./product.ts";
+import { agentRequest, effortOf, failedTurn, NO_OBSERVATION, readTurn, TZ } from "./product.ts";
 import { render, type JudgeScores } from "./summary.ts";
 import { CONTRACT, EFFORTS, HARNESSES, SHAPES, type Candidate, type Case, type Check, type Effort, type Observation, type RunFile, type RunRecord, type RunStatus, type Shape, type Tap, type Wall } from "./types.ts";
 import { dateOf, parseWall, todayAt } from "./when.ts";
@@ -92,8 +92,7 @@ async function productTurn(cli: string, c: Candidate, k: Case, message: string, 
   const reply = await agentTurn([process.execPath, TAP, tapFile, String(TURN_TAP_MS), cli], agentRequest(c, message, now), sessions);
   const tap = readTap(tapFile);
   if (reply.status !== 200) {
-    const status: RunStatus = tap?.killed ? "timeout" : reply.status === 409 ? "signed_out" : "claude_failed";
-    return { status, observation: NO_OBSERVATION, calls: [], refusedCalls: [], usage: null, costUsd: tap?.costUsd ?? null, tap, buildDir: null };
+    return { ...failedTurn(reply.status, tap), tap, buildDir: null };
   }
   const read = readTurn(reply.body, message, now, CONTRACT[k.shape]);
   return { ...read, costUsd: tap?.costUsd ?? read.costUsd, tap, buildDir: null };
@@ -139,7 +138,7 @@ async function buildTurn(cli: string, chrome: string | null, c: Candidate, messa
   mkdirSync(keep, { recursive: true });
   cpSync(work, keep, { recursive: true });
   rmSync(work, { recursive: true, force: true });
-  const usage: Usage | null = result?.usage ?? null;
+  const usage: Usage | null = result?.usage ?? tap?.usage ?? null;
   const base = { calls: [], refusedCalls: [], usage, costUsd: tap?.costUsd ?? null, tap, buildDir: keep };
   if (tap?.killed) return { status: "timeout", observation: NO_OBSERVATION, ...base };
   if (!result || result.is_error !== false) {
@@ -244,7 +243,8 @@ async function main() {
         const out = await (k.shape === "build" ? buildTurn(cli, chrome, c, message, checks, tapFile, join(runDir, "builds", safe)) : productTurn(cli, c, k, message, now, tapFile)).catch(
           (err: unknown): Outcome => {
             console.error(`${id} harness error: ${String(err)}`);
-            return { status: "harness_error", observation: NO_OBSERVATION, calls: [], refusedCalls: [], usage: null, costUsd: readTap(tapFile)?.costUsd ?? null, tap: readTap(tapFile), buildDir: null };
+            const tap = readTap(tapFile);
+            return { status: "harness_error", observation: NO_OBSERVATION, calls: [], refusedCalls: [], usage: tap?.usage ?? null, costUsd: tap?.costUsd ?? null, tap, buildDir: null };
           },
         );
         const record: RunRecord = {
@@ -270,7 +270,7 @@ async function main() {
           rejected: out.observation.rejected,
           wakeups: out.observation.wakeups,
           checks: out.status === "ok" ? checks.map((ch) => grade(ch, out.observation)) : [],
-          wallMs: out.tap?.wallMs ?? 0,
+          wallMs: out.tap?.wallMs ?? null,
           firstTextMs: out.tap?.firstTextMs ?? null,
           usage: out.usage,
           costUsd: out.costUsd,
@@ -280,7 +280,8 @@ async function main() {
         file.records.push(record);
         writeFileSync(join(runDir, "run.json"), `${JSON.stringify(file, null, 2)}\n`);
         const passed = record.checks.filter((r) => r.pass).length;
-        console.log(`${id} ${record.status} ${passed}/${record.checks.length} checks ${(record.wallMs / 1000).toFixed(1)}s $${(record.costUsd ?? 0).toFixed(4)}`);
+        const wall = record.wallMs === null ? "no time" : `${(record.wallMs / 1000).toFixed(1)}s`;
+        console.log(`${id} ${record.status} ${passed}/${record.checks.length} checks ${wall} ${record.costUsd === null ? "cost unknown" : `$${record.costUsd.toFixed(4)}`}`);
       }
     }
   }

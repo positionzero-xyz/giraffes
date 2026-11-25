@@ -1,5 +1,5 @@
 import type { AgentReply, AgentRequest, Usage } from "../../src/claude.ts";
-import type { Candidate, Contract, Observation, RunStatus, Wall, Wakeup } from "./types.ts";
+import type { Candidate, Contract, Observation, RunStatus, Tap, Wall, Wakeup } from "./types.ts";
 import {
   boxTurnAttempt,
   boxTurnRequest,
@@ -69,6 +69,12 @@ export type TurnRead = {
   readonly usage: Usage | null;
   readonly costUsd: number | null;
 };
+
+/** A box turn that got no 200, with whatever spend the tap saw on the CLI's own result. */
+export function failedTurn(status: 409 | 502, tap: Tap | null): TurnRead {
+  const kind: RunStatus = tap?.killed ? "timeout" : status === 409 ? "signed_out" : "claude_failed";
+  return { status: kind, observation: NO_OBSERVATION, calls: [], refusedCalls: [], usage: tap?.usage ?? null, costUsd: tap?.costUsd ?? null };
+}
 
 const FAILED: Readonly<Record<string, RunStatus>> = { refused_by_model: "refused", invalid: "invalid_output" };
 

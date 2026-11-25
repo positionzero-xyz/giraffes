@@ -37,10 +37,11 @@ export type Row = {
 };
 
 function judgeMean(records: readonly RunRecord[], key: JudgeKey, scores: Scores): number | null {
+  if (!calibrationGate(key, scores).proven) return null;
   const ids = new Set(records.map((r) => r.id));
   const got = Object.entries(key)
     .filter(([id, e]) => "record" in e && ids.has(e.record) && scores[id])
-    .map(([id]) => itemScore(scores[id]));
+    .map(([id, e]) => itemScore(e.shape, scores[id]));
   return got.length ? sum(got) / got.length : null;
 }
 
@@ -123,7 +124,7 @@ export function render(run: RunFile, key: JudgeKey | null, judges: readonly Judg
   const friday = run.records.filter((r) => r.caseId === "reminder-next-friday" && r.status === "ok").map((r) => r.checks.find((c) => c.check === "due_at")?.detail ?? "");
   const read = (label: string) => friday.filter((d) => d.startsWith(label)).length;
   if (friday.length) notes.push(`"Next Friday" readings: coming ${read("coming")}, next week ${read("next week")}, neither ${friday.length - read("coming") - read("next week")}.`);
-  for (const [name, g] of gates) notes.push(`Judge ${name} calibration good ${g.good.toFixed(2)}, flat ${g.flat.toFixed(2)}, bad ${g.bad.toFixed(2)}: ${g.proven ? "proven" : "unproven, so its scores don't count"}.`);
+  for (const [name, g] of gates) notes.push(`Judge ${name} calibration good ${g.good.toFixed(2)}, flat ${g.flat.toFixed(2)}, bad ${g.bad.toFixed(2)}: ${g.proven ? "proven" : "unproven, so the table shows none of its scores"}.`);
   if (judges.length === 0) notes.push("No judge scores yet. The judge batch is in judge/.");
   return `${[...lines, "", ...notes.map((n) => `- ${n}`)].join("\n")}\n`;
 }

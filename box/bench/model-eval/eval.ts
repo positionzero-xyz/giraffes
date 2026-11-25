@@ -8,7 +8,7 @@ import { agentArgs, agentTurn, authStatus, cliVersion, type SessionStore, type U
 import { findChrome, inspect } from "./browser.ts";
 import { BUILD_SYSTEM, selectCases } from "./cases.ts";
 import { grade, REPLY_CAP } from "./checks.ts";
-import { ingestScores, writeJudgeBatch, type JudgeKey } from "./judge.ts";
+import { ingestScores, readScores, writeJudgeBatch, type JudgeKey } from "./judge.ts";
 import { agentRequest, effortOf, NO_OBSERVATION, readTurn, TZ } from "./product.ts";
 import { render, type JudgeScores } from "./summary.ts";
 import { CONTRACT, EFFORTS, HARNESSES, SHAPES, type Candidate, type Case, type Check, type Effort, type Observation, type RunFile, type RunRecord, type RunStatus, type Shape, type Tap, type Wall } from "./types.ts";
@@ -183,7 +183,7 @@ function judgesOf(runDir: string): { key: JudgeKey | null; judges: JudgeScores[]
   const judges = existsSync(dir)
     ? readdirSync(dir)
         .filter((f) => f.endsWith(".json"))
-        .map((f) => ({ name: f.slice(0, -5), scores: JSON.parse(readFileSync(join(dir, f), "utf8")) }))
+        .map((f) => ({ name: f.slice(0, -5), scores: key ? readScores(key, JSON.parse(readFileSync(join(dir, f), "utf8"))) : {} }))
     : [];
   return { key, judges };
 }

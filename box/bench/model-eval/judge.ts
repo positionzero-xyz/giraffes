@@ -93,6 +93,7 @@ export function readScores(key: JudgeKey, raw: unknown): Scores {
       const v = (got as Record<string, unknown>)[c.key];
       if (!Number.isInteger(v) || (v as number) < 1 || (v as number) > 5) problems.push(`${id}.${c.key} is ${JSON.stringify(v)}`);
     }
+    for (const k of Object.keys(got)) if (!criteria.some((c) => c.key === k)) problems.push(`${id}.${k} is not a ${entry.shape} criterion`);
   }
   for (const id of Object.keys(scores)) if (!(id in key)) problems.push(`${id} is not in the batch`);
   if (problems.length) throw new Error(`bad scores: ${problems.slice(0, 10).join("; ")}`);
@@ -100,14 +101,15 @@ export function readScores(key: JudgeKey, raw: unknown): Scores {
 }
 
 const mean = (xs: readonly number[]) => xs.reduce((a, b) => a + b, 0) / Math.max(1, xs.length);
-export const itemScore = (s: Readonly<Record<string, number>>) => mean(Object.values(s));
+/** An item's mean over its rubric's criteria, so no other key can move it. */
+export const itemScore = (shape: Shape, s: Readonly<Record<string, number>>) => mean((RUBRICS[shape]?.criteria ?? []).map((c) => s[c.key]));
 
 export type Gate = { readonly proven: boolean; readonly good: number; readonly flat: number; readonly bad: number };
 
 export function calibrationGate(key: JudgeKey, scores: Scores): Gate {
   const of = (level: Calibration) => {
     const id = Object.entries(key).find(([, e]) => "calibration" in e && e.calibration === level)?.[0];
-    return id && scores[id] ? itemScore(scores[id]) : Number.NaN;
+    return id && scores[id] ? itemScore("draft", scores[id]) : Number.NaN;
   };
   const good = of("good");
   const flat = of("flat");

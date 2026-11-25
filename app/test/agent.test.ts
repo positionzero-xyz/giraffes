@@ -518,6 +518,58 @@ describe("time zone and language", () => {
     expect(await c.received()).toEqual(["ขอโทษค่ะ ตอนนี้ยังตอบข้อความนั้นไม่ได้ ช่วยส่งมาใหม่อีกครั้งได้ไหมคะ"]);
     model.assertDone();
   });
+
+  async function telegramMessage(chatId: number, updateId: number, text: string, languageCode: unknown) {
+    const secret = "A0_-".repeat(8);
+    const body = {
+      update_id: updateId,
+      message: {
+        date: Date.UTC(2099, 10, 4, 3) / 1000,
+        chat: { id: chatId, type: "private" },
+        from: { id: chatId, is_bot: false, first_name: "Pim", language_code: languageCode },
+        text,
+      },
+    };
+    const req = new Request("https://agent.test/webhook/telegram", {
+      method: "POST",
+      headers: { "x-telegram-bot-api-secret-token": secret },
+      body: JSON.stringify(body),
+    });
+    const response = await worker.fetch(req, { ...env, TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_WEBHOOK_SECRET: secret });
+    expect(response.status).toBe(200);
+  }
+
+  test.each([
+    { text: "/start", code: "th", notice: /^ต้องมี AI/ },
+    { text: "สวัสดี", code: "TH-th", notice: /^ต้องมี AI/ },
+    { text: "/key", code: "th", notice: /^ใส่ API key/ },
+    { text: "/key", code: "en-US", notice: /^Add your API key/ },
+    { text: "/key", code: "ja", notice: /^Add your API key/ },
+    { text: "/key", code: undefined, notice: /^Add your API key/ },
+    { text: "/key", code: 123, notice: /^Add your API key/ },
+  ])("a new Telegram person's $text notice uses their $code language before a model call", async ({ text, code, notice }) => {
+    const c = await devChat("777000111", { model: null, at: "2099-11-04T10:00", channel: "telegram" });
+
+    await telegramMessage(777000111, 1, text, code);
+    await c.settle();
+
+    expect(await c.received()).toEqual([expect.stringMatching(notice)]);
+    expect(c.logs("model_call")).toEqual([]);
+  });
+
+  test("Telegram's language hint does not replace the language set during a conversation", async () => {
+    const model = scripted([turn({ actions: [locale("Asia/Bangkok", "en"), send("English from now on.")] })]);
+    const c = await devChat("777000111", { model, at: "2099-11-04T10:00", channel: "telegram" });
+
+    await telegramMessage(777000111, 1, "คุยภาษาอังกฤษนะ", "th");
+    await c.settle();
+    expect(await c.received()).toEqual(["English from now on."]);
+
+    await telegramMessage(777000111, 2, "/key", "th");
+    await c.settle();
+    expect(await c.received()).toEqual([expect.stringMatching(/^Add your API key/)]);
+    model.assertDone();
+  });
 });
 
 describe("failure and duplicate safety", () => {

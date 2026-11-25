@@ -162,6 +162,8 @@ export type ServeRequest = {
 
 export type ConnectResult = { readonly ok: true; readonly provider: string; readonly model: string } | { readonly ok: false; readonly error: KeyPageError };
 
+type CatchUpAccess = { readonly plan: Plan; readonly budget: string };
+
 export type AccessView = {
   readonly lanes: readonly ("box" | "key" | "included")[];
   readonly key: {
@@ -371,7 +373,7 @@ export class Agent extends DurableObject<Env> {
   async serve(req: ServeRequest): Promise<Served<Purpose> | { readonly kind: "not_owner" }> {
     if (!this.#store.ownsGroup(req.group, req.ownershipVersion)) return { kind: "not_owner" };
     const plan = await this.#planNow(this.#agent().key, this.#deps.clock.now());
-    if (plan.kind === "lapsed") return { kind: "no_access", why: "nothing", told: false, notice: null };
+    if (plan.kind === "lapsed") return { kind: "no_access", why: "nothing", told: false, notice: null, waitForConnection: false };
     return this.#access().call({ purpose: req.purpose, system: req.system, prompt: req.prompt, plan });
   }
 
@@ -489,9 +491,11 @@ export class Agent extends DurableObject<Env> {
         if (poisoned) this.#commitPoison(poisoned);
         this.#fireDueWakeups();
         while (clock.now() - started < DRAIN_BUDGET_MS) {
-          const batch = this.#store.claimBatch(clock.now());
+          const now = clock.now();
+          const catchUp = await this.#catchUpAccess(now);
+          const batch = this.#store.claimBatch(clock.now(), catchUp?.budget ?? null);
           if (!batch) break;
-          await this.#turn(batch);
+          await this.#turn(batch, catchUp?.plan ?? null);
           await this.#deliverReady();
           this.#fireDueWakeups();
         }
@@ -548,7 +552,7 @@ export class Agent extends DurableObject<Env> {
     };
   }
 
-  async #turn(batch: Batch): Promise<void> {
+  async #turn(batch: Batch, catchUpPlan: Plan | null): Promise<void> {
     const a = this.#agent();
     const view = this.#view(batch, a);
     const bypass = bypassModel(view);
@@ -561,7 +565,7 @@ export class Agent extends DurableObject<Env> {
     if (first.kind === "choice" && first.choice.kind === "backup") return this.#backupTap(first.choice.revision, view, a.key);
     const command = commandOf(first);
     if (command) return this.#command(command, view, a);
-    const plan = await this.#planNow(a.key, view.now);
+    const plan = (batch.items[0].catchUp ? catchUpPlan : null) ?? await this.#planNow(a.key, view.now);
     if (plan.kind === "lapsed") {
       const alreadyToldToday = this.#store.toldToday("lapsed", startOfLocalDay(view.now, view.tz));
       return this.#commit(planWithoutModel(view, { kind: "lapsed", alreadyToldToday }), view, a.key, { kind: "none" });
@@ -569,7 +573,9 @@ export class Agent extends DurableObject<Env> {
 
     const shown = await this.#historyThatFits(batch, a, view, plan);
     const box = renderBoxTurn(shown, this.#store.boxSession());
-    const served = await this.#access().call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan, box });
+    const access = this.#access();
+    const catchUpBudget = batch.items[0].catchUp ? access.catchUpBudget(plan, this.#deps.clock.now()) ?? "unavailable" : null;
+    const served = await access.call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan, box });
     const historyTrimmed = shown.historyLeftOut > 0 || ((served.kind === "ok" || served.kind === "failed") && served.trimmed);
     switch (served.kind) {
       case "ok": {
@@ -585,13 +591,18 @@ export class Agent extends DurableObject<Env> {
       case "over_cap": {
         const alreadyToldToday = this.#store.toldToday("refused_budget", startOfLocalDay(view.now, view.tz));
         const capUsd = usd(this.#store.key()?.capMicro ?? (0 as MicroUsd));
-        return this.#commit(planWithoutModel(view, { kind: "over_cap", scope: served.scope, capUsd, alreadyToldToday }), view, a.key, { kind: "none" });
+        return this.#commit(planWithoutModel(view, { kind: "over_cap", scope: served.scope, capUsd, alreadyToldToday, catchUpBudget }), view, a.key, { kind: "none" });
       }
       case "no_access": {
-        const offer = served.why === "box_not_ready" ? NOTICES[view.language].boxNotReady : this.#onboarding(view.language, plan, a.key);
+        const waitForConnection = first.kind === "message" && (served.waitForConnection || batch.items[0].catchUp !== undefined);
+        const notices = NOTICES[view.language];
+        const signedOutWithRequest = waitForConnection && this.#boxLane().state() === "signed_out";
+        const offer = served.why === "box_not_ready"
+          ? (signedOutWithRequest ? notices.boxSignedOut : notices.boxNotReady)
+          : this.#onboarding(view.language, plan, a.key);
         const text = served.notice ?? offer;
         const alreadyToldToday = served.told || (served.notice === null && this.#store.toldToday("no_access", startOfLocalDay(view.now, view.tz)));
-        return this.#commit(planWithoutModel(view, { kind: "no_access", text, alreadyToldToday }), view, a.key, { kind: "none" });
+        return this.#commit(planWithoutModel(view, { kind: "no_access", text, alreadyToldToday, waitForConnection }), view, a.key, { kind: "none" });
       }
       case "unavailable":
         return this.#modelUnavailable(view, a.key);
@@ -633,6 +644,15 @@ export class Agent extends DurableObject<Env> {
       clock: this.#deps.clock,
       instance: this.#instance,
     });
+  }
+
+  async #catchUpAccess(now: EpochMs): Promise<CatchUpAccess | null> {
+    if (!this.#store.hasWaitingRequests(now)) return null;
+    const a = this.#store.agent();
+    if (a?.status !== "active") return null;
+    const plan = await this.#planNow(a.key, now);
+    const budget = this.#access().catchUpBudget(plan, now);
+    return budget !== null && this.#store.hasWaitingRequests(now, budget) ? { plan, budget } : null;
   }
 
   #boxLane(): BoxLane {
@@ -1239,12 +1259,13 @@ export class Agent extends DurableObject<Env> {
 
   async #rearm(): Promise<void> {
     const now = this.#deps.clock.now();
+    const catchUp = await this.#catchUpAccess(now);
     const r = this.#store.readiness(now);
     const a = this.#store.agent();
     const fireTimes = a && !r.channelEventWaiting ? r.earliestWakeups.map((w) => fireAt(w, a.tz)) : [];
     const t = nextAlarm({
       now,
-      inboxReadyAt: r.inboxReadyAt,
+      inboxReadyAt: r.inboxReadyAt ?? (catchUp ? now : null),
       wakeupFireAt: fireTimes.length > 0 ? (Math.min(...fireTimes) as EpochMs) : null,
       outboxReadyAt: r.outboxReadyAt,
       logsReadyAt: r.logsReadyAt,

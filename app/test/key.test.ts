@@ -5,7 +5,7 @@ import { AgentStore } from "../src/agent/store";
 import { eventKey, type AgentKey, type LocalDate, type MicroUsd } from "../src/domain";
 import { NOTICES } from "../src/notices";
 import worker from "../src/worker";
-import { chat, devChat, fakeBox, fakeProvider, giveKey, local, scripted, send, type DevChat, type ProviderStep } from "./testkit";
+import { chat, devChat, fakeBox, fakeProvider, giveKey, local, schedule, scripted, send, type DevChat, type ProviderStep } from "./testkit";
 
 const NOTICE = NOTICES.en;
 const KEY = "oc_sk_live_abcdefghijklmnop0123456789";
@@ -36,6 +36,220 @@ async function doDump(agent: AgentKey): Promise<string> {
 }
 
 describe("entering a key on the page", () => {
+  test("a request waits when the new key can afford its probe but not catch-up", async () => {
+    const provider = fakeProvider([PROBE_OK, PROBE_OK, reply("I'll help you remember to call Mum.")]);
+    const c = await devChat("catch-up-cap", { model: null, provider, at: "2099-11-04T10:00" });
+    expect((await submit(await keyLink(c))).status).toBe(200);
+    await c.settle();
+    await c.received();
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_agent, state) => {
+      state.storage.sql.exec("UPDATE spend_month SET spent_micro = 4990000 WHERE scope = 'byok' AND month = '2099-11'");
+    });
+    await c.say("Can you plan a day trip for us?");
+    expect(await c.received()).toEqual([NOTICE.ownCapReached("5.00")]);
+    await c.say("/key remove");
+    await c.received();
+    const request = "Remind me to call Mum at 6.";
+    await c.say(request);
+    expect((await c.received())[0]).toContain("answer requests from the last 24 hours");
+
+    expect((await submit(await keyLink(c))).status).toBe(200);
+    await c.settle();
+    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5")]);
+    expect(provider.seen).toHaveLength(2);
+    expect(c.logs("turn").at(-1)?.outcome).toBe("refused_budget");
+
+    await c.say("/key cap 10");
+    expect(await c.received()).toEqual([NOTICE.keyCapSet("10.00"), `${NOTICE.catchUp}\nI'll help you remember to call Mum.`]);
+    expect(provider.seen).toHaveLength(3);
+    expect(JSON.stringify(provider.seen[2].body)).toContain(request);
+    await c.say("/key cap 11");
+    expect(await c.received()).toEqual([NOTICE.keyCapSet("11.00")]);
+    expect(provider.seen).toHaveLength(3);
+  });
+
+  test("a key out of credit says when the key can be tried again without promising to replay requests", async () => {
+    const provider = fakeProvider([PROBE_OK, { kind: "status", status: 402 }, PROBE_OK]);
+    const c = await devChat("catch-up-key-out-of-credit", { model: null, provider, at: "2099-11-04T10:00" });
+    expect((await submit(await keyLink(c))).status).toBe(200);
+    await c.settle();
+    await c.received();
+    await c.say("Help me plan dinner.");
+    const [refused] = await c.received();
+    expect(refused).toContain("try the key again");
+    expect(refused).not.toContain("answer requests");
+    await c.say("Can we use pumpkin?");
+    expect(await c.received()).toEqual([refused]);
+    expect((await submit(await keyLink(c))).status).toBe(200);
+    await c.settle();
+    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5")]);
+    expect(provider.seen).toHaveLength(3);
+  });
+
+  test.each(["pending", "processing"] as const)("catch-up expiry applies to %s batches after backoff", async (status) => {
+    const provider = fakeProvider([PROBE_OK, { kind: "network" }, reply("This reply would be too late.")]);
+    const c = await devChat(`catch-up-expired-${status}`, { model: null, provider, at: "2099-11-04T10:00" });
+    await c.say("Look up my October receipt.", { id: "old-request", at: local("2099-11-03T10:01") });
+    await c.received();
+    expect((await submit(await keyLink(c))).status).toBe(200);
+    await c.settle();
+    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5")]);
+    expect(provider.seen).toHaveLength(2);
+    if (status === "processing") {
+      await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_agent, state) => {
+        state.storage.sql.exec("UPDATE inbox SET status = 'processing', attempts = 3 WHERE event_key = ?", eventKey.dev("old-request"));
+      });
+    }
+
+    c.clock.set(local("2099-11-04T10:02"));
+    await c.settle();
+
+    expect(await c.received()).toEqual([]);
+    expect(provider.seen).toHaveLength(2);
+  });
+
+  test("roll-forward skips a claimed request that the old Worker marked answered", async () => {
+    const provider = fakeProvider([PROBE_OK, { kind: "network" }, reply("Duplicate answer.")]);
+    const c = await devChat("catch-up-roll-forward", { model: null, provider, at: "2099-11-04T10:00" });
+    await c.say("Plan dinner for me.", { id: "old-worker-answer" });
+    await c.received();
+    expect((await submit(await keyLink(c))).status).toBe(200);
+    await c.settle();
+    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5")]);
+    expect(provider.seen).toHaveLength(2);
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_agent, state) => {
+      state.storage.sql.exec("UPDATE inbox SET status = 'done', outcome = 'acted' WHERE event_key = ?", eventKey.dev("old-worker-answer"));
+    });
+
+    await c.settle();
+
+    expect(await c.received()).toEqual([]);
+    expect(provider.seen).toHaveLength(2);
+  });
+
+  test("connecting answers the earlier request once without replaying commands or follow", async () => {
+    const provider = fakeProvider([PROBE_OK, reply("The market opens at 8."), PROBE_OK]);
+    const c = await devChat("catch-up-key", { model: null, provider, at: "2099-11-04T10:00" });
+    await c.say("/follow");
+    await c.say("When does the market open?");
+    expect(await c.received()).toEqual([NOTICE.noAccess({ box: false, key: true, included: false })]);
+
+    const ticket = await keyLink(c);
+    expect((await submit(ticket)).status).toBe(200);
+    await c.settle();
+
+    expect(await c.received()).toEqual([
+      NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5"),
+      "Here's my answer to what you sent earlier.\nThe market opens at 8.",
+    ]);
+    expect(provider.seen).toHaveLength(2);
+    expect(JSON.stringify(provider.seen[1].body)).toContain("When does the market open?");
+
+    expect((await submit(await keyLink(c))).status).toBe(200);
+    await c.settle();
+    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5")]);
+    expect(provider.seen).toHaveLength(3);
+  });
+
+  test("a catch-up turn log uses the request, start time and outcome as its identity", async () => {
+    const provider = fakeProvider([PROBE_OK, reply("Here is the route.")]);
+    const c = await devChat("catch-up-log", { model: null, provider, at: "2099-11-04T10:00" });
+    await c.say("How do I get there?", { id: "route-request" });
+    await c.received();
+    const ticket = await keyLink(c);
+    expect((await submit(ticket)).status).toBe(200);
+    await c.settle();
+
+    expect(c.logs("turn").filter((row) => row.outcome === "acted").map((row) => row.id)).toEqual([
+      `${c.agent}|${eventKey.dev("route-request")}|catch-up:${c.clock.now()}:acted`,
+    ]);
+  });
+
+  test("a repeat queued after connecting joins catch-up, and a message during the model call gets its own reply", async () => {
+    const provider = fakeProvider();
+    const c = await devChat("catch-up-batch", { model: null, provider, at: "2099-11-04T10:00" });
+    const ticket = await keyLink(c);
+    const noticeStarted = Promise.withResolvers<void>();
+    const repeatQueued = Promise.withResolvers<void>();
+    const deliver = c.channel.deliver;
+    c.channel.deliver = async (message, now) => {
+      if (message.texts[0].startsWith("I need an AI")) {
+        noticeStarted.resolve();
+        await repeatQueued.promise;
+      }
+      return deliver(message, now);
+    };
+    const request = "What is the exchange rate?";
+    provider.steps.push(
+      PROBE_OK,
+      { kind: "call", run: async () => {
+        expect((await c.post("How much is a train ticket?")).status).toBe(200);
+        return reply("I can't check live exchange rates.");
+      } },
+      reply("It depends on the route."),
+    );
+
+    await c.post(request);
+    await noticeStarted.promise;
+    try {
+      expect((await submit(ticket)).status).toBe(200);
+      c.clock.set(local("2099-11-04T10:01"));
+      expect((await c.post(request)).status).toBe(200);
+    } finally {
+      repeatQueued.resolve();
+    }
+    await c.settle();
+
+    expect(await c.received()).toEqual([
+      NOTICE.noAccess({ box: false, key: true, included: false }),
+      NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5"),
+      `${NOTICE.catchUp}\nI can't check live exchange rates.`,
+      "It depends on the route.",
+    ]);
+    expect(provider.seen).toHaveLength(3);
+    const batch = JSON.stringify(provider.seen[1].body);
+    expect(batch).toContain(`[Sent 2099-11-04 10:00] Person: ${request}`);
+    expect(batch).toContain(`[Sent 2099-11-04 10:01] Person: ${request}`);
+    expect(batch).not.toContain("How much is a train ticket?");
+    expect(c.logs("turn").filter((row) => row.outcome === "acted").map((row) => row.batchSize)).toEqual([2, 1]);
+  });
+
+  test("catch-up drops an expired request and uses send time for relative reminders", async () => {
+    const provider = fakeProvider([PROBE_OK, {
+      kind: "output",
+      value: {
+        actions: [
+          schedule("call-mum", "2099-11-04T11:00", "Call Mum"),
+          schedule("check-oven", "2099-11-04T13:00", "Check the oven"),
+          send("I'll remind you to check the oven at 1 pm."),
+        ],
+        tasks: [],
+        about: "",
+      },
+    }]);
+    const c = await devChat("catch-up-reminders", { model: null, provider, at: "2099-11-04T10:00" });
+    await c.say("Find my October receipt.", { at: local("2099-11-03T11:00") });
+    await c.say("Remind me in an hour to call Mum.");
+    await c.say("Remind me in three hours to check the oven.");
+    await c.received();
+    c.clock.set(local("2099-11-04T12:00"));
+    expect((await submit(await keyLink(c))).status).toBe(200);
+    await c.settle();
+
+    expect(await c.received()).toEqual([
+      NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5"),
+      `${NOTICE.catchUp}\nI'll remind you to check the oven at 1 pm.\n${NOTICE.reminderPast}`,
+    ]);
+    expect(provider.seen).toHaveLength(2);
+    const prompt = JSON.stringify(provider.seen[1].body);
+    expect(prompt).not.toContain("Find my October receipt.");
+    expect(prompt).toContain("[Sent 2099-11-04 10:00] Person: Remind me in an hour to call Mum.");
+    expect(prompt).toContain("Resolve relative reminder times from when the request was first sent");
+    expect((await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder")).toMatchObject([
+      { key: "check-oven", dueAt: local("2099-11-04T13:00") },
+    ]);
+  });
+
   test("/key sends a one-time link whose ticket rides in the fragment, kept out of the history, with no model call", async () => {
     const model = scripted([]);
     const c = await devChat("amy", { model, at: "2099-11-04T10:00" });
@@ -275,6 +489,7 @@ describe("no consent, no key: a person who has or had a Claude plan box", () => 
     expect(provider.seen).toHaveLength(0);
     const got = await c.received();
     expect(got).toContain(NOTICE.boxNotReady);
+    expect(got.join("\n")).not.toContain("answer requests from the last 24 hours");
     expect(got).toContain(NOTICE.backupAsk("OpenCode Go"));
     expect((await c.snapshot()).access.lanes).toEqual([]);
   });

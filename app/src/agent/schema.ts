@@ -471,6 +471,13 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE box_session ADD COLUMN reply_backfill TEXT NOT NULL DEFAULT '[]';
   `,
+  `
+  ALTER TABLE inbox ADD COLUMN catch_up TEXT CHECK (catch_up IN ('earlier', 'joined'));
+  CREATE INDEX inbox_waiting_for_access ON inbox(received_at) WHERE status = 'done' AND catch_up = 'earlier';
+  `,
+  `
+  ALTER TABLE inbox ADD COLUMN catch_up_budget TEXT;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

@@ -155,7 +155,12 @@ type AdmissionCols = {
   state_at: EpochMs;
   told_on: LocalDate | null;
 };
-type InboxCols = { event_key: EventKey; payload: string; attempts: number; received_at: EpochMs };
+type InboxCols = { event_key: EventKey; payload: string; attempts: number; received_at: EpochMs; catch_up: NonNullable<InboxItem["catchUp"]> | null };
+type QueuedInboxCols = InboxCols & { seq: number; kind: AgentEventKind; ready_at: EpochMs };
+
+const CATCH_UP_WINDOW_MS = 24 * 60 * 60_000;
+const WAITING_FOR_ACCESS = `status = 'done' AND catch_up = 'earlier' AND received_at >= ?
+  AND (outcome = 'no_access' OR (outcome = 'refused_budget' AND catch_up_budget IS NOT NULL))`;
 type WakeupCols = {
   id: WakeupId;
   key: WakeupKey;
@@ -320,7 +325,7 @@ function toWakeup(r: WakeupCols): PendingWakeup {
 }
 
 function toInboxItem(r: InboxCols): InboxItem {
-  return { key: r.event_key, event: fromJson<AgentEvent>(r.payload), attempts: r.attempts, receivedAt: r.received_at };
+  return { key: r.event_key, event: fromJson<AgentEvent>(r.payload), attempts: r.attempts, receivedAt: r.received_at, catchUp: r.catch_up ?? undefined };
 }
 
 function toBox(r: BoxCols): Box {
@@ -463,8 +468,9 @@ export class AgentStore {
     const agent = this.agent();
     if (!agent) return null;
     return this.tx(() => {
+      this.expireCatchUp("processing", now);
       const inFlight = this.sql
-        .exec<InboxCols>("SELECT event_key, payload, attempts, received_at FROM inbox WHERE status = 'processing' ORDER BY seq")
+        .exec<InboxCols>("SELECT event_key, payload, attempts, received_at, catch_up FROM inbox WHERE status = 'processing' ORDER BY seq")
         .toArray()
         .map(toInboxItem);
       const batch = toBatch(inFlight);
@@ -502,35 +508,78 @@ export class AgentStore {
     });
   }
 
-  claimBatch(now: EpochMs): Batch | null {
+  hasWaitingRequests(now: EpochMs, budget: string | null = null): boolean {
+    return this.sql.exec(
+      `SELECT 1 FROM inbox WHERE ${WAITING_FOR_ACCESS} AND (? IS NULL OR catch_up_budget IS NOT ?) LIMIT 1`,
+      now - CATCH_UP_WINDOW_MS,
+      budget,
+      budget,
+    ).toArray().length > 0;
+  }
+
+  private expireCatchUp(status: "pending" | "processing", now: EpochMs): void {
+    this.sql.exec(
+      `UPDATE inbox SET status = 'failed', catch_up = NULL, catch_up_budget = NULL, finished_at = COALESCE(finished_at, ?)
+       WHERE status = ? AND catch_up IS NOT NULL AND received_at < ?`,
+      now,
+      status,
+      now - CATCH_UP_WINDOW_MS,
+    );
+  }
+
+  claimBatch(now: EpochMs, catchUpBudget: string | null): Batch | null {
     return this.tx(() => {
+      this.expireCatchUp("pending", now);
+      const retry = this.sql.exec<QueuedInboxCols>(
+        "SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox WHERE status = 'pending' AND catch_up IS NOT NULL ORDER BY seq",
+      ).toArray();
+      if (retry.length > 0) return retry[0].ready_at <= now ? this.claimRows(retry, true) : null;
+
       const ready = this.sql
-        .exec<InboxCols & { kind: AgentEventKind; ready_at: EpochMs }>(
-          `SELECT event_key, kind, payload, attempts, received_at, ready_at FROM inbox
+        .exec<QueuedInboxCols>(
+          `SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox
            WHERE status = 'pending' ORDER BY seq LIMIT ?`,
-          TURN.maxBatchMessages,
+          catchUpBudget === null ? TURN.maxBatchMessages : -1,
         )
         .toArray();
       const [head] = ready;
-      if (!head || head.ready_at > now) return null;
-      const joins = (r: (typeof ready)[number]) => r.kind === "message" && r.ready_at <= now && commandOf(fromJson<AgentEvent>(r.payload)) === null;
-      const end = joins(head) ? ready.findIndex((r) => !joins(r)) : 1;
-      const rows = end === -1 ? ready : ready.slice(0, end);
-      const keys = rows.map((r) => r.event_key);
-      this.sql.exec(
-        `UPDATE inbox SET status = 'processing', attempts = attempts + 1 WHERE event_key IN (${placeholders(keys.length)})`,
-        ...keys,
-      );
-      return toBatch(rows.map((r) => toInboxItem({ ...r, attempts: r.attempts + 1 })));
+      const joins = (r: QueuedInboxCols) => r.kind === "message" && r.ready_at <= now && commandOf(fromJson<AgentEvent>(r.payload)) === null;
+      if (head && head.ready_at > now) return null;
+      if (head && !joins(head)) return this.claimRows([head], false);
+      const end = ready.findIndex((r) => !joins(r));
+      const messages = end === -1 ? ready : ready.slice(0, end);
+      const earlier = catchUpBudget !== null
+        ? this.sql.exec<QueuedInboxCols>(
+          `SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox
+           WHERE ${WAITING_FOR_ACCESS} AND catch_up_budget IS NOT ? ORDER BY seq`,
+          now - CATCH_UP_WINDOW_MS,
+          catchUpBudget,
+        ).toArray()
+        : [];
+      return earlier.length > 0
+        ? this.claimRows([...earlier, ...messages].sort((a, b) => a.seq - b.seq), true)
+        : this.claimRows(messages.slice(0, TURN.maxBatchMessages), false);
     });
+  }
+
+  private claimRows(rows: readonly QueuedInboxCols[], catchUp: boolean): Batch | null {
+    if (rows.length === 0) return null;
+    this.sql.exec(
+      `UPDATE inbox SET status = 'processing', attempts = attempts + 1,
+         catch_up = CASE WHEN ? THEN COALESCE(catch_up, 'joined') ELSE NULL END
+       WHERE event_key IN (SELECT value FROM json_each(?))`,
+      catchUp ? 1 : 0,
+      JSON.stringify(rows.map((r) => r.event_key)),
+    );
+    return toBatch(rows.map((r) => toInboxItem({ ...r, attempts: r.attempts + 1, catch_up: catchUp ? r.catch_up ?? "joined" : null })));
   }
 
   releaseBatch(keys: readonly EventKey[], readyAt: EpochMs, logs: readonly LogRow[], now: EpochMs): void {
     this.tx(() => {
       this.sql.exec(
-        `UPDATE inbox SET status = 'pending', ready_at = ? WHERE status = 'processing' AND event_key IN (${placeholders(keys.length)})`,
+        "UPDATE inbox SET status = 'pending', ready_at = ? WHERE status = 'processing' AND event_key IN (SELECT value FROM json_each(?))",
         readyAt,
-        ...keys,
+        JSON.stringify(keys),
       );
       this.insertLogs(logs, now);
     });
@@ -789,10 +838,15 @@ export class AgentStore {
         this.insertOutbox(outboxId, firstKey, { ...o, taskId: o.link && tasks.resolve(o.link), choice }, now);
       }
       this.sql.exec(
-        `UPDATE inbox SET status = 'done', outcome = ?, finished_at = ? WHERE event_key IN (${placeholders(commit.batchKeys.length)})`,
+        `UPDATE inbox SET status = 'done', outcome = ?, finished_at = ?, catch_up = ?, catch_up_budget = ?,
+           attempts = CASE WHEN ? THEN 0 ELSE attempts END
+         WHERE event_key IN (SELECT value FROM json_each(?))`,
         commit.outcome,
         now,
-        ...commit.batchKeys,
+        commit.waitForAccess ? "earlier" : null,
+        commit.waitForAccess?.kind === "budget" ? commit.waitForAccess.budget : null,
+        commit.waitForAccess ? 1 : 0,
+        JSON.stringify(commit.batchKeys),
       );
       this.insertLogs(logs, now);
     });
@@ -1560,7 +1614,7 @@ export class AgentStore {
       )
       .one();
     return {
-      inboxReadyAt: min("SELECT (SELECT ready_at FROM inbox WHERE status IN ('pending', 'processing') ORDER BY seq LIMIT 1) AS t"),
+      inboxReadyAt: min("SELECT (SELECT ready_at FROM inbox WHERE status IN ('pending', 'processing') ORDER BY catch_up IS NOT NULL DESC, seq LIMIT 1) AS t"),
       channelEventWaiting: this.channelEventWaiting(),
       earliestWakeups: this.sql
         .exec<{ origin: WakeupOrigin; due_at: EpochMs }>(

@@ -36,7 +36,7 @@ describe("a check-in on a plan-only person's box that fails every time", () => {
     await c.advanceTo("2099-11-05T09:30");
 
     expect(first).toHaveLength(1);
-    expect(first[0]).toMatch(/^Your Claude plan is signed out.*If you sent me something, send it again after you sign in\./s);
+    expect(first[0]).toMatch(/^Your Claude plan is signed out.*Once you sign in, I'll answer requests from the last 24 hours\./s);
     expect(await c.received()).toEqual([]);
     expect(turns(c)).toEqual([
       ["message", "no_model"],

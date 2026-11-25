@@ -817,6 +817,31 @@ describe("connecting a Claude plan", () => {
     expect((await c.snapshot()).spendThisMonthMicro).toBe(0);
   });
 
+  test("a box signing back in answers the rejected turn and the later waiting message together", async () => {
+    const box = fakeBox({ signedIn: true });
+    const c = await devChat("catch-up-box", { model: null, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+    box.signedIn = false;
+    box.replies.push({ kind: "signed_out" });
+    await c.say("Help me plan dinner.");
+    expect(await c.received()).toEqual([expect.stringContaining("Once you sign in, I'll answer requests from the last 24 hours.")]);
+    await c.say("Use the vegetables I have.");
+    expect(await c.received()).toEqual([]);
+
+    box.signedIn = true;
+    box.replies.push({ kind: "reply", step: chat("Roast the vegetables for dinner.") });
+    await c.advanceTo("2099-11-04T10:01");
+
+    expect(await c.received()).toEqual([say("connected"), `${NOTICE.catchUp}\nRoast the vegetables for dinner.`]);
+    expect(box.parses).toHaveLength(2);
+    expect(box.parses[1].user.match(/Help me plan dinner\./g)).toHaveLength(1);
+    expect(box.parses[1].user).toMatch(/Help me plan dinner\.[\s\S]*Use the vegetables I have\./);
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("already_connected")]);
+    expect(box.parses).toHaveLength(2);
+  });
+
   test("an unavailable box backs the turn off, never spends anyone's money, skips the box for 5 minutes, and then tries it again", async () => {
     const box = fakeBox({ signedIn: true });
     const model = scripted([]);

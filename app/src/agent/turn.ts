@@ -194,6 +194,7 @@ export type InboxItem = {
   readonly event: AgentEvent;
   readonly attempts: number;
   readonly receivedAt: EpochMs;
+  readonly catchUp?: "earlier" | "joined";
 };
 
 export type Batch = { readonly items: readonly [InboxItem, ...InboxItem[]] };
@@ -287,14 +288,23 @@ function renderBatch(view: TurnView): string[] {
   let left: number = TURN.batchBytes;
   return items.map((i, at) => {
     const line = renderEvent(i.event, view.tz);
-    if (at === items.length - 1) return line;
-    const cut = clipBytes(line, Math.max(4, Math.min(TURN.messageBytes, left)));
+    const sent = i.catchUp ? `[Sent ${human(i.receivedAt, view.tz)}] ` : "";
+    if (at === items.length - 1) return sent + line;
+    const share = i.catchUp ? Math.floor(left / (items.length - at - 1)) : left;
+    const cut = clipBytes(line, Math.max(4, Math.min(TURN.messageBytes, share)));
     left = Math.max(0, left - bytesOf(cut));
-    return cut;
+    return sent + cut;
   });
 }
 
 const keep = (title: string, lines: readonly string[]): PromptSection => ({ title, keep: lines, trim: [], dropRank: 0 });
+const newSection = (view: TurnView) => {
+  const lines = renderBatch(view);
+  if (view.batch.items[0].catchUp) {
+    lines.unshift("The AI connection just became available. Answer these requests together, and answer repeats once. Resolve relative reminder times from when the request was first sent, using the timestamps below. If the requested time has passed, say so and do not schedule it.");
+  }
+  return keep("New", lines);
+};
 const conversationLines = (rows: readonly TurnRow[], tz: TimeZone): string[] => rows.map((r) => `[${human(r.at, tz)}] ${SPEAKER[r.role]} ${r.text}`);
 const nowSection = (view: TurnView) => keep("Now", [`${human(view.now, view.tz)} (${weekday(view.now, view.tz)}), ${view.tz}`, `Language for notices: ${view.language}`]);
 const lookAhead = (view: TurnView): PromptSection[] => [
@@ -312,7 +322,7 @@ export function renderUser(view: TurnView): PromptParts {
       { title: "Memory", keep: [view.summary || "(nothing yet)"], trim: view.notes.map((n) => `- ${n}`), dropRank: 2 },
       ...lookAhead(view),
       conversation.length ? { title: "Conversation", keep: [], trim: conversation, dropRank: 1, history: true } : keep("Conversation", ["(no earlier messages)"]),
-      keep("New", renderBatch(view)),
+      newSection(view),
     ],
   };
 }
@@ -350,7 +360,7 @@ export function renderBoxTurn(view: TurnView, held: BoxSession | null): BoxTurnP
   const lines = memoryLines(view.summary, view.notes);
   const update = memory !== (held?.memory ?? "") ? [keep("Memory (replaces the memory you had)", lines.length ? lines : ["(empty)"])] : [];
   const parts = (rows: readonly SeqTurn[], extra: readonly PromptSection[]): PromptParts => ({
-    sections: [nowSection(view), ...extra, ...lookAhead(view), ...conversation(rows), keep("New", renderBatch(view))],
+    sections: [nowSection(view), ...extra, ...lookAhead(view), ...conversation(rows), newSection(view)],
   });
   return {
     append: memory ? `${AGENT_SYSTEM}\n\n${memory}` : AGENT_SYSTEM,
@@ -394,6 +404,7 @@ export type Reachability = { readonly status: PersonStatus; readonly at: EpochMs
 export type TurnCommit = {
   readonly batchKeys: readonly [EventKey, ...EventKey[]];
   readonly outcome: TurnOutcome;
+  readonly waitForAccess?: { readonly kind: "connection" } | { readonly kind: "budget"; readonly budget: string };
   readonly turns: readonly NewTurn[];
   readonly outbound: Outbound | null;
   readonly wakeupsCancel: readonly WakeupKey[];
@@ -455,6 +466,7 @@ const NO_COST = 0 as MicroUsd;
 function newestReply(view: TurnView): ReplyHandle | undefined {
   let reply: ReplyHandle | undefined;
   for (const item of view.batch.items) {
+    if (item.catchUp === "earlier") continue;
     const e = item.event;
     if ((e.kind === "message" || e.kind === "lifecycle" || e.kind === "choice") && e.reply) reply = e.reply;
   }
@@ -674,6 +686,8 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   const said = [...agentTexts, ...(noticeText === null ? [] : [noticeText]), ...(plan === null ? [] : [plan])];
   const requestedReminder = said.length === 0 ? textWithoutModel(view, null) : null;
   const texts = requestedReminder === null ? said : [requestedReminder];
+  const [lead, ...rest] = texts;
+  const delivered = view.batch.items[0].catchUp && lead !== undefined ? [`${t.catchUp}\n${lead}`, ...rest] : texts;
 
   const effects = lifecycleEffects(view);
   const input = { kind: "input" } as const;
@@ -696,7 +710,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
     batchKeys: batchKeys(view),
     outcome: acted ? "acted" : "quiet",
     turns,
-    outbound: outbound(texts, askedOf(intent, purposeOf(view, tasks, link)), view, { link, choice: plan === null ? null : "accept_pending" }),
+    outbound: outbound(delivered, askedOf(intent, purposeOf(view, tasks, link)), view, { link, choice: plan === null ? null : "accept_pending" }),
     wakeupsCancel: [...cancelled.keys()],
     wakeupsAdd: [...adds.values()],
     wakeupsRetime,
@@ -714,8 +728,8 @@ export type NoModelReason =
   | { readonly kind: "block" }
   | { readonly kind: "ignored" }
   | { readonly kind: "stale_lifecycle" }
-  | { readonly kind: "over_cap"; readonly scope: "byok" | "included" | "included_ceiling"; readonly capUsd: string; readonly alreadyToldToday: boolean }
-  | { readonly kind: "no_access"; readonly text: string; readonly alreadyToldToday: boolean }
+  | { readonly kind: "over_cap"; readonly scope: "byok" | "included" | "included_ceiling"; readonly capUsd: string; readonly alreadyToldToday: boolean; readonly catchUpBudget?: string | null }
+  | { readonly kind: "no_access"; readonly text: string; readonly alreadyToldToday: boolean; readonly waitForConnection?: boolean }
   | { readonly kind: "lapsed"; readonly alreadyToldToday: boolean }
   | { readonly kind: "model_failed" }
   | { readonly kind: "too_long" }
@@ -753,6 +767,10 @@ function textWithoutModel(view: TurnView, notice: string | null): string | null 
 export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit {
   const t: Notices = NOTICES[view.language];
   const keepInHistory = why.kind !== "feedback";
+  const waitForAccess: TurnCommit["waitForAccess"] =
+    why.kind === "no_access" && why.waitForConnection ? { kind: "connection" }
+    : why.kind === "over_cap" && why.catchUpBudget != null ? { kind: "budget", budget: why.catchUpBudget }
+    : undefined;
   const fx = keepInHistory ? taskEffects(view) : { commit: NO_TASKS, replies: [] };
   let outcome: TurnOutcome;
   let text: string | null = null;
@@ -805,12 +823,13 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
   const confirmed = fx.replies.map((r) => acceptNotice(t, r));
   const joined = (lead: string | null) => [lead, ...confirmed].filter((x) => x !== null).join("\n") || null;
   const said = joined(text);
-  const turns = keepInHistory ? personTurns(view) : [];
+  const turns = keepInHistory && !waitForAccess ? personTurns(view) : [];
   const kept = joined(note ?? text);
   if (keepInHistory && kept !== null) turns.push({ role: "note", text: kept, at: view.now, eventKey: view.batch.items[0].key });
   return {
     batchKeys: batchKeys(view),
     outcome,
+    ...(waitForAccess ? { waitForAccess } : {}),
     turns,
     outbound: outbound(said === null ? [] : [said], askedOf(intentOf(trigger(view)), purposeOf(view, fx.commit, null)), view, { link: null, choice: null }),
     wakeupsCancel: [],
@@ -862,7 +881,8 @@ export function logsForTurn(input: {
   readonly now: EpochMs;
 }): LogRow[] {
   const { agent, commit, view, call } = input;
-  const turnId = `${agent}|${commit.batchKeys[0]}`;
+  const first = view.batch.items[0];
+  const turnId = first.catchUp ? `${agent}|${first.key}|catch-up:${input.startedAt}:${commit.outcome}` : `${agent}|${first.key}`;
   const rows: LogRow[] = [
     {
       stream: "turn",

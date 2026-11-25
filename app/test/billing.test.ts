@@ -446,12 +446,14 @@ describe("checkout and the portal", () => {
   });
 
   test.each([
-    { kind: "retry", language: "en", delivery: "delivery hasn't been confirmed", timing: "at least 30 seconds apart", billing: "payment statement" },
-    { kind: "in_doubt", language: "th", delivery: "ทีมอาจได้รับการแจ้งเตือนแล้ว", timing: "อย่างน้อย 30 วินาที", billing: "รายการเดินบัญชี" },
+    { kind: "retry", language: "en", delivery: "delivery hasn't been confirmed", timing: "another attempt in 30 seconds", billing: "payment statement" },
+    { kind: "in_doubt", language: "th", delivery: "ทีมอาจได้รับการแจ้งเตือนแล้ว", timing: "ลองอีกครั้งในอีก 30 วินาที", billing: "รายการเดินบัญชี" },
+    { kind: "throw", language: "en", delivery: "may already have received the alert", timing: "another attempt in 30 seconds", billing: "payment statement" },
   ] as const)("retries a $kind operator alert on the alarm and gives the person the next steps in $language", async ({ kind, language, delivery, timing, billing }) => {
     const kit = billingOn();
     const c = await devChat("june", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
-    const operator = scriptedChannel([{ kind, afterMs: 30_000 }, { kind: "retry", afterMs: 30_000 }]);
+    const first = kind === "throw" ? { kind } : { kind, afterMs: 30_000 };
+    const operator = scriptedChannel([first, { kind: "retry", afterMs: 30_000 }]);
     const deliver = vi.spyOn(operator, "deliver");
     await c.say("/plan");
     await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent, state) => {
@@ -480,6 +482,65 @@ describe("checkout and the portal", () => {
       [expect.any(String), 0], [deliver.mock.calls[0]?.[0].id, 30_000], [deliver.mock.calls[0]?.[0].id, 60_000],
     ]);
     expect(await c.received()).toEqual([]);
+  });
+
+  test.each([{ kind: "failed", detail: "fake refusal" }, { kind: "recipient_gone" }] as const)(
+    "reports $kind accurately, retries every five minutes, and stops after three attempts",
+    async (result) => {
+      const kit = billingOn();
+      const c = await devChat("refused", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+      const operator = scriptedChannel();
+      const deliver = vi.spyOn(operator, "deliver").mockResolvedValue(result);
+      await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+        agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+      });
+      await c.say("/plan");
+      await pay(kit, c, "refused", "standard");
+      await c.received();
+      const extra = { user: "refused", sub: "sub_refused_extra", plan: "included", status: "active" } as const;
+      expect((await stripeChange(kit, extra)).status).toBe(200);
+      await c.settle();
+      expect(await c.received()).toEqual([expect.stringContaining("The billing alert couldn't be delivered. I've scheduled another attempt in 300 seconds. I'll try up to two more times.")]);
+      await c.advanceTo("2099-11-04T11:00");
+      await stripeChange(kit, extra);
+      await c.settle();
+      expect(deliver.mock.calls.map(([, at]) => at)).toEqual([
+        local("2099-11-04T10:00"), local("2099-11-04T10:05"), local("2099-11-04T10:10"),
+      ]);
+      expect(operator.delivered).toEqual([]);
+      expect(await c.received()).toEqual([]);
+    },
+  );
+
+  test("backs off a failed receipt write without re-sending a confirmed operator alert", async () => {
+    const kit = billingOn();
+    const c = await devChat("receipt", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    const operator = scriptedChannel();
+    await runInDurableObject(stub, (agent, { storage }) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+      storage.sql.exec(`CREATE TRIGGER fail_billing_receipt BEFORE UPDATE ON billing_alert
+        WHEN NEW.ready_at IS NULL BEGIN SELECT RAISE(ABORT, 'receipt write unavailable'); END`);
+    });
+    await c.say("/plan");
+    await pay(kit, c, "receipt", "standard");
+    await c.received();
+    const extra = { id: "evt_receipt_extra", user: "receipt", sub: "sub_receipt_extra", plan: "included", status: "active" } as const;
+    expect((await stripeChange(kit, extra)).status).toBe(200);
+    await c.settle();
+    expect(operator.delivered).toHaveLength(1);
+    expect(await (await stripeChange(kit, extra)).text()).toBe("duplicate");
+    expect(await runInDurableObject(stub, (_, { storage }) => storage.getAlarm())).toBe(local("2099-11-04T10:00:30"));
+
+    await c.advanceTo("2099-11-04T10:00:30");
+    expect(operator.delivered).toHaveLength(1);
+    expect(await runInDurableObject(stub, (_, { storage }) => storage.getAlarm())).toBe(local("2099-11-04T10:01"));
+    await runInDurableObject(stub, (_, { storage }) => { storage.sql.exec("DROP TRIGGER fail_billing_receipt"); });
+    await c.advanceTo("2099-11-04T10:10");
+    await stripeChange(kit, { ...extra, id: "evt_receipt_later" });
+    await c.settle();
+    expect(operator.delivered).toHaveLength(1);
+    expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
   });
 
   test("does not re-alert or notify for the same subscriptions after Stripe event dedupe expires", async () => {

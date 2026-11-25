@@ -36,12 +36,13 @@ const follow = (c: DevChat, code?: InviteCode) =>
   code ? ({ kind: "lifecycle", change: "follow", at: c.clock.now(), code } as const) : ({ kind: "lifecycle", change: "follow", at: c.clock.now() } as const);
 
 describe("admission to the beta", () => {
-  test("a LINE stranger is asked for a code once a day, in Thai, with no model call, no push and no check-in", async () => {
+  test("a LINE stranger is asked for a code once a day, in Thai, with no model call, no push, no check-in and nothing they wrote kept", async () => {
     const model = scripted([]);
     const c = await devChat("U00000000000000000000000000000a01", { model, at: "2099-11-04T10:00", channel: "line", admission: "beta" });
 
-    await c.say("hello");
+    await c.say("hello Ploymarker");
     await c.say("anyone there?");
+    expect(JSON.stringify(await doRows(c.agent, "SELECT payload FROM inbox"))).not.toContain("Ploymarker");
 
     expect(await c.received()).toEqual([NOTICES.th.waitlist.no_code]);
     const s = await c.snapshot();
@@ -58,10 +59,10 @@ describe("admission to the beta", () => {
     const c = await devChat("5531", { model, at: "2099-11-04T10:00", channel: "telegram", admission: "beta" });
 
     await c.event(follow(c, CODE));
-    expect(c.channel.delivered.at(-1)).toMatchObject({ text: t.privacy(NOTICE_URL), button: { label: t.consentButton, data: "c" } });
+    expect(c.channel.delivered.at(-1)).toMatchObject({ text: t.privacy(NOTICE_URL), button: { label: t.consentButton, data: "c2" } });
     expect(await enrolled("p:telegram:5531")).toBeNull();
 
-    await c.tap("c");
+    await c.tap("c2");
     expect(await c.received()).toEqual([t.privacy(NOTICE_URL), t.welcome]);
     const s = await c.snapshot();
     expect(s.admission).toMatchObject({ state: "admitted", seat: { cohort: "recruit", half: "intl_telegram", code: CODE, inviter: null } });
@@ -105,7 +106,7 @@ describe("admission to the beta", () => {
     await c.event(follow(c, CODE));
     await fillRecruits();
 
-    await c.tap("c");
+    await c.tap("c2");
 
     expect((await c.received()).at(-1)).toBe(t.waitlist.full);
     expect((await c.snapshot()).admission).toMatchObject({ state: "waitlisted", reason: "full" });
@@ -132,7 +133,7 @@ describe("admission to the beta", () => {
     await mint(CODE, "recruit", "th_line");
     const host = await devChat("5534", { model: scripted([]), at: "2099-11-04T10:00", channel: "telegram", admission: "beta" });
     await host.event(follow(host, CODE));
-    await host.tap("c");
+    await host.tap("c2");
     await host.received();
 
     for (let i = 0; i < ADMISSION.invitesPerPerson + 1; i++) await host.say("/invite");
@@ -144,7 +145,7 @@ describe("admission to the beta", () => {
 
     const friend = await devChat("5535", { model: scripted([]), at: "2099-11-04T11:00", channel: "telegram", admission: "beta" });
     await friend.say(`/join ${codes[0]}`);
-    await friend.tap("c");
+    await friend.tap("c2");
     expect(await enrolled("p:telegram:5535")).toMatchObject({ cohort: "joiner", half: "th_line", inviter: "p:telegram:5534" });
   });
 

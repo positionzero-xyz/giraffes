@@ -60,11 +60,11 @@ function english(controller: string, contact: string): readonly Section[] {
     {
       heading: "How long",
       body: [
-        "Recent chat is kept word for word. Older messages are folded into a summary, and the originals are deleted.",
+        "Recent chat is kept word for word. When the chat grows long and an AI is available, older messages are folded into a summary and the originals are deleted.",
         `Copies of messages Giraffe sent you: ${r.sentCopies} days.`,
         `Incoming messages, after Giraffe has handled them: ${r.handledIncoming} days.`,
         `The summary, notes, reminders, tasks, plans, settings and usage records: nothing deletes them automatically yet. To ask for them to be deleted, email ${contact}.`,
-        `The private machine for a Claude plan, and its files: until you remove the connection, or after ${r.unusedBox} days if nobody signs in.`,
+        `The private machine for a Claude plan, and its files: until you remove the connection, or until Giraffe removes it, when nobody signs in for about ${r.unusedBox} days or when your plan no longer includes it.`,
       ],
     },
     {
@@ -123,11 +123,11 @@ function thai(controller: string, contact: string): readonly Section[] {
     {
       heading: "เก็บนานเท่าไร",
       body: [
-        "แชตล่าสุดเก็บแบบคำต่อคำ ข้อความที่เก่ากว่านั้นจะถูกสรุปรวมไว้ แล้วลบต้นฉบับ",
+        "แชตล่าสุดเก็บแบบคำต่อคำ เมื่อแชตยาวขึ้นและมี AI พร้อมใช้งาน ข้อความที่เก่ากว่านั้นจะถูกสรุปรวมไว้ แล้วลบต้นฉบับ",
         `สำเนาข้อความที่ Giraffe ส่งถึงคุณ: ${r.sentCopies} วัน`,
         `ข้อความขาเข้า หลังจาก Giraffe จัดการแล้ว: ${r.handledIncoming} วัน`,
         `สรุป โน้ต การเตือน งาน แผน การตั้งค่า และบันทึกการใช้งาน: ยังไม่มีการลบอัตโนมัติ หากต้องการให้ลบ อีเมลมาที่ ${contact}`,
-        `เครื่องส่วนตัวสำหรับแพ็กเกจ Claude และไฟล์ในเครื่อง: จนกว่าคุณจะลบการเชื่อม หรือหลัง ${r.unusedBox} วันหากไม่มีการเข้าสู่ระบบ`,
+        `เครื่องส่วนตัวสำหรับแพ็กเกจ Claude และไฟล์ในเครื่อง: จนกว่าคุณจะลบการเชื่อม หรือจนกว่า Giraffe จะลบเอง เมื่อไม่มีการเข้าสู่ระบบประมาณ ${r.unusedBox} วัน หรือเมื่อแพ็กเกจของคุณไม่รวมบริการนี้แล้ว`,
       ],
     },
     {

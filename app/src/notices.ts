@@ -239,8 +239,8 @@ const en: Notices = {
   consentButton: "I'm 20+ and agree",
   privacy: (notice) => `Before we start, here is how your messages are handled.
 • I keep our chat and the notes, reminders and tasks I make for you, so I can help over time. Send /memory to see your notes, reminders and tasks.
-• To answer you, I send your messages and what I've saved to the AI you connect, such as Anthropic or your Claude plan. LINE or Telegram also carries every message.
-• Our own logs keep times and counts, never your words.
+• To answer you, I send your messages and what I've saved to an AI: the one you connect, such as Anthropic or your Claude plan, or on some plans one Giraffe provides. LINE or Telegram also carries every message.
+• Our own logs keep times, counts and costs, never your words.
 • Some of these services are outside Thailand.
 • If you share health or other private details, I keep them the same way, only to help you.
 • You need to be 20 or over.
@@ -431,8 +431,8 @@ const th: Notices = {
   consentButton: "อายุ 20+ และยอมรับ",
   privacy: (notice) => `ก่อนเริ่ม ขอแจ้งให้ทราบว่าข้อความของคุณจะถูกจัดการอย่างไรนะคะ
 • เราเก็บแชต รวมถึงโน้ต การเตือน และงานที่บันทึกไว้ให้คุณ เพื่อช่วยคุณได้ต่อเนื่อง ส่ง /memory เพื่อดูโน้ต การเตือน และงานของคุณ
-• เพื่อตอบคุณ ข้อความและสิ่งที่บันทึกไว้จะถูกส่งไปยัง AI ที่คุณเชื่อมไว้ เช่น Anthropic หรือแพ็กเกจ Claude ของคุณ และ LINE หรือ Telegram ก็รับส่งทุกข้อความด้วย
-• บันทึกของเราเก็บแค่เวลาและจำนวนครั้ง ไม่เก็บข้อความของคุณ
+• เพื่อตอบคุณ ข้อความและสิ่งที่บันทึกไว้จะถูกส่งไปยัง AI ที่คุณเชื่อมไว้ เช่น Anthropic หรือแพ็กเกจ Claude ของคุณ หรือ AI ที่ Giraffe จัดให้ในบางแพ็กเกจ และ LINE หรือ Telegram ก็รับส่งทุกข้อความด้วย
+• บันทึกของเราเก็บเวลา จำนวนครั้ง และค่าใช้จ่าย ไม่เก็บข้อความของคุณ
 • บางบริการเหล่านี้อยู่นอกประเทศไทย
 • ถ้าคุณเล่าเรื่องสุขภาพหรือเรื่องส่วนตัวที่อ่อนไหว เราจะเก็บไว้แบบเดียวกัน เพื่อช่วยคุณเท่านั้น
 • ต้องมีอายุ 20 ปีขึ้นไป

@@ -190,20 +190,26 @@ export const proposalId = (task: TaskId, version: number): ProposalId => `${task
  */
 export type Choice = { readonly kind: "accept"; readonly proposal: ProposalId } | { readonly kind: "consent" } | { readonly kind: "backup"; readonly revision: number | null };
 
-/** "a:7.1", "c" or "b:3": short enough for Telegram's 64-byte callback_data and a LINE postback. */
+/**
+ * Raised whenever the consent message changes, so a button from an older message is not consent to the new one.
+ * Its tap parses to nothing and is ignored.
+ */
+export const CONSENT_VERSION = 2;
+
+/** "a:7.1", "c2" or "b:3": short enough for Telegram's 64-byte callback_data and a LINE postback. */
 export function choiceToken(c: Choice): string {
   switch (c.kind) {
     case "accept":
       return `a:${c.proposal}`;
     case "consent":
-      return "c";
+      return `c${CONSENT_VERSION}`;
     case "backup":
       return c.revision === null ? "b" : `b:${c.revision}`;
   }
 }
 
 export function parseChoice(token: string): Choice | null {
-  if (token === "c") return { kind: "consent" };
+  if (token === `c${CONSENT_VERSION}`) return { kind: "consent" };
   if (token === "b") return { kind: "backup", revision: null };
   const backup = /^b:(\d{1,9})$/.exec(token);
   if (backup) return { kind: "backup", revision: Number(backup[1]) };

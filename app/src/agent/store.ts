@@ -868,6 +868,12 @@ export class AgentStore {
         commit.waitForAccess ? 1 : 0,
         JSON.stringify(commit.batchKeys),
       );
+      if (commit.admission) {
+        this.sql.exec(
+          "UPDATE inbox SET payload = json_set(payload, '$.text', '') WHERE kind = 'message' AND event_key IN (SELECT value FROM json_each(?))",
+          JSON.stringify(commit.batchKeys),
+        );
+      }
       this.insertLogs(logs, now);
       return true;
     });

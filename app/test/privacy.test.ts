@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { SEND_MESSAGE_MAX_CHARS } from "../src/channels/telegram";
 import { loadConfig, type Env } from "../src/config";
+import { choiceToken, parseChoice } from "../src/domain";
 import { NOTICES } from "../src/notices";
 import { privacyPage, RETENTION_DAYS } from "../src/privacy";
 import worker from "../src/worker";
@@ -15,8 +16,8 @@ describe("the consent message", () => {
     expect(NOTICES.en.consentButton).toBe("I'm 20+ and agree");
     expect(NOTICES.en.privacy(NOTICE_URL)).toBe(`Before we start, here is how your messages are handled.
 • I keep our chat and the notes, reminders and tasks I make for you, so I can help over time. Send /memory to see your notes, reminders and tasks.
-• To answer you, I send your messages and what I've saved to the AI you connect, such as Anthropic or your Claude plan. LINE or Telegram also carries every message.
-• Our own logs keep times and counts, never your words.
+• To answer you, I send your messages and what I've saved to an AI: the one you connect, such as Anthropic or your Claude plan, or on some plans one Giraffe provides. LINE or Telegram also carries every message.
+• Our own logs keep times, counts and costs, never your words.
 • Some of these services are outside Thailand.
 • If you share health or other private details, I keep them the same way, only to help you.
 • You need to be 20 or over.
@@ -25,8 +26,8 @@ Tap the button to agree.`);
     expect(NOTICES.th.consentButton).toBe("อายุ 20+ และยอมรับ");
     expect(NOTICES.th.privacy(NOTICE_URL)).toBe(`ก่อนเริ่ม ขอแจ้งให้ทราบว่าข้อความของคุณจะถูกจัดการอย่างไรนะคะ
 • เราเก็บแชต รวมถึงโน้ต การเตือน และงานที่บันทึกไว้ให้คุณ เพื่อช่วยคุณได้ต่อเนื่อง ส่ง /memory เพื่อดูโน้ต การเตือน และงานของคุณ
-• เพื่อตอบคุณ ข้อความและสิ่งที่บันทึกไว้จะถูกส่งไปยัง AI ที่คุณเชื่อมไว้ เช่น Anthropic หรือแพ็กเกจ Claude ของคุณ และ LINE หรือ Telegram ก็รับส่งทุกข้อความด้วย
-• บันทึกของเราเก็บแค่เวลาและจำนวนครั้ง ไม่เก็บข้อความของคุณ
+• เพื่อตอบคุณ ข้อความและสิ่งที่บันทึกไว้จะถูกส่งไปยัง AI ที่คุณเชื่อมไว้ เช่น Anthropic หรือแพ็กเกจ Claude ของคุณ หรือ AI ที่ Giraffe จัดให้ในบางแพ็กเกจ และ LINE หรือ Telegram ก็รับส่งทุกข้อความด้วย
+• บันทึกของเราเก็บเวลา จำนวนครั้ง และค่าใช้จ่าย ไม่เก็บข้อความของคุณ
 • บางบริการเหล่านี้อยู่นอกประเทศไทย
 • ถ้าคุณเล่าเรื่องสุขภาพหรือเรื่องส่วนตัวที่อ่อนไหว เราจะเก็บไว้แบบเดียวกัน เพื่อช่วยคุณเท่านั้น
 • ต้องมีอายุ 20 ปีขึ้นไป
@@ -34,10 +35,10 @@ Tap the button to agree.`);
 กดปุ่มด้านล่างเพื่อยอมรับค่ะ`);
   });
 
-  test.each(["en", "th"] as const)("in %s it promises no forget and no 'nobody else', and the button and text agree on age 20", (lang) => {
+  test.each(["en", "th"] as const)("in %s it names no forget command before one exists, and the button and text agree on age 20", (lang) => {
     const t = NOTICES[lang];
     const text = t.privacy(NOTICE_URL);
-    for (const broken of ["forget", "Nobody else", "ลืม", "ไม่มีใครอื่น", "18"]) expect(text + t.consentButton).not.toContain(broken);
+    for (const absent of ["forget", "ลืม", "18"]) expect(text + t.consentButton).not.toContain(absent);
     expect(t.consentButton).toContain("20+");
     expect(text).toContain("20");
   });
@@ -48,6 +49,12 @@ Tap the button to agree.`);
     expect(text.length).toBeLessThanOrEqual(Math.min(LINE_TEXT_MAX, SEND_MESSAGE_MAX_CHARS));
     expect(t.consentButton.length).toBeLessThanOrEqual(LINE_QUICK_REPLY_LABEL_MAX);
   });
+});
+
+test("a consent button from an older consent message is not consent to this one", () => {
+  expect(choiceToken({ kind: "consent" })).toBe("c2");
+  expect(parseChoice("c2")).toEqual({ kind: "consent" });
+  expect(parseChoice("c")).toBeNull();
 });
 
 describe("the privacy notice page", () => {

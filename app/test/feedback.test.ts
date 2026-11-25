@@ -30,7 +30,7 @@ describe("/feedback", () => {
       "INSERT INTO invite_code (code, cohort, half, issuer, created_at) VALUES ('FEED23', 'recruit', 'intl_telegram', 'operator', 0)",
     ).run();
     await c.say("/join FEED23");
-    await c.tap("c");
+    await c.tap("c2");
     expect(await c.received()).toEqual([NOTICES.en.privacy(NOTICE_URL), NOTICES.en.welcome]);
 
     const receivedAt = local("2099-11-04T09:59");

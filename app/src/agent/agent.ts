@@ -63,7 +63,6 @@ import {
   type Language,
   type MicroUsd,
   type PersonStatus,
-  type Seat,
   type TimeZone,
   type WakeupKey,
 } from "../domain";
@@ -78,7 +77,7 @@ import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach"
 import { inLineReserve, type QuotaReading } from "../policy/quota";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
 import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../policy/time";
-import { ADMISSION, planAdmission, type AdmissionAnswer, type AdmissionMode, type AdmissionStep } from "./admission";
+import { ADMISSION, planAdmission, planOpenAdmission, STAFF, type AdmissionAnswer, type AdmissionMode, type AdmissionStep } from "./admission";
 import { COMPACTION, compactionCommit, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import type { Claim, ProviderOrder } from "./forget";
@@ -152,7 +151,6 @@ export type BillingDeps = {
   readonly stripe: StripeApi | null;
 };
 
-const STAFF: Seat = { cohort: "staff", half: null, code: null, inviter: null };
 
 /** A model call a group asks its owner to serve; the group names the ownership version it was told. */
 export type ServeRequest = {
@@ -230,7 +228,7 @@ export class Agent extends DurableObject<Env> {
       checkinLocal: SCHEDULE.defaultCheckinLocal,
       checkin: checkinWakeup(now, DEFAULT_TIME_ZONE, SCHEDULE.defaultCheckinLocal),
       trialEndsAt: this.#deps.billing.config.on ? trialEnd(now, this.#deps.billing.config.rules) : null,
-      admit: this.#deps.admission === "open" || envelope.identity.channel === "dev" ? STAFF : null,
+      admit: envelope.identity.channel === "dev" ? STAFF : null,
     };
     const stored = this.#store.enqueue(envelope, first, now);
     if (stored !== "inserted") return stored;
@@ -738,14 +736,8 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #admission(view: TurnView, a: AgentRow): Promise<void> {
-    if (this.#deps.admission === "open") {
-      const now = this.#deps.clock.now();
-      const admitted = { next: { state: "admitted", seat: STAFF, at: now }, change: "consented", ensureCheckin: checkinWakeup(now, a.tz, a.checkinLocal) } as const;
-      this.#commit(planWithoutModel(view, { kind: "admission", commit: admitted, text: null, consent: false }), view, a.key, { kind: "none" });
-      return;
-    }
     const admission = { ...view, privacyUrl: this.#deps.privacyUrl };
-    let step: AdmissionStep = planAdmission(admission, null);
+    let step: AdmissionStep = this.#deps.admission === "open" ? planOpenAdmission(admission) : planAdmission(admission, null);
     if (step.kind !== "commit") {
       const now = this.#deps.clock.now();
       let answer: AdmissionAnswer;

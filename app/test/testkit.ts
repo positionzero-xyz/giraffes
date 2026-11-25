@@ -229,6 +229,8 @@ export type DevChat = {
   say(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<void>;
   /** The person taps a button whose data is `data`, such as "a:1.1". */
   tap(data: string): Promise<void>;
+  /** A LINE or Telegram person under open admission taps the consent button; the welcome is read and dropped. */
+  consent(): Promise<void>;
   /** Any channel event, past the webhook, such as a Telegram follow with its start code. */
   event(e: ChannelEvent): Promise<void>;
   remove(): Promise<void>;
@@ -305,6 +307,10 @@ export async function devChat(
       const choice = parseChoice(data);
       if (!choice) throw new Error(`not a button: ${data}`);
       await chat.event({ kind: "choice", choice, at: clock.now() });
+    },
+    async consent() {
+      await chat.tap("c");
+      await chat.received();
     },
     async event(e) {
       const id = `e${++messageIds}`;

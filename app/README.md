@@ -128,7 +128,8 @@ price plus the provider's fee from our price cards, not an invoice.
      Enrolled people get joiner codes with `/invite`. It can't run with `BILLING=on`.
      Send `/feedback <text>` to register a feedback event. The ledger keeps the event and cohort. The service discards the message and operator alerts still cover LINE quota.
      Send `/memory` to see the saved notes, reminders, tasks and personal settings for this chat, even without connected AI. Send `/memory next` for another page when prompted.
-   - `ADMISSION=open`: everyone is admitted at first contact, and `/invite` and `/join` are billing's.
+   - `ADMISSION=open`: no code is needed. A person on LINE or Telegram gets the consent message and is admitted when they tap
+     the button, and `/invite` and `/join` are billing's.
 
    Plans and payments (`/plan`, `/invite`, `/join <code>`, `/leave`, see `docs/design/BOX.md`) follow `BILLING`:
    - `BILLING=off` (the default): nobody pays, nobody lapses and no trial clock runs. `/plan` says it is

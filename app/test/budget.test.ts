@@ -142,13 +142,14 @@ describe("a message too long for the route", () => {
   test("gets a code-written notice in the person's language, and no model is called", async () => {
     const provider = answering();
     const c = await devChat("U00000000000000000000000000000b01", { model: null, provider, at: "2099-11-04T10:00", channel: "line" });
+    await c.consent();
     await giveKey(c.agent, ALIBABA_KEY);
 
     await c.say(THAI.repeat(8_000));
 
     expect(await c.received()).toEqual([NOTICES.th.tooLong]);
     expect(provider.seen).toEqual([]);
-    expect(c.logs("turn").map((l) => l.outcome)).toEqual(["too_long"]);
+    expect(c.logs("turn").map((l) => l.outcome)).toEqual(["not_admitted", "too_long"]);
   });
 });
 

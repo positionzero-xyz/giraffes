@@ -66,6 +66,7 @@ describe("/feedback", () => {
   test("thanks a Thai speaker in Thai without calling a model", async () => {
     const model = scripted([]);
     const c = await devChat("feedback-thai", { at, model, channel: "line" });
+    await c.consent();
 
     await c.say("/feedback แจ้งเตือนมาช้า");
 
@@ -80,6 +81,7 @@ describe("/feedback", () => {
     const model = scripted([]);
     const ledger = memoryLedger();
     const c = await devChat("7392", { at, model, channel, ledger });
+    await c.consent();
 
     await c.say(command);
 

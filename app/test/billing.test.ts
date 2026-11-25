@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
 import { planAllowsBox, planOf, type CustomerId, type PlanRules, type Subscription, type SubscriptionId } from "../src/billing/plan";
 import { d1Billing, type BillingStore } from "../src/billing/store";
@@ -10,6 +10,7 @@ import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs, MicroUsd } from "../src/domain";
 import { HAIKU_5_5 } from "../src/model/providers";
 import { NOTICES } from "../src/notices";
+import worker from "../src/worker";
 import {
   billingOn,
   chat,
@@ -23,6 +24,7 @@ import {
   quiet,
   schedule,
   scripted,
+  scriptedChannel,
   signStripe,
   STRIPE_VARS,
   stripeChange,
@@ -142,7 +144,7 @@ describe("stripe boundary", () => {
       mode: "subscription",
       client_reference_id: "p:dev:ann",
       success_url: "https://giraffes.test/billing/done",
-      cancel_url: "https://giraffes.test/billing/done",
+      cancel_url: "https://giraffes.test/billing/cancel",
       "metadata[agent_key]": "p:dev:ann",
       "metadata[plan]": "plus",
       "subscription_data[metadata][agent_key]": "p:dev:ann",
@@ -157,6 +159,16 @@ describe("stripe boundary", () => {
     });
     expect(formBody({ "a[b]": "x y" })).toBe("a%5Bb%5D=x%20y");
     expect(Object.keys(checkoutForm(cfg, rules, { agent: agent("ann"), plan: "standard", idempotencyKey: "k" }))).not.toContain("optional_items[0][price]");
+  });
+
+  test("leaving Checkout without paying shows a cancellation page with no charge", async () => {
+    const { cancel_url, success_url } = checkoutForm(cfg, rules, { agent: agent("ann"), plan: "standard", idempotencyKey: "cancel" });
+    const bindings = { ...env, ...STRIPE_VARS };
+    const cancelled = await worker.fetch(new Request(String(cancel_url)), bindings);
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.headers.get("content-type")).toContain("text/html");
+    expect(await cancelled.text()).toContain("You weren’t charged for this checkout.");
+    expect(await (await worker.fetch(new Request(String(success_url)), bindings)).text()).toContain("All done.");
   });
 
   test("the subscription read, session expiry and portal session call Stripe as documented", async () => {
@@ -406,18 +418,25 @@ describe("checkout and the portal", () => {
     expect(await c.received()).toEqual([`You're on the Standard plan.\n${NOTICE.noPortal}`]);
   });
 
-  test("a second paying subscription is logged and recorded, nothing is cancelled, and the person is told once", async () => {
+  test("a second paying subscription alerts the operator immediately and tells the person once", async () => {
     const kit = billingOn();
     const c = await devChat("ike", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel();
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
     await c.say("/plan");
     await c.received();
     const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
     await stripeChange(kit, { user: "ike", sub: "sub_ike_1", plan: "standard", status: "active" });
+    expect(operator.delivered).toEqual([]);
     await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "included", status: "active" });
+    expect(operator.delivered.map(({ text }) => text)).toEqual([expect.stringContaining("sub_ike_1 sub_ike_2")]);
     await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "included", status: "active" });
     await c.settle();
 
-    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", NOTICE.duplicate]);
+    expect(operator.delivered).toHaveLength(1);
+    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", expect.stringContaining("I’ve alerted the team to review it")]);
     expect(warnings).toHaveBeenCalledWith({ code: "stripe_duplicate_subscription" });
     expect(JSON.stringify(warnings.mock.calls)).not.toContain("sub_ike_");
     warnings.mockRestore();

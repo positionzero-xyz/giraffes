@@ -309,7 +309,7 @@ export async function devChat(
       await chat.event({ kind: "choice", choice, at: clock.now() });
     },
     async consent() {
-      await chat.tap("c");
+      await chat.tap("c2");
       await chat.received();
     },
     async event(e) {

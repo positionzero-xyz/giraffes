@@ -17,15 +17,26 @@ describe("open admission asks for consent before anything else", () => {
     await c.say("are you there?");
 
     expect(c.channel.delivered.map((d) => ({ text: d.text, button: d.button }))).toEqual([
-      { text: t.privacy(NOTICE_URL), button: { label: t.consentButton, data: "c" } },
-      { text: t.privacy(NOTICE_URL), button: { label: t.consentButton, data: "c" } },
+      { text: t.privacy(NOTICE_URL), button: { label: t.consentButton, data: "c2" } },
+      { text: t.privacy(NOTICE_URL), button: { label: t.consentButton, data: "c2" } },
     ]);
     expect((await c.snapshot()).admission).toEqual({ state: "stranger" });
     expect(c.logs("admission")).toEqual([]);
     expect(model.calls).toEqual([]);
     expect((await c.snapshot()).pendingWakeups).toEqual([]);
     expect(JSON.stringify(await doRows(c.agent, "SELECT text FROM turn"))).not.toContain("Ploy");
+    expect(JSON.stringify(await doRows(c.agent, "SELECT payload FROM inbox"))).not.toContain("Ploy");
   });
+
+  test.each(["/memory", "/key remove"])("a new person's first %s gets the consent message, not an answer", async (command) => {
+    const c = await devChat("6104", { model: scripted([]), at: "2099-11-04T10:00", channel: "telegram" });
+
+    await c.say(command);
+
+    expect(await c.received()).toEqual([NOTICES.en.privacy(NOTICE_URL)]);
+    expect((await c.snapshot()).admission).toEqual({ state: "stranger" });
+  });
+
 
   test("the consent tap admits the person, logs consent once, starts check-ins, and their next message is answered", async () => {
     const model = scripted([chat("Hi! What do you need?")]);
@@ -33,7 +44,7 @@ describe("open admission asks for consent before anything else", () => {
     const t = NOTICES.en;
 
     await c.say("hello");
-    await c.tap("c");
+    await c.tap("c2");
 
     expect(await c.received()).toEqual([t.privacy(NOTICE_URL), t.welcome]);
     const s = await c.snapshot();
@@ -52,7 +63,7 @@ describe("open admission asks for consent before anything else", () => {
     await c.remove();
 
     await c.say("let me back in");
-    await c.tap("c");
+    await c.tap("c2");
 
     expect(await c.received()).toEqual([NOTICES.en.removed, NOTICES.en.removed]);
     expect((await c.snapshot()).admission).toMatchObject({ state: "removed" });

@@ -25,7 +25,7 @@ function english(controller: string, contact: string): readonly Section[] {
       body: [
         "Your messages to Giraffe and its replies.",
         "What Giraffe saves to help you: notes, reminders, tasks, plans it proposes, a summary of older chat, and your language, time zone and check-in time.",
-        "Your LINE or Telegram user ID. If you connect an AI, your API key (stored encrypted) or the sign-in for your own Claude plan (kept on your own private machine).",
+        "Your LINE or Telegram user ID. If you connect an AI, your API key (stored encrypted) or the sign-in for your own Claude plan (kept on a private machine Giraffe runs for you on Fly.io).",
         "Usage records: when you sent messages, how many, and what each AI answer cost. These never include your words.",
         "On a paid plan, your plan and subscription status. Stripe handles card details. Giraffe never sees your card number.",
       ],
@@ -63,7 +63,7 @@ function english(controller: string, contact: string): readonly Section[] {
         "Recent chat is kept word for word. Older messages are folded into a summary, and the originals are deleted.",
         `Copies of messages Giraffe sent you: ${r.sentCopies} days.`,
         `Incoming messages, after Giraffe has handled them: ${r.handledIncoming} days.`,
-        "The summary, notes, reminders, tasks, plans, settings and usage records: until you ask for them to be deleted.",
+        `The summary, notes, reminders, tasks, plans, settings and usage records: nothing deletes them automatically yet. To ask for them to be deleted, email ${contact}.`,
         `The private machine for a Claude plan, and its files: until you remove the connection, or after ${r.unusedBox} days if nobody signs in.`,
       ],
     },
@@ -76,7 +76,6 @@ function english(controller: string, contact: string): readonly Section[] {
       ],
     },
     { heading: "Age", body: ["You need to be 20 or over to use Giraffe."] },
-    { heading: "Changes", body: ["If this notice changes in a way that matters, Giraffe tells you in the chat first."] },
   ];
 }
 
@@ -89,7 +88,7 @@ function thai(controller: string, contact: string): readonly Section[] {
       body: [
         "ข้อความที่คุณส่งถึง Giraffe และข้อความตอบกลับ",
         "สิ่งที่ Giraffe บันทึกไว้เพื่อช่วยคุณ: โน้ต การเตือน งาน แผนที่เสนอ สรุปแชตเก่า รวมถึงภาษา เขตเวลา และเวลาทักทายของคุณ",
-        "user ID ของ LINE หรือ Telegram และถ้าคุณเชื่อม AI ไว้ คีย์ API ของคุณ (เก็บแบบเข้ารหัส) หรือการเข้าสู่ระบบแพ็กเกจ Claude ของคุณ (เก็บไว้บนเครื่องส่วนตัวของคุณ)",
+        "user ID ของ LINE หรือ Telegram และถ้าคุณเชื่อม AI ไว้ คีย์ API ของคุณ (เก็บแบบเข้ารหัส) หรือการเข้าสู่ระบบแพ็กเกจ Claude ของคุณ (เก็บไว้บนเครื่องส่วนตัวที่ Giraffe เปิดให้คุณบน Fly.io)",
         "บันทึกการใช้งาน: เวลาที่ส่งข้อความ จำนวนครั้ง และค่าใช้จ่ายของแต่ละคำตอบจาก AI โดยไม่มีข้อความของคุณ",
         "สำหรับแพ็กเกจที่ชำระเงิน: แพ็กเกจและสถานะการสมัคร Stripe เป็นผู้จัดการข้อมูลบัตร Giraffe ไม่เห็นเลขบัตรของคุณ",
       ],
@@ -127,7 +126,7 @@ function thai(controller: string, contact: string): readonly Section[] {
         "แชตล่าสุดเก็บแบบคำต่อคำ ข้อความที่เก่ากว่านั้นจะถูกสรุปรวมไว้ แล้วลบต้นฉบับ",
         `สำเนาข้อความที่ Giraffe ส่งถึงคุณ: ${r.sentCopies} วัน`,
         `ข้อความขาเข้า หลังจาก Giraffe จัดการแล้ว: ${r.handledIncoming} วัน`,
-        "สรุป โน้ต การเตือน งาน แผน การตั้งค่า และบันทึกการใช้งาน: จนกว่าคุณจะขอให้ลบ",
+        `สรุป โน้ต การเตือน งาน แผน การตั้งค่า และบันทึกการใช้งาน: ยังไม่มีการลบอัตโนมัติ หากต้องการให้ลบ อีเมลมาที่ ${contact}`,
         `เครื่องส่วนตัวสำหรับแพ็กเกจ Claude และไฟล์ในเครื่อง: จนกว่าคุณจะลบการเชื่อม หรือหลัง ${r.unusedBox} วันหากไม่มีการเข้าสู่ระบบ`,
       ],
     },
@@ -140,7 +139,6 @@ function thai(controller: string, contact: string): readonly Section[] {
       ],
     },
     { heading: "อายุ", body: ["ต้องมีอายุ 20 ปีขึ้นไปจึงใช้ Giraffe ได้"] },
-    { heading: "การเปลี่ยนแปลง", body: ["ถ้าประกาศนี้เปลี่ยนในเรื่องสำคัญ Giraffe จะแจ้งในแชตก่อน"] },
   ];
 }
 

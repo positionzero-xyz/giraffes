@@ -7,6 +7,7 @@ import type { CheckoutId } from "../billing/stripe";
 import type { BoxHostKind } from "../box/host";
 import { dueAt, type Box, type BoxState, type ReclaimReason } from "../box/machine";
 import { commandOf } from "./commands";
+import { renderSavedPage, snapshotSavedItems, savedPageNotice, type SavedCursor, type SavedPage } from "./saved-items";
 import type { BoxName } from "../box/names";
 import {
   assertNever,
@@ -39,6 +40,7 @@ import {
   type OutboundMessage,
   type OutboxId,
   type PersonStatus,
+  type ReplyHandle,
   type ProposalId,
   type Repeat,
   type TaskFact,
@@ -53,7 +55,7 @@ import {
   type WakeupKey,
   type WakeupOrigin,
 } from "../domain";
-import { modelCallRow, type Backend, type LogRow } from "../ledger/ledger";
+import { diagnosticRow, modelCallRow, type Backend, type LogRow } from "../ledger/ledger";
 import { NOTICES } from "../notices";
 import type { KeyFault, SchemaMode } from "../model/client";
 import type { Auth, ModelRef, ProviderId } from "../model/providers";
@@ -85,14 +87,19 @@ export type AgentRow = {
   readonly statusAt: EpochMs;
 };
 
-export type OutboxRow = OutboundMessage & {
+type SavedReference = SavedCursor & { readonly snapshot: string | null };
+
+export type OutboxRow = Omit<OutboundMessage, "texts"> & {
   readonly eventKey: EventKey;
   readonly triggerKind: AgentEventKind;
   readonly admittedDay: LocalDate | null;
   readonly attempts: number;
   readonly taskId: TaskId | null;
   readonly purpose: UnaskedPurpose | null;
-};
+} & (
+  | { readonly saved: null; readonly texts: OutboundMessage["texts"] }
+  | { readonly saved: SavedReference }
+);
 
 export type Reservation = {
   readonly id: string;
@@ -189,7 +196,11 @@ type OutboxCols = {
   purpose: UnaskedPurpose | null;
   choice: string | null;
   reply_only: number;
+  saved_snapshot: string | null;
+  saved_item: number | null;
+  saved_offset: number | null;
 };
+type SavedState = { snapshot: string | null; snapshot_revision: number | null; revision: number; cursor_item: number; cursor_offset: number };
 type ReservationCols = {
   id: string;
   month: UtcMonth;
@@ -304,12 +315,6 @@ const toReservation = (r: ReservationCols): Reservation => ({
 
 function fromJson<T>(text: string): T {
   return JSON.parse(text);
-}
-
-function queuedLog(row: LogRow): LogRow {
-  if (row.stream === "model_call" && row.backend === undefined) return { ...row, backend: "api" };
-  if (row.stream === "unasked" && (row as { purpose?: unknown }).purpose === undefined) return { ...row, taskId: null, purpose: "unlinked" };
-  return row;
 }
 
 /** The id D1 knows a task by, unique across people. */
@@ -492,7 +497,6 @@ export class AgentStore {
               id: r.id,
               agent: agent.key,
               purpose: r.purpose,
-              model: r.model,
               backend: r.backend,
               status: "recovered_after_crash",
               estimate: r.estimate,
@@ -623,7 +627,7 @@ export class AgentStore {
     return this.sql.exec<{ state_at: EpochMs }>("SELECT state_at FROM admission").toArray()[0]?.state_at ?? null;
   }
 
-  private logAdmission(change: AdmissionChange, reason: string | null, now: EpochMs): void {
+  private logAdmission(change: AdmissionChange, reason: Cohort | WaitlistReason | null, now: EpochMs): void {
     const a = this.agent();
     if (!a) return;
     const id = `${a.key}|a${change}|${now}`;
@@ -642,8 +646,8 @@ export class AgentStore {
       this.sql.exec("DELETE FROM key_ticket");
       const agent = this.agent()?.key;
       const unasked = this.sql
-        .exec<{ id: OutboxId; trigger_kind: AgentEventKind; texts: string; task_id: TaskId | null; purpose: UnaskedPurpose | null }>(
-          "SELECT id, trigger_kind, texts, task_id, purpose FROM outbox WHERE status = 'pending' AND intent = 'unasked'",
+        .exec<{ id: OutboxId; trigger_kind: AgentEventKind; task_id: TaskId | null; purpose: UnaskedPurpose | null }>(
+          "SELECT id, trigger_kind, task_id, purpose FROM outbox WHERE status = 'pending' AND intent = 'unasked'",
         )
         .toArray();
       this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'removed', closed_at = ? WHERE status = 'pending'", now);
@@ -655,7 +659,6 @@ export class AgentStore {
             id: r.id,
             agent,
             triggerKind: r.trigger_kind,
-            text: fromJson<string[]>(r.texts).join("\n"),
             status: "dropped_removed",
             day: null,
             at: now,
@@ -721,7 +724,7 @@ export class AgentStore {
         `SELECT p.id, p.task_id, p.version, o.closed_at AS sent_at FROM proposal p
          JOIN outbox o ON o.id = p.outbox_id
          WHERE p.status = 'open'
-           AND o.id = (SELECT id FROM outbox WHERE status = 'sent' ORDER BY closed_at DESC, rowid DESC LIMIT 1)`,
+           AND o.id = (SELECT id FROM outbox WHERE status = 'sent' AND saved_item IS NULL ORDER BY closed_at DESC, rowid DESC LIMIT 1)`,
       )
       .toArray()[0];
     return r ? { id: r.id, task: r.task_id, version: r.version, sentAt: r.sent_at } : null;
@@ -876,7 +879,7 @@ export class AgentStore {
         )
         .one();
       open.set(t.ref, id);
-      this.insertLogs([{ stream: "task", id: globalTaskId(agent, id), agent, ref: t.ref, kind: t.kind, title: t.title, causeKind: cause.kind, openedAt: now }], now);
+      this.insertLogs([{ stream: "task", id: globalTaskId(agent, id), agent, kind: t.kind, causeKind: cause.kind, openedAt: now }], now);
       this.recordFact(agent, id, { kind: "opened", ref: "", detail: {}, cause }, now);
     }
     for (const { target, fact } of c.facts) {
@@ -946,8 +949,6 @@ export class AgentStore {
           agent,
           taskId: globalTaskId(agent, task),
           kind: fact.kind,
-          ref: fact.ref,
-          detail: JSON.stringify(fact.detail),
           completes,
           personDecision: decision,
           causeKind: fact.cause.kind,
@@ -1196,12 +1197,46 @@ export class AgentStore {
     });
   }
 
+  private savedState(): SavedState {
+    return this.sql.exec<SavedState>("SELECT snapshot, snapshot_revision, revision, cursor_item, cursor_offset FROM saved_items").one();
+  }
+
+  queueSavedPage(input: { key: EventKey; restart: boolean; reply?: ReplyHandle; replyOnly: boolean; now: EpochMs }): void {
+    this.tx(() => {
+      const { key, restart, reply, replyOnly, now } = input;
+      if (restart) {
+        snapshotSavedItems(this.sql);
+        this.sql.exec(
+          "UPDATE saved_items SET snapshot = ?, snapshot_revision = revision, cursor_item = 0, cursor_offset = 0", crypto.randomUUID(),
+        );
+      }
+      const state = this.savedState();
+      this.sql.exec(
+        `INSERT INTO outbox (id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, ready_at, created_at, reply_only,
+                             saved_snapshot, saved_item, saved_offset)
+         VALUES (?, ?, 'message', 'reply', '[]', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        crypto.randomUUID(), key, reply?.token ?? null, reply?.expiresAt ?? null, now, now, replyOnly ? 1 : 0,
+        state.snapshot, state.cursor_item, state.cursor_offset,
+      );
+      this.sql.exec("UPDATE inbox SET status = 'done', outcome = 'no_model', finished_at = ? WHERE event_key = ?", now, key);
+    });
+  }
+
+  savedPage(ref: SavedReference, agent: AgentRow): SavedPage | null {
+    const state = this.savedState();
+    if (ref.snapshot === null) return savedPageNotice(agent.language, false);
+    if (ref.snapshot !== state.snapshot || ref.item !== state.cursor_item || ref.offset !== state.cursor_offset) return null;
+    if (state.snapshot_revision !== state.revision) return savedPageNotice(agent.language, true);
+    return renderSavedPage({ sql: this.sql, cursor: ref, agent });
+  }
+
   readyOutbox(now: EpochMs, limit: number): readonly OutboxRow[] {
     const agent = this.agent();
     if (!agent) return [];
     return this.sql
       .exec<OutboxCols>(
-        `SELECT id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, admitted_day, in_doubt, attempts, task_id, purpose, choice, reply_only
+        `SELECT id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, admitted_day, in_doubt, attempts, task_id, purpose, choice, reply_only,
+                saved_snapshot, saved_item, saved_offset
          FROM outbox WHERE status = 'pending' AND ready_at <= ? ORDER BY created_at, rowid LIMIT ?`,
         now,
         limit,
@@ -1211,7 +1246,6 @@ export class AgentStore {
         const base = {
           id: r.id,
           to: agent.identity,
-          texts: fromJson<readonly [string, ...string[]]>(r.texts),
           intent: r.intent,
           eventKey: r.event_key,
           triggerKind: r.trigger_kind,
@@ -1221,10 +1255,12 @@ export class AgentStore {
           purpose: r.purpose,
           replyOnly: r.reply_only === 1,
           ...button(r.choice, agent.language),
+          ...(r.in_doubt === 0 && r.reply_token !== null && r.reply_expires !== null
+            ? { reply: { token: r.reply_token, expiresAt: r.reply_expires } } : {}),
         };
-        return r.in_doubt === 0 && r.reply_token !== null && r.reply_expires !== null
-          ? { ...base, reply: { token: r.reply_token, expiresAt: r.reply_expires } }
-          : base;
+        return r.saved_item !== null && r.saved_offset !== null
+          ? { ...base, saved: { snapshot: r.saved_snapshot, item: r.saved_item, offset: r.saved_offset } }
+          : { ...base, saved: null, texts: fromJson<OutboundMessage["texts"]>(r.texts) };
       });
   }
 
@@ -1242,9 +1278,25 @@ export class AgentStore {
     );
   }
 
-  markSent(id: OutboxId, via: "reply" | "push", now: EpochMs, logs: readonly LogRow[]): void {
+  markSent(id: OutboxId, via: "reply" | "push", now: EpochMs, logs: readonly LogRow[], next: SavedCursor | null = null): void {
     this.tx(() => {
+      if (next !== null) {
+        this.sql.exec(
+          `UPDATE saved_items SET cursor_item = ?, cursor_offset = ? WHERE snapshot_revision = revision AND EXISTS (
+             SELECT 1 FROM outbox WHERE id = ? AND status = 'sending' AND saved_snapshot = snapshot
+               AND saved_item = cursor_item AND saved_offset = cursor_offset)`,
+          next.item, next.offset, id,
+        );
+      } else {
+        const done = this.sql.exec(
+          `UPDATE saved_items SET snapshot = NULL WHERE snapshot_revision = revision AND EXISTS (
+             SELECT 1 FROM outbox WHERE id = ? AND status = 'sending' AND saved_snapshot = snapshot
+               AND saved_item = cursor_item AND saved_offset = cursor_offset)`, id,
+        ).rowsWritten > 0;
+        if (done) this.sql.exec("DELETE FROM saved_item");
+      }
       this.sql.exec("UPDATE outbox SET status = 'sent', via = ?, closed_at = ? WHERE id = ?", via, now, id);
+      this.sql.exec("UPDATE outbox SET reply_token = NULL, reply_expires = NULL WHERE id = ? AND saved_item IS NOT NULL", id);
       this.insertLogs(logs, now);
     });
   }
@@ -1260,6 +1312,7 @@ export class AgentStore {
   drop(id: OutboxId, reason: "budget" | "blocked" | "quota" | "failed" | "removed", now: EpochMs, logs: readonly LogRow[]): void {
     this.tx(() => {
       this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = ?, closed_at = ? WHERE id = ?", reason, now, id);
+      this.sql.exec("UPDATE outbox SET reply_token = NULL, reply_expires = NULL WHERE id = ? AND saved_item IS NOT NULL", id);
       this.insertLogs(logs, now);
     });
   }
@@ -1267,6 +1320,7 @@ export class AgentStore {
   recipientGone(id: OutboxId, now: EpochMs, logs: readonly LogRow[]): void {
     this.tx(() => {
       this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'gone', closed_at = ? WHERE id = ?", now, id);
+      this.sql.exec("UPDATE outbox SET reply_token = NULL, reply_expires = NULL WHERE id = ? AND saved_item IS NOT NULL", id);
       this.sql.exec("UPDATE agent SET status = 'blocked'");
       this.insertLogs(logs, now);
     });
@@ -1568,11 +1622,13 @@ export class AgentStore {
 
   private insertLogs(rows: readonly LogRow[], now: EpochMs): void {
     for (const row of rows) {
+      const diagnostic = diagnosticRow(row);
+      if (diagnostic === null) continue;
       this.sql.exec(
         "INSERT OR IGNORE INTO log_outbox (id, stream, row, created_at) VALUES (?, ?, ?, ?)",
         `${row.stream}:${row.id}`,
         row.stream,
-        JSON.stringify(row),
+        JSON.stringify(diagnostic),
         now,
       );
     }
@@ -1581,10 +1637,16 @@ export class AgentStore {
   pendingLogs(now: EpochMs, limit: number): readonly LogRow[] {
     const { retry_at } = this.sql.exec<{ retry_at: EpochMs }>("SELECT retry_at FROM log_flush").one();
     if (retry_at > now) return [];
-    return this.sql
-      .exec<{ row: string }>("SELECT row FROM log_outbox ORDER BY created_at, rowid LIMIT ?", limit)
-      .toArray()
-      .map((r) => queuedLog(fromJson<LogRow>(r.row)));
+    const queued = this.sql.exec<{ id: string; row: string }>(
+      "SELECT id, CASE WHEN json_valid(row) THEN row ELSE 'null' END AS row FROM log_outbox ORDER BY created_at, rowid LIMIT ?", limit,
+    ).toArray();
+    const rows: LogRow[] = [];
+    for (const { id, row } of queued) {
+      const diagnostic = diagnosticRow(JSON.parse(row));
+      if (diagnostic !== null) rows.push(diagnostic);
+      else this.sql.exec("DELETE FROM log_outbox WHERE id = ?", id);
+    }
+    return rows;
   }
 
   logsShipped(rows: readonly LogRow[]): void {

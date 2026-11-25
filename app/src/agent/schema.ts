@@ -478,6 +478,44 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE inbox ADD COLUMN catch_up_budget TEXT;
   `,
+  `
+  CREATE TABLE saved_items (
+    one               INTEGER PRIMARY KEY CHECK (one = 1),
+    revision          INTEGER NOT NULL DEFAULT 0,
+    snapshot          TEXT,
+    snapshot_revision INTEGER,
+    cursor_item       INTEGER NOT NULL DEFAULT 0,
+    cursor_offset     INTEGER NOT NULL DEFAULT 0
+  );
+  INSERT INTO saved_items (one) VALUES (1);
+  CREATE TABLE saved_item (
+    ordinal   INTEGER PRIMARY KEY,
+    kind      TEXT NOT NULL CHECK (kind IN ('note', 'reminder', 'task', 'setting')),
+    source_id INTEGER NOT NULL
+  );
+
+  ALTER TABLE outbox ADD COLUMN saved_snapshot TEXT;
+  ALTER TABLE outbox ADD COLUMN saved_item INTEGER;
+  ALTER TABLE outbox ADD COLUMN saved_offset INTEGER
+    CHECK ((saved_item IS NULL AND saved_offset IS NULL AND saved_snapshot IS NULL)
+        OR (saved_item IS NOT NULL AND saved_offset IS NOT NULL AND texts = '[]' AND intent = 'reply' AND choice IS NULL));
+
+  CREATE TRIGGER saved_settings_update AFTER UPDATE OF language, tz, checkin_local ON agent
+  WHEN NEW.language IS NOT OLD.language OR NEW.tz IS NOT OLD.tz OR NEW.checkin_local IS NOT OLD.checkin_local
+  BEGIN UPDATE saved_items SET revision = revision + 1; END;
+  ${["memory_note", "wakeup", "task", "task_fact"].flatMap((table) =>
+    ["INSERT", "UPDATE", "DELETE"].map((op) => {
+      const personOnly = table !== "wakeup" ? "" : op === "UPDATE" ? "WHEN OLD.origin = 'person' OR NEW.origin = 'person'"
+        : `WHEN ${op === "DELETE" ? "OLD" : "NEW"}.origin = 'person'`;
+      return `CREATE TRIGGER saved_${table}_${op} AFTER ${op} ON ${table} ${personOnly}
+        BEGIN UPDATE saved_items SET revision = revision + 1; END;`;
+    }),
+  ).join("\n")}
+  `,
+  `
+  DELETE FROM log_outbox;
+  UPDATE log_flush SET failures = 0, retry_at = 0;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

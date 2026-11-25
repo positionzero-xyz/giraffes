@@ -122,7 +122,8 @@ price plus the provider's fee from our price cards, not an invoice.
      Moving a start that is already set, which moves week 0 for every recruit, needs `--force`.
      A Telegram recruit opens `https://t.me/<bot>?start=<code>`; a LINE recruit sends `/join <code>`.
      Enrolled people get joiner codes with `/invite`. It can't run with `BILLING=on`.
-     Send `/feedback <text>` to report a problem. Reports are redacted, saved to the ledger and forwarded if `OPERATOR_CHAT` is set.
+     Send `/feedback <text>` to register a feedback event. The ledger keeps the event and cohort. The service discards the message and operator alerts still cover LINE quota.
+     Send `/memory` to see the saved notes, reminders, tasks and personal settings for this chat, even without connected AI. Send `/memory next` for another page when prompted.
    - `ADMISSION=open`: everyone is admitted at first contact, and `/invite` and `/join` are billing's.
 
    Plans and payments (`/plan`, `/invite`, `/join <code>`, `/leave`, see `docs/design/BOX.md`) follow `BILLING`:
@@ -159,17 +160,12 @@ npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_s
 ```
 
 Safety incidents and survey answers are operator rows in `safety_incident` and `survey_response`. The
-safety gate can't pass before at least one red-team attempt is recorded, and the survey gate counts each
+safety incident's `detail` must be an empty string. The safety gate needs at least one red-team attempt, and the survey gate counts each
 person's latest answer. `tasks_by_type` counts tasks opened and completed per kind, and
 `tasks_by_evidence` breaks the completions down by the fact that completed them.
 
 ### Update an existing ledger
 
-No ledger has been deployed yet, so there is nothing to upgrade: create the ledger fresh from
-`src/ledger/d1-schema.sql`, as in step 1 above, or with `--local` for the dev ledger. To start a local ledger
-over, delete it and load the schema file again.
-
-Re-running the schema file adds tables and views that are new, but never changes the columns or CHECKs of
-a table that already exists. Once a ledger is deployed, the next change to an existing table needs a real
-migration: one SQL file that drops the views depending on the table, rebuilds the table, copies its rows by
-named columns and recreates the views, tested against a copy of the previous schema with rows in it.
+Apply `src/ledger/d1-schema.sql` before deploying this Worker. On an existing ledger, the file adds write guards,
+clears the historical message and diagnostic fields, and updates the completion view. Apply it with `--local`
+to upgrade a dev ledger. An older Worker may fail to flush diagnostics until it is replaced.

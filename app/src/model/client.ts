@@ -135,15 +135,28 @@ async function post(fetch: Fetch, url: string, headers: Record<string, string>, 
 
 export const UNREADABLE_REPLY: Extract<WireResult, { kind: "reply" }> ={ kind: "reply", text: "", stop: "end", usage: null, reportedMicro: null };
 
+const tokenCount = z.number().int().nonnegative();
+const TokenUsage = z.object({
+  input_tokens: tokenCount,
+  output_tokens: tokenCount,
+  cache_creation_input_tokens: tokenCount.nullish(),
+  cache_read_input_tokens: tokenCount.nullish(),
+});
+
+function readTokenUsage(raw: unknown): Usage | null {
+  const usage = TokenUsage.safeParse(raw).data;
+  return usage ? {
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
+    cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+  } : null;
+}
+
 const AnthropicReply = z.object({
   content: z.array(z.object({ type: z.string(), text: z.string().optional() })),
   stop_reason: z.string().nullable(),
-  usage: z.object({
-    input_tokens: z.number(),
-    output_tokens: z.number(),
-    cache_creation_input_tokens: z.number().nullish(),
-    cache_read_input_tokens: z.number().nullish(),
-  }),
+  usage: z.unknown().optional(),
 });
 
 function anthropic(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): ModelClient {
@@ -175,12 +188,7 @@ function anthropic(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): Model
         kind: "reply",
         text: r.content.flatMap((b) => (b.type === "text" && b.text !== undefined ? [b.text] : [])).join(""),
         stop: r.stop_reason === "refusal" ? "refusal" : r.stop_reason === "max_tokens" ? "max_tokens" : "end",
-        usage: {
-          inputTokens: r.usage.input_tokens,
-          outputTokens: r.usage.output_tokens,
-          cacheWriteTokens: r.usage.cache_creation_input_tokens ?? 0,
-          cacheReadTokens: r.usage.cache_read_input_tokens ?? 0,
-        },
+        usage: readTokenUsage(r.usage),
         reportedMicro: null,
       };
     },
@@ -191,15 +199,15 @@ const OpenAIReply = z.object({
   choices: z
     .array(z.object({ message: z.object({ content: z.string().nullish(), refusal: z.string().nullish() }), finish_reason: z.string().nullish() }))
     .min(1),
-  usage: z
-    .object({
-      prompt_tokens: z.number(),
-      completion_tokens: z.number(),
-      prompt_tokens_details: z.object({ cached_tokens: z.number().nullish() }).nullish(),
-      cost: z.number().nullish(),
-    })
-    .nullish(),
+  usage: z.unknown().optional(),
 });
+
+const OpenAIUsage = z.object({
+  prompt_tokens: tokenCount,
+  completion_tokens: tokenCount,
+  prompt_tokens_details: z.object({ cached_tokens: tokenCount.nullish() }).nullish(),
+});
+const OpenAICost = z.object({ cost: z.number().nonnegative() });
 
 function openai(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): ModelClient {
   return {
@@ -232,15 +240,19 @@ function openai(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): ModelCli
       const parsed = OpenAIReply.safeParse(jsonOf(res.body));
       if (!parsed.success) return UNREADABLE_REPLY;
       const [choice] = parsed.data.choices;
-      const u = parsed.data.usage;
+      const u = OpenAIUsage.safeParse(parsed.data.usage).data;
       const cached = u?.prompt_tokens_details?.cached_tokens ?? 0;
+      const cost = OpenAICost.safeParse(parsed.data.usage).data?.cost;
+      const reported = cost === undefined ? null : Math.ceil(cost * 1_000_000);
       const refused = (choice.message.refusal ?? "") !== "" || choice.finish_reason === "content_filter";
       return {
         kind: "reply",
         text: choice.message.content ?? "",
         stop: refused ? "refusal" : choice.finish_reason === "length" ? "max_tokens" : "end",
-        usage: u ? { inputTokens: u.prompt_tokens - cached, outputTokens: u.completion_tokens, cacheWriteTokens: 0, cacheReadTokens: cached } : null,
-        reportedMicro: typeof u?.cost === "number" ? (Math.ceil(u.cost * 1_000_000) as MicroUsd) : null,
+        usage: u && cached <= u.prompt_tokens
+          ? { inputTokens: u.prompt_tokens - cached, outputTokens: u.completion_tokens, cacheWriteTokens: 0, cacheReadTokens: cached }
+          : null,
+        reportedMicro: reported !== null && Number.isSafeInteger(reported) ? reported as MicroUsd : null,
       };
     },
   };
@@ -248,14 +260,7 @@ function openai(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): ModelCli
 
 const BridgeReply = z.object({
   structured: z.unknown(),
-  usage: z
-    .object({
-      input_tokens: z.number(),
-      output_tokens: z.number(),
-      cache_creation_input_tokens: z.number().nullish(),
-      cache_read_input_tokens: z.number().nullish(),
-    })
-    .nullable(),
+  usage: z.unknown().optional(),
   stop: z.enum(["end", "refusal", "max_tokens"]),
 });
 
@@ -268,14 +273,11 @@ export function bridgeBody(req: { readonly model: string; readonly system: strin
 export function readBridgeReply(raw: unknown): Extract<WireResult, { kind: "reply" }> | null {
   const reply = BridgeReply.safeParse(raw);
   if (!reply.success) return null;
-  const u = reply.data.usage;
   return {
     kind: "reply",
     text: reply.data.structured === undefined ? "" : JSON.stringify(reply.data.structured),
     stop: reply.data.stop,
-    usage: u
-      ? { inputTokens: u.input_tokens, outputTokens: u.output_tokens, cacheWriteTokens: u.cache_creation_input_tokens ?? 0, cacheReadTokens: u.cache_read_input_tokens ?? 0 }
-      : null,
+    usage: readTokenUsage(reply.data.usage),
     reportedMicro: null,
   };
 }

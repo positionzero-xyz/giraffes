@@ -1,3 +1,4 @@
+import { diagnostic } from "../diagnostics";
 import type { ChannelId, EpochMs, InboundEnvelope, OutboundMessage, OutboxId } from "../domain";
 import type { Config, OperatorChat } from "../config";
 import { lineChannel } from "./line";
@@ -37,7 +38,7 @@ export async function tellOperator(channels: ChannelRegistry, to: OperatorChat, 
     const message = i === 0 ? part : continuation + part;
     const sent = await channels[to.channel].deliver({ id: crypto.randomUUID() as OutboxId, to, texts: [message], intent: "requested" }, now);
     if (sent.kind !== "sent") {
-      console.warn("operator alert not sent", sent.kind);
+      diagnostic("operator_alert_failed");
       return null;
     }
   }

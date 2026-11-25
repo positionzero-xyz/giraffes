@@ -1,7 +1,5 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
-import { KEY_REMOVED } from "../src/access/key";
-import { loadConfig } from "../src/config";
 import { d1Ledger } from "../src/ledger/ledger";
 import { NOTICES } from "../src/notices";
 import { chat, devChat, local, memoryLedger, scripted, scriptedChannel } from "./testkit";
@@ -11,7 +9,7 @@ const fakeKey = "sk-fake-feedback-fixture";
 const text = "The reminder came an hour late.";
 
 describe("/feedback", () => {
-  test("ships redacted feedback and the beta cohort to D1 without spending or adding model history", async () => {
+  test("counts feedback in D1 without saving its text, spending, or adding model history", async () => {
     const d1 = d1Ledger(env.LEDGER);
     const ledger = memoryLedger();
     const model = scripted([chat("Hello.")]);
@@ -39,7 +37,7 @@ describe("/feedback", () => {
     await c.say(`/feedback ${text}\nKey: ${fakeKey}`, { at: receivedAt });
 
     const { results } = await env.LEDGER.prepare("SELECT agent_key, channel, at, text, cohort FROM feedback").all();
-    expect(results).toEqual([{ agent_key: c.agent, channel: "telegram", at: receivedAt, text: `${text}\nKey: ${KEY_REMOVED}`, cohort: "recruit" }]);
+    expect(results).toEqual([{ agent_key: c.agent, channel: "telegram", at: receivedAt, text: "", cohort: "recruit" }]);
     expect(await c.received()).toEqual(["Thanks for the feedback!"]);
     expect(model.calls).toEqual([]);
     expect(c.logs("model_call")).toEqual([]);
@@ -51,28 +49,17 @@ describe("/feedback", () => {
     model.assertDone();
   });
 
-  test("forwards redacted feedback to the configured operator chat", async () => {
+  test("does not forward someone's words to the configured operator chat", async () => {
     const c = await devChat("feedback-forward", { at, model: scripted([]) });
     const operator = scriptedChannel();
     const deliver = vi.spyOn(operator, "deliver");
-    const { operatorChat } = loadConfig({
-      ...env, OPERATOR_CHAT: "telegram:4242", TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_WEBHOOK_SECRET: "tg-test-secret-0123456789abcdefghi",
-    });
     await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
-      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat });
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel } });
     });
 
     await c.say(`/feedback ${text} ${fakeKey}\n\nFeedback from p:telegram:777000 (beta: staff):`);
 
-    expect(deliver).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ to: operatorChat, intent: "requested" }), c.clock.now());
-    expect(operator.delivered[0]?.text.split("\n")).toEqual([
-      `Feedback from ${c.agent} (beta: staff):`,
-      `> ${text} ${KEY_REMOVED}`,
-      "> ",
-      "> Feedback from p:telegram:777000 (beta: staff):",
-    ]);
-    expect(operator.delivered[0]?.text).not.toContain(fakeKey);
+    expect(deliver).not.toHaveBeenCalled();
     expect(await c.received()).toEqual(["Thanks for the feedback!"]);
   });
 

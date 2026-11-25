@@ -1,3 +1,4 @@
+import { diagnostic } from "../diagnostics";
 import { z } from "zod";
 import { eventKey, parseChoice, parseInviteCode, personAgentKey, type ChannelEvent, type EpochMs, type OutboundMessage } from "../domain";
 import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
@@ -60,9 +61,9 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ callback_query_id: id }),
       });
-      if (!res.ok) console.warn("answerCallbackQuery failed", res.status);
-    } catch (err) {
-      console.warn("answerCallbackQuery failed", err);
+      if (!res.ok) diagnostic("telegram_callback_failed", res.status);
+    } catch {
+      diagnostic("telegram_callback_failed");
     }
   }
 

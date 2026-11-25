@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
-import { COHORTS, HALVES, TASK_KINDS, type TaskRef, type AgentKey, type EpochMs, type MicroUsd } from "../src/domain";
+import { COHORTS, HALVES, TASK_KINDS, type AgentKey, type EpochMs, type MicroUsd } from "../src/domain";
 import type { BoxName } from "../src/box/names";
 import { BOX_HOST_KINDS } from "../src/box/host";
 import { ACTION_REJECTIONS, BACKENDS, d1Ledger, MODEL_CALL_STATUSES, TURN_OUTCOMES, UNASKED_STATUSES, type LogRow } from "../src/ledger/ledger";
@@ -76,16 +76,14 @@ describe("log shipping", () => {
         startedAt: at,
         finishedAt: at,
       },
-      { stream: "unasked", id: "o-1", agent: agent("a"), triggerKind: "checkin", text: "Morning!", status: "sent", day: null, at, taskId: "p:dev:a|t1", purpose: "task_followup" },
-      { stream: "task", id: "p:dev:a|t1", agent: agent("a"), ref: "trip" as TaskRef, kind: "plan", title: "A trip", causeKind: "checkin", openedAt: at },
+      { stream: "unasked", id: "o-1", agent: agent("a"), triggerKind: "checkin", status: "sent", day: null, at, taskId: "p:dev:a|t1", purpose: "task_followup" },
+      { stream: "task", id: "p:dev:a|t1", agent: agent("a"), kind: "plan", causeKind: "checkin", openedAt: at },
       {
         stream: "task_fact",
         id: "p:dev:a|f1",
         agent: agent("a"),
         taskId: "p:dev:a|t1",
         kind: "plan_accepted",
-        ref: "1.1",
-        detail: '{"via":"tap","version":1}',
         completes: true,
         personDecision: true,
         causeKind: "choice",
@@ -98,7 +96,6 @@ describe("log shipping", () => {
         id: "r-1",
         agent: agent("a"),
         purpose: "turn",
-        model: "opencode-go:claude-haiku-5-5",
         backend: "key",
         status: "settled",
         estimateMicro: micro(900),
@@ -109,7 +106,7 @@ describe("log shipping", () => {
         cacheWriteTokens: 0,
         at,
       },
-      { stream: "rejection", id: "p:dev:a|dev:1|0", agent: agent("a"), turnId: "p:dev:a|dev:1", action: "schedule_wakeup:dentist", reason: "bad_time", at },
+      { stream: "rejection", id: "p:dev:a|dev:1|0", agent: agent("a"), turnId: "p:dev:a|dev:1", reason: "bad_time", at },
     ];
 
     await ledger.append(rows);
@@ -131,7 +128,6 @@ describe("log shipping", () => {
       id: "r-refused",
       agent: agent("a"),
       purpose: "turn",
-      model: "opencode-go:claude-haiku-5-5",
       backend: "key",
       status: "not_a_status",
       estimateMicro: micro(900),

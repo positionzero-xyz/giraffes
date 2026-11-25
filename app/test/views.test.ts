@@ -33,14 +33,14 @@ async function enroll(p: Person, inviter: string | null = null): Promise<void> {
 
 async function completed(agent: string, at: number, via: "tap" | "typed" = "tap"): Promise<string> {
   const task = `${agent}|t${next()}`;
-  await run("INSERT INTO task (id, agent_key, ref, kind, title, cause_kind, opened_at) VALUES (?, ?, 'trip', 'plan', 'A trip', 'checkin', ?)", task, agent, at - DAY);
+  await run("INSERT INTO task (id, agent_key, ref, kind, title, cause_kind, opened_at) VALUES (?, ?, '', 'plan', '', 'checkin', ?)", task, agent, at - DAY);
   await run(
     `INSERT INTO task_fact (id, agent_key, task_id, kind, ref, detail, completes, person_decision, cause_kind, cause_at, at)
-     VALUES (?, ?, ?, 'plan_accepted', '1.1', ?, 1, 1, 'choice', ?, ?)`,
+     VALUES (?, ?, ?, 'plan_accepted', '', '{}', 1, 1, ?, ?, ?)`,
     `${agent}|f${next()}`,
     agent,
     task,
-    JSON.stringify({ via, version: 1 }),
+    via === "tap" ? "choice" : "message",
     at,
     at,
   );
@@ -50,7 +50,7 @@ async function completed(agent: string, at: number, via: "tap" | "typed" = "tap"
 async function unasked(agent: string, task: string | null, at: number, purpose = "task_followup"): Promise<string> {
   const id = `o${next()}`;
   await run(
-    "INSERT INTO unasked_message (id, agent_key, trigger_kind, text, status, day, at, task_id, purpose) VALUES (?, ?, 'checkin', 'Morning!', 'sent', NULL, ?, ?, ?)",
+    "INSERT INTO unasked_message (id, agent_key, trigger_kind, text, status, day, at, task_id, purpose) VALUES (?, ?, 'checkin', '', 'sent', NULL, ?, ?, ?)",
     id,
     agent,
     at,
@@ -116,10 +116,10 @@ describe("gate views", () => {
     const last = await unasked(ana.agent, task, decidedAt - DAY);
     await unasked(ana.agent, task, decidedAt - 2 * DAY, "bookkeeping");
     await unasked(ana.agent, null, decidedAt - DAY, "unlinked");
-    await run("INSERT INTO task (id, agent_key, ref, kind, title, cause_kind, opened_at) VALUES (?, ?, 'trip', 'plan', 'A trip', 'checkin', ?)", task, ana.agent, START);
+    await run("INSERT INTO task (id, agent_key, ref, kind, title, cause_kind, opened_at) VALUES (?, ?, '', 'plan', '', 'checkin', ?)", task, ana.agent, START);
     await run(
       `INSERT INTO task_fact (id, agent_key, task_id, kind, ref, detail, completes, person_decision, cause_kind, cause_at, at)
-       VALUES ('f-accept', ?, ?, 'plan_accepted', '1.1', '{"via":"tap"}', 1, 1, 'choice', ?, ?)`,
+       VALUES ('f-accept', ?, ?, 'plan_accepted', '', '{}', 1, 1, 'choice', ?, ?)`,
       ana.agent,
       task,
       decidedAt,
@@ -169,7 +169,7 @@ describe("gate views", () => {
     await enroll(ana);
     await wrote(ana.agent, START + DAY);
     await run("INSERT INTO survey_response (agent_key, answered_at, answer) VALUES (?, ?, 'very')", ana.agent, START + 30 * DAY);
-    await run("INSERT INTO safety_incident (id, agent_key, kind, detail, at) VALUES ('s1', NULL, 'red_team_fail', 'tried', ?)", START);
+    await run("INSERT INTO safety_incident (id, agent_key, kind, detail, at) VALUES ('s1', NULL, 'red_team_fail', '', ?)", START);
 
     expect(await rows("SELECT incidents, red_team_passes, red_team_attempts FROM gate_safety")).toEqual([{ incidents: 0, red_team_passes: 0, red_team_attempts: 1 }]);
     expect(await rows("SELECT active, very FROM gate_survey")).toEqual([{ active: 1, very: 1 }]);
@@ -192,7 +192,7 @@ describe("gate views", () => {
   test("the safety gate needs at least one red-team attempt before it can pass", async () => {
     const safety = async () => (await rows("SELECT gate, passed FROM gate_summary")).find((r) => r.gate === "gate_safety")?.passed;
     expect(await safety()).toBe(0);
-    await run("INSERT INTO safety_incident (id, agent_key, kind, detail, at) VALUES ('s2', NULL, 'red_team_fail', 'tried', ?)", START);
+    await run("INSERT INTO safety_incident (id, agent_key, kind, detail, at) VALUES ('s2', NULL, 'red_team_fail', '', ?)", START);
     expect(await safety()).toBe(1);
   });
 
@@ -212,7 +212,7 @@ describe("gate views", () => {
     await enroll(ana);
     const open = async () => {
       const task = `${ana.agent}|t${next()}`;
-      await run("INSERT INTO task (id, agent_key, ref, kind, title, cause_kind, opened_at) VALUES (?, ?, 'trip', 'plan', 'A trip', 'checkin', ?)", task, ana.agent, START);
+      await run("INSERT INTO task (id, agent_key, ref, kind, title, cause_kind, opened_at) VALUES (?, ?, '', 'plan', '', 'checkin', ?)", task, ana.agent, START);
     };
     await open();
     await open();

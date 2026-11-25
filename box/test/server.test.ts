@@ -67,6 +67,22 @@ beforeEach(() => {
   rmSync(join(dir, "events.log"), { force: true });
 });
 
+it("logs only typed diagnostics when the CLI puts private text in stderr or the result subtype", async (t) => {
+  signIn(true);
+  const info = t.mock.method(console, "info", () => {});
+  const error = t.mock.method(console, "error", () => {});
+  const log = t.mock.method(console, "log", () => {});
+  const model = "private fixture model name";
+  const system = "private fixture system prompt";
+
+  assert.equal((await call("POST", "/parse", { auth: bearer, body: { ...turn("crash"), model, system } })).status, 502);
+  assert.equal((await call("POST", "/parse", { auth: bearer, body: { ...turn(), model, system } })).status, 200);
+
+  const messages = [info, error, log].flatMap((mock) => mock.mock.calls.map((entry) => entry.arguments));
+  assert.deepEqual(messages[0], [{ code: "parse_failed", exit: 2 }]);
+  assert(!JSON.stringify(messages).includes("private fixture"));
+});
+
 describe("auth", () => {
   it("refuses /health and /parse without the exact bearer token", async () => {
     for (const auth of [undefined, "", `Bearer ${TOKEN}x`, TOKEN]) {

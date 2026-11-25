@@ -70,9 +70,9 @@ describe("reminders", () => {
       ].join("\n"),
     ]);
     expect((await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder")).toEqual([]);
-    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([
-      ["cancel_wakeup:gym", "not_pending"],
-      ["schedule_wakeup:dentist", "bad_time"],
+    expect(c.logs("rejection").map((l) => l.reason)).toEqual([
+      "not_pending",
+      "bad_time",
     ]);
   });
 
@@ -118,7 +118,7 @@ describe("reminders", () => {
     expect(reminders).toHaveLength(20);
     expect(reminders.find((w) => w.key === "r0")?.dueAt).toBe(local("2099-11-08T09:00"));
     expect(await c.received()).toEqual([["Moved it and added rent.", NOTICE.reminderLimit].join("\n")]);
-    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([["schedule_wakeup:rent", "limit"]]);
+    expect(c.logs("rejection").map((l) => l.reason)).toEqual(["limit"]);
     model.assertDone();
   });
 
@@ -132,7 +132,7 @@ describe("reminders", () => {
 
     expect((await c.received()).map((t) => t.length)).toEqual([TURN.maxTextChars]);
     expect((await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder").map((w) => w.key)).toEqual(["call-mom"]);
-    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([["send", "too_long"]]);
+    expect(c.logs("rejection").map((l) => l.reason)).toEqual(["too_long"]);
     model.assertDone();
   });
 
@@ -203,7 +203,7 @@ describe("reminders", () => {
     await c.advanceTo("2099-11-04T10:05");
 
     expect(model.calls).toHaveLength(2);
-    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([["schedule_wakeup:check", "past"]]);
+    expect(c.logs("rejection").map((l) => l.reason)).toEqual(["past"]);
     model.assertDone();
   });
 
@@ -262,11 +262,11 @@ describe("reminders", () => {
     await c.advanceTo("2099-11-04T15:00");
 
     expect(await c.received()).toEqual(["Update a.", "Update b.", "Update c."]);
-    expect(c.logs("unasked").map((l) => [l.text, l.status])).toEqual([
-      ["Update a.", "sent"],
-      ["Update b.", "sent"],
-      ["Update c.", "sent"],
-      ["Update d.", "dropped_budget"],
+    expect(c.logs("unasked").map((l) => l.status)).toEqual([
+      "sent",
+      "sent",
+      "sent",
+      "dropped_budget",
     ]);
   });
 });
@@ -494,7 +494,7 @@ describe("time zone and language", () => {
     await c.say("I live on Mars now");
 
     expect(await c.received()).toEqual(["Switched to Mars time.\n(I couldn't find that time zone, so I kept the one you had.)"]);
-    expect(c.logs("rejection").map((l) => [l.action, l.reason])).toEqual([["set_locale", "bad_zone"]]);
+    expect(c.logs("rejection").map((l) => l.reason)).toEqual(["bad_zone"]);
     expect((await c.snapshot()).agent?.tz).toBe("Asia/Bangkok");
   });
 
@@ -624,11 +624,11 @@ describe("delivery", () => {
       ["Update b.", "2099-11-05T08:10"],
       ["Update c.", "2099-11-05T08:20"],
     ]);
-    expect(c.logs("unasked").map((l) => [l.text, l.status, l.day])).toEqual([
-      ["Update a.", "sent", "2099-11-05"],
-      ["Update b.", "sent", "2099-11-05"],
-      ["Update c.", "sent", "2099-11-05"],
-      ["Update d.", "dropped_budget", null],
+    expect(c.logs("unasked").map((l) => [l.status, l.day])).toEqual([
+      ["sent", "2099-11-05"],
+      ["sent", "2099-11-05"],
+      ["sent", "2099-11-05"],
+      ["dropped_budget", null],
     ]);
     expect((await c.snapshot()).unaskedSentToday).toBe(3);
     model.assertDone();
@@ -650,7 +650,7 @@ describe("delivery", () => {
     await c.advanceTo("2099-11-04T12:00");
 
     expect(await c.received()).toEqual(["OK.", "Time for your pills."]);
-    expect(c.logs("unasked").map((l) => [l.text, l.status])).toEqual([["How is the trip planning going?", "dropped_quota"]]);
+    expect(c.logs("unasked").map((l) => l.status)).toEqual(["dropped_quota"]);
     model.assertDone();
   });
 

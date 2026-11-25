@@ -117,7 +117,7 @@ describe("a person's own key", () => {
     expect(req.url).toBe("https://opencode.ai/inference/go/anthropic/v1/messages");
     expect(req.headers.get("authorization")).toBe(`Bearer ${KEY}`);
     expect(req.headers.get("x-opencode-session")).toMatch(/^[0-9a-f]{32}$/);
-    expect(c.logs("model_call").map((l) => [l.backend, l.model, l.status])).toEqual([["key", "opencode-go:claude-haiku-5-5", "settled"]]);
+    expect(c.logs("model_call").map((l) => [l.backend, l.status])).toEqual([["key", "settled"]]);
     const snap = await c.snapshot();
     expect(snap.access.spentMicro.byok).toBeGreaterThan(0);
     expect(snap.access.spentMicro.included).toBe(0);

@@ -304,6 +304,92 @@ describe("no request that carries the person's words starts after a forget begin
   });
 });
 
+describe("branches that tell the person something", () => {
+  test("a key refused after the forget began rests the key but queues no notice", async () => {
+    const held = gate();
+    const provider = fakeProvider([{ kind: "call", run: () => held.wait.then(() => ({ kind: "status", status: 401 }) as const) }]);
+    const c = await devChat("fence-refused", { model: null, provider, at: "2099-11-04T10:00" });
+    await giveKey(c.agent);
+
+    await c.post("where do I live again?");
+    await until(() => provider.seen.length === 1);
+    const { op } = await begin(c);
+    held.open();
+    await c.settle();
+    await end(c, op);
+    await c.settle();
+
+    const s = await c.snapshot();
+    expect(s.turns).toEqual([]);
+    expect(s.outbox).toEqual([]);
+    expect(s.access.key?.health).toBe("resting:credential");
+  });
+
+  test("a box that answers signed out after the forget began moves to signed out but queues no notice", async () => {
+    const box = fakeBox({ signedIn: true });
+    const held = gate();
+    let entered = false;
+    const client: BoxClient = {
+      ...box.deps.client,
+      async agent() {
+        entered = true;
+        await held.wait;
+        return { kind: "signed_out" };
+      },
+    };
+    const c = await devChat("fence-signed-out", { model: scripted([]), at: "2099-11-04T10:00", box: { ...box.deps, client } });
+    await c.say("/claude");
+    await c.received();
+    const before = (await c.snapshot()).turns.length;
+
+    await c.post("where do I live again?");
+    await until(() => entered);
+    const { op } = await begin(c);
+    held.open();
+    await c.settle();
+    await end(c, op);
+    await c.settle();
+
+    const s = await c.snapshot();
+    expect(s.box?.state).toBe("signed_out");
+    expect(s.turns).toHaveLength(before);
+    expect(await c.received()).toEqual([]);
+  });
+
+  test("a request waiting for a connection when the forget began isn't answered once the person connects", async () => {
+    const provider = fakeProvider([{ kind: "output", value: { actions: [send("You live at 12 Elm Street.")], tasks: [], about: "" } }]);
+    const c = await devChat("fence-catch-up", { model: null, provider, at: "2099-11-04T10:00" });
+    await c.say("where do I live again?");
+    await c.received();
+
+    const { op } = await begin(c);
+    await end(c, op);
+    await giveKey(c.agent);
+    await c.settle();
+
+    expect(provider.seen).toEqual([]);
+    expect(await c.received()).toEqual([]);
+  });
+
+  test("a notice queued during the hold waits for its end, without a busy alarm", async () => {
+    const c = await devChat("fence-notice", { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00" });
+    await c.say("hello");
+    await c.received();
+    const { op } = await begin(c);
+    await runInDurableObject<Agent, void>(stubOf(c.agent), (_a, state) =>
+      new AgentStore(state.storage).notifyOnce("plan", eventKey.billing("plan"), { texts: ["Your plan changed."], note: "Your plan changed." }, c.clock.now()),
+    );
+    await c.settle();
+    const alarm = await nextAlarm(c);
+    expect(alarm === null || alarm > c.clock.now()).toBe(true);
+    expect(await c.received()).toEqual([]);
+
+    await end(c, op);
+    await c.settle();
+    expect(await c.received()).toEqual(["Your plan changed."]);
+  });
+});
+
 describe("delivery after a forget", () => {
   test("a reply still waiting to be sent when the forget began never goes out", async () => {
     const model = scripted([chat("You live at 12 Elm Street.")]);

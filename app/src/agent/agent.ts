@@ -30,6 +30,7 @@ import {
   needsLink,
   newBox,
   onCommand,
+  onConnected,
   onPlan,
   onRemove,
   onSignedOut,
@@ -1010,8 +1011,12 @@ export class Agent extends DurableObject<Env> {
     const deps = this.#deps.box;
     if (!boxServes(deps, agent)) return this.#boxReply(view, agent, null, { box: null, say: "unavailable" });
     if (!planAllowsBox(this.#plan(view.now).kind)) return this.#boxReply(view, agent, null, { box: null, say: "not_in_plan" });
-    const now = this.#deps.clock.now();
     const current = this.#store.box();
+    if (current?.state === "signed_out") {
+      const health = await deps.client.health(current.url, await boxToken(deps.secret, current.name));
+      if (health.kind === "up" && health.signedIn) return this.#boxReply(view, agent, deps, onConnected(current, this.#deps.clock.now()));
+    }
+    const now = this.#deps.clock.now();
     if (current) return this.#boxReply(view, agent, deps, onCommand(current, now));
 
     const name = await deps.host.nameFor(agent);

@@ -29,6 +29,7 @@ import {
   type EpochMs,
   type EventKey,
   type FactCause,
+  type ForgetEpoch,
   type FactKind,
   type Identity,
   type InboundEnvelope,
@@ -75,6 +76,7 @@ import {
   type UnaskedPurpose,
 } from "./tasks";
 import type { AdmissionChange, AdmissionCommit } from "./admission";
+import { laterCutoff, type Claim, type ForgetState, type ProviderOrder } from "./forget";
 import { TURN, type Asked, type Batch, type BoxReplyBackfill, type BoxSession, type BoxSessionSeen, type InboxItem, type Outbound, type SeqTurn, type TurnCommit, type TurnRow } from "./turn";
 
 export type AgentRow = {
@@ -1694,6 +1696,44 @@ export class AgentStore {
       compactionRetryAt: compaction.retry_at > now && compactionDue(compaction.turns, compaction.notes) ? compaction.retry_at : null,
       boxAt: min("SELECT MIN(next_at) AS t FROM box"),
     };
+  }
+
+  forget(): ForgetState {
+    const r = this.sql
+      .exec<{ epoch: ForgetEpoch; op: string | null; cutoff_at: EpochMs | null; cutoff_seq: number | null }>("SELECT epoch, op, cutoff_at, cutoff_seq FROM forget")
+      .one();
+    return { epoch: r.epoch, op: r.op, cutoff: r.cutoff_at === null ? null : { at: r.cutoff_at, seq: r.cutoff_seq } };
+  }
+
+  /** True while no forget is open and none began since `epoch`. */
+  live(epoch: ForgetEpoch): boolean {
+    const f = this.forget();
+    return f.op === null && f.epoch === epoch;
+  }
+
+  claim(): Claim | null {
+    const f = this.forget();
+    return f.op === null ? { epoch: f.epoch, live: () => this.live(f.epoch) } : null;
+  }
+
+  /**
+   * Opens a forget: the epoch moves on, so every result of work begun before now is stale, and the cutoff moves to the
+   * trigger's place in its provider's order. A second forget while one is open supersedes it.
+   */
+  beginForget(trigger: ProviderOrder, now: EpochMs): { readonly op: string; readonly epoch: ForgetEpoch } {
+    return this.tx(() => {
+      const f = this.forget();
+      const op = crypto.randomUUID();
+      const epoch = (f.epoch + 1) as ForgetEpoch;
+      const cutoff = laterCutoff(f.cutoff, trigger);
+      this.sql.exec("UPDATE forget SET epoch = ?, op = ?, opened_at = ?, cutoff_at = ?, cutoff_seq = ?", epoch, op, now, cutoff.at, cutoff.seq);
+      return { op, epoch };
+    });
+  }
+
+  /** Ends the hold only for the forget that is open; an older one's end changes nothing. */
+  endForget(op: string): boolean {
+    return this.sql.exec("UPDATE forget SET op = NULL, opened_at = NULL WHERE op = ?", op).rowsWritten > 0;
   }
 
   prune(now: EpochMs): void {

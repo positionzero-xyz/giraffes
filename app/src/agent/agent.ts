@@ -57,6 +57,7 @@ import {
   type AgentKey,
   type EpochMs,
   type EventKey,
+  type ForgetEpoch,
   type InboundEnvelope,
   type InviteCode,
   type Language,
@@ -80,6 +81,7 @@ import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../poli
 import { ADMISSION, planAdmission, type AdmissionAnswer, type AdmissionMode, type AdmissionStep } from "./admission";
 import { COMPACTION, compactionCommit, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
+import type { ProviderOrder } from "./forget";
 import { migrate } from "./schema";
 import {
   AgentStore,
@@ -465,6 +467,22 @@ export class Agent extends DurableObject<Env> {
     const now = this.#deps.clock.now();
     this.#store.remove(now);
     await this.#armNoLaterThan(now);
+  }
+
+  /**
+   * Opens a forget at `trigger`, the place in the provider's order of the request that asked for it. From here until
+   * `endForget` with the same `op`, nothing ordinary runs, and nothing begun before it may send, save or call out.
+   */
+  async beginForget(trigger: ProviderOrder): Promise<{ readonly op: string; readonly epoch: ForgetEpoch }> {
+    return this.#store.beginForget(trigger, this.#deps.clock.now());
+  }
+
+  async endForget(op: string): Promise<boolean> {
+    const now = this.#deps.clock.now();
+    if (!this.#store.endForget(op)) return false;
+    await this.#armNoLaterThan(now);
+    this.ctx.waitUntil(this.alarm());
+    return true;
   }
 
   /** Dev only: the pending wake-up `key` falls due now and fires through the alarm, as it would at its time. */

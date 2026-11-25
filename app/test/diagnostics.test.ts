@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { expect, inject, test, vi } from "vitest";
-import { MIGRATIONS, migrate } from "../src/agent/schema";
+import { MIGRATIONS } from "../src/agent/schema";
 import { AgentStore } from "../src/agent/store";
 import { d1Ledger, diagnosticRow, logSchema } from "../src/ledger/ledger";
 import { chat, devChat, fakeProvider, giveKey, scripted } from "./testkit";
@@ -126,8 +126,7 @@ test("the DO cutover discards old JSON for every queued stream", async () => {
     for (const stream of streams) {
       storage.sql.exec("INSERT INTO log_outbox VALUES (?, ?, ?, 0)", stream, stream, JSON.stringify({ stream, text: marker }));
     }
-    storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(MIGRATIONS.length - 1));
-    migrate(storage);
+    storage.sql.exec(MIGRATIONS.find((m) => m.includes("DELETE FROM log_outbox")) ?? "");
     expect(storage.sql.exec("SELECT * FROM log_outbox").toArray()).toEqual([]);
   });
   await runInDurableObject(stub, (agent) => agent.alarm());

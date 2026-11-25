@@ -516,6 +516,20 @@ export const MIGRATIONS: readonly string[] = [
   DELETE FROM log_outbox;
   UPDATE log_flush SET failures = 0, retry_at = 0;
   `,
+  `
+  CREATE TABLE forget (
+    one         INTEGER PRIMARY KEY CHECK (one = 1),
+    epoch       INTEGER NOT NULL DEFAULT 0,
+    op          TEXT,
+    opened_at   INTEGER,
+    cutoff_at   INTEGER,
+    cutoff_seq  INTEGER,
+    CHECK ((op IS NULL) = (opened_at IS NULL)),
+    CHECK (cutoff_seq IS NULL OR cutoff_at IS NOT NULL)
+  );
+  INSERT INTO forget (one) VALUES (1);
+  ALTER TABLE box ADD COLUMN volume TEXT;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

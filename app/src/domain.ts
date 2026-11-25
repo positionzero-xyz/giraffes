@@ -2,6 +2,8 @@ declare const brand: unique symbol;
 export type Brand<T, B extends string> = T & { readonly [brand]: B };
 
 export type EpochMs = Brand<number, "EpochMs">;
+/** Counts the person's forgets. Work started under an older epoch may not send, save or call out under a newer one. */
+export type ForgetEpoch = Brand<number, "ForgetEpoch">;
 export type MicroUsd = Brand<number, "MicroUsd">;
 export type TimeZone = Brand<string, "TimeZone">;
 export type LocalDateTime = Brand<string, "LocalDateTime">;
@@ -75,7 +77,8 @@ export type ChannelEvent =
       /** The invite code a follow arrived with, such as Telegram's `/start CODE`. */
       readonly code?: InviteCode;
     }
-  | { readonly kind: "choice"; readonly choice: Choice; readonly at: EpochMs; readonly reply?: ReplyHandle };
+  /** `epoch`: the forget epoch the button was sent in; absent on a button from before buttons carried one, which is epoch 0. */
+  | { readonly kind: "choice"; readonly choice: Choice; readonly at: EpochMs; readonly reply?: ReplyHandle; readonly epoch?: ForgetEpoch };
 
 export type InboundEnvelope = {
   readonly agent: AgentKey;
@@ -206,6 +209,15 @@ export function parseChoice(token: string): Choice | null {
   if (backup) return { kind: "backup", revision: Number(backup[1]) };
   const m = /^a:([1-9]\d{0,9}\.[1-9]\d{0,5})$/.exec(token);
   return m ? { kind: "accept", proposal: m[1] as ProposalId } : null;
+}
+
+/** A button's data: its choice token, and after a forget the epoch it was sent in, so a tap on an older button can be refused. */
+export const buttonData = (token: string, epoch: ForgetEpoch): string => (epoch === 0 ? token : `${token}@${epoch}`);
+
+export function parseButton(data: string): { readonly choice: Choice; readonly epoch: ForgetEpoch } | null {
+  const m = /^([^@]+)(?:@([1-9]\d{0,8}))?$/.exec(data);
+  const choice = m ? parseChoice(m[1]) : null;
+  return m && choice ? { choice, epoch: Number(m[2] ?? 0) as ForgetEpoch } : null;
 }
 
 export type InviteCode = Brand<string, "InviteCode">;

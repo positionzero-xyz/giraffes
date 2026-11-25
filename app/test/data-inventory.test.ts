@@ -1,6 +1,8 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { expect, test } from "vitest";
 import { logSchema } from "../src/ledger/ledger";
+import { erasePersonLedger, personLedgerTables } from "../src/ledger/erase";
+import { personAgentKey } from "../src/domain";
 import type { AgentEvent, TaskFact } from "../src/domain";
 import type { BoxReplyBackfill } from "../src/agent/turn";
 
@@ -101,6 +103,55 @@ test("every Durable Object and D1 column has a data classification, including in
     return header.map((column) => `${name}.${column}`);
   }));
   expect(names.flat().sort()).toEqual(classifiedColumns(d1));
+});
+
+test("ledger erase covers every person table and removes indirect enrollment and billing links", async () => {
+  const person = personAgentKey({ channel: "telegram", channelUserId: "100" });
+  const remaining = personAgentKey({ channel: "telegram", channelUserId: "200" });
+  const shared = ["beta", "line_quota", "line_quota_alert"];
+  const indirect = ["billing_duplicate", "billing_invite", "billing_seat", "billing_subscription", "enrollment", "invite_code"];
+  expect([...personLedgerTables, ...indirect, ...shared].sort()).toEqual(Object.keys(d1).sort());
+
+  const db = env.LEDGER;
+  await db.batch([
+    db.prepare("INSERT INTO agent VALUES ('a', ?, 'telegram', 1), ('b', ?, 'telegram', 2)").bind(person, remaining),
+    ...[
+      "INSERT INTO action_rejection (id, agent_key, turn_id, action, reason, at) VALUES ('a', ?, 'turn-a', '', 'limit', 1)",
+      "INSERT INTO admission_log (id, agent_key, change, channel, at) VALUES ('a', ?, 'consented', 'telegram', 1)",
+      "INSERT INTO boxes (agent_key, name, host, created_at) VALUES (?, 'fixture', 'fly', 1)",
+      "INSERT INTO feedback (id, agent_key, channel, at, text) VALUES ('a', ?, 'telegram', 1, '')",
+      "INSERT INTO lifecycle (id, agent_key, change, source, at) VALUES ('a', ?, 'follow', 'channel', 1)",
+      "INSERT INTO model_call (id, agent_key, purpose, model, status, estimate_micro, cost_micro, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at) VALUES ('a', ?, 'turn', '', 'settled', 1, 1, 1, 1, 0, 0, 1)",
+      "INSERT INTO safety_incident (id, agent_key, kind, detail, at) VALUES ('a', ?, 'privacy', '', 1)",
+      "INSERT INTO survey_response (agent_key, answered_at, answer) VALUES (?, 1, 'very')",
+      "INSERT INTO task (id, agent_key, ref, kind, title, cause_kind, opened_at) VALUES ('task-a', ?, '', 'plan', '', 'message', 1)",
+      "INSERT INTO task_fact (id, agent_key, task_id, kind, ref, detail, completes, person_decision, cause_kind, cause_at, at) VALUES ('fact-a', ?, 'task-a', 'closed', '', '{}', 1, 1, 'message', 1, 1)",
+      "INSERT INTO turn_log (id, agent_key, event_kind, batch_size, outcome, refused_for_budget, cost_micro, attempts, started_at, finished_at) VALUES ('turn-a', ?, 'message', 1, 'quiet', 0, 0, 1, 1, 1)",
+      "INSERT INTO unasked_message (id, agent_key, trigger_kind, text, status, at, purpose) VALUES ('a', ?, 'wakeup', '', 'sent', 1, 'unlinked')",
+    ].map((sql) => db.prepare(sql).bind(person)),
+    db.prepare("INSERT INTO invite_code VALUES ('OWNER1', 'recruit', 'intl_telegram', 'operator', 1), ('JOINER', 'joiner', NULL, ?, 2)").bind(person),
+    db.prepare("INSERT INTO enrollment VALUES (?, 'OWNER1', 'recruit', 'intl_telegram', NULL, 'telegram', 1), (?, 'JOINER', 'joiner', 'intl_telegram', ?, 'telegram', 2)").bind(person, remaining, person),
+    db.prepare("INSERT INTO billing_subscription (id, owner_key, plan, status, seats, updated_at) VALUES ('sub_owner', ?, 'plus', 'canceled', 2, 1)").bind(person),
+    db.prepare("INSERT INTO billing_subscription (id, owner_key, plan, status, seats, updated_at) VALUES ('sub_other', ?, 'plus', 'active', 2, 1)").bind(remaining),
+    db.prepare("INSERT INTO billing_duplicate VALUES (?, 'sub_owner', 1)").bind(person),
+    db.prepare("INSERT INTO billing_seat VALUES (?, 'sub_owner', 1, NULL)").bind(remaining),
+    db.prepare("INSERT INTO billing_invite VALUES ('PAID01', 'sub_owner', 1, 100, ?, 2), ('PAID02', 'sub_other', 1, 100, ?, 2)").bind(remaining, person),
+  ]);
+
+  await erasePersonLedger(db, person);
+  await erasePersonLedger(db, person);
+
+  for (const table of personLedgerTables) {
+    expect((await db.prepare(`SELECT * FROM ${table} WHERE agent_key = ?`).bind(person).all()).results, table).toEqual([]);
+  }
+  expect((await db.prepare("SELECT agent_key FROM agent").all()).results).toEqual([{ agent_key: remaining }]);
+  expect((await db.prepare("SELECT agent_key, inviter, code FROM enrollment").all()).results).toEqual([
+    { agent_key: remaining, inviter: null, code: expect.stringMatching(/^retired:/) },
+  ]);
+  for (const table of ["invite_code", "billing_duplicate", "billing_seat", "billing_invite"]) {
+    expect((await db.prepare(`SELECT * FROM ${table}`).all()).results).toEqual([]);
+  }
+  expect((await db.prepare("SELECT id FROM billing_subscription").all()).results).toEqual([{ id: "sub_other" }]);
 });
 
 type Fields<T> = { [K in keyof T]-?: keyof Classification };

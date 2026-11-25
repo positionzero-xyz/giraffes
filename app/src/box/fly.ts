@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { HOST_OK, type BoxHost, type Fetch, type HostFailure, type HostResult } from "./host.ts";
+import { HOST_OK, type BoxHost, type Fetch, type FlyBoxRetirement, type HostFailure, type HostResult } from "./host.ts";
 import { boxName, type BoxName, type BoxToken } from "./names.ts";
 
 export const FLY_API = "https://api.machines.dev/v1";
@@ -23,6 +23,7 @@ const NameTaken = z.object({ status: z.literal("name_taken") });
 const AppReply = z.object({ organization: z.object({ slug: z.string() }).nullish() });
 const IpsReply = z.object({ ips: z.array(z.object({ ip: z.string(), shared: z.boolean().nullish(), egress: z.boolean().nullish() })).nullable() });
 export const FlyVolumesReply = z.array(z.object({ id: z.string(), name: z.string(), state: z.string(), auto_backup_enabled: z.boolean().optional() }));
+const RetirementVolumes = z.array(z.object({ id: z.string(), state: z.string(), attached_machine_id: z.string().nullish() }));
 const VolumeReply = z.object({ id: z.string(), auto_backup_enabled: z.literal(false) });
 const MachinesReply = z.array(z.object({ id: z.string(), config: z.unknown() }));
 
@@ -74,7 +75,7 @@ export function machineConfig(cfg: FlyConfig, token: BoxToken, volumeId: string)
   };
 }
 
-export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, timeoutMs: number = FLY_TIMEOUT_MS): BoxHost {
+export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, timeoutMs: number = FLY_TIMEOUT_MS): BoxHost & FlyBoxRetirement {
   const authorization = flyAuthorization(cfg.apiToken);
 
   async function call(method: string, path: string, body?: unknown): Promise<Reply | HostFailure> {
@@ -109,6 +110,12 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
   }
 
   const failed = (x: unknown): x is HostFailure => typeof x === "object" && x !== null && "ok" in x && x.ok === false;
+
+  async function retirementVolumes(name: BoxName) {
+    const path = `/apps/${name}/volumes`;
+    const listed = await call("GET", path);
+    return listed.ok ? read(listed, RetirementVolumes, `GET ${path}`) : listed;
+  }
 
   async function app(name: BoxName): Promise<HostResult> {
     const created = await call("POST", "/apps", { app_name: name, org_slug: cfg.org, network: name });
@@ -222,6 +229,44 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       const r = await call("DELETE", `/apps/${name}?force=true`);
       if (!r.ok) return r;
       return success(r.status) || r.status === 404 ? HOST_OK : fail(false, `DELETE /apps/${name}: ${r.status}`);
+    },
+    async retirementTarget(name) {
+      const volumes = await retirementVolumes(name);
+      if (failed(volumes)) return volumes;
+      const volume = volumes[0];
+      if (volumes.length !== 1 || !volume?.attached_machine_id || volume.state !== "created") {
+        return fail(true, "cannot verify the box's mounted disk");
+      }
+      return { ok: true, target: { disk: volume.id, machine: volume.attached_machine_id } };
+    },
+    async retireWipedDisk(name, target) {
+      const volumes = await retirementVolumes(name);
+      if (failed(volumes)) return volumes;
+      if (volumes.some((v) => v.id !== target.disk || (v.attached_machine_id && v.attached_machine_id !== target.machine))) {
+        return fail(true, "unverified disk or machine remains");
+      }
+      const removedMachine = await call("DELETE", `/apps/${name}/machines/${encodeURIComponent(target.machine)}?force=true`);
+      if (!removedMachine.ok) return removedMachine;
+      if (!success(removedMachine.status) && removedMachine.status !== 404) return fail(true, "box machine retirement unverified");
+      if (volumes.some((v) => v.state !== "pending_destroy" && v.state !== "destroyed")) {
+        const removedDisk = await call("DELETE", `/apps/${name}/volumes/${encodeURIComponent(target.disk)}`);
+        if (!removedDisk.ok) return removedDisk;
+        if (!success(removedDisk.status) && removedDisk.status !== 404) return fail(true, "box disk retirement unverified");
+      }
+      const remaining = await retirementVolumes(name);
+      if (failed(remaining)) return remaining;
+      if (remaining.some((v) => v.id !== target.disk || v.attached_machine_id || (v.state !== "pending_destroy" && v.state !== "destroyed"))) {
+        return fail(true, "box disk remains live");
+      }
+      return HOST_OK;
+    },
+    async removeRetiredApp(name) {
+      const removedApp = await call("DELETE", `/apps/${name}?force=true`);
+      if (!removedApp.ok) return removedApp;
+      if (!success(removedApp.status) && removedApp.status !== 404) return fail(true, "box app retirement unverified");
+      const app = await call("GET", `/apps/${name}`);
+      if (!app.ok) return app;
+      return app.status === 404 ? HOST_OK : fail(true, "box app remains live");
     },
   };
 }

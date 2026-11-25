@@ -101,8 +101,16 @@ function readAt(body: Json): At | undefined {
   return typeof body.box === "string" && SESSION_ID.test(body.box) && isEpoch(body.epoch) ? { box: body.box, epoch: body.epoch } : undefined;
 }
 
-export function readEraseRequest(body: unknown): number | null {
-  return isObject(body) && isEpoch(body.epoch) && body.epoch > 0 ? body.epoch : null;
+type EraseRequest =
+  | { readonly scope: "workspace"; readonly epoch: number }
+  | { readonly scope: "account"; readonly epoch: number; readonly box: string };
+
+export function readEraseRequest(body: unknown): EraseRequest | null {
+  if (!isObject(body) || !isEpoch(body.epoch) || body.epoch === 0) return null;
+  const { box, epoch, scope } = body;
+  if (scope === undefined && box === undefined) return { scope: "workspace", epoch };
+  if (scope === "account" && typeof box === "string" && SESSION_ID.test(box)) return { scope, epoch, box };
+  return null;
 }
 
 export function readParseRequest(body: unknown): ParseRequest | null {

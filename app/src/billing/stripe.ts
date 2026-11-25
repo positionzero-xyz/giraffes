@@ -24,6 +24,12 @@ export interface StripeApi {
   subscription(id: SubscriptionId): Promise<StripeReply<unknown>>;
 }
 
+export interface StripeErasure {
+  /** A checkout can complete between the initial read and expiration. */
+  closeCheckout(id: CheckoutId, owner: AgentKey): Promise<StripeReply<SubscriptionId | null>>;
+  closeSubscription(id: SubscriptionId, owner: AgentKey): Promise<StripeReply<"settled">>;
+}
+
 function priceOf(cfg: StripeConfig, plan: PaidPlan): string {
   const price = cfg.prices[plan];
   if (price === null) throw new Error(`no Stripe price for the ${plan} plan`);
@@ -63,9 +69,21 @@ const CheckoutReply = z.object({ id: z.string().min(1), url: z.string().url() })
 const PortalReply = z.object({ url: z.string().url() });
 /** Stripe's error message can echo part of the key, so only its type and code reach the logs. */
 const ErrorReply = z.object({ error: z.object({ type: z.string().optional(), code: z.string().optional() }) });
+const CheckoutState = z.object({
+  id: z.string(),
+  status: z.enum(["open", "complete", "expired"]),
+  client_reference_id: z.string().nullable(),
+  subscription: z.string().min(1).nullable(),
+  metadata: z.object({ agent_key: z.string().optional() }).nullable(),
+});
+const ErasingSubscription = z.object({
+  id: z.string(),
+  status: z.enum(SUBSCRIPTION_STATUSES),
+  metadata: z.object({ agent_key: z.string().optional() }),
+});
 
-export function stripeApi(cfg: StripeConfig, rules: PlanRules, fetch: Fetch): StripeApi {
-  async function call(what: string, method: "GET" | "POST", path: string, o: { form?: Form; idempotencyKey?: string } = {}): Promise<StripeReply<unknown>> {
+export function stripeApi(cfg: StripeConfig, rules: PlanRules, fetch: Fetch): StripeApi & StripeErasure {
+  async function call(what: string, method: "GET" | "POST" | "DELETE", path: string, o: { form?: Form; idempotencyKey?: string } = {}): Promise<StripeReply<unknown>> {
     let res: Response;
     let body: unknown;
     try {
@@ -86,6 +104,15 @@ export function stripeApi(cfg: StripeConfig, rules: PlanRules, fetch: Fetch): St
     if (res.ok) return { ok: true, value: body };
     const e = ErrorReply.safeParse(body);
     return { ok: false, status: res.status, detail: `${what} ${res.status}${e.success ? ` ${e.data.error.type ?? ""} ${e.data.error.code ?? ""}`.trimEnd() : ""}` };
+  }
+
+  async function checkoutState(path: string, id: CheckoutId, owner: AgentKey): Promise<StripeReply<z.infer<typeof CheckoutState>>> {
+    const r = await call("checkout read", "GET", path);
+    if (!r.ok) return r;
+    const parsed = CheckoutState.safeParse(r.value);
+    return parsed.success && parsed.data.id === id && parsed.data.client_reference_id === owner
+      ? { ok: true, value: parsed.data }
+      : { ok: false, status: 200, detail: "checkout identity unverified" };
   }
 
   return {
@@ -112,6 +139,56 @@ export function stripeApi(cfg: StripeConfig, rules: PlanRules, fetch: Fetch): St
     async subscription(id) {
       const r = await call("subscription", "GET", `/subscriptions/${encodeURIComponent(id)}`);
       return !r.ok && r.status === 404 ? { ok: true, value: null } : r;
+    },
+    async closeCheckout(id, owner) {
+      const path = `/checkout/sessions/${encodeURIComponent(id)}`;
+      let current = await checkoutState(path, id, owner);
+      if (!current.ok) return current;
+      if (current.value.status === "open") {
+        const expired = await call("expire checkout for erasure", "POST", `${path}/expire`);
+        if (!expired.ok && expired.status !== 400) return expired;
+        current = await checkoutState(path, id, owner);
+        if (!current.ok) return current;
+      }
+      const checkout = current.value;
+      if (checkout.status === "open" || (checkout.status === "complete" && !checkout.subscription)) {
+        return { ok: false, status: 200, detail: "checkout termination unverified" };
+      }
+      if (checkout.metadata?.agent_key) {
+        const cleared = await call("clear checkout metadata for erasure", "POST", path, { form: { "metadata[agent_key]": "" } });
+        if (!cleared.ok) return cleared;
+        const verified = CheckoutState.safeParse(cleared.value);
+        if (!verified.success || verified.data.id !== id || verified.data.metadata?.agent_key) {
+          return { ok: false, status: 200, detail: "checkout metadata removal unverified" };
+        }
+      }
+      return { ok: true, value: checkout.status === "complete" ? checkout.subscription as SubscriptionId : null };
+    },
+    async closeSubscription(id, owner) {
+      const path = `/subscriptions/${encodeURIComponent(id)}`;
+      const r = await call("read subscription for erasure", "GET", path);
+      if (!r.ok) return r;
+      const subscription = ErasingSubscription.safeParse(r.value);
+      if (!subscription.success || subscription.data.id !== id || (subscription.data.metadata.agent_key && subscription.data.metadata.agent_key !== owner)) {
+        return { ok: false, status: 200, detail: "subscription identity unverified" };
+      }
+      const current = subscription.data;
+      const closed = current.status === "canceled" || current.status === "incomplete_expired";
+      if (current.metadata.agent_key) {
+        const cleared = await call("clear subscription metadata for erasure", "POST", path, { form: { "metadata[agent_key]": "" } });
+        if (!cleared.ok) return cleared;
+        const verified = ErasingSubscription.safeParse(cleared.value);
+        if (!verified.success || verified.data.id !== id || verified.data.metadata.agent_key) {
+          return { ok: false, status: 200, detail: "subscription metadata removal unverified" };
+        }
+      }
+      if (closed) return { ok: true, value: "settled" };
+      const canceled = await call("cancel subscription for erasure", "DELETE", path);
+      if (!canceled.ok) return canceled;
+      const verified = ErasingSubscription.safeParse(canceled.value);
+      return verified.success && verified.data.id === id && verified.data.status === "canceled" && !verified.data.metadata.agent_key
+        ? { ok: true, value: "settled" }
+        : { ok: false, status: 200, detail: "subscription cancellation unverified" };
     },
   };
 }

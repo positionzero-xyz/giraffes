@@ -11,6 +11,20 @@ export type HostResult = { readonly ok: true } | HostFailure;
 
 export const HOST_OK: HostResult = { ok: true };
 
+export type FlyDiskRetirement = {
+  readonly disk: string;
+  readonly machine: string;
+};
+
+export interface FlyBoxRetirement {
+  /** Run before wiping so the authenticated box proof can be bound to the mounted disk. */
+  retirementTarget(name: BoxName): Promise<{ readonly ok: true; readonly target: FlyDiskRetirement } | HostFailure>;
+  /** Run after the identified disk has acknowledged an account wipe. */
+  retireWipedDisk(name: BoxName, target: FlyDiskRetirement): Promise<HostResult>;
+  /** Run after the caller has durably recorded the disk retirement proof. */
+  removeRetiredApp(name: BoxName): Promise<HostResult>;
+}
+
 export interface BoxHost {
   readonly kind: BoxHostKind;
   /** The image `ensure` puts on a machine; null when the host doesn't run one. */

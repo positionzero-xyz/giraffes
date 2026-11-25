@@ -210,6 +210,34 @@ describe("the static host shares one Claude login", () => {
 });
 
 describe("fly host", () => {
+  test("account erasure waits for the wiped volume to stop being live before deleting its app", async () => {
+    let volumeLive = true;
+    let appExists = true;
+    const requests: string[] = [];
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      requests.push(`${method} ${path}`);
+      if (method === "GET" && path.endsWith("/volumes")) {
+        return Response.json([{ id: "vol_1", state: volumeLive ? "created" : "pending_destroy", attached_machine_id: volumeLive ? "machine_1" : null }]);
+      }
+      if (method === "DELETE" && path.endsWith(app)) appExists = false;
+      if (method === "GET" && !appExists) return new Response(null, { status: 404 });
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    expect(found).toEqual({ ok: true, target: { disk: "vol_1", machine: "machine_1" } });
+    if (!found.ok) throw new Error(found.detail);
+    expect(await host.retireWipedDisk(app, found.target)).toMatchObject({ ok: false, retryable: true });
+    expect(requests).toContain(`DELETE /v1/apps/${app}/volumes/vol_1`);
+    expect(requests).not.toContain(`DELETE /v1/apps/${app}`);
+    volumeLive = false;
+    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true });
+    expect(await host.removeRetiredApp(app)).toEqual({ ok: true });
+    expect(requests.slice(-2)).toEqual([`DELETE /v1/apps/${app}`, `GET /v1/apps/${app}`]);
+  });
+
   test("provisioning sends the contract's requests: app, shared v4 and v6, a data volume, one machine", async () => {
     const fly = fakeFly();
     const host = flyHost(flyConfig, fly.fetch);
@@ -453,6 +481,21 @@ describe("box client", () => {
       throw new TypeError("fetch failed");
     };
     expect(await boxClient(down).erase("https://b", token, 3)).toMatchObject({ kind: "pending" });
+  });
+
+  test("account erase requires proof for the requested disk and scope", async () => {
+    const box = "00000000-0000-4000-8000-000000000001";
+    const request = { scope: "account", box, epoch: 3 } as const;
+    expect(await boxClient(answering(200, { box, floor: 4 })).erase("https://b", token, request)).toMatchObject({ kind: "pending" });
+    expect(await boxClient(answering(200, {
+      box: "00000000-0000-4000-8000-000000000002", floor: 4, scope: "account",
+    })).erase("https://b", token, request)).toMatchObject({ kind: "pending" });
+    const receipt = { box, floor: 4, scope: "account" };
+    const accountErase = boxClient(async (_url, init) => {
+      expect(JSON.parse(String(init?.body))).toEqual(request);
+      return new Response(JSON.stringify(receipt), { status: 200 });
+    });
+    expect(await accountErase.erase("https://b", token, request)).toEqual({ kind: "erased", ...receipt });
   });
 
   test("a reply is read as the bridge's, and the default parse timeout is 120 s", async () => {

@@ -115,6 +115,46 @@ describe("stripe boundary", () => {
   const kit = billingOn();
   const { stripe: cfg, rules } = kit.config;
 
+  test("erasure reconciles a checkout that completes while being expired, then clears metadata and cancels", async () => {
+    const owner = agent("erase-billing");
+    const checkout = "cs_erasure" as CheckoutId;
+    const subscription = "sub_erasure" as SubscriptionId;
+    const requests: string[] = [];
+    let checkoutOpen = true;
+    let subscriptionStatus = "active";
+    let checkoutMetadata: { agent_key?: string } = { agent_key: owner };
+    let subscriptionMetadata: { agent_key?: string } = { agent_key: owner };
+    const api = stripeApi(cfg, rules, async (url, init) => {
+      const path = new URL(url).pathname;
+      requests.push(`${init?.method} ${path}`);
+      if (path.endsWith("/expire")) {
+        checkoutOpen = false;
+        return Response.json({ error: { code: "checkout_session_not_open" } }, { status: 400 });
+      }
+      if (init?.method === "POST") {
+        expect(new URLSearchParams(String(init.body)).get("metadata[agent_key]")).toBe("");
+        if (path.endsWith(checkout)) checkoutMetadata = {};
+        else subscriptionMetadata = {};
+      }
+      if (path.endsWith(checkout)) return Response.json({
+        id: checkout, client_reference_id: owner, metadata: checkoutMetadata,
+        status: checkoutOpen ? "open" : "complete", subscription: checkoutOpen ? null : subscription,
+      });
+      if (init?.method === "DELETE") subscriptionStatus = "canceled";
+      return Response.json({ id: subscription, status: subscriptionStatus, metadata: subscriptionMetadata });
+    });
+    expect(await api.closeCheckout(checkout, owner)).toEqual({ ok: true, value: subscription });
+    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: "settled" });
+    expect(requests).toEqual([
+      "GET /v1/checkout/sessions/cs_erasure", "POST /v1/checkout/sessions/cs_erasure/expire",
+      "GET /v1/checkout/sessions/cs_erasure", "POST /v1/checkout/sessions/cs_erasure",
+      "GET /v1/subscriptions/sub_erasure", "POST /v1/subscriptions/sub_erasure", "DELETE /v1/subscriptions/sub_erasure",
+    ]);
+    requests.length = 0;
+    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: "settled" });
+    expect(requests).toEqual(["GET /v1/subscriptions/sub_erasure"]);
+  });
+
   test("the signature is HMAC-SHA256 over 't.payload'; a wrong secret, a changed body, a stale or missing header fail", async () => {
     const now = (Math.floor(Date.now() / 1000) * 1000) as EpochMs;
     const body = '{"id":"evt_1"}';

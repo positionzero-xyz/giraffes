@@ -9,6 +9,7 @@ export type BoxHealth =
   | { readonly kind: "unavailable"; readonly detail: string };
 
 export type BoxAt = { readonly box: string; readonly epoch: number };
+export type AccountBoxErase = BoxAt & { readonly scope: "account" };
 
 export type BoxRequest = { readonly model: string; readonly system: string; readonly user: string; readonly jsonSchema: JsonSchema; readonly at?: BoxAt };
 export type BoxAgentRequest = {
@@ -32,7 +33,7 @@ export type BoxReply =
   | { readonly kind: "unavailable"; readonly detail: string };
 
 export type BoxErase =
-  | { readonly kind: "erased"; readonly box: string; readonly floor: number }
+  | { readonly kind: "erased"; readonly box: string; readonly floor: number; readonly scope?: "account" }
   | { readonly kind: "unauthorized" }
   | { readonly kind: "pending"; readonly detail: string };
 
@@ -41,13 +42,13 @@ export interface BoxClient {
   parse(url: string, token: BoxToken, req: BoxRequest): Promise<BoxReply>;
   /** The reply's text is JSON containing the session's answer and its accepted and refused tool calls. */
   agent(url: string, token: BoxToken, req: BoxAgentRequest): Promise<BoxReply>;
-  erase(url: string, token: BoxToken, epoch: number): Promise<BoxErase>;
+  erase(url: string, token: BoxToken, request: number | AccountBoxErase): Promise<BoxErase>;
 }
 
 export const BOX_TIMEOUTS = { parseMs: 120_000, healthMs: 15_000 } as const;
 
 const Health = z.object({ ok: z.literal(true), signedIn: z.boolean(), box: z.uuid().optional().catch(undefined) });
-const Erased = z.object({ box: z.uuid(), floor: z.number().int() });
+const Erased = z.object({ box: z.uuid(), floor: z.number().int(), scope: z.literal("account").optional() });
 const Stale = z.object({ error: z.literal("stale") });
 const Session = z.object({ id: z.uuid(), resumed: z.boolean() });
 const AgentBody = z.object({
@@ -103,14 +104,15 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
         return reply && { reply, session };
       }),
 
-    async erase(url, token, epoch) {
+    async erase(url, token, request) {
+      const erase = typeof request === "number" ? { epoch: request } : request;
       let res: Response;
       let body: unknown;
       try {
         res = await fetch(`${url}/erase`, {
           method: "POST",
           headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-          body: JSON.stringify({ epoch }),
+          body: JSON.stringify(erase),
           signal: AbortSignal.timeout(timeouts.parseMs),
         });
         body = await res.json().catch(() => null);
@@ -120,8 +122,11 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
       if (res.status === 401) return { kind: "unauthorized" };
       if (!res.ok) return { kind: "pending", detail: `erase ${res.status}` };
       const erased = Erased.safeParse(body);
-      if (!erased.success || erased.data.floor < epoch) return { kind: "pending", detail: "erase reply unreadable" };
-      return { kind: "erased", box: erased.data.box, floor: erased.data.floor };
+      if (!erased.success || erased.data.floor < erase.epoch) return { kind: "pending", detail: "erase reply unreadable" };
+      if ("scope" in erase && (erased.data.scope !== erase.scope || erased.data.box !== erase.box)) {
+        return { kind: "pending", detail: "account erase not verified" };
+      }
+      return { kind: "erased", ...erased.data };
     },
   };
 

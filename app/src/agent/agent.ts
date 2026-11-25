@@ -557,13 +557,14 @@ export class Agent extends DurableObject<Env> {
     const view = this.#view(batch, a);
     const bypass = bypassModel(view);
     if (bypass) return this.#commit(planWithoutModel(view, bypass), view, a.key, { kind: "none" });
-    if (!mayspend(view.admission)) return this.#admission(view, a);
     const first = batch.items[0].event;
+    const command = commandOf(first);
+    if (command?.kind === "key_remove") return this.#keyCommand(command, view, a.key);
+    if (!mayspend(view.admission)) return this.#admission(view, a);
     if (first.kind === "choice" && first.choice.kind === "consent") {
       return this.#commit(planWithoutModel(view, { kind: "ignored" }), view, a.key, { kind: "none" });
     }
     if (first.kind === "choice" && first.choice.kind === "backup") return this.#backupTap(first.choice.revision, view, a.key);
-    const command = commandOf(first);
     if (command) return this.#command(command, view, a);
     const plan = (batch.items[0].catchUp ? catchUpPlan : null) ?? await this.#planNow(a.key, view.now);
     if (plan.kind === "lapsed") {

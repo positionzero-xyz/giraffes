@@ -631,13 +631,14 @@ export class AgentStore {
   }
 
   /**
-   * The operator takes a person out of the beta. Their seat stays used, their key links stop working, and every
-   * pending push is dropped with reason removed.
+   * The operator takes a person out of the beta. Their seat stays used, their saved key is deleted, their key links
+   * stop working, and every pending push is dropped with reason removed.
    */
   remove(now: EpochMs): void {
     this.tx(() => {
       if (this.admission().state === "removed") return;
       this.writeAdmission({ next: { state: "removed", at: now }, change: "removed", ensureCheckin: null }, now);
+      this.deleteKey();
       this.sql.exec("DELETE FROM key_ticket");
       const agent = this.agent()?.key;
       const unasked = this.sql
@@ -1430,10 +1431,14 @@ export class AgentStore {
     return this.tx(() => {
       const current = this.key();
       if (current !== null && current.revision !== expectRevision) return false;
-      this.sql.exec("DELETE FROM model_key");
-      this.sql.exec("UPDATE key_revision SET revision = revision + 1");
+      this.deleteKey();
       return current !== null;
     });
+  }
+
+  private deleteKey(): void {
+    this.sql.exec("DELETE FROM model_key");
+    this.sql.exec("UPDATE key_revision SET revision = revision + 1");
   }
 
   setKeyCap(micro: MicroUsd, expectRevision: number): boolean {

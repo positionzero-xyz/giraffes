@@ -826,12 +826,14 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
   const turns = keepInHistory && !waitForAccess ? personTurns(view) : [];
   const kept = joined(note ?? text);
   if (keepInHistory && kept !== null) turns.push({ role: "note", text: kept, at: view.now, eventKey: view.batch.items[0].key });
+  const out = outbound(said === null ? [] : [said], askedOf(intentOf(trigger(view)), purposeOf(view, fx.commit, null)), view, { link: null, choice: null });
   return {
     batchKeys: batchKeys(view),
     outcome,
     ...(waitForAccess ? { waitForAccess } : {}),
     turns,
-    outbound: outbound(said === null ? [] : [said], askedOf(intentOf(trigger(view)), purposeOf(view, fx.commit, null)), view, { link: null, choice: null }),
+    /** Someone outside the beta reaches here only with a command they may always send, such as /key remove. */
+    outbound: out && !mayspend(view.admission) ? { ...out, replyOnly: true } : out,
     wakeupsCancel: [],
     wakeupsAdd: [],
     wakeupsRetime: [],

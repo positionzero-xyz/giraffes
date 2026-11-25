@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { splittingCli, THAI_TURN } from "../../../test/split-cli.ts";
 
 const TAP = fileURLToPath(new URL("../tap.ts", import.meta.url));
 const dir = mkdtempSync(join(tmpdir(), "tap-test-"));
@@ -19,9 +20,9 @@ function run(child: string, timeoutMs: number, stdin = ""): Promise<{ code: numb
   const record = join(dir, `${Math.random().toString(36).slice(2)}.jsonl`);
   return new Promise((resolve) => {
     const p = spawn(process.execPath, [TAP, record, String(timeoutMs), process.execPath, child], { stdio: ["pipe", "pipe", "inherit"] });
-    let stdout = "";
-    p.stdout.on("data", (c: Buffer) => (stdout += c));
-    p.on("close", (code) => resolve({ code, stdout, record: JSON.parse(readFileSync(record, "utf8").trim()) }));
+    const chunks: Buffer[] = [];
+    p.stdout.on("data", (c: Buffer) => chunks.push(c));
+    p.on("close", (code) => resolve({ code, stdout: Buffer.concat(chunks).toString("utf8"), record: JSON.parse(readFileSync(record, "utf8").trim()) }));
     p.stdin.end(stdin);
   });
 }
@@ -91,5 +92,14 @@ process.exitCode = 1;`,
     const r = await run(fake("silent", "process.exitCode = 1;"), 10_000);
     assert.equal(r.record.costUsd, null);
     assert.equal(r.record.usage, null);
+  });
+});
+
+describe("the tap on Thai cut across chunks", () => {
+  it("passes the CLI's bytes through whole and still reads the result", async () => {
+    const r = await run(splittingCli(THAI_TURN), 10_000);
+    const lines = r.stdout.trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(lines, THAI_TURN);
+    assert.equal(r.record.costUsd, 0.001);
   });
 });

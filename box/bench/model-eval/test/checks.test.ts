@@ -47,6 +47,12 @@ describe("every check passes its known-good and fails its known-bad", () => {
   it("page_has", () =>
     both({ kind: "page_has", items: [{ label: "pork", any: ["เรือหมู"] }, { label: "50", any: ["50"] }] }, page({ text: "ก๋วยเตี๋ยวเรือหมู 50 บาท" }), page({ text: "ก๋วยเตี๋ยวเรือเนื้อ 60 บาท" })));
 
+  it("priced, in a list or a table, against the same prices on the wrong dishes", () => {
+    const menu = { kind: "priced", items: [{ label: "pork", any: ["เรือหมู"], price: 50 }, { label: "beef", any: ["เรือเนื้อ"], price: 60 }, { label: "soup", any: ["เกาเหลา"], price: 55 }] } as const;
+    both(menu, page({ text: "ก๋วยเตี๋ยวเรือหมู 50 บาท\nก๋วยเตี๋ยวเรือเนื้อ 60 บาท\nเกาเหลา 55 บาท" }), page({ text: "ก๋วยเตี๋ยวเรือหมู 60 บาท\nก๋วยเตี๋ยวเรือเนื้อ 55 บาท\nเกาเหลา 50 บาท" }));
+    both(menu, page({ text: "เมนู\tราคา\nก๋วยเตี๋ยวเรือหมู\nเส้นเล็ก น้ำตก\t฿50\nก๋วยเตี๋ยวเรือเนื้อ\t฿60\nเกาเหลา\t฿55" }), page({ text: "ก๋วยเตี๋ยวเรือหมู\nก๋วยเตี๋ยวเรือเนื้อ\nเกาเหลา\n50 60 55" }));
+  });
+
   it("loads_clean", () => both({ kind: "loads_clean" }, page({}), page({ errors: ["ReferenceError: total is not defined"] })));
 
   it("loads_clean fails a page that never loaded", () => assert.equal(grade({ kind: "loads_clean" }, turn("")).pass, false));

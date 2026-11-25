@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="th">
+<head><meta charset="utf-8"><title>จองคิวนวด</title></head>
+<body>
+<h1>จองคิวนวด</h1>
+<form id="f">
+  <label>ชื่อ <input name="name" required></label>
+  <label>เบอร์โทร <input name="phone" type="tel"></label>
+  <label>วันที่ <input name="date" type="date"></label>
+  <label>เวลา <input name="time" type="time"></label>
+  <button type="submit">จองคิว</button>
+</form>
+<ul id="list"></ul>
+<script>
+  const draw = () => (document.getElementById("list").innerHTML = JSON.parse(localStorage.getItem("names") || "[]").map((n) => `<li>${n}</li>`).join(""));
+  document.getElementById("f").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const names = JSON.parse(localStorage.getItem("names") || "[]");
+    names.push(new FormData(e.target).get("name"));
+    localStorage.setItem("names", JSON.stringify(names));
+    draw();
+  });
+  draw();
+</script>
+</body>
+</html>

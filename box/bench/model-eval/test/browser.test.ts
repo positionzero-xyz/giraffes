@@ -9,7 +9,7 @@ const chrome = findChrome(process.env.CHROME);
 const pageFile = (name: string) => fileURLToPath(new URL(`./pages/${name}.html`, import.meta.url));
 
 async function graded(name: string, check: Check) {
-  const page = await inspect(chrome as string, pageFile(name), check.kind === "persists");
+  const page = await inspect(chrome as string, pageFile(name), check.kind === "persists" || check.kind === "total_adds");
   const o: Observation = { text: "", raw: "", answered: true, wakeups: [], rejected: [], files: {}, page };
   return grade(check, o);
 }
@@ -26,6 +26,18 @@ describe("build checks against a real headless browser", { skip: chrome ? false 
     const r = await graded("forgets", { kind: "persists", shown: false });
     assert.equal(r.pass, false);
     assert.match(r.detail, /nothing saved/);
+  });
+
+  it("a booking form that keeps only the name fails and names what it dropped", async () => {
+    const r = await graded("saves-name-only", { kind: "persists", shown: false });
+    assert.equal(r.pass, false);
+    assert.match(r.detail, /0812345678/);
+  });
+
+  it("an expense page passes when its total grows by the amount entered, and fails when the total stays put", async () => {
+    const good = await graded("buttons-list", { kind: "total_adds" });
+    assert.equal(good.pass, true, good.detail);
+    assert.equal((await graded("total-stuck", { kind: "total_adds" })).pass, false);
   });
 
   it("a clean page loads clean and a throwing one doesn't", async () => {

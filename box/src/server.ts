@@ -2,7 +2,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readTicket, verifyBearer, type SigninTicket } from "./auth.ts";
-import { agentTurn, authStatus, cliVersion, parseTurn, readAgentRequest, readParseRequest, spawnClaude, type Cli, type SessionStore } from "./claude.ts";
+import { agentTurn, authStatus, cliVersion, parseTurn, readAgentRequest, readParseRequest, spawnClaude, type Cli } from "./claude.ts";
 import { readJson, readSigninJson, sendJson } from "./http.ts";
 
 export type BoxOptions = { readonly token: string; readonly cli: Cli; readonly sessionFile: string; readonly now?: () => number };
@@ -40,20 +40,11 @@ function signinUrl(output: string): string | undefined {
   return undefined;
 }
 
-function fileSessions(path: string): SessionStore {
-  return {
-    get: () => (existsSync(path) ? readFileSync(path, "utf8").trim() || null : null),
-    set: (id) => writeFileSync(path, id),
-  };
-}
-
 export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOptions): Server {
   let login: Login | null = null;
   const usedTickets = new Map<string, number>();
   let turns: Promise<unknown> = Promise.resolve();
   let version: string | null = null;
-
-  const sessions = fileSessions(sessionFile);
 
   function oneTurnAtATime<R>(run: () => Promise<R>): Promise<R> {
     const next = turns.then(run);
@@ -113,7 +104,17 @@ export function createBox({ token, cli, sessionFile, now = Date.now }: BoxOption
     res.on("close", () => {
       if (!res.writableFinished) abandoned.abort();
     });
-    const reply = await oneTurnAtATime(() => agentTurn(cli, parsed, sessions, abandoned.signal));
+    const reply = await oneTurnAtATime(async () => {
+      if (parsed.session !== undefined) {
+        const named = await agentTurn(cli, parsed, abandoned.signal);
+        if (named.status === 200 && parsed.session !== null) writeFileSync(sessionFile, named.body.session.id);
+        return named;
+      }
+      const session = existsSync(sessionFile) ? readFileSync(sessionFile, "utf8").trim() || null : null;
+      const result = await agentTurn(cli, { ...parsed, session }, abandoned.signal);
+      if (result.status === 200 && !result.body.session.resumed) writeFileSync(sessionFile, result.body.session.id);
+      return result;
+    });
     sendJson(res, reply.status, reply.body);
   }
 

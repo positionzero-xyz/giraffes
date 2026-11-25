@@ -1,9 +1,8 @@
 import { z } from "zod";
 import { planAllowsBox, type Plan } from "../billing/plan";
-import type { BoxAgentRequest } from "../box/client";
+import type { BoxAgentRequest, SessionUsed } from "../box/client";
 import type { BoxState } from "../box/machine";
-import { AGENT_SYSTEM } from "../agent/prompt";
-import { AGENT_TOOLS, BoxTurnOutputSchema, turnFromAgent } from "../agent/turn";
+import { AGENT_TOOLS, BoxTurnOutputSchema, oneOffBoxTurn, turnFromAgent, type BoxTurnPrompt } from "../agent/turn";
 import { assertNever, eventKey, mayspend, type AgentKey, type EpochMs, type MicroUsd } from "../domain";
 import { modelCallRow, type Backend, type ModelCallStatus } from "../ledger/ledger";
 import { NOTICES, type KeyPageError } from "../notices";
@@ -95,7 +94,7 @@ export function accessOf(f: AccessFacts): Access {
   return { lanes, whenEmpty: f.claudePlan ? "box_not_ready" : "nothing" };
 }
 
-export type CallRecord = { readonly lane: Lane["kind"]; readonly model: ModelRef; readonly costMicro: MicroUsd };
+export type CallRecord = { readonly lane: Lane["kind"]; readonly model: ModelRef; readonly costMicro: MicroUsd; readonly box?: { readonly session: string | null } };
 
 export type OverCap = SpendScope | "included_ceiling";
 
@@ -115,7 +114,9 @@ export type Served<P extends Purpose> =
    */
   | { readonly kind: "no_access"; readonly why: Access["whenEmpty"]; readonly told: boolean; readonly notice: string | null };
 
-export type BoxAnswer = { readonly kind: "reply"; readonly reply: Extract<WireResult, { kind: "reply" }> } | { readonly kind: "moved_on"; readonly transient: boolean; readonly told: boolean };
+export type BoxAnswer =
+  | { readonly kind: "reply"; readonly reply: Extract<WireResult, { kind: "reply" }>; readonly session?: SessionUsed }
+  | { readonly kind: "moved_on"; readonly transient: boolean; readonly told: boolean };
 
 export interface BoxLane {
   state(): BoxState | null;
@@ -141,6 +142,7 @@ export type CallRequest<P extends Purpose> = {
   readonly system: string;
   readonly prompt: PromptParts;
   readonly plan: Plan;
+  readonly box?: BoxTurnPrompt;
 };
 
 type Next = {
@@ -336,16 +338,20 @@ export class ModelAccess {
 
   /** A turn as the person's own Claude Code session; its tool calls and reply become a turn output for the usual checks. */
   async #boxAgent(req: CallRequest<"turn">): Promise<LaneResult<"turn">> {
+    const box = req.box ?? oneOffBoxTurn(req.prompt);
+    const { append, session } = box;
     const route = routeFor({ kind: "box", provider: "claude" }, "turn");
-    const fitted = this.#fit(route, "strict", { ...req, prompt: { sections: req.prompt.sections.filter((s) => !s.history) } });
-    if (fitted === null) return { kind: "next", tooLong: true };
-    const answer = await this.deps.box.agent({ model: route.model, append: AGENT_SYSTEM, turn: fitted.user, tools: AGENT_TOOLS });
+    const turn = this.#fit(route, "strict", { ...req, system: append, prompt: box.turn });
+    const fresh = this.#fit(route, "strict", { ...req, system: append, prompt: box.fresh });
+    if (turn === null || fresh === null) return { kind: "next", tooLong: true };
+    const answer = await this.deps.box.agent({ model: route.model, append, session, turn: turn.user, fresh: fresh.user, tools: AGENT_TOOLS });
     if (answer.kind === "moved_on") return { kind: "next", transient: answer.transient, told: answer.told };
     const output = turnFromAgent(jsonOrNull(answer.reply.text));
     const attempt = readAttempt(output === null ? answer.reply : { ...answer.reply, text: JSON.stringify(output) }, BoxTurnOutputSchema);
     this.#log(route, "box", "settled", 0 as MicroUsd, 0 as MicroUsd, attempt);
-    const call: CallRecord = { lane: "box", model: route.ref, costMicro: 0 as MicroUsd };
-    return { kind: "served", served: attempt.kind === "ok" ? { kind: "ok", value: attempt.value, call, trimmed: false } : { kind: "failed", call, trimmed: false } };
+    const call: CallRecord = { lane: "box", model: route.ref, costMicro: 0 as MicroUsd, box: { session: answer.session?.id ?? null } };
+    const trimmed = answer.session?.resumed === false ? fresh.trimmed : turn.trimmed;
+    return { kind: "served", served: attempt.kind === "ok" ? { kind: "ok", value: attempt.value, call, trimmed } : { kind: "failed", call, trimmed } };
   }
 
   async #box<P extends Purpose>(req: CallRequest<P>): Promise<LaneResult<P>> {

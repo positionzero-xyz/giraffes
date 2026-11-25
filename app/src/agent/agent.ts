@@ -92,11 +92,14 @@ import {
 import {
   bypassModel,
   logsForTurn,
+  memoryHeldAfter,
   planTurn,
   planWithoutModel,
+  renderBoxTurn,
   renderUser,
   TURN,
   type Batch,
+  type BoxSessionSeen,
   type TurnCall,
   type TurnCommit,
   type TurnRow,
@@ -565,11 +568,16 @@ export class Agent extends DurableObject<Env> {
     }
 
     const shown = await this.#historyThatFits(batch, a, view, plan);
-    const served = await this.#access().call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan });
+    const box = renderBoxTurn(shown, this.#store.boxSession());
+    const served = await this.#access().call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan, box });
     const historyTrimmed = shown.historyLeftOut > 0 || ((served.kind === "ok" || served.kind === "failed") && served.trimmed);
     switch (served.kind) {
-      case "ok":
-        return this.#commit(planTurn(served.value, shown), shown, a.key, { kind: "served", costMicro: served.call.costMicro, historyTrimmed });
+      case "ok": {
+        const commit = planTurn(served.value, shown);
+        const answered = served.call.box;
+        const seen = answered ? { id: answered.session, sentThrough: box.sentThrough, memory: memoryHeldAfter(shown, commit) } : null;
+        return this.#commit(commit, shown, a.key, { kind: "served", costMicro: served.call.costMicro, historyTrimmed }, null, [], seen);
+      }
       case "failed":
         return this.#commit(planWithoutModel(shown, { kind: "model_failed" }), shown, a.key, { kind: "served", costMicro: served.call.costMicro, historyTrimmed });
       case "too_long":
@@ -639,10 +647,18 @@ export class Agent extends DurableObject<Env> {
     };
   }
 
-  #commit(commit: TurnCommit, view: TurnView, agent: AgentKey, call: TurnCall, box: Box | null = null, extraLogs: readonly LogRow[] = []): void {
+  #commit(
+    commit: TurnCommit,
+    view: TurnView,
+    agent: AgentKey,
+    call: TurnCall,
+    box: Box | null = null,
+    extraLogs: readonly LogRow[] = [],
+    seen: BoxSessionSeen | null = null,
+  ): void {
     const now = this.#deps.clock.now();
     const logs = logsForTurn({ agent, commit, view, call, startedAt: view.now, now });
-    this.#store.commitTurn(commit, logs.concat(extraLogs), now, box);
+    this.#store.commitTurn(commit, logs.concat(extraLogs), now, box, seen);
   }
 
   async #admission(view: TurnView, a: AgentRow): Promise<void> {
@@ -1039,7 +1055,7 @@ export class Agent extends DurableObject<Env> {
       modelCallRow({ id: crypto.randomUUID(), agent, purpose, model: `claude-plan:${model}`, backend: "box", status, estimate: NO_COST, cost: NO_COST, usage: null, at: now });
     switch (res.kind) {
       case "reply":
-        return { kind: "reply", reply: res.reply };
+        return { kind: "reply", reply: res.reply, session: res.session };
       case "signed_out": {
         const t = onSignedOut(box, now, this.#store.key()?.backup === true);
         this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [missed("rejected")], now);

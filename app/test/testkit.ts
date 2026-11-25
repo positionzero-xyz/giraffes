@@ -380,6 +380,7 @@ export type DestroyStep = "ok" | "die" | "fail";
 export type BoxReplyStep =
   | { readonly kind: "reply"; readonly step: ScriptStep; readonly refusedCalls?: Readonly<NonNullable<TurnOutput["refusedCalls"]>> }
   | { readonly kind: "signed_out" }
+  | { readonly kind: "refusal" }
   | { readonly kind: "status"; readonly status: number };
 
 export type FakeBox = {
@@ -393,9 +394,14 @@ export type FakeBox = {
   image: string;
   readonly destroyCalls: string[];
   readonly healthCalls: string[];
-  /** Every turn the box got; `agent` is set for a turn run as the person's own Claude Code session. */
-  readonly parses: { readonly authorization: string | null; readonly user: string; readonly agent: { readonly append: string; readonly tools: readonly string[] } | null }[];
+  readonly parses: {
+    readonly authorization: string | null;
+    readonly user: string;
+    readonly agent: { readonly append: string; readonly tools: readonly string[]; readonly session: string | null; readonly resumed: boolean; readonly fresh: string | null } | null;
+  }[];
   readonly replies: BoxReplyStep[];
+  readonly sessions: Set<string>;
+  ignoresSession: boolean;
   signedIn: boolean;
   /** False makes the box's own URL unreachable, as a wedged machine or a network fault would. */
   reachable: boolean;
@@ -423,6 +429,8 @@ export function fakeBox(
     healthCalls: [] as string[],
     parses: [] as FakeBox["parses"][number][],
     replies: [] as BoxReplyStep[],
+    sessions: new Set<string>(),
+    ignoresSession: false,
     signedIn: opts.signedIn ?? false,
     reachable: true,
     nameOf: (user: string) => boxName(BOX_SECRET, "gbox-", personAgentKey({ channel: "dev", channelUserId: user })),
@@ -466,18 +474,30 @@ export function fakeBox(
     }
     if (url.pathname === "/parse" || url.pathname === "/agent") {
       const agent = url.pathname === "/agent";
-      const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; append?: string; tools?: { name: string }[] };
-      box.parses.push({ authorization, user: (agent ? body.turn : body.user) ?? "", agent: agent ? { append: body.append ?? "", tools: (body.tools ?? []).map((t) => t.name) } : null });
+      const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; fresh?: string | null; session?: string | null; append?: string; tools?: { name: string }[] };
+      const named = box.ignoresSession ? null : (body.session ?? null);
+      const resumed = box.ignoresSession || (named !== null && box.sessions.has(named));
+      const session = resumed ? named : crypto.randomUUID();
+      const read = agent ? ((resumed ? body.turn : (body.fresh ?? body.turn)) ?? "") : (body.user ?? "");
+      box.parses.push({
+        authorization,
+        user: read,
+        agent: agent ? { append: body.append ?? "", tools: (body.tools ?? []).map((t) => t.name), session: body.session ?? null, resumed, fresh: body.fresh ?? null } : null,
+      });
       const step = box.replies.shift();
       if (!step) {
-        UNSCRIPTED_BOX_TURNS.push((agent ? body.turn : body.user)?.slice(-120) ?? "");
+        UNSCRIPTED_BOX_TURNS.push(read.slice(-120));
         throw new Error("the box got a turn the test didn't script");
       }
+      if (agent && session !== null && (step.kind === "reply" || step.kind === "refusal")) box.sessions.add(session);
+      const reported = box.ignoresSession ? {} : { session: { id: session, resumed } };
       switch (step.kind) {
         case "signed_out":
           return Response.json({ error: "signed_out" }, { status: 409 });
         case "status":
           return Response.json({ error: "claude_failed" }, { status: step.status });
+        case "refusal":
+          return Response.json({ text: "", calls: [], ...reported, usage: { input_tokens: 900, output_tokens: 1 }, stop: "refusal" });
         case "reply": {
           if (step.step.kind !== "output") throw new Error("a box reply must be an output step");
           if (!agent) return Response.json({ structured: step.step.value, usage: { input_tokens: 900, output_tokens: 90 }, stop: "end" });
@@ -487,7 +507,7 @@ export function fakeBox(
             ...actions.filter((a) => a.type !== "send" && a.type !== "quiet").map(({ type, ...input }) => ({ name: type, input })),
             ...tasks.map((input) => ({ name: "task", input })),
           ];
-          return Response.json({ text, calls, refusedCalls: step.refusedCalls, usage: { input_tokens: 900, output_tokens: 90 }, stop: "end" });
+          return Response.json({ text, calls, refusedCalls: step.refusedCalls, ...reported, usage: { input_tokens: 900, output_tokens: 90 }, stop: "end" });
         }
       }
     }

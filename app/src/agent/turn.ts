@@ -30,7 +30,8 @@ import {
 } from "../domain";
 import type { ActionRejection, LogRow, TurnOutcome } from "../ledger/ledger";
 import { NOTICES, type FixedNotice, type Notices } from "../notices";
-import { bytesOf, type PromptParts, type PromptSection } from "../model/prompt";
+import { AGENT_SYSTEM } from "./prompt";
+import { bytesOf, renderPrompt, type PromptParts, type PromptSection } from "../model/prompt";
 import type { JsonSchema } from "../model/client";
 import {
   admitReminder,
@@ -198,6 +199,12 @@ export type InboxItem = {
 export type Batch = { readonly items: readonly [InboxItem, ...InboxItem[]] };
 
 export type TurnRow = { readonly role: "person" | "agent" | "note"; readonly text: string; readonly at: EpochMs };
+export type SeqTurn = TurnRow & { readonly seq: number };
+export type BoxReplyBackfill = { readonly seq: number; readonly notice: string | null };
+
+/** Claude Code keeps the system prompt a session started with, so a memory change has to reach a resumed session in a message. */
+export type BoxSession = { readonly id: string | null; readonly seenSeq: number; readonly memory: string; readonly replyBackfill: readonly BoxReplyBackfill[] };
+export type BoxSessionSeen = { readonly id: string | null; readonly sentThrough: number; readonly memory: string };
 
 export type TurnView = TaskView & {
   readonly admission: Admission;
@@ -209,7 +216,7 @@ export type TurnView = TaskView & {
   readonly summary: string;
   readonly notes: readonly string[];
   /** The newest turns not yet in the summary. */
-  readonly recent: readonly TurnRow[];
+  readonly recent: readonly SeqTurn[];
   /** Turns not yet in the summary that are older than `recent` and so not shown. */
   readonly historyLeftOut: number;
   readonly pending: readonly PendingWakeup[];
@@ -288,24 +295,81 @@ function renderBatch(view: TurnView): string[] {
 }
 
 const keep = (title: string, lines: readonly string[]): PromptSection => ({ title, keep: lines, trim: [], dropRank: 0 });
+const conversationLines = (rows: readonly TurnRow[], tz: TimeZone): string[] => rows.map((r) => `[${human(r.at, tz)}] ${SPEAKER[r.role]} ${r.text}`);
+const nowSection = (view: TurnView) => keep("Now", [`${human(view.now, view.tz)} (${weekday(view.now, view.tz)}), ${view.tz}`, `Language for notices: ${view.language}`]);
+const lookAhead = (view: TurnView): PromptSection[] => [
+  keep("Pending wake-ups", view.pending.length ? view.pending.map((w) => renderPending(w, view.tz)) : ["(none)"]),
+  keep("Open tasks", view.openTasks.length ? view.openTasks.map(renderTask) : ["(none)"]),
+  keep(`Unasked messages left today: ${view.unaskedLeftToday}`, []),
+];
 
 /** The turn prompt as sections: the conversation, then notes, are what a smaller route's budget trims first. */
 export function renderUser(view: TurnView): PromptParts {
-  const conversation = view.recent.map((r) => `[${human(r.at, view.tz)}] ${SPEAKER[r.role]} ${r.text}`);
+  const conversation = conversationLines(view.recent, view.tz);
   return {
     sections: [
-      keep("Now", [`${human(view.now, view.tz)} (${weekday(view.now, view.tz)}), ${view.tz}`, `Language for notices: ${view.language}`]),
+      nowSection(view),
       { title: "Memory", keep: [view.summary || "(nothing yet)"], trim: view.notes.map((n) => `- ${n}`), dropRank: 2 },
-      keep("Pending wake-ups", view.pending.length ? view.pending.map((w) => renderPending(w, view.tz)) : ["(none)"]),
-      keep("Open tasks", view.openTasks.length ? view.openTasks.map(renderTask) : ["(none)"]),
-      keep(`Unasked messages left today: ${view.unaskedLeftToday}`, []),
+      ...lookAhead(view),
       conversation.length ? { title: "Conversation", keep: [], trim: conversation, dropRank: 1, history: true } : keep("Conversation", ["(no earlier messages)"]),
       keep("New", renderBatch(view)),
     ],
   };
 }
 
-export type NewTurn = TurnRow & { readonly eventKey: EventKey };
+export function memoryBlock(summary: string, notes: readonly string[]): string {
+  const lines = memoryLines(summary, notes);
+  return lines.length === 0 ? "" : renderPrompt({ sections: [keep("Memory", lines)] });
+}
+
+const memoryLines = (summary: string, notes: readonly string[]): string[] => [...(summary ? [summary] : []), ...notes.map((n) => `- ${n}`)];
+
+export function memoryHeldAfter(view: TurnView, commit: TurnCommit): string {
+  return memoryBlock(view.summary, [...view.notes, ...commit.notes].slice(-TURN.recentNotes));
+}
+
+export type BoxTurnPrompt = {
+  readonly append: string;
+  readonly session: string | null;
+  readonly turn: PromptParts;
+  readonly fresh: PromptParts;
+  readonly sentThrough: number;
+};
+
+export function renderBoxTurn(view: TurnView, held: BoxSession | null): BoxTurnPrompt {
+  const memory = memoryBlock(view.summary, view.notes);
+  const seen = held?.seenSeq ?? 0;
+  const replies = new Map(held?.replyBackfill.map((r) => [r.seq, r]));
+  const unseen = view.recent.filter((r) => r.seq > seen).flatMap((r): SeqTurn[] => {
+    const reply = replies.get(r.seq);
+    if (!reply) return [r];
+    return reply.notice === null ? [] : [{ ...r, role: "note", text: reply.notice }];
+  });
+  const conversation = (rows: readonly SeqTurn[]): PromptSection[] =>
+    rows.length ? [{ title: "Conversation you haven't seen", keep: [], trim: conversationLines(rows, view.tz), dropRank: 1, history: true }] : [];
+  const lines = memoryLines(view.summary, view.notes);
+  const update = memory !== (held?.memory ?? "") ? [keep("Memory (replaces the memory you had)", lines.length ? lines : ["(empty)"])] : [];
+  const parts = (rows: readonly SeqTurn[], extra: readonly PromptSection[]): PromptParts => ({
+    sections: [nowSection(view), ...extra, ...lookAhead(view), ...conversation(rows), keep("New", renderBatch(view))],
+  });
+  return {
+    append: memory ? `${AGENT_SYSTEM}\n\n${memory}` : AGENT_SYSTEM,
+    session: held?.id ?? null,
+    turn: parts(unseen, update),
+    fresh: parts(view.recent, []),
+    sentThrough: Math.max(seen, view.recent.at(-1)?.seq ?? 0),
+  };
+}
+
+/** A turn that isn't the person's own chat, such as a group's, runs in a session of its own that nothing records. */
+export function oneOffBoxTurn(prompt: PromptParts): BoxTurnPrompt {
+  return { append: AGENT_SYSTEM, session: null, turn: prompt, fresh: prompt, sentThrough: 0 };
+}
+
+export type NewTurn = TurnRow & {
+  readonly eventKey: EventKey;
+  readonly boxView?: { readonly kind: "input" } | { readonly kind: "reply"; readonly notice: string | null };
+};
 
 /** Why a message goes out. Only an unasked one carries a purpose, the reason code had to send it. */
 export type Asked = { readonly intent: Exclude<Intent, "unasked"> } | { readonly intent: "unasked"; readonly purpose: UnaskedPurpose };
@@ -415,11 +479,11 @@ function acceptNotice(t: Notices, r: AcceptReply): string {
   return r.kind === "accepted" ? t.planAccepted(r.title) : t.planChanged;
 }
 
-function personTurns(view: TurnView): NewTurn[] {
+function personTurns(view: TurnView, boxView?: NewTurn["boxView"]): NewTurn[] {
   const turns: NewTurn[] = [];
   for (const item of view.batch.items) {
     const e = item.event;
-    if (e.kind === "message") turns.push({ role: "person", text: e.text, at: item.receivedAt, eventKey: item.key });
+    if (e.kind === "message") turns.push({ role: "person", text: e.text, at: item.receivedAt, eventKey: item.key, boxView });
     if (e.kind === "choice") {
       const text =
         e.choice.kind === "accept"
@@ -427,7 +491,7 @@ function personTurns(view: TurnView): NewTurn[] {
           : e.choice.kind === "consent"
             ? "[agreed to the privacy notice]"
             : "[chose to use their key as a backup]";
-      turns.push({ role: "person", text, at: item.receivedAt, eventKey: item.key });
+      turns.push({ role: "person", text, at: item.receivedAt, eventKey: item.key, boxView });
     }
   }
   return turns;
@@ -595,10 +659,11 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
 
   const agentTexts = [...sends];
   const late = lateTrigger(view);
+  let lateNotice: string | null = null;
   if (late && agentTexts.length > 0) {
     const written = out.lateNotice?.trim();
-    const notice = written ? fit(written, TURN.maxLateNoticeChars, "late_notice") : t.lateFallback(human(late.dueAt, view.tz));
-    agentTexts[0] = `${notice}\n${agentTexts[0]}`;
+    lateNotice = written ? fit(written, TURN.maxLateNoticeChars, "late_notice") : t.lateFallback(human(late.dueAt, view.tz));
+    agentTexts[0] = `${lateNotice}\n${agentTexts[0]}`;
   }
   const noticeText = (agentTexts.length > 0 || intent === "reply") && notices.size > 0 ? [...notices].join("\n") : null;
   if (noticeText !== null && agentTexts.length >= sendCap) {
@@ -611,12 +676,15 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   const texts = requestedReminder === null ? said : [requestedReminder];
 
   const effects = lifecycleEffects(view);
-  const turns = personTurns(view);
+  const input = { kind: "input" } as const;
+  const turns = personTurns(view, input);
   const note = said.length > 0 ? triggerNote(first, view.tz) : null;
-  if (note !== null) turns.push({ role: "note", text: note, at: view.now, eventKey: view.batch.items[0].key });
-  for (const text of agentTexts) turns.push({ role: "agent", text, at: view.now, eventKey: view.batch.items[0].key });
+  if (note !== null) turns.push({ role: "note", text: note, at: view.now, eventKey: view.batch.items[0].key, boxView: input });
+  for (const [i, text] of agentTexts.entries()) {
+    turns.push({ role: "agent", text, at: view.now, eventKey: view.batch.items[0].key, boxView: { kind: "reply", notice: i === 0 ? lateNotice : null } });
+  }
   if (noticeText !== null) turns.push({ role: "note", text: noticeText, at: view.now, eventKey: view.batch.items[0].key });
-  if (plan !== null) turns.push({ role: "agent", text: plan, at: view.now, eventKey: view.batch.items[0].key });
+  if (plan !== null) turns.push({ role: "agent", text: plan, at: view.now, eventKey: view.batch.items[0].key, boxView: { kind: "reply", notice: null } });
   if (requestedReminder !== null) turns.push({ role: "note", text: requestedReminder, at: view.now, eventKey: view.batch.items[0].key });
 
   const locale = setLocale ? { tz: view.tz, language } : null;

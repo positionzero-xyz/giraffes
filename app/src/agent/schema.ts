@@ -460,6 +460,17 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE wakeup ADD COLUMN repeat TEXT CHECK (repeat IN ('daily', 'weekdays', 'weekly'));
   ALTER TABLE wakeup ADD COLUMN repeat_anchor TEXT CHECK ((repeat IS NULL) = (repeat_anchor IS NULL));
   `,
+  `
+  CREATE TABLE box_session (
+    one       INTEGER PRIMARY KEY CHECK (one = 1),
+    id        TEXT,
+    seen_seq  INTEGER NOT NULL,
+    memory    TEXT NOT NULL
+  );
+  `,
+  `
+  ALTER TABLE box_session ADD COLUMN reply_backfill TEXT NOT NULL DEFAULT '[]';
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

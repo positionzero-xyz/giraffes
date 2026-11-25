@@ -73,7 +73,7 @@ import {
   type UnaskedPurpose,
 } from "./tasks";
 import type { AdmissionChange, AdmissionCommit } from "./admission";
-import { TURN, type Asked, type Batch, type InboxItem, type Outbound, type TurnCommit, type TurnRow } from "./turn";
+import { TURN, type Asked, type Batch, type BoxReplyBackfill, type BoxSession, type BoxSessionSeen, type InboxItem, type Outbound, type SeqTurn, type TurnCommit, type TurnRow } from "./turn";
 
 export type AgentRow = {
   readonly key: AgentKey;
@@ -625,7 +625,7 @@ export class AgentStore {
   ): {
     readonly summary: string;
     readonly notes: readonly string[];
-    readonly recent: readonly TurnRow[];
+    readonly recent: readonly SeqTurn[];
     readonly historyLeftOut: number;
     readonly pending: readonly PendingWakeup[];
     readonly openTasks: readonly OpenTask[];
@@ -639,7 +639,7 @@ export class AgentStore {
       .reverse()
       .map((n) => n.text);
     const recent = this.sql
-      .exec<{ role: TurnRow["role"]; text: string; at: EpochMs }>("SELECT role, text, at FROM turn WHERE seq > ? ORDER BY seq DESC LIMIT ?", memory.through, limitTurns)
+      .exec<SeqTurn>("SELECT seq, role, text, at FROM turn WHERE seq > ? ORDER BY seq DESC LIMIT ?", memory.through, limitTurns)
       .toArray()
       .reverse();
     const unsummarized = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM turn WHERE seq > ?", memory.through).one().n;
@@ -728,14 +728,37 @@ export class AgentStore {
       .map(toWakeup);
   }
 
-  commitTurn(commit: TurnCommit, logs: readonly LogRow[], now: EpochMs, box: Box | null = null): void {
+  boxSession(): BoxSession | null {
+    const r = this.sql.exec<{ id: string | null; seen_seq: number; memory: string; reply_backfill: string }>("SELECT id, seen_seq, memory, reply_backfill FROM box_session").toArray()[0];
+    return r ? { id: r.id, seenSeq: r.seen_seq, memory: r.memory, replyBackfill: fromJson(r.reply_backfill) } : null;
+  }
+
+  commitTurn(commit: TurnCommit, logs: readonly LogRow[], now: EpochMs, box: Box | null = null, seen: BoxSessionSeen | null = null): void {
     const [firstKey] = commit.batchKeys;
     this.tx(() => {
       if (box) this.writeBox(box);
       const outboxId = crypto.randomUUID() as OutboxId;
       const tasks = this.applyTasks(commit.tasks, commit.trigger, commit.outbound ? outboxId : null, now);
+      let seenSeq = seen?.sentThrough ?? 0;
+      let gap = seen !== null && this.sql.exec("SELECT seq FROM turn WHERE seq > ? LIMIT 1", seenSeq).toArray().length > 0;
+      const replyBackfill: BoxReplyBackfill[] = [];
       for (const t of commit.turns) {
-        this.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES (?, ?, ?, ?)", t.role, t.text, t.at, t.eventKey);
+        const { seq } = this.sql.exec<{ seq: number }>("INSERT INTO turn (role, text, at, event_key) VALUES (?, ?, ?, ?) RETURNING seq", t.role, t.text, t.at, t.eventKey).one();
+        if (!seen) continue;
+        const view = t.boxView;
+        gap ||= !view || (view.kind === "reply" && view.notice !== null);
+        if (!gap) seenSeq = seq;
+        else if (view) replyBackfill.push({ seq, notice: view.kind === "reply" ? view.notice : null });
+      }
+      if (seen) {
+        this.sql.exec(
+          `INSERT INTO box_session (one, id, seen_seq, memory, reply_backfill) VALUES (1, ?, ?, ?, ?)
+           ON CONFLICT (one) DO UPDATE SET id = excluded.id, seen_seq = excluded.seen_seq, memory = excluded.memory, reply_backfill = excluded.reply_backfill`,
+          seen.id,
+          seenSeq,
+          seen.memory,
+          JSON.stringify(replyBackfill),
+        );
       }
       for (const key of commit.wakeupsCancel) {
         this.sql.exec(

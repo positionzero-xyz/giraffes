@@ -9,12 +9,20 @@ export type BoxHealth =
   | { readonly kind: "unavailable"; readonly detail: string };
 
 export type BoxRequest = { readonly model: string; readonly system: string; readonly user: string; readonly jsonSchema: JsonSchema };
-/** A turn in the person's own Claude Code session: `append` follows its system prompt, `turn` is the context and what is new. */
-export type BoxAgentRequest = { readonly model: string; readonly append: string; readonly turn: string; readonly tools: readonly unknown[] };
+export type BoxAgentRequest = {
+  readonly model: string;
+  readonly append: string;
+  readonly session: string | null;
+  readonly turn: string;
+  readonly fresh: string;
+  readonly tools: readonly unknown[];
+};
+
+export type SessionUsed = { readonly id: string; readonly resumed: boolean };
 
 export type BoxReply =
   /** The CLI answered; whether the answer is valid is the caller's to decide. */
-  | { readonly kind: "reply"; readonly reply: Extract<WireResult, { kind: "reply" }> }
+  | { readonly kind: "reply"; readonly reply: Extract<WireResult, { kind: "reply" }>; readonly session?: SessionUsed }
   | { readonly kind: "signed_out" }
   | { readonly kind: "unauthorized" }
   | { readonly kind: "unavailable"; readonly detail: string };
@@ -29,7 +37,15 @@ export interface BoxClient {
 export const BOX_TIMEOUTS = { parseMs: 120_000, healthMs: 15_000 } as const;
 
 const Health = z.object({ ok: z.literal(true), signedIn: z.boolean() });
-const AgentBody = z.object({ text: z.string(), calls: z.array(z.unknown()), refusedCalls: z.unknown().optional(), usage: z.unknown(), stop: z.unknown() });
+const Session = z.object({ id: z.uuid(), resumed: z.boolean() });
+const AgentBody = z.object({
+  text: z.string(),
+  calls: z.array(z.unknown()),
+  refusedCalls: z.unknown().optional(),
+  session: Session.optional().catch(undefined),
+  usage: z.unknown(),
+  stop: z.unknown(),
+});
 
 function jsonOrNull(text: string): unknown {
   try {
@@ -56,18 +72,29 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
       return parsed.success ? { kind: "up", signedIn: parsed.data.signedIn } : { kind: "unavailable", detail: "health reply unreadable" };
     },
 
-    parse: (url, token, req) => post(url, token, "parse", bridgeBody(req), readBridgeReply),
+    parse: (url, token, req) =>
+      post(url, token, "parse", bridgeBody(req), (raw) => {
+        const reply = readBridgeReply(raw);
+        return reply && { reply };
+      }),
 
     agent: (url, token, req) =>
       post(url, token, "agent", JSON.stringify(req), (raw) => {
         const body = AgentBody.safeParse(raw);
         if (!body.success) return null;
-        const { usage, stop, ...structured } = body.data;
-        return readBridgeReply({ structured, usage, stop });
+        const { usage, stop, session, ...structured } = body.data;
+        const reply = readBridgeReply({ structured, usage, stop });
+        return reply && { reply, session };
       }),
   };
 
-  async function post(url: string, token: BoxToken, path: "parse" | "agent", body: string, read: (raw: unknown) => ReturnType<typeof readBridgeReply>): Promise<BoxReply> {
+  async function post(
+    url: string,
+    token: BoxToken,
+    path: "parse" | "agent",
+    body: string,
+    read: (raw: unknown) => { readonly reply: Extract<WireResult, { kind: "reply" }>; readonly session?: SessionUsed } | null,
+  ): Promise<BoxReply> {
     let res: Response;
     let text: string;
     try {
@@ -84,6 +111,6 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
     if (res.status === 409) return { kind: "signed_out" };
     if (res.status === 401) return { kind: "unauthorized" };
     if (!res.ok) return { kind: "unavailable", detail: `${path} ${res.status}` };
-    return { kind: "reply", reply: read(jsonOrNull(text)) ?? UNREADABLE_REPLY };
+    return { kind: "reply", ...(read(jsonOrNull(text)) ?? { reply: UNREADABLE_REPLY }) };
   }
 }

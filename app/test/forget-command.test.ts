@@ -2,6 +2,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { devLane, DEV_URL_SCRIPTED } from "../src/access/access";
 import { Agent } from "../src/agent/agent";
+import { backupsWithin, HOST_BACKUP_DAYS } from "../src/agent/backups";
 import { FORGET_TEXT, type Receipt } from "../src/agent/forget-text";
 import type { ChannelAdapter, Delivery } from "../src/channels/channel";
 import type { Env } from "../src/config";
@@ -489,5 +490,16 @@ describe("a forget left open", () => {
     expect(c.model.calls).toHaveLength(2);
     await c.advanceTo("2099-11-20T10:00");
     expect(await c.received()).toEqual([]);
+  });
+});
+
+describe("the receipt's backup sentence", () => {
+  test("is used only when every backup copy has a documented expiry within 30 days", () => {
+    expect(backupsWithin([HOST_BACKUP_DAYS.durableObject, ...HOST_BACKUP_DAYS.fly])).toBe("expire");
+    expect(backupsWithin([HOST_BACKUP_DAYS.durableObject, 60])).toBe("pending");
+    expect(backupsWithin([HOST_BACKUP_DAYS.durableObject, ...HOST_BACKUP_DAYS.static])).toBe("pending");
+    expect(en.receipt({ deleted: [[2, 5]], backups: "pending" })).toBe(
+      "I cleared our chat and deleted saved items 2 and 5. Removing the backup copies at our hosts is still pending.",
+    );
   });
 });

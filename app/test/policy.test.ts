@@ -182,6 +182,7 @@ describe("agent tools", () => {
       ["cancel_wakeup", ["key"]],
       ["remember", ["note"]],
       ["set_locale", ["timeZone", "language"]],
+      ["forget", []],
       ["task", ["op", "ref", "kind", "title", "plan"]],
     ]);
     const task = AGENT_TOOLS.find((t) => t.name === "task")?.inputSchema;

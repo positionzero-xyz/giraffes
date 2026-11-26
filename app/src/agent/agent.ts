@@ -327,8 +327,12 @@ export class Agent extends DurableObject<Env> {
     const destination = alert.telegram_redirect === null ? to : { ...to, channelUserId: alert.telegram_redirect };
     const migrationNote = alert.telegram_redirect === null ? "" : `\nTelegram moved this group. Update OPERATOR_CHAT to telegram:${alert.telegram_redirect}.`;
     const ownerKey = person?.key ?? this.ctx.id.name;
-    const detectedAt = ownerKey === undefined ? null : await billing.store.duplicateDetectedAt(ownerKey, alert.subscription_ids).catch(() => null);
-    const dateLine = detectedAt === null ? "Detection date unavailable." : `Detected at: ${new Date(detectedAt).toISOString()}`;
+    const detectedAt = ownerKey === undefined ? null : await billing.store.duplicateDetectedAt(ownerKey, alert.subscription_ids).catch(() => {
+      diagnostic("operator_alert_date_lookup_failed");
+      return null;
+    });
+    const detectedDate = new Date(typeof detectedAt === "number" ? detectedAt : NaN);
+    const dateLine = Number.isNaN(detectedDate.getTime()) ? "Detection date unavailable." : `Detected at: ${detectedDate.toISOString()}`;
     const message = {
       id: alert.delivery_id,
       to: destination,

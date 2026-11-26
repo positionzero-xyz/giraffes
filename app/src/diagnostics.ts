@@ -15,6 +15,7 @@ type Diagnostic = DrainPhase
   | "ledger_flush_failed"
   | "line_quota"
   | "line_quota_unavailable"
+  | "operator_alert_date_lookup_failed"
   | "operator_alert_failed"
   | "operator_alert_unconfirmed"
   | "operator_alert_destination_unavailable"

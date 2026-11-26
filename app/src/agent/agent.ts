@@ -1120,10 +1120,6 @@ export class Agent extends DurableObject<Env> {
     return health.kind === "unavailable" ? { kind: "down", retryable: true, detail: health.detail } : health;
   }
 
-  /**
-   * Every request names the box's volume, read once from /health, and the epoch of the work that sends it, so an image
-   * with erase refuses work from before its last erase. The claim is checked again after each await, right before a fetch.
-   */
   /** True only when the consented backup key is currently healthy and has unspent cap room. */
   #backupKeyCanServe(now: EpochMs, purpose: CallPurpose): boolean {
     const key = this.#store.key();
@@ -1132,6 +1128,10 @@ export class Agent extends DurableObject<Env> {
     return fits(this.#store.spend("byok", utcMonth(now)), estimate(route, route.promptBytes), key.capMicro);
   }
 
+  /**
+   * Every request names the box's volume, read once from /health, and the epoch of the work that sends it, so an image
+   * with erase refuses work from before its last erase. The claim is checked again after each await, right before a fetch.
+   */
   async #onBox(
     purpose: CallPurpose,
     claim: Claim,

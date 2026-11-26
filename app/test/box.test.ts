@@ -968,6 +968,58 @@ describe("connecting a Claude plan", () => {
     ]);
   });
 
+  test("a resting backup key does not hold a recovered box off", async () => {
+    const box = fakeBox({ signedIn: true });
+    const provider = fakeProvider([{ kind: "output", value: { actions: [{ type: "send", text: "From your key." }], tasks: [], about: "" } }]);
+    const c = await devChat("resk", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await giveKey(c.agent, { backup: true });
+    await c.received();
+
+    box.replies.push({ kind: "status", status: 503 });
+    await c.say("first");
+    expect(await c.received()).toEqual(["From your key."]);
+    expect(box.parses).toHaveLength(1);
+    expect(provider.seen).toHaveLength(1);
+
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (_agent, state) => {
+      state.storage.sql.exec("UPDATE model_key SET fault = 'rate', failures = 1, rest_until = NULL, told_on = NULL, unreadable_under = NULL");
+    });
+    box.replies.push({ kind: "reply", step: chat("Back on your plan.") });
+    await c.say("second");
+
+    expect(await c.received()).toEqual(["Back on your plan."]);
+    expect(box.parses).toHaveLength(2);
+    expect(provider.seen).toHaveLength(1);
+  });
+
+  test("a backup key without worst-case cap room does not hold a recovered box off", async () => {
+    const box = fakeBox({ signedIn: true });
+    const provider = fakeProvider([{ kind: "output", value: { actions: [{ type: "send", text: "From your key." }], tasks: [], about: "" } }]);
+    const c = await devChat("capk", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await giveKey(c.agent, { backup: true });
+    await c.received();
+
+    box.replies.push({ kind: "status", status: 503 });
+    await c.say("first");
+    expect(await c.received()).toEqual(["From your key."]);
+    expect(box.parses).toHaveLength(1);
+    expect(provider.seen).toHaveLength(1);
+
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (_agent, state) => {
+      state.storage.sql.exec("UPDATE model_key SET cap_micro = 1");
+    });
+    box.replies.push({ kind: "reply", step: chat("Back on your plan.") });
+    await c.say("second");
+
+    expect(await c.received()).toEqual(["Back on your plan."]);
+    expect(box.parses).toHaveLength(2);
+    expect(provider.seen).toHaveLength(1);
+  });
+
   test("a box that answers signed_out says the backup key answers for now, and the key does", async () => {
     const box = fakeBox({ signedIn: true });
     const provider = fakeProvider([{ kind: "output", value: { actions: [{ type: "send", text: "From your key." }], tasks: [], about: "" } }]);

@@ -129,7 +129,7 @@ describe("LINE delivery", () => {
     [{ message: "Failed to send messages" }, "failed"],
   ] as const)("classifies LINE push 400 by the error's field: %j", async (body, kind) => {
     stubFetch(() => Response.json(body, { status: 400 }));
-    expect(await line().deliver(outbound(), NOW)).toMatchObject({ kind });
+    expect(await line().deliverOperatorAlert?.(outbound(), NOW)).toMatchObject({ kind });
   });
 
   test("a LINE push recovers from a transient error with the same retry key", async () => {
@@ -377,13 +377,13 @@ describe("Telegram delivery", () => {
   });
 
   test.each([
-    [{ description: "Bad Request: chat not found" }, "recipient_gone"],
-    [{ description: "Bad Request: private chat not found" }, "recipient_gone"],
-    [{ parameters: { migrate_to_chat_id: -1001234567890 } }, "recipient_gone"],
+    [{ description: "Bad Request: chat not found" }, "chat_unavailable"],
+    [{ description: "Bad Request: private chat not found" }, "chat_unavailable"],
+    [{ parameters: { migrate_to_chat_id: -1001234567890 } }, "chat_migrated"],
     [{ description: "Bad Request: message is too long" }, "failed"],
   ] as const)("classifies Telegram sendMessage 400 by its description or migration parameter: %j", async (body, kind) => {
     stubFetch(() => Response.json({ ok: false, error_code: 400, ...body }, { status: 400 }));
-    expect(await telegram().deliver(msg, NOW)).toMatchObject({ kind });
+    expect(await telegram().deliverOperatorAlert?.(msg, NOW)).toMatchObject({ kind });
   });
 });
 

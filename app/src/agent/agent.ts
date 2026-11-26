@@ -123,6 +123,7 @@ const KEY_TICKET_MS = 15 * 60_000;
 const KEY_LINK_NOTE = "<key link>";
 const BILLING_ALERT_REFUSED_MS = 300_000;
 const BILLING_ALERT_MAX_BACKOFF_MS = 3_600_000;
+const BILLING_ALERT_UNAVAILABLE_MS = 86_400_000;
 
 export type Clock = { now(): EpochMs };
 
@@ -222,8 +223,12 @@ export class Agent extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.#store = new AgentStore(ctx.storage);
-    void ctx.blockConcurrencyWhile(async () => migrate(ctx.storage));
     this.#deps = defaultDeps(env);
+    void ctx.blockConcurrencyWhile(async () => {
+      migrate(ctx.storage);
+      const billingAlertAt = this.#billingAlertAt();
+      if (billingAlertAt !== null) await this.#armNoLaterThan(billingAlertAt);
+    });
   }
 
   /** "stale": the person's last forget already covers this event, so nothing of it was stored. */
@@ -311,27 +316,38 @@ export class Agent extends DurableObject<Env> {
 
   async #attemptBillingAlert(to: OperatorChat): Promise<BillingAlertSettlement | null> {
     const { channels, clock } = this.#deps;
-    const alert = this.#store.nextBillingAlert();
     const now = clock.now();
+    const route = `${to.channel}:${to.channelUserId}`;
+    const alert = this.#store.nextBillingAlert(route, now);
     if (alert === null || alert.ready_at > now) return null;
     const person = this.#store.agent();
     const notices = person ? NOTICES[person.language] : null;
     const backoffMs = Math.min(BILLING_ALERT_MAX_BACKOFF_MS, CHANNEL_RETRY_MS * 2 ** alert.attempts);
-    this.#store.startBillingAlertAttempt(alert.subscription_ids, (now + backoffMs) as EpochMs);
-    const result = await channels[to.channel].deliver({
+    this.#store.startBillingAlertAttempt(alert.subscription_ids, (now + backoffMs) as EpochMs, route);
+    const destination = alert.telegram_redirect === null ? to : { ...to, channelUserId: alert.telegram_redirect };
+    const migrationNote = alert.telegram_redirect === null ? "" : `\nTelegram moved this group. Update OPERATOR_CHAT to telegram:${alert.telegram_redirect}.`;
+    const message = {
       id: alert.delivery_id,
-      to,
-      texts: [`Duplicate paid plans\nSubscriptions: ${alert.subscription_ids}\nReview the subscriptions and any extra charges.`],
+      to: destination,
+      texts: [`Duplicate paid plans\nSubscriptions: ${alert.subscription_ids}\nReview the subscriptions and any extra charges.${migrationNote}`],
       intent: "requested",
-    }, now).catch(() => ({ kind: "in_doubt", afterMs: CHANNEL_RETRY_MS } as const));
+    } as const;
+    const channel = channels[to.channel];
+    const result = await (channel.deliverOperatorAlert?.(message, now) ?? channel.deliver(message, now))
+      .catch(() => ({ kind: "in_doubt", afterMs: CHANNEL_RETRY_MS } as const));
     const settlement = { subscriptionIds: alert.subscription_ids };
     if (result.kind === "sent") return { ...settlement, kind: "sent", text: notices?.duplicateAlerted };
     if (result.kind === "fenced") {
       return { ...settlement, kind: "retry", delayMs: backoffMs, text: undefined };
     }
-    if (result.kind === "recipient_gone") {
-      diagnostic("operator_alert_recipient_gone");
-      return { ...settlement, kind: "gone", text: notices?.duplicateAlertGone };
+    if (result.kind === "chat_migrated" && alert.telegram_redirect === null && result.chatId !== to.channelUserId) {
+      diagnostic("operator_alert_chat_migrated");
+      return { ...settlement, kind: "migrated", chatId: result.chatId, text: undefined };
+    }
+    if (result.kind === "recipient_gone" || result.kind === "chat_unavailable" || result.kind === "chat_migrated") {
+      diagnostic("operator_alert_destination_unavailable");
+      return { ...settlement, kind: "unavailable", delayMs: BILLING_ALERT_UNAVAILABLE_MS,
+        text: alert.notified < 2 ? notices?.duplicateAlertDelayed : undefined };
     }
 
     const outcome = result.kind === "failed" ? "refused" : result.kind;
@@ -346,9 +362,10 @@ export class Agent extends DurableObject<Env> {
   }
 
   #billingAlertAt(): EpochMs | null {
-    if (this.#deps.operatorChat === null || this.#store.held()) return null;
+    const { clock, operatorChat } = this.#deps;
+    if (operatorChat === null || this.#store.held()) return null;
     if (this.#billingAlertSettlement !== null) return this.#billingAlertStorageRetryAt as EpochMs;
-    const next = this.#store.nextBillingAlert();
+    const next = this.#store.nextBillingAlert(`${operatorChat.channel}:${operatorChat.channelUserId}`, clock.now());
     return next && Math.max(next.ready_at, this.#billingAlertStorageRetryAt) as EpochMs;
   }
 

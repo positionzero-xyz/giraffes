@@ -1,7 +1,7 @@
 import { diagnostic } from "../diagnostics";
 import { z } from "zod";
 import { LANGUAGES, eventKey, parseButton, parseInviteCode, personAgentKey, type ChannelEvent, type EpochMs, type Language, type OutboundMessage } from "../domain";
-import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
+import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type OperatorAlertDelivery, type Received } from "./channel";
 
 const Chat = z.object({ id: z.number().int(), type: z.string() });
 const Sender = z.object({ language_code: z.string().optional() }).optional().catch(undefined);
@@ -61,7 +61,7 @@ function supportedLanguage(code: string | undefined): Language | undefined {
 
 const SendError = z.object({
   description: z.string().optional(),
-  parameters: z.object({ retry_after: z.number().optional(), migrate_to_chat_id: z.number().int().optional() }).optional(),
+  parameters: z.object({ retry_after: z.number().optional(), migrate_to_chat_id: z.number().int().negative().optional() }).optional(),
 });
 
 export const SEND_MESSAGE_MAX_CHARS = 4096;
@@ -81,6 +81,45 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
       if (!res.ok) diagnostic("telegram_callback_failed", res.status);
     } catch {
       diagnostic("telegram_callback_failed");
+    }
+  }
+
+  /**
+   * Telegram's sendMessage has no idempotency key, so a crash after a send succeeds but before the row is
+   * marked sent re-sends it on recovery.
+   */
+  async function send(msg: OutboundMessage): Promise<OperatorAlertDelivery> {
+    try {
+      const res = await fetch(`${api}/sendMessage`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          chat_id: msg.to.channelUserId,
+          text: msg.texts.join("\n\n"),
+          link_preview_options: { is_disabled: true },
+          ...(msg.button ? { reply_markup: { inline_keyboard: [[{ text: msg.button.label, callback_data: msg.button.data }]] } } : {}),
+        }),
+      });
+      if (res.ok) return { kind: "sent", via: "push" };
+      const body: unknown = await res.json().catch(() => null);
+      const detail = `${res.status} ${JSON.stringify(body)}`;
+      if (res.status === 403) return { kind: "recipient_gone" };
+      const error = SendError.safeParse(body).data;
+      if (res.status === 400) {
+        const migrated = error?.parameters?.migrate_to_chat_id;
+        if (migrated !== undefined) return { kind: "chat_migrated", chatId: String(migrated), detail };
+        if (error?.description === "Bad Request: chat not found" || error?.description === "Bad Request: private chat not found") {
+          return { kind: "chat_unavailable", detail };
+        }
+      }
+      if (res.status === 429) {
+        const retryAfter = error?.parameters?.retry_after;
+        return { kind: "retry", afterMs: retryAfter === undefined ? CHANNEL_RETRY_MS : retryAfter * 1000, detail };
+      }
+      if (res.status >= 500) return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail };
+      return { kind: "failed", detail };
+    } catch (err) {
+      return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail: String(err) };
     }
   }
 
@@ -111,40 +150,12 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
       };
     },
 
-    /**
-     * Telegram's sendMessage has no idempotency key, so a crash after a send succeeds but before the row is
-     * marked sent re-sends it on recovery.
-     */
     async deliver(msg: OutboundMessage): Promise<Delivery> {
-      try {
-        const res = await fetch(`${api}/sendMessage`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            chat_id: msg.to.channelUserId,
-            text: msg.texts.join("\n\n"),
-            link_preview_options: { is_disabled: true },
-            ...(msg.button ? { reply_markup: { inline_keyboard: [[{ text: msg.button.label, callback_data: msg.button.data }]] } } : {}),
-          }),
-        });
-        if (res.ok) return { kind: "sent", via: "push" };
-        const body: unknown = await res.json().catch(() => null);
-        const detail = `${res.status} ${JSON.stringify(body)}`;
-        if (res.status === 403) return { kind: "recipient_gone" };
-        const error = SendError.safeParse(body).data;
-        if (res.status === 400 && (error?.description === "Bad Request: chat not found"
-          || error?.description === "Bad Request: private chat not found" || error?.parameters?.migrate_to_chat_id !== undefined)) {
-          return { kind: "recipient_gone" };
-        }
-        if (res.status === 429) {
-          const retryAfter = error?.parameters?.retry_after;
-          return { kind: "retry", afterMs: retryAfter === undefined ? CHANNEL_RETRY_MS : retryAfter * 1000, detail };
-        }
-        if (res.status >= 500) return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail };
-        return { kind: "failed", detail };
-      } catch (err) {
-        return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail: String(err) };
-      }
+      const result = await send(msg);
+      if (result.kind === "chat_migrated" || result.kind === "chat_unavailable") return { kind: "failed", detail: result.detail };
+      return result;
     },
+
+    deliverOperatorAlert: send,
   };
 }

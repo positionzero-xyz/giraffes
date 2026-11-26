@@ -542,6 +542,12 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE billing_alert ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE billing_alert ADD COLUMN closed_as TEXT CHECK (closed_as IN ('sent', 'gone'));
   `,
+  `
+  ALTER TABLE billing_alert ADD COLUMN operator_route TEXT;
+  ALTER TABLE billing_alert ADD COLUMN telegram_redirect TEXT;
+  ALTER TABLE billing_alert ADD COLUMN destination_wait INTEGER NOT NULL DEFAULT 0;
+  UPDATE billing_alert SET ready_at = 0, notified = 0, closed_as = NULL WHERE closed_as = 'gone';
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

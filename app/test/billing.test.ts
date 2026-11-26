@@ -743,7 +743,7 @@ describe("checkout and the portal", () => {
     await c.received();
     await stripeChange(kit, { user: "long-outage", sub: "sub_long_outage_extra", plan: "included", status: "active" });
     await c.settle();
-    expect(await c.received()).toEqual([expect.stringContaining("I'll keep trying unless the billing chat is permanently unavailable")]);
+    expect(await c.received()).toEqual([expect.stringContaining("I'll keep trying.")]);
     await c.advanceTo("2099-11-04T14:00");
     expect(deliver.mock.calls.map(([, at]) => (at - local("2099-11-04T10:00")) / 1000)).toEqual([
       0, 30, 90, 210, 450, 930, 1890, 3810, 7410, 11010,
@@ -832,6 +832,26 @@ describe("checkout and the portal", () => {
       migrate(storage);
       expect(storage.sql.exec("SELECT delivery_id, ready_at, attempts FROM billing_alert").toArray()).toEqual([
         { delivery_id: "existing-id", ready_at: 9000, attempts: 0 },
+      ]);
+    });
+  });
+
+  test("upgrading existing alerts reopens unavailable destinations and preserves sent alerts", async () => {
+    const stub = env.AGENT.get(env.AGENT.idFromName("billing-alert-destination-upgrade"));
+    await runInDurableObject(stub, (_, { storage }) => {
+      const beforeDestinationRecovery = MIGRATIONS.findIndex((migration) => migration.includes("ADD COLUMN operator_route"));
+      storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN operator_route");
+      storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN telegram_redirect");
+      storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN destination_wait");
+      storage.sql.exec(`INSERT INTO billing_alert (subscription_ids, delivery_id, notified, closed_as) VALUES
+        ('sub_a sub_b', 'unavailable-id', 1, 'gone'), ('sub_a sub_c', 'sent-id', 1, 'sent')`);
+      storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeDestinationRecovery));
+
+      migrate(storage);
+
+      expect(storage.sql.exec("SELECT delivery_id, ready_at, notified, closed_as FROM billing_alert ORDER BY subscription_ids").toArray()).toEqual([
+        { delivery_id: "unavailable-id", ready_at: 0, notified: 0, closed_as: null },
+        { delivery_id: "sent-id", ready_at: null, notified: 1, closed_as: "sent" },
       ]);
     });
   });

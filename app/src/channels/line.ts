@@ -82,7 +82,7 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
     }
   }
 
-  async function push(msg: OutboundMessage, messages: readonly object[]): Promise<Delivery> {
+  async function push(msg: OutboundMessage, messages: readonly object[], operatorAlert = false): Promise<Delivery> {
     try {
       // LINE dedupes pushes on X-Line-Retry-Key and answers 409 to a repeat, so a resend after a crash isn't
       // delivered twice.
@@ -93,7 +93,7 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
       });
       if (res.ok || res.status === 409) return { kind: "sent", via: "push" };
       const body = await res.text();
-      if (res.status === 400 && invalidPushRecipient(body)) return { kind: "recipient_gone" };
+      if (operatorAlert && res.status === 400 && invalidPushRecipient(body)) return { kind: "recipient_gone" };
       return classify(res.status, body);
     } catch (err) {
       return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail: String(err) };
@@ -134,6 +134,8 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
       }
       return { kind: "accepted", envelopes, ignored: body.data.events.length - envelopes.length };
     },
+
+    deliverOperatorAlert: (msg) => push(msg, toMessages(msg), true),
 
     async deliver(msg: OutboundMessage, now: EpochMs, live: () => boolean = () => true): Promise<Delivery> {
       const messages = toMessages(msg);

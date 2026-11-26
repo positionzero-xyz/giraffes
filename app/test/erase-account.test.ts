@@ -4,7 +4,7 @@ import type { Agent } from "../src/agent/agent";
 import { parseInviteCode, type EpochMs } from "../src/domain";
 import { type SubscriptionId } from "../src/billing/plan";
 import { d1Ledger } from "../src/ledger/ledger";
-import { chat, devChat, fakeBox, hold, scripted } from "./testkit";
+import { billingOn, chat, devChat, fakeBox, hold, scripted } from "./testkit";
 
 test("a confirmed account erase clears private state and requires a fresh decision to return", async () => {
   const model = scripted([chat("A private reply.")]);
@@ -80,10 +80,13 @@ test("a workspace-only box reply keeps account erasure pending", async () => {
   const user = "erase-with-box";
   const volume = "00000000-0000-4000-8000-000000000002";
   const box = fakeBox({ onlyFor: user, signedIn: true, volume });
+  const billing = billingOn();
+  const closeSubscription = vi.fn(async () => ({ ok: true, value: "settled" } as const));
   let accountProof = false;
   const c = await devChat(user, {
     model: null,
     at: "2099-11-04T10:00",
+    billing: { ...billing.deps, stripe: { ...billing.stripe, closeSubscription, closeCheckout: async () => ({ ok: true, value: null }) } },
     box: {
       ...box.deps,
       host: { ...box.deps.host, kind: "static" },
@@ -100,17 +103,21 @@ test("a workspace-only box reply keeps account erasure pending", async () => {
       },
     },
   });
+  await env.LEDGER.prepare("INSERT INTO billing_subscription (id, owner_key, plan, status, seats, updated_at) VALUES ('sub_box_erase', ?, 'standard', 'active', 1, 1)")
+    .bind(c.agent).run();
   await c.say("/claude");
   await c.say("/erase");
   const confirm = c.channel.delivered.at(-1)?.button;
   if (!confirm) throw new Error("missing confirmation");
   await c.tap(confirm.data);
+  expect(closeSubscription).toHaveBeenCalledWith("sub_box_erase", c.agent);
   expect(c.channel.delivered.at(-1)?.text).not.toMatch(/deleted your live Giraffe data/);
   await c.say("please answer this");
   accountProof = true;
   c.clock.set((c.clock.now() + 60_000) as EpochMs);
   await c.settle();
   expect(c.channel.delivered.at(-1)?.text).toMatch(/deleted your live Giraffe data/);
+  expect(closeSubscription).toHaveBeenCalledTimes(1);
   expect((await c.snapshot()).box).toBeNull();
 });
 

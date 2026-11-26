@@ -503,6 +503,15 @@ export class Agent extends DurableObject<Env> {
         this.#devSavedPages.clear();
         this.#devModel = null;
       }
+      if (current.paid === undefined) {
+        try {
+          const paid = await this.#endErasedBilling(current);
+          current = { ...current, paid };
+          this.ctx.storage.kv.put(ERASE_JOB, current);
+        } catch {
+          // A billing retry should not hold up the box wipe.
+        }
+      }
       while (current.box.kind !== "none" && current.box.kind !== "done") {
         const box = await this.#eraseAccountBox(current);
         if (box === current.box) {
@@ -514,8 +523,11 @@ export class Agent extends DurableObject<Env> {
       }
       const { box } = current;
       const job = current;
-      const paid = job.paid ?? await this.#endErasedBilling(job);
-      this.ctx.storage.kv.put(ERASE_JOB, { ...job, paid });
+      const { paid } = job;
+      if (paid === undefined) {
+        await this.#retryErasure();
+        return;
+      }
       const invited = await revokeErasedInvites(this.env.LEDGER, job.person);
       for (const invitee of invited) {
         const stub = this.env.AGENT.get(this.env.AGENT.idFromName(invitee));

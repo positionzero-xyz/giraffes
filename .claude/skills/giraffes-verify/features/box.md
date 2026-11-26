@@ -12,7 +12,7 @@ A person's own Claude plan, run in an unmodified Claude Code inside their box. L
 
 ## Scripting the mock
 
-An explicit script file can also ride in as the fifth argument of `box/up.sh` (`--mock <script-file>`), mounted read-only; when both exist, the explicit one wins. With `MOCK_DUMPS` set and no explicit script, the mock reads `<dumps>/mock-script.json` again for every request, so a drive can arm, rewrite or delete it while the box runs. Write it atomically (write a temp file, then rename) because a half-written or missing file just means unscripted. The file is:
+With `MOCK_DUMPS` set, the mock reads `<dumps>/mock-script.json` again for every request, so a drive can arm, rewrite or delete it while the box runs. Write it atomically (write a temp file, then rename) because a half-written or missing file just means unscripted. The file is:
 
 ```json
 {

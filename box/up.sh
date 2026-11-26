@@ -2,7 +2,8 @@
 # usage: BOX_TOKEN=<token> box/up.sh <name> <host-port> <data-dir> [--mock [script-file]]
 # Runs the box image (BOX_IMAGE, default giraffes-box:mvp) on 127.0.0.1:<host-port> with the person's state in <data-dir>.
 # --mock signs the CLI in with a fake API key against box/mock-api.mjs running inside the box, with every Anthropic host resolved to loopback.
-# With --mock, a script file can make the mock call Giraffe tools; MOCK_DUMPS=<host-dir> keeps each raw request the mock gets as a file there.
+# With --mock, MOCK_DUMPS=<host-dir> keeps each raw request the mock gets as a file there, and the mock
+# reads its optional script from <host-dir>/mock-script.json (rewritable while the box runs).
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 name=$1 port=$2 data=$3 mode=${4:-} script=${5:-}
@@ -20,15 +21,16 @@ fi
 if [ "$mode" = --mock ] && [ -n "$script" ]; then
   [ -f "$script" ] || { echo "mock script not found: $script" >&2; exit 1; }
   script_dir=$(cd "$(dirname "$script")" && { pwd -W 2>/dev/null || pwd; })
-  mock+=(-v "$script_dir/$(basename "$script"):/mock-script.json:ro")
   script_in_box=/mock-script.json
+  if [ -n "${MOCK_DUMPS:-}" ]; then
+    script_in_box=/dumps/mock-script.json
+  fi
+  mock+=(-v "$script_dir/$(basename "$script"):$script_in_box:ro")
 fi
 if [ "$mode" = --mock ] && [ -n "${MOCK_DUMPS:-}" ]; then
   mkdir -p "$MOCK_DUMPS"
   mock+=(-v "$(cd "$MOCK_DUMPS" && { pwd -W 2>/dev/null || pwd; }):/dumps")
   dumps=/dumps
-  # An explicit script file wins; otherwise the rewritable default lives in the dumps mount.
-  [ -z "$script_in_box" ] && script_in_box=/dumps/mock-script.json
 fi
 if [ "$mode" = --mock ]; then
   mock+=(-v "$here:/box:ro"
@@ -40,9 +42,12 @@ if [ "$mode" = --mock ]; then
 fi
 docker run -d --name "$name" --init -p "127.0.0.1:$port:8789" -v "$data:/data" -e BOX_TOKEN "${mock[@]}" "${BOX_IMAGE:-giraffes-box:mvp}"
 if [ "$mode" = --mock ]; then
+  if [ -n "$dumps" ] && [ -z "$script_in_box" ]; then
+    script_in_box=/dumps/mock-script.json
+  fi
   if [ -n "$dumps" ]; then
     # lockdown.sh takes agent's write access to the dumps mount, so the mock writes there as root.
-    docker exec -d "$name" node /box/mock-api.mjs /dumps/mock.log 8788 "$dumps" "$script_in_box"
+    docker exec -d "$name" node /box/mock-api.mjs /dumps/mock.log 8788 "$dumps" /dumps/mock-script.json
   else
     docker exec -d -u agent "$name" node /box/mock-api.mjs /tmp/mock.log 8788 "" "$script_in_box"
   fi

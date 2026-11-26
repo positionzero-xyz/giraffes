@@ -12,7 +12,8 @@ REPO=$(cygpath -m "$(cd "$(git -C "$HERE" rev-parse --path-format=absolute --git
 CHECK="$CHECKOUT/.githooks/check-private.mjs"
 mkdir -p "$1" && OUT=$(cygpath -m "$(cd "$1" && pwd)"); shift
 TSV="$OUT/gates.tsv"
-[ -f "$TSV" ] || printf 'rev\tsha\ttypecheck\tapp_tests\tbox_tests\tlinux_box\tleak_check\n' > "$TSV"
+rm -f "$TSV" || { echo "gates: cannot replace $TSV" >&2; exit 1; }
+printf 'rev\tsha\ttypecheck\tapp_tests\tbox_tests\tlinux_box\tleak_check\n' > "$TSV" || { echo "gates: cannot write $TSV" >&2; exit 1; }
 
 count() { grep -Eo "$2" "$1" | tail -1 | grep -Eo '[0-9]+' | head -1; }
 winrepo=$(cygpath -w "$REPO")
@@ -35,10 +36,10 @@ for rev in "$@"; do
     fi
   done
   git -C "$REPO" worktree remove --force "$wt" 2>/dev/null
-  git -C "$REPO" worktree add --detach "$wt" "$sha" >/dev/null 2>&1 || { printf '%s\t%s\tWORKTREE_FAIL\t\t\t\n' "$rev" "$sha" >> "$TSV"; continue; }
+  git -C "$REPO" worktree add --detach "$wt" "$sha" >/dev/null 2>&1 || { printf '%s\t%s\tWORKTREE_FAIL\t\t\t\n' "$rev" "$sha" >> "$TSV" || { echo "gates: cannot write $TSV" >&2; exit 1; }; continue; }
   winwt=$(cygpath -w "$wt")
   powershell -NoProfile -Command "New-Item -ItemType Junction -Path '$winwt\\app\\node_modules' -Target '$winrepo\\app\\node_modules' | Out-Null"
-  [ -d "$wt/app/node_modules/vitest" ] || { printf '%s\t%s\tNO_NODE_MODULES\t\t\t\n' "$rev" "$sha" >> "$TSV"; continue; }
+  [ -d "$wt/app/node_modules/vitest" ] || { printf '%s\t%s\tNO_NODE_MODULES\t\t\t\n' "$rev" "$sha" >> "$TSV" || { echo "gates: cannot write $TSV" >&2; exit 1; }; continue; }
   boxdeps=missing
   if [ -d "$wt/box" ]; then
     if [ -d "$REPO/box/node_modules" ]; then
@@ -106,12 +107,22 @@ for rev in "$@"; do
   if [ "$ctl" != 1 ]; then leak="CONTROL_FAIL"; elif [ "$lk" = 0 ]; then leak="PASS"; else leak="FAIL see $name.leak.log"; fi
 
   [ "$tc" = 0 ] && tcs=PASS || tcs="FAIL exit=$tc"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rev" "$sha" "$tcs" "$app" "$box" "$lbox" "$leak" >> "$TSV"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rev" "$sha" "$tcs" "$app" "$box" "$lbox" "$leak" >> "$TSV" || { echo "gates: cannot write $TSV" >&2; exit 1; }
 
   powershell -NoProfile -Command "[System.IO.Directory]::Delete('$winwt\\app\\node_modules', \$false)"
   [ -e "$wt/box/node_modules" ] && powershell -NoProfile -Command "[System.IO.Directory]::Delete('$winwt\\box\\node_modules', \$false)"
   git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1
 done
 [ -d "$REPO/app/node_modules/vitest" ] && [ -d "$REPO/box/node_modules/@anthropic-ai/claude-code" ] && echo "main node_modules intact" || echo "WARNING: main node_modules missing"
-cat "$TSV"
-! tail -n "$#" "$TSV" | grep -qE 'FAIL|WORKTREE_FAIL|NO_NODE_MODULES|SKIP'
+if ! cat "$TSV"; then
+  echo "gates: cannot read $TSV" >&2
+  exit 1
+fi
+row_count=$(wc -l < "$TSV") || { echo "gates: cannot count $TSV" >&2; exit 1; }
+expected_rows=$(( $# + 1 ))
+if [ "$row_count" -ne "$expected_rows" ]; then
+  echo "gates: expected $# result row(s), found $((row_count - 1))" >&2
+  exit 1
+fi
+results=$(tail -n "$#" "$TSV") || { echo "gates: cannot read result rows from $TSV" >&2; exit 1; }
+! printf '%s\n' "$results" | grep -qE 'FAIL|WORKTREE_FAIL|NO_NODE_MODULES|SKIP'

@@ -1,10 +1,10 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readTicket, verifyBearer, type SigninTicket } from "./auth.ts";
-import { agentTurn, authStatus, cliVersion, parseTurn, readAgentRequest, readEraseRequest, readParseRequest, spawnClaude, stopClaude, type At, type Cli } from "./claude.ts";
+import { agentTurn, authStatus, cliVersion, deleteSessionTranscripts, isSessionId, parseTurn, readAgentRequest, readEraseRequest, readParseRequest, spawnClaude, stopClaude, type At, type Cli } from "./claude.ts";
 import { diagnostic } from "./diagnostics.ts";
-import { leftovers, loadOrCreateState, saveState, sweep, type PersonFiles } from "./erase.ts";
+import { leftovers, loadOrCreateState, saveState, sweep, writeDurably, type PersonFiles } from "./erase.ts";
 import { readJson, readSigninJson, sendJson } from "./http.ts";
 
 export type BoxOptions = {
@@ -185,6 +185,25 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
     sendJson(res, reply.status, reply.body);
   }
 
+  function writeLegacySession(id: string): boolean {
+    try {
+      writeDurably(sessionFile, id);
+      return true;
+    } catch (err) {
+      diagnostic({ code: "legacy_session_write_failed", error: errorCode(err) });
+      return false;
+    }
+  }
+
+  function legacySession(): string | null {
+    try {
+      return existsSync(sessionFile) ? readFileSync(sessionFile, "utf8").trim() || null : null;
+    } catch (err) {
+      diagnostic({ code: "legacy_session_read_failed", error: errorCode(err) });
+      return null;
+    }
+  }
+
   async function agent(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const arrivedAfter = erasesStarted;
     const parsed = readAgentRequest(await readJson(req));
@@ -195,13 +214,24 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
     });
     const reply = await turnAt(parsed.at, arrivedAfter, abandoned, async () => {
       if (parsed.session !== undefined) {
-        const named = await agentTurn(cli, parsed, abandoned.signal);
-        if (named.status === 200 && parsed.session !== null) writeFileSync(sessionFile, named.body.session.id);
+        const before = parsed.ephemeral !== true ? legacySession() : null;
+        const named = await agentTurn(cli, parsed, abandoned.signal, configDir);
+        if (named.status === 200 && parsed.ephemeral !== true) {
+          const written = writeLegacySession(named.body.session.id);
+          const replaced = before !== null && before !== named.body.session.id && isSessionId(before);
+          const unavailable = replaced ? deleteSessionTranscripts(configDir, [before]) : true;
+          if (!written && replaced && !unavailable) return { status: 502, body: { error: "claude_failed" } };
+        }
         return named;
       }
-      const session = existsSync(sessionFile) ? readFileSync(sessionFile, "utf8").trim() || null : null;
-      const result = await agentTurn(cli, { ...parsed, session }, abandoned.signal);
-      if (result.status === 200 && !result.body.session.resumed) writeFileSync(sessionFile, result.body.session.id);
+      const before = parsed.ephemeral === true ? null : legacySession();
+      const result = await agentTurn(cli, { ...parsed, session: before }, abandoned.signal, configDir);
+      if (result.status === 200 && parsed.ephemeral !== true) {
+        const written = result.body.session.resumed ? true : writeLegacySession(result.body.session.id);
+        const replaced = before !== null && before !== result.body.session.id && isSessionId(before);
+        const unavailable = replaced ? deleteSessionTranscripts(configDir, [before]) : true;
+        if (!written && replaced && !unavailable) return { status: 502, body: { error: "claude_failed" } };
+      }
       return result;
     });
     sendJson(res, reply.status, reply.body);

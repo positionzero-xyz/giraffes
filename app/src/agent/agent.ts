@@ -688,7 +688,12 @@ export class Agent extends DurableObject<Env> {
         const check = await fly?.retirementRecheck(box.name, step.target);
         if (check && !check.ok && check.missing) return { kind: "reclaimed", host: "fly" };
         if (!check?.ok) return step;
-        if (check.state === "gone") return { kind: "remove-app", box, target: step.target };
+        if (check.state === "gone") {
+          // A disk that disappears before the box acknowledged a wipe never becomes a wiped box.
+          return step.resume === "wipe-fly"
+            ? { kind: "reclaimed", host: "fly" }
+            : { kind: "remove-app", box, target: step.target };
+        }
         return { kind: step.resume, box, target: step.target };
       }
       case "wipe-static":

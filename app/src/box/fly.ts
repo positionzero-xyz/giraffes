@@ -304,12 +304,25 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       const owned = await ownership(name);
       if (failed(owned)) return owned;
       const volumes = await retirementVolumes(name);
-      if (failed(volumes)) return volumes;
+      if (failed(volumes)) {
+        if (!volumes.missing) return volumes;
+        // A missing volume list is not proof the app is gone: the app read just succeeded.
+        const again = await ownership(name);
+        return failed(again) ? again : fail(true, "volume list unavailable");
+      }
       const live = volumes.filter((v) => !GONE_VOLUME.has(v.state));
       const saved = target.disk ? [target.disk] : target.disks ?? [];
       if (live.length === 0) return { ok: true, state: "gone" };
       if (!target.disk && saved.length > 1) return fail(true, "retirement target includes several unproven disks");
-      if (live.some((v) => !saved.includes(v.id))) return fail(true, "a different live volume appeared");
+      for (const v of live) {
+        if (!saved.includes(v.id)) return fail(true, "a different live volume appeared");
+        const attached = v.attached_machine_id ?? null;
+        // A no-wipe target never authorizes a newly mounted disk or its machine.
+        if (!target.disk && attached !== null) return fail(true, "volume attached without a wipe");
+        if (target.disk && attached !== null && attached !== target.machine) {
+          return fail(true, "volume attached to a different machine");
+        }
+      }
       return { ok: true, state: "present" };
     },
     async retireWipedDisk(name, target) {
@@ -329,6 +342,13 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       const live = volumes.filter((v) => !GONE_VOLUME.has(v.state));
       const known = new Set(disks);
       if (live.some((v) => !known.has(v.id))) return fail(true, "unexpected live volume remains");
+      for (const v of live) {
+        const attached = v.attached_machine_id ?? null;
+        if (target.disk === null && attached !== null) return fail(true, "volume attached without a wipe");
+        if (target.disk !== null && attached !== null && attached !== target.machine) {
+          return fail(true, "volume attached to a different machine");
+        }
+      }
 
       const machines = new Set<string>();
       if (target.machine) machines.add(target.machine);

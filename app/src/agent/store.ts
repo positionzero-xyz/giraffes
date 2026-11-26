@@ -869,12 +869,7 @@ export class AgentStore {
         commit.waitForAccess ? 1 : 0,
         JSON.stringify(commit.batchKeys),
       );
-      if (commit.admission || !mayspend(this.admission())) {
-        this.sql.exec(
-          "UPDATE inbox SET payload = json_set(payload, '$.text', '') WHERE kind = 'message' AND event_key IN (SELECT value FROM json_each(?))",
-          JSON.stringify(commit.batchKeys),
-        );
-      }
+      if (commit.admission || !mayspend(this.admission())) this.clearInboxText(commit.batchKeys);
       this.insertLogs(logs, now);
       return true;
     });
@@ -1260,7 +1255,16 @@ export class AgentStore {
         state.snapshot, state.cursor_item, state.cursor_offset,
       );
       this.sql.exec("UPDATE inbox SET status = 'done', outcome = 'no_model', finished_at = ? WHERE event_key = ?", now, key);
+      if (!mayspend(this.admission())) this.clearInboxText([key]);
     });
+  }
+
+  /** Someone not admitted is answered, but what they wrote is not kept. */
+  private clearInboxText(keys: readonly EventKey[]): void {
+    this.sql.exec(
+      "UPDATE inbox SET payload = json_set(payload, '$.text', '') WHERE kind = 'message' AND event_key IN (SELECT value FROM json_each(?))",
+      JSON.stringify(keys),
+    );
   }
 
   savedPage(ref: SavedReference, agent: AgentRow): SavedPage | null {

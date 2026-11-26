@@ -71,7 +71,7 @@ describe("the privacy notice page", () => {
   });
 
   test("states the retention periods the store enforces", () => {
-    expect(RETENTION_DAYS).toEqual({ sentCopies: 30, handledIncoming: 14, unusedBox: 2 });
+    expect(RETENTION_DAYS).toEqual({ sentCopies: 30, handledIncoming: 14, unusedBox: 2, boxAfterPlanEnds: 14 });
     const page = privacyPage({ controller: PRIVACY_VARS.PRIVACY_CONTROLLER, contact: PRIVACY_VARS.PRIVACY_CONTACT });
     expect(page).toContain(`Copies of messages Giraffe sent you: removed at the first cleanup after ${RETENTION_DAYS.sentCopies} days.`);
     expect(page).toContain(`ข้อความขาเข้า หลังจาก Giraffe จัดการแล้ว: ลบในการล้างข้อมูลครั้งแรกหลัง ${RETENTION_DAYS.handledIncoming} วัน`);

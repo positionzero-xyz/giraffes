@@ -9,6 +9,7 @@ export const RETENTION_DAYS = {
   sentCopies: days(OUTBOX_KEEP_MS),
   handledIncoming: days(DEDUPE_WINDOW_MS),
   unusedBox: days(BOX.reclaimAfterMs),
+  boxAfterPlanEnds: days(BOX.retireAfterMs),
 } as const;
 
 const escape = (s: string) =>
@@ -64,7 +65,7 @@ function english(controller: string, contact: string): readonly Section[] {
         `Copies of messages Giraffe sent you: removed at the first cleanup after ${r.sentCopies} days. Cleanup runs whenever Giraffe handles a message, reminder or check-in for you.`,
         `Incoming messages, after Giraffe has handled them: removed at the first cleanup after ${r.handledIncoming} days. Before you join, Giraffe clears the text of your messages as soon as it has answered.`,
         `The summary, notes, reminders, tasks, plans, settings and usage records: nothing deletes them automatically yet. To ask for them to be deleted, email ${contact}.`,
-        `The private machine for a Claude plan, and its files: until you remove the connection, or until Giraffe removes it, when nobody signs in for about ${r.unusedBox} days or when your plan no longer includes it.`,
+        `The private machine for a Claude plan, and its files: until you remove the connection. Giraffe also removes it if nobody ever signs in to it, no sooner than about ${r.unusedBox} days after the first sign-in link, and about ${r.boxAfterPlanEnds} days after your plan stops including it.`,
       ],
     },
     {
@@ -127,7 +128,7 @@ function thai(controller: string, contact: string): readonly Section[] {
         `สำเนาข้อความที่ Giraffe ส่งถึงคุณ: ลบในการล้างข้อมูลครั้งแรกหลัง ${r.sentCopies} วัน การล้างข้อมูลทำทุกครั้งที่ Giraffe จัดการข้อความ การเตือน หรือการทักทายให้คุณ`,
         `ข้อความขาเข้า หลังจาก Giraffe จัดการแล้ว: ลบในการล้างข้อมูลครั้งแรกหลัง ${r.handledIncoming} วัน ก่อนคุณเข้าร่วม Giraffe จะล้างข้อความของคุณทันทีหลังตอบ`,
         `สรุป โน้ต การเตือน งาน แผน การตั้งค่า และบันทึกการใช้งาน: ยังไม่มีการลบอัตโนมัติ หากต้องการให้ลบ อีเมลมาที่ ${contact}`,
-        `เครื่องส่วนตัวสำหรับแพ็กเกจ Claude และไฟล์ในเครื่อง: จนกว่าคุณจะลบการเชื่อม หรือจนกว่า Giraffe จะลบเอง เมื่อไม่มีการเข้าสู่ระบบประมาณ ${r.unusedBox} วัน หรือเมื่อแพ็กเกจของคุณไม่รวมบริการนี้แล้ว`,
+        `เครื่องส่วนตัวสำหรับแพ็กเกจ Claude และไฟล์ในเครื่อง: จนกว่าคุณจะลบการเชื่อม นอกจากนี้ Giraffe จะลบเองถ้าไม่เคยมีการเข้าสู่ระบบเลย โดยไม่เร็วกว่าประมาณ ${r.unusedBox} วันหลังส่งลิงก์เข้าสู่ระบบครั้งแรก และประมาณ ${r.boxAfterPlanEnds} วันหลังแพ็กเกจของคุณไม่รวมบริการนี้แล้ว`,
       ],
     },
     {

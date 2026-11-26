@@ -80,6 +80,20 @@ describe("admission to the beta", () => {
     await c.say("hello");
     expect(await c.received()).toEqual(["Hi! What do you need?"]);
     model.assertDone();
+
+    const turnsBefore = await doRows(c.agent, "SELECT seq FROM turn");
+    await c.tap("c2");
+    expect(await c.received()).toEqual([]);
+    expect(await doRows(c.agent, "SELECT seq FROM turn")).toEqual(turnsBefore);
+  });
+
+  test("a waitlisted person's /memory gets an answer, and the command isn't kept", async () => {
+    const c = await devChat("5536", { model: scripted([]), at: "2099-11-04T10:00", channel: "telegram", admission: "beta" });
+    await c.say("hello");
+    await c.say("/memory");
+
+    expect((await c.snapshot()).admission).toMatchObject({ state: "waitlisted" });
+    expect(JSON.stringify(await doRows(c.agent, "SELECT payload FROM inbox"))).not.toContain("/memory");
   });
 
   test("an unknown code, a used one and one for a full beta each waitlist the person and say why", async () => {

@@ -928,8 +928,9 @@ describe("connecting a Claude plan", () => {
     await c.say("hello");
     expect(await c.received()).toEqual([text]);
 
+    box.replies.push({ kind: "reply", step: chat("Hi.") });
     await c.say("/claude");
-    expect(await c.received()).toEqual([boxMessage("setting_up", lang, null).text, boxMessage("connected", lang, null).text]);
+    expect(await c.received()).toEqual([boxMessage("setting_up", lang, null).text, boxMessage("connected", lang, null).text, `${NOTICES[lang].catchUp}\nHi.`]);
     expect((await c.snapshot()).box?.state).toBe("signed_in");
   });
 

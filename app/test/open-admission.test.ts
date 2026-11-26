@@ -38,6 +38,17 @@ describe("open admission asks for consent before anything else", () => {
   });
 
 
+  test.each(["/memory", "/key remove"])("someone left waitlisted by the beta gets the consent message for %s once sign-up is open", async (command) => {
+    const beta = await devChat("6107", { model: scripted([]), at: "2099-11-04T10:00", channel: "telegram", admission: "beta" });
+    await beta.say("hello");
+    expect((await beta.snapshot()).admission).toMatchObject({ state: "waitlisted" });
+
+    const c = await devChat("6107", { model: scripted([]), at: "2099-11-05T10:00", channel: "telegram" });
+    await c.say(command);
+
+    expect(await c.received()).toEqual([NOTICES.en.privacy(NOTICE_URL)]);
+  });
+
   test("the consent tap admits the person, logs consent once, starts check-ins, and their next message is answered", async () => {
     const model = scripted([chat("Hi! What do you need?")]);
     const c = await devChat("6102", { model, at: "2099-11-04T10:00", channel: "telegram" });

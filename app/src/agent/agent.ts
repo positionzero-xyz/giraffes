@@ -599,9 +599,10 @@ export class Agent extends DurableObject<Env> {
     const item = batch.items[0];
     const first = item.event;
     const command = commandOf(first);
-    const stranger = this.#store.admission().state === "stranger";
+    const before = this.#store.admission().state;
+    const awaitingConsent = before === "stranger" || (this.#deps.admission === "open" && (before === "waitlisted" || before === "consenting"));
     if (command?.kind === "memory" || command?.kind === "memory_next") {
-      if (stranger) return this.#admission(this.#view(batch, a), a);
+      if (awaitingConsent) return this.#admission(this.#view(batch, a), a);
       return this.#store.queueSavedPage({
         key: item.key, restart: command.kind === "memory", now: this.#deps.clock.now(),
         reply: first.kind === "message" ? first.reply : undefined,
@@ -611,7 +612,7 @@ export class Agent extends DurableObject<Env> {
     const view = this.#view(batch, a);
     const bypass = bypassModel(view);
     if (bypass) return this.#commit(planWithoutModel(view, bypass), view, a.key, { kind: "none" });
-    if (!stranger && command?.kind === "key_remove") return this.#keyCommand(command, view, a.key);
+    if (!awaitingConsent && command?.kind === "key_remove") return this.#keyCommand(command, view, a.key);
     if (!mayspend(view.admission)) return this.#admission(view, a);
     if (first.kind === "choice" && first.choice.kind === "consent") {
       return this.#commit(planWithoutModel(view, { kind: "ignored" }), view, a.key, { kind: "none" });

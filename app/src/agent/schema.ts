@@ -550,6 +550,7 @@ export const MIGRATIONS: readonly string[] = [
     action        TEXT NOT NULL,
     operation_id  TEXT NOT NULL UNIQUE,
     args          TEXT NOT NULL,
+    epoch         INTEGER NOT NULL,
     status        TEXT NOT NULL CHECK (status IN ('approval_pending', 'ready', 'verifying', 'uncertain', 'succeeded', 'failed', 'dropped')),
     attempt       INTEGER NOT NULL DEFAULT 0,
     in_doubt      INTEGER NOT NULL DEFAULT 0 CHECK (in_doubt IN (0, 1)),
@@ -576,7 +577,7 @@ export const MIGRATIONS: readonly string[] = [
   );
 
   CREATE TRIGGER outside_write_immutable
-  BEFORE UPDATE OF intent, provider, action, operation_id, args ON outside_write
+  BEFORE UPDATE OF intent, provider, action, operation_id, args, epoch ON outside_write
   BEGIN
     SELECT RAISE (ABORT, 'outside write action is immutable');
   END;

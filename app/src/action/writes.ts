@@ -1,4 +1,4 @@
-import type { AgentKey, Brand, EpochMs } from "../domain";
+import type { AgentKey, Brand, EpochMs, ForgetEpoch } from "../domain";
 import { canonicalJsonObject, parseJsonObject, type JsonObject } from "./json";
 
 export type OutsideWriteId = Brand<string, "OutsideWriteId">;
@@ -15,6 +15,7 @@ export type OutsideWrite = {
   readonly action: string;
   readonly operationId: OperationId;
   readonly args: JsonObject;
+  readonly epoch: ForgetEpoch;
   readonly status: OutsideWriteStatus;
   readonly attempt: number;
   readonly leaseUntil: EpochMs | null;
@@ -32,6 +33,7 @@ export type NewOutsideWrite = {
   readonly action: string;
   readonly operationId: OperationId;
   readonly args: JsonObject;
+  readonly epoch: ForgetEpoch;
   readonly status: "approval_pending" | "ready";
   readonly now: EpochMs;
 };
@@ -66,6 +68,7 @@ export function prepareOutsideWrite(input: {
   readonly provider: string;
   readonly action: string;
   readonly args: unknown;
+  readonly epoch: ForgetEpoch;
   readonly now: EpochMs;
   readonly approval?: { readonly owner: AgentKey; readonly expiresAt: EpochMs };
 }): OutsideWriteDraft | null {
@@ -80,6 +83,7 @@ export function prepareOutsideWrite(input: {
       action: input.action,
       operationId: `ow_${crypto.randomUUID()}` as OperationId,
       args,
+      epoch: input.epoch,
       status: input.approval ? "approval_pending" : "ready",
       now: input.now,
     },
@@ -104,10 +108,11 @@ export type OutsideWriteAnswer =
 export type OutsideCheckAnswer =
   | { readonly kind: "accepted"; readonly receipt: JsonObject }
   | { readonly kind: "rejected"; readonly reason: string }
-  | { readonly kind: "not_found" }
+  | { readonly kind: "not_found"; readonly attemptSettled?: boolean }
   | { readonly kind: "unknown" };
 
 export type OutsideProvider = {
+  readonly dedupesByOperationId?: boolean;
   write(call: OutsideWriteCall, signal: AbortSignal): Promise<OutsideWriteAnswer>;
   check(call: OutsideWriteCall, signal: AbortSignal): Promise<OutsideCheckAnswer>;
 };
@@ -125,7 +130,7 @@ export type WriteReconciliation =
 
 export type OutsideWriteStore = {
   outsideWrite(id: OutsideWriteId): OutsideWrite | null;
-  beginOutsideWrite(id: OutsideWriteId, now: EpochMs, leaseMs: number): { readonly attempt: number } | null;
+  beginOutsideWrite(id: OutsideWriteId, now: EpochMs, leaseMs: number, epoch: ForgetEpoch): { readonly attempt: number } | null;
   finishOutsideWrite(id: OutsideWriteId, attempt: number, outcome: WriteFinish, now: EpochMs): boolean;
   reconcileOutsideWrite(id: OutsideWriteId, attempt: number, outcome: WriteReconciliation, now: EpochMs): boolean;
 };
@@ -137,7 +142,8 @@ export type ApprovalConsumption = { readonly kind: "consumed" | "mismatched" | "
 
 export type OutsideWritePut =
   | { readonly kind: "created" | "existing"; readonly write: OutsideWrite; readonly approval: OutsideApproval | null }
-  | { readonly kind: "conflict"; readonly write: OutsideWrite };
+  | { readonly kind: "conflict"; readonly write: OutsideWrite }
+  | { readonly kind: "stale" };
 
 const callOf = (write: OutsideWrite): OutsideWriteCall => ({
   intent: write.intent,
@@ -178,14 +184,14 @@ function answerOutcome(answer: OutsideWriteAnswer): WriteFinish {
   return answer.kind === "accepted" ? { kind: "succeeded", receipt: answer.receipt } : { kind: "failed", reason: answer.reason };
 }
 
-function checkOutcome(answer: OutsideCheckAnswer): WriteReconciliation {
+function checkOutcome(answer: OutsideCheckAnswer, provider: OutsideProvider): WriteReconciliation {
   switch (answer.kind) {
     case "accepted":
       return { kind: "succeeded", receipt: answer.receipt };
     case "rejected":
       return { kind: "failed", reason: answer.reason };
     case "not_found":
-      return { kind: "ready" };
+      return provider.dedupesByOperationId === true || answer.attemptSettled === true ? { kind: "ready" } : { kind: "uncertain" };
     case "unknown":
       return { kind: "uncertain" };
   }
@@ -202,7 +208,7 @@ export async function advanceOutsideWrite(
   if (current === null) return null;
   if (current.status === "approval_pending" || current.status === "succeeded" || current.status === "failed" || current.status === "dropped") return current;
   if (current.status === "ready") {
-    const begun = store.beginOutsideWrite(id, clock.now(), leaseMs);
+    const begun = store.beginOutsideWrite(id, clock.now(), leaseMs, current.epoch);
     if (begun === null) return store.outsideWrite(id);
     let outcome: WriteFinish;
     try {
@@ -220,6 +226,6 @@ export async function advanceOutsideWrite(
   } catch {
     answer = { kind: "unknown" };
   }
-  store.reconcileOutsideWrite(id, current.attempt, checkOutcome(answer), clock.now());
+  store.reconcileOutsideWrite(id, current.attempt, checkOutcome(answer, provider), clock.now());
   return store.outsideWrite(id);
 }

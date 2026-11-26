@@ -1,9 +1,10 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { expect, test } from "vitest";
 import { advanceOutsideWrite, outsideApprovalView, prepareOutsideWrite, type OutsideProvider, type OutsideWriteCall } from "../src/action/writes";
-import type { JsonObject } from "../src/action/json";
+import { canonicalJsonObject, parseJsonObject, type JsonObject } from "../src/action/json";
 import { AgentStore } from "../src/agent/store";
-import type { AgentKey, EpochMs } from "../src/domain";
+import { MIGRATIONS, migrate } from "../src/agent/schema";
+import type { AgentKey, EpochMs, ForgetEpoch } from "../src/domain";
 import { fakeClock, local } from "./testkit";
 
 const owner = "p:telegram:owner" as AgentKey;
@@ -33,7 +34,7 @@ function fakeOutsideProvider(writeSteps: readonly WriteStep[] = [], checkSteps: 
       if (step === "unknown") return { kind: "unknown" };
       const receipt = accepted.get(call.operationId);
       if (step === "truth" && receipt !== undefined) return { kind: "accepted", receipt };
-      return { kind: "not_found" };
+      return { kind: "not_found", attemptSettled: true };
     },
   };
   return { provider, writes, checks };
@@ -48,7 +49,7 @@ const start = local("2099-11-04T10:00");
 const sendArgs = { to: "a@example.com", subject: "Lunch", body: "Shall we eat at noon?" };
 
 function draft(intent: string, args: unknown = sendArgs, now: EpochMs = start, approval: { readonly owner: AgentKey; readonly expiresAt: EpochMs } | undefined = undefined) {
-  const made = prepareOutsideWrite({ intent, provider: "mail", action: "send", args, now, approval });
+  const made = prepareOutsideWrite({ intent, provider: "mail", action: "send", args, epoch: 0 as ForgetEpoch, now, approval });
   if (!made) throw new Error("bad test write");
   return made;
 }
@@ -61,7 +62,7 @@ test("a repeated write intent reuses the durable record and its stable operation
     const repeated = store.putOutsideWrite(replay.write, null);
     expect(created.kind).toBe("created");
     expect(repeated.kind).toBe("existing");
-    if (created.kind === "conflict" || repeated.kind === "conflict") throw new Error("unexpected conflict");
+    if (created.kind !== "created" && created.kind !== "existing" || repeated.kind !== "created" && repeated.kind !== "existing") throw new Error("unexpected conflict");
     expect(repeated.write.id).toBe(created.write.id);
     expect(repeated.write.operationId).toBe(created.write.operationId);
     expect(repeated.write.operationId).not.toBe(replay.write.operationId);
@@ -77,7 +78,7 @@ test("a replayed approval request keeps the original approval rather than extend
     const replay = draft("event-12:send-0", sendArgs, (start + 1_000) as EpochMs, { owner, expiresAt: laterExpiry });
     const created = store.putOutsideWrite(first.write, first.approval);
     const repeated = store.putOutsideWrite(replay.write, replay.approval);
-    if (created.kind === "conflict" || repeated.kind === "conflict" || !created.approval || !repeated.approval) throw new Error("unexpected conflict");
+    if (created.kind !== "created" && created.kind !== "existing" || repeated.kind !== "created" && repeated.kind !== "existing" || !created.approval || !repeated.approval) throw new Error("unexpected conflict");
     expect(repeated.kind).toBe("existing");
     expect(repeated.approval.id).toBe(created.approval.id);
     expect(repeated.approval.expiresAt).toBe(firstExpiry);
@@ -90,7 +91,7 @@ test("a lost response is reconciled from the provider before any retry and does 
     const fake = fakeOutsideProvider(["accept_then_lost"]);
     const made = draft("event-2:send-0");
     const put = store.putOutsideWrite(made.write, null);
-    if (put.kind === "conflict") throw new Error("unexpected conflict");
+    if (put.kind !== "created" && put.kind !== "existing") throw new Error("unexpected conflict");
 
     const first = await advanceOutsideWrite(store, fake.provider, put.write.id, clock);
     expect(first).toMatchObject({ status: "uncertain", receipt: null, attempt: 1 });
@@ -111,7 +112,7 @@ test("a write retried only after a real not-found check keeps the same operation
     const fake = fakeOutsideProvider(["lost", "accept"], ["not_found"]);
     const made = draft("event-3:send-0");
     const put = store.putOutsideWrite(made.write, null);
-    if (put.kind === "conflict") throw new Error("unexpected conflict");
+    if (put.kind !== "created" && put.kind !== "existing") throw new Error("unexpected conflict");
 
     expect((await advanceOutsideWrite(store, fake.provider, put.write.id, clock))?.status).toBe("uncertain");
     expect((await advanceOutsideWrite(store, fake.provider, put.write.id, clock))?.status).toBe("ready");
@@ -129,7 +130,7 @@ test("an unknown outcome stays uncertain and is never retried blindly", async ()
     const fake = fakeOutsideProvider(["accept_then_lost"], ["unknown"]);
     const made = draft("event-4:send-0");
     const put = store.putOutsideWrite(made.write, null);
-    if (put.kind === "conflict") throw new Error("unexpected conflict");
+    if (put.kind !== "created" && put.kind !== "existing") throw new Error("unexpected conflict");
 
     expect((await advanceOutsideWrite(store, fake.provider, put.write.id, clock))?.status).toBe("uncertain");
     expect((await advanceOutsideWrite(store, fake.provider, put.write.id, clock))?.status).toBe("uncertain");
@@ -145,9 +146,9 @@ test("a lease abandoned by a crash is checked rather than treated as done or ret
     const fake = fakeOutsideProvider(["accept"]);
     const made = draft("event-7:send-0");
     const put = store.putOutsideWrite(made.write, null);
-    if (put.kind === "conflict") throw new Error("unexpected conflict");
+    if (put.kind !== "created" && put.kind !== "existing") throw new Error("unexpected conflict");
 
-    const begun = store.beginOutsideWrite(put.write.id, start, 1_000);
+    const begun = store.beginOutsideWrite(put.write.id, start, 1_000, put.write.epoch);
     expect(begun).toEqual({ attempt: 1 });
     await fake.provider.write(
       { intent: put.write.intent, provider: put.write.provider, action: put.write.action, operationId: put.write.operationId, args: put.write.args },
@@ -170,7 +171,7 @@ test("the exact action stored for an approval cannot be edited underneath it", a
     const expiresAt = (start + 15 * 60_000) as EpochMs;
     const made = draft("event-8:send-0", sendArgs, start, { owner, expiresAt });
     const put = store.putOutsideWrite(made.write, made.approval);
-    if (put.kind === "conflict" || !put.approval) throw new Error("approval missing");
+    if (put.kind !== "created" && put.kind !== "existing" || !put.approval) throw new Error("approval missing");
 
     const approval = put.approval;
     const view = outsideApprovalView(put.write, approval);
@@ -190,9 +191,9 @@ test("a forget closes waiting and in-flight outside writes without recovery or r
     const expiresAt = (start + 15 * 60_000) as EpochMs;
     const approved = draft("event-11:send-1", sendArgs, start, { owner, expiresAt });
     const approvedPut = store.putOutsideWrite(approved.write, approved.approval);
-    if (waitingPut.kind === "conflict" || approvedPut.kind === "conflict" || !approvedPut.approval) throw new Error("unexpected conflict");
+    if (waitingPut.kind !== "created" && waitingPut.kind !== "existing" || approvedPut.kind !== "created" && approvedPut.kind !== "existing" || !approvedPut.approval) throw new Error("unexpected conflict");
 
-    expect(store.beginOutsideWrite(waitingPut.write.id, start, 1_000)).toEqual({ attempt: 1 });
+    expect(store.beginOutsideWrite(waitingPut.write.id, start, 1_000, waitingPut.write.epoch)).toEqual({ attempt: 1 });
     store.beginForget({ at: start, seq: null }, start);
 
     expect(store.outsideWrite(waitingPut.write.id)).toMatchObject({ status: "dropped", inDoubt: true, leaseUntil: null });
@@ -213,7 +214,7 @@ test("the owner approves the exact write once; others, repeats and changed argum
     const expiresAt = (start + 15 * 60_000) as EpochMs;
     const made = draft("event-5:send-0", sendArgs, start, { owner, expiresAt });
     const put = store.putOutsideWrite(made.write, made.approval);
-    if (put.kind === "conflict" || !put.approval) throw new Error("approval missing");
+    if (put.kind !== "created" && put.kind !== "existing" || !put.approval) throw new Error("approval missing");
 
     expect((await advanceOutsideWrite(store, fake.provider, put.write.id, clock))?.status).toBe("approval_pending");
     expect(store.decideOutsideApproval(put.approval.id, other, "approve", clock.now())).toEqual({ kind: "wrong_owner" });
@@ -221,7 +222,7 @@ test("the owner approves the exact write once; others, repeats and changed argum
 
     const changed = draft("event-5:send-1", { ...sendArgs, body: "Shall we eat at one?" }, start, { owner, expiresAt });
     const changedPut = store.putOutsideWrite(changed.write, changed.approval);
-    if (changedPut.kind === "conflict") throw new Error("unexpected conflict");
+    if (changedPut.kind !== "created" && changedPut.kind !== "existing") throw new Error("unexpected conflict");
     expect(store.consumeOutsideApproval(put.approval.id, changedPut.write.id, clock.now())).toEqual({ kind: "mismatched" });
     expect(store.outsideWrite(changedPut.write.id)?.status).toBe("approval_pending");
 
@@ -246,7 +247,7 @@ test("a definite provider rejection is a durable failure, not an uncertain retry
     };
     const made = draft("event-9:send-0");
     const put = store.putOutsideWrite(made.write, null);
-    if (put.kind === "conflict") throw new Error("unexpected conflict");
+    if (put.kind !== "created" && put.kind !== "existing") throw new Error("unexpected conflict");
     expect((await advanceOutsideWrite(store, provider, put.write.id, clock))).toMatchObject({ status: "failed", failure: "recipient address refused", receipt: null });
   });
 });
@@ -256,7 +257,7 @@ test("refusing an approval terminally refuses the bound write", async () => {
     const expiresAt = (start + 15 * 60_000) as EpochMs;
     const made = draft("event-10:send-0", sendArgs, start, { owner, expiresAt });
     const put = store.putOutsideWrite(made.write, made.approval);
-    if (put.kind === "conflict" || !put.approval) throw new Error("approval missing");
+    if (put.kind !== "created" && put.kind !== "existing" || !put.approval) throw new Error("approval missing");
     expect(store.decideOutsideApproval(put.approval.id, owner, "refuse", start)).toEqual({ kind: "refused" });
     expect(store.outsideWrite(put.write.id)).toMatchObject({ status: "failed", failure: "approval refused" });
     expect(store.consumeOutsideApproval(put.approval.id, put.write.id, start)).toEqual({ kind: "not_approved" });
@@ -268,10 +269,86 @@ test("an approval expires before it can run", async () => {
     const expiresAt = (start + 1_000) as EpochMs;
     const made = draft("event-6:send-0", sendArgs, start, { owner, expiresAt });
     const put = store.putOutsideWrite(made.write, made.approval);
-    if (put.kind === "conflict" || !put.approval) throw new Error("approval missing");
+    if (put.kind !== "created" && put.kind !== "existing" || !put.approval) throw new Error("approval missing");
     expect(store.decideOutsideApproval(put.approval.id, owner, "approve", start)).toEqual({ kind: "approved" });
     expect(store.consumeOutsideApproval(put.approval.id, put.write.id, expiresAt)).toEqual({ kind: "expired" });
     expect(store.outsideWrite(put.write.id)).toMatchObject({ status: "failed", failure: "approval expired" });
     expect(store.outsideApproval(put.approval.id)?.status).toBe("expired");
+  });
+});
+
+test("a provider request held past its lease is never duplicated while it may still be pending", async () => {
+  await inStore("lease-race", async (store) => {
+    const clock = fakeClock(start);
+    let effects = 0;
+    let checks = 0;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const provider: OutsideProvider = {
+      async write(call) {
+        effects += 1;
+        await gate;
+        return { kind: "accepted", receipt: { id: "first", operation: call.operationId } };
+      },
+      async check(call) {
+        checks += 1;
+        if (checks === 1) return { kind: "not_found" };
+        return { kind: "accepted", receipt: { id: "first", operation: call.operationId } };
+      },
+    };
+    const made = draft("event-13:send-0");
+    const put = store.putOutsideWrite(made.write, null);
+    if (put.kind !== "created" && put.kind !== "existing") throw new Error("unexpected conflict");
+
+    const firstAdvance = advanceOutsideWrite(store, provider, put.write.id, clock, 10);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    clock.set((start + 11) as EpochMs);
+    expect((await advanceOutsideWrite(store, provider, put.write.id, clock, 10))?.status).toBe("uncertain");
+    expect(effects).toBe(1);
+
+    release();
+    await firstAdvance;
+    expect((await advanceOutsideWrite(store, provider, put.write.id, clock, 10))?.status).toBe("succeeded");
+    expect(effects).toBe(1);
+    expect(checks).toBe(2);
+  });
+});
+
+test("work drafted before a forget is stale and cannot be inserted after it", async () => {
+  await inStore("forget-stale-insert", (store) => {
+    const staleDraft = draft("event-14:send-0");
+    const forget = store.beginForget({ at: start, seq: null }, start);
+    expect(store.putOutsideWrite(staleDraft.write, staleDraft.approval).kind).toBe("stale");
+    store.endForget(forget.op);
+    expect(store.putOutsideWrite(staleDraft.write, staleDraft.approval).kind).toBe("stale");
+
+    const live = prepareOutsideWrite({ intent: "event-15:send-0", provider: "mail", action: "send", args: sendArgs, epoch: 1 as ForgetEpoch, now: start });
+    if (!live) throw new Error("bad test write");
+    expect(store.putOutsideWrite(live.write, live.approval).kind).toBe("created");
+  });
+});
+
+test("canonical JSON preserves an own __proto__ field", () => {
+  const parsed = parseJsonObject(JSON.parse('{"__proto__":{"x":1},"safe":2}'));
+  if (!parsed) throw new Error("parse failed");
+  expect(canonicalJsonObject(parsed)).toBe('{"__proto__":{"x":1},"safe":2}');
+});
+
+test("schema v26 upgrades to the action-safety migration", async () => {
+  const stub = env.AGENT.get(env.AGENT.idFromName("action-migration-v26"));
+  await runInDurableObject(stub, (_agent, state) => {
+    expect(MIGRATIONS.length).toBe(27);
+    state.storage.sql.exec("DROP TRIGGER IF EXISTS outside_approval_immutable");
+    state.storage.sql.exec("DROP TRIGGER IF EXISTS outside_write_immutable");
+    state.storage.sql.exec("DROP TABLE IF EXISTS outside_approval");
+    state.storage.sql.exec("DROP TABLE IF EXISTS outside_write");
+    state.storage.sql.exec("UPDATE meta SET v = '26' WHERE k = 'schema_version'");
+    migrate(state.storage);
+    const version = state.storage.sql.exec<{ v: string }>("SELECT v FROM meta WHERE k = 'schema_version'").one().v;
+    const tables = state.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('outside_write', 'outside_approval') ORDER BY name").toArray().map((r) => r.name);
+    expect(version).toBe(String(MIGRATIONS.length));
+    expect(tables).toEqual(["outside_approval", "outside_write"]);
   });
 });

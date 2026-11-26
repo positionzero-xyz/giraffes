@@ -21,7 +21,7 @@ export function parseJsonValue(value: unknown): JsonValue | undefined {
   for (const [key, field] of Object.entries(value)) {
     const parsed = parseJsonValue(field);
     if (parsed === undefined) return undefined;
-    out[key] = parsed;
+    Object.defineProperty(out, key, { value: parsed, writable: true, enumerable: true, configurable: true });
   }
   return out;
 }

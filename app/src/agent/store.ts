@@ -290,6 +290,7 @@ type OutsideWriteCols = {
   action: string;
   operation_id: OutsideWrite["operationId"];
   args: string;
+  epoch: ForgetEpoch;
   status: OutsideWriteStatus;
   attempt: number;
   in_doubt: number;
@@ -383,6 +384,7 @@ function toOutsideWrite(r: OutsideWriteCols): OutsideWrite {
     action: r.action,
     operationId: r.operation_id,
     args: jsonObject(r.args),
+    epoch: r.epoch,
     status: r.status,
     attempt: r.attempt,
     inDoubt: r.in_doubt === 1,
@@ -1716,15 +1718,18 @@ export class AgentStore {
 
   putOutsideWrite(write: NewOutsideWrite, approval: NewOutsideApproval | null): OutsideWritePut {
     return this.tx(() => {
+      const forget = this.forget();
+      if (forget.op !== null || forget.epoch !== write.epoch) return { kind: "stale" };
       const inserted = this.sql.exec(
-        `INSERT OR IGNORE INTO outside_write (id, intent, provider, action, operation_id, args, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO outside_write (id, intent, provider, action, operation_id, args, epoch, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         write.id,
         write.intent,
         write.provider,
         write.action,
         write.operationId,
         canonicalJsonObject(write.args),
+        write.epoch,
         write.status,
         write.now,
         write.now,
@@ -1746,7 +1751,7 @@ export class AgentStore {
       }
       const existing = this.sql
         .exec<OutsideWriteCols>(
-          "SELECT id, intent, provider, action, operation_id, args, status, attempt, in_doubt, lease_until, receipt, failure, created_at, updated_at FROM outside_write WHERE intent = ?",
+          "SELECT id, intent, provider, action, operation_id, args, epoch, status, attempt, in_doubt, lease_until, receipt, failure, created_at, updated_at FROM outside_write WHERE intent = ?",
           write.intent,
         )
         .toArray()[0];
@@ -1767,7 +1772,7 @@ export class AgentStore {
   outsideWrite(id: OutsideWriteId): OutsideWrite | null {
     const r = this.sql
       .exec<OutsideWriteCols>(
-        "SELECT id, intent, provider, action, operation_id, args, status, attempt, in_doubt, lease_until, receipt, failure, created_at, updated_at FROM outside_write WHERE id = ?",
+        "SELECT id, intent, provider, action, operation_id, args, epoch, status, attempt, in_doubt, lease_until, receipt, failure, created_at, updated_at FROM outside_write WHERE id = ?",
         id,
       )
       .toArray()[0];
@@ -1794,14 +1799,18 @@ export class AgentStore {
     return r ? toOutsideApproval(r) : null;
   }
 
-  beginOutsideWrite(id: OutsideWriteId, now: EpochMs, leaseMs: number): { readonly attempt: number } | null {
+  beginOutsideWrite(id: OutsideWriteId, now: EpochMs, leaseMs: number, epoch: ForgetEpoch): { readonly attempt: number } | null {
     const r = this.sql
       .exec<{ attempt: number }>(
         `UPDATE outside_write SET status = 'verifying', attempt = attempt + 1, lease_until = ?, updated_at = ?
-         WHERE id = ? AND status = 'ready' RETURNING attempt`,
+         WHERE id = ? AND status = 'ready' AND epoch = ?
+           AND EXISTS (SELECT 1 FROM forget WHERE op IS NULL AND epoch = ?)
+         RETURNING attempt`,
         (now + leaseMs) as EpochMs,
         now,
         id,
+        epoch,
+        epoch,
       )
       .toArray()[0];
     return r ?? null;

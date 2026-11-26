@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -6,10 +7,11 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createBox } from "../src/server.ts";
-import { startMock, type RunningMock } from "./mock.ts";
+import { mockPort } from "./mock-port.ts";
 
 // BOX_TEST_CLI points at the Linux CLI inside the box image; the default is the sibling npm install.
 const CLI = process.env.BOX_TEST_CLI ?? fileURLToPath(new URL("../node_modules/@anthropic-ai/claude-code/bin/claude.exe", import.meta.url));
+const MOCK = fileURLToPath(new URL("../mock-api.mjs", import.meta.url));
 const TOKEN = "b-agent-test-token-0123456789abcdefghijklmnop";
 const APPEND = "You are Giraffe, a personal assistant.";
 const GONE = "11111111-2222-3333-4444-555555555555";
@@ -47,7 +49,7 @@ function sent(): Sent[] {
 }
 const userTexts = (s: Sent): string[] => s.messages.filter((m) => m.role === "user").map((m) => textOf(m.content)).filter((t) => t.trim());
 
-let mock: RunningMock;
+let mock: ChildProcess;
 let base = "";
 const stateDir = join(dir, "state");
 mkdirSync(stateDir, { recursive: true });
@@ -65,14 +67,15 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     for (const k of Object.keys(process.env)) if (k.startsWith("CLAUDE") || k.startsWith("ANTHROPIC")) delete process.env[k];
     writeFileSync(script, JSON.stringify({ calls: [], text: "" }));
     mkdirSync(dumps);
-    mock = await startMock(mockLog, dumps, script);
-    Object.assign(process.env, { CLAUDE_CONFIG_DIR: join(dir, "config"), ANTHROPIC_BASE_URL: `http://127.0.0.1:${mock.port}`, ANTHROPIC_API_KEY: "sk-ant-api03-mock-not-a-key" });
+    mock = spawn(process.execPath, [MOCK, mockLog, "0", dumps, script], { stdio: ["ignore", "pipe", "inherit"] });
+    const port = await mockPort(mock);
+    Object.assign(process.env, { CLAUDE_CONFIG_DIR: join(dir, "config"), ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`, ANTHROPIC_API_KEY: "sk-ant-api03-mock-not-a-key" });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
   after(() => {
     server.close();
-    mock.proc.kill();
+    mock.kill();
   });
 
   it("returns the reply text, the tool calls Giraffe's server accepted, in order, and the new session it started", async () => {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -7,10 +8,11 @@ import { join, relative } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createBox } from "../src/server.ts";
-import { startMock, type RunningMock } from "./mock.ts";
+import { mockPort } from "./mock-port.ts";
 
 // BOX_TEST_CLI points at the Linux CLI inside the box image; the default is the sibling npm install.
 const CLI = process.env.BOX_TEST_CLI ?? fileURLToPath(new URL("../node_modules/@anthropic-ai/claude-code/bin/claude.exe", import.meta.url));
+const MOCK = fileURLToPath(new URL("../mock-api.mjs", import.meta.url));
 const TOKEN = "b-erase-test-token-0123456789abcdefghijklmnop";
 const APPEND = "You are Giraffe, a personal assistant.";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -33,7 +35,7 @@ const dumps = join(dir, "dumps");
 
 const REMEMBER = { name: "remember", description: "Remember a fact.", inputSchema: { type: "object", properties: { note: { type: "string" } }, required: ["note"] } };
 
-let mock: RunningMock;
+let mock: ChildProcess;
 const boxes: Server[] = [];
 
 async function listen(opts: { scratchDirs?: readonly string[]; stateFile?: string; requireEpoch?: boolean } = {}): Promise<string> {
@@ -109,13 +111,13 @@ describe("erasing the person's words from the box", { skip: existsSync(CLI) ? fa
     writeFileSync(join(config, ".credentials.json"), CREDENTIALS);
     writeFileSync(join(config, ".claude.json"), JSON.stringify({ oauthAccount: ACCOUNT, tipsHistory: { "MARKER-ZERO-6020": 1 } }));
     writeFileSync(script, JSON.stringify({ calls: [], text: "Noted." }));
-    mock = await startMock(mockLog, dumps, script);
-    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${mock.port}`;
+    mock = spawn(process.execPath, [MOCK, mockLog, "0", dumps, script], { stdio: ["ignore", "pipe", "inherit"] });
+    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${await mockPort(mock)}`;
     base = await listen();
   });
   after(() => {
     for (const server of boxes) server.close();
-    mock.proc.kill();
+    mock.kill();
   });
 
   it("keeps the person's words from a turn in Claude Code's files (the control)", async () => {

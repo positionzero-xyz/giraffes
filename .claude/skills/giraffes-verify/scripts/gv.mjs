@@ -226,7 +226,10 @@ function printRows(raw) {
 }
 
 async function requireHealthy(r) {
-  const bad = (await health(r)).filter(([pass]) => !pass);
+  // Same bar as doctor: a bridge backend whose login can't be checked is not healthy,
+  // so a drive never posts into a run that would only burn or drop the message.
+  const results = [...(await health(r)), ...(r.backend === "bridge" ? [claudeSignedIn()] : [])];
+  const bad = results.filter(([pass]) => !pass);
   if (bad.length) fail(`refusing to drive an unhealthy run:\n${bad.map(([, msg]) => `FAIL ${msg}`).join("\n")}`);
 }
 

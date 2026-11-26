@@ -1123,6 +1123,14 @@ export class Agent extends DurableObject<Env> {
    * Every request names the box's volume, read once from /health, and the epoch of the work that sends it, so an image
    * with erase refuses work from before its last erase. The claim is checked again after each await, right before a fetch.
    */
+  /** True only when the consented backup key is currently healthy and has unspent cap room. */
+  #backupKeyCanServe(now: EpochMs): boolean {
+    const key = this.#store.key();
+    if (!key?.backup || key.health.kind !== "ok") return false;
+    const spend = this.#store.spend("byok", utcMonth(now));
+    return spend.spent + spend.reserved < key.capMicro;
+  }
+
   async #onBox(
     purpose: CallPurpose,
     claim: Claim,
@@ -1163,7 +1171,7 @@ export class Agent extends DurableObject<Env> {
         return { kind: "moved_on", transient: true, told: false };
       case "unavailable":
         diagnostic("box_unavailable");
-        if (this.#store.key()?.backup === true) this.#skipBoxUntil = now + BOX.skipAfterUnavailableMs;
+        if (this.#backupKeyCanServe(now)) this.#skipBoxUntil = now + BOX.skipAfterUnavailableMs;
         this.#store.appendLogs([missed("unavailable")], now);
         return { kind: "moved_on", transient: true, told: false };
       default:

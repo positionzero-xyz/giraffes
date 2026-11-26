@@ -173,7 +173,7 @@ describe("schema", () => {
     await ledger.append([{ stream: "rejection", id: "flushed-row", agent: agent("a"), turnId: "p:dev:a|turn", reason: "tool_refused", at }]);
     await ledger.append([{ stream: "rejection", id: "later-row", agent: agent("a"), turnId: "p:dev:a|turn", reason: "bad_time", at: (at + 1) as EpochMs }]);
 
-    expect((await env.LEDGER.prepare("SELECT id, reason FROM action_rejection").all()).results).toEqual([
+    expect((await env.LEDGER.prepare("SELECT id, reason FROM action_rejection ORDER BY at, id").all()).results).toEqual([
       { id: "legacy-row", reason: "bad_time" },
       { id: "flushed-row", reason: "tool_refused" },
       { id: "later-row", reason: "bad_time" },

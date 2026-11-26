@@ -1,4 +1,4 @@
-import { diagnostic, type DrainPhase } from "../diagnostics";
+import { diagnostic, operatorAlertChatMigrated, type DrainPhase } from "../diagnostics";
 import { DurableObject } from "cloudflare:workers";
 import { draftKey, issueTicket, redactSecrets, seal, type KeyFields } from "../access/key";
 import {
@@ -315,7 +315,7 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #attemptBillingAlert(to: OperatorChat): Promise<BillingAlertSettlement | null> {
-    const { channels, clock } = this.#deps;
+    const { billing, channels, clock } = this.#deps;
     const now = clock.now();
     const route = `${to.channel}:${to.channelUserId}`;
     const alert = this.#store.nextBillingAlert(route, now);
@@ -326,10 +326,13 @@ export class Agent extends DurableObject<Env> {
     this.#store.startBillingAlertAttempt(alert.subscription_ids, (now + backoffMs) as EpochMs, route);
     const destination = alert.telegram_redirect === null ? to : { ...to, channelUserId: alert.telegram_redirect };
     const migrationNote = alert.telegram_redirect === null ? "" : `\nTelegram moved this group. Update OPERATOR_CHAT to telegram:${alert.telegram_redirect}.`;
+    const ownerKey = person?.key ?? this.ctx.id.name;
+    const detectedAt = ownerKey === undefined ? null : await billing.store.duplicateDetectedAt(ownerKey, alert.subscription_ids).catch(() => null);
+    const dateLine = detectedAt === null ? "Detection date unavailable." : `Detected at: ${new Date(detectedAt).toISOString()}`;
     const message = {
       id: alert.delivery_id,
       to: destination,
-      texts: [`Duplicate paid plans\nSubscriptions: ${alert.subscription_ids}\nReview the subscriptions and any extra charges.${migrationNote}`],
+      texts: [`Duplicate paid plans\n${dateLine}\nSubscriptions: ${alert.subscription_ids}\nReview the subscriptions and any extra charges.${migrationNote}`],
       intent: "requested",
     } as const;
     const channel = channels[to.channel];
@@ -341,7 +344,7 @@ export class Agent extends DurableObject<Env> {
       return { ...settlement, kind: "retry", delayMs: backoffMs, text: undefined };
     }
     if (result.kind === "chat_migrated" && alert.telegram_redirect === null && result.chatId !== to.channelUserId) {
-      diagnostic("operator_alert_chat_migrated");
+      operatorAlertChatMigrated(to.channelUserId, result.chatId);
       return { ...settlement, kind: "migrated", chatId: result.chatId, text: undefined };
     }
     if (result.kind === "recipient_gone" || result.kind === "chat_unavailable" || result.kind === "chat_migrated") {
@@ -1453,7 +1456,8 @@ export class Agent extends DurableObject<Env> {
 
   async #armNoLaterThan(t: EpochMs): Promise<void> {
     const current = await this.ctx.storage.getAlarm();
-    if (current === null || current > t) await this.ctx.storage.setAlarm(t);
+    const at = Math.max(t, this.#deps.clock.now());
+    if (current === null || current > at) await this.ctx.storage.setAlarm(at);
   }
 }
 

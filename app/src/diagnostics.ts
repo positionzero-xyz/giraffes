@@ -17,7 +17,6 @@ type Diagnostic = DrainPhase
   | "line_quota_unavailable"
   | "operator_alert_failed"
   | "operator_alert_unconfirmed"
-  | "operator_alert_chat_migrated"
   | "operator_alert_destination_unavailable"
   | "request_failed"
   | "stripe_checkout_expiry_failed"
@@ -32,4 +31,8 @@ type Diagnostic = DrainPhase
 
 export function diagnostic(code: Diagnostic, value?: number): void {
   console.warn(value === undefined ? { code } : { code, value });
+}
+
+export function operatorAlertChatMigrated(oldChatId: string, newChatId: string): void {
+  console.warn({ code: "operator_alert_chat_migrated", oldChatId, newChatId });
 }

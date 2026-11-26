@@ -546,7 +546,7 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE billing_alert ADD COLUMN operator_route TEXT;
   ALTER TABLE billing_alert ADD COLUMN telegram_redirect TEXT;
   ALTER TABLE billing_alert ADD COLUMN destination_wait INTEGER NOT NULL DEFAULT 0;
-  UPDATE billing_alert SET ready_at = 0, notified = 0, closed_as = NULL WHERE closed_as = 'gone';
+  UPDATE billing_alert SET ready_at = unixepoch() * 1000, notified = 0, closed_as = NULL WHERE closed_as = 'gone';
   `,
 ];
 

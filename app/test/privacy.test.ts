@@ -75,6 +75,7 @@ describe("the privacy notice page", () => {
     const page = privacyPage({ controller: PRIVACY_VARS.PRIVACY_CONTROLLER, contact: PRIVACY_VARS.PRIVACY_CONTACT });
     expect(page).toContain(`Copies of messages Giraffe sent you: removed at the first cleanup after ${RETENTION_DAYS.sentCopies} days.`);
     expect(page).toContain(`ข้อความขาเข้า หลังจาก Giraffe จัดการแล้ว: ลบในการล้างข้อมูลครั้งแรกหลัง ${RETENTION_DAYS.handledIncoming} วัน`);
+    expect(page).toContain(`about ${RETENTION_DAYS.boxAfterPlanEnds} days after it finds that your plan no longer includes it. Giraffe checks that when it handles a message, reminder or check-in for you.`);
   });
 
   test("escapes the operator's name and contact", () => {

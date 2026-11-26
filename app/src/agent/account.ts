@@ -1,5 +1,6 @@
 import type { AgentKey, EpochMs, ForgetEpoch, Identity, InviteCode, Language, OutboxId, ReplyHandle } from "../domain";
 import type { CheckoutId } from "../billing/stripe";
+import type { SubscriptionId } from "../billing/plan";
 import type { BoxName } from "../box/names";
 import type { BoxHostKind, FlyDiskRetirement } from "../box/host";
 
@@ -13,7 +14,7 @@ export const ERASE_JOB = "account:erase";
 export type AccountChallenge = { readonly digest: string; readonly expiresAt: EpochMs; readonly epoch: ForgetEpoch };
 export type StartChallenge = AccountChallenge & { readonly invite?: InviteCode };
 
-type EraseBoxTarget = {
+export type EraseBoxTarget = {
   readonly name: BoxName;
   readonly host: BoxHostKind;
   readonly url: string;
@@ -22,11 +23,20 @@ type EraseBoxTarget = {
 
 export type EraseBox =
   | { readonly kind: "none" }
-  | { readonly kind: "find" }
   | { readonly kind: "unverified" }
-  | { readonly kind: "done"; readonly host: BoxHostKind }
+  | { readonly kind: "wiped" | "reclaimed"; readonly host: BoxHostKind }
   | { readonly kind: "locate" | "wipe-static"; readonly box: EraseBoxTarget }
   | { readonly kind: "wipe-fly" | "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement };
+
+export type EraseBilling =
+  | { readonly kind: "pending"; readonly checkouts: readonly CheckoutId[]; readonly subscriptions: readonly SubscriptionId[]; readonly endedSubscription: boolean }
+  | { readonly kind: "done"; readonly endedSubscription: boolean };
+
+type EraseLedger =
+  | { readonly kind: "sweep" | "detach"; readonly invitees: readonly AgentKey[]; readonly members: readonly AgentKey[] }
+  | { readonly kind: "done" };
+
+type EraseBoxReceipt = { readonly kind: "wiped" | "reclaimed"; readonly host: BoxHostKind };
 
 type ErasureIdentity = {
   readonly id: OutboxId;
@@ -38,8 +48,10 @@ type ErasureIdentity = {
 };
 
 export type Erasure = ErasureIdentity & (
-  | { readonly kind: "cleaning"; readonly checkouts: readonly CheckoutId[]; readonly box: EraseBox; readonly paid?: boolean }
-  | { readonly kind: "receipt"; readonly expiresAt: EpochMs; readonly attempted: boolean; readonly hadBox: boolean; readonly paid: boolean }
+  | { readonly kind: "starting" }
+  | { readonly kind: "preparing"; readonly checkouts: readonly CheckoutId[]; readonly box: EraseBoxTarget | null }
+  | { readonly kind: "cleaning"; readonly ledger: EraseLedger; readonly billing: EraseBilling; readonly box: EraseBox }
+  | { readonly kind: "receipt"; readonly expiresAt: EpochMs; readonly attempted: boolean; readonly box: EraseBoxReceipt | null; readonly endedSubscription: boolean }
 );
 
 export async function digestChallenge(value: string): Promise<string> {
@@ -58,20 +70,26 @@ export const ACCOUNT_COPY = {
     confirm: "Stop Giraffe and permanently delete your account data? Your reminders, tasks, and AI connections will end. If you own a paid Giraffe plan, it will be canceled and its shared seats will end. Payment records and provider backups can remain.",
     confirmButton: "Stop and delete",
     pending: "Account deletion is in progress. Giraffe has stopped processing your messages.",
-    restart: "To start using Giraffe, agree to start a new account. Giraffe uses your messages to provide the service. Your chat and AI providers handle data under their own policies. You can send /erase to stop and delete your account.",
-    restartButton: "Start fresh",
+    start: "To use Giraffe, tap Start to agree. Giraffe uses your messages to provide the service. Your chat and AI providers handle data under their own policies. You can send /erase to stop and delete your account.",
+    startButton: "Start",
     receipt: "Giraffe stopped and deleted your live Giraffe data. Cloudflare restore copies can remain for up to 30 days. Your chat and AI providers may keep copies under their own policies.",
-    box: "Fly may retain older disk snapshots for up to 60 days.",
-    billing: "Any Giraffe subscriptions you owned have ended. Stripe may keep required payment records and historical checkout references.",
+    reclaimedBox: "Your box was removed earlier. Giraffe could not verify a disk wipe.",
+    flyCopies: "Fly may retain older disk copies for up to 60 days after removal.",
+    subscriptionEnded: "Any Giraffe subscriptions you owned have ended.",
+    stripeRecords: "If you requested a payment link, Stripe may keep checkout records and historical chat account references, even if you didn’t pay. Stripe may also keep required payment records.",
+    return: "To start fresh, send /start and tap Start.",
   },
   th: {
     confirm: "หยุดใช้ Giraffe และลบข้อมูลบัญชีของคุณอย่างถาวรไหม การเตือน งาน และการเชื่อมต่อ AI จะหยุด หากคุณเป็นเจ้าของแพ็กเกจแบบชำระเงิน แพ็กเกจและสิทธิ์ที่แชร์จะสิ้นสุด ประวัติการชำระเงินและข้อมูลสำรองของผู้ให้บริการอาจยังคงอยู่",
     confirmButton: "หยุดและลบข้อมูล",
     pending: "กำลังลบข้อมูลบัญชี Giraffe หยุดประมวลผลข้อความของคุณแล้ว",
-    restart: "หากต้องการใช้ Giraffe ให้ยืนยันเพื่อเริ่มบัญชีใหม่ Giraffe ใช้ข้อความของคุณเพื่อให้บริการ ผู้ให้บริการแชตและ AI จัดการข้อมูลตามนโยบายของตน คุณส่ง /erase เพื่อหยุดใช้และลบบัญชีได้",
-    restartButton: "เริ่มใหม่",
+    start: "หากต้องการใช้ Giraffe ให้แตะเริ่มเพื่อยืนยัน Giraffe ใช้ข้อความของคุณเพื่อให้บริการ ผู้ให้บริการแชตและ AI จัดการข้อมูลตามนโยบายของตน คุณส่ง /erase เพื่อหยุดใช้และลบบัญชีได้",
+    startButton: "เริ่ม",
     receipt: "Giraffe หยุดทำงานและลบข้อมูลบัญชีที่ใช้งานอยู่แล้ว ข้อมูลสำหรับกู้คืนของ Cloudflare อาจคงอยู่ได้ถึง 30 วัน ผู้ให้บริการแชตและ AI อาจเก็บข้อมูลตามนโยบายของตน",
-    box: "Fly อาจเก็บสำเนาดิสก์เดิมได้ถึง 60 วัน",
-    billing: "หากคุณเป็นเจ้าของแพ็กเกจ Giraffe แพ็กเกจนั้นสิ้นสุดแล้ว Stripe อาจเก็บข้อมูลการชำระเงินที่จำเป็นและข้อมูลอ้างอิงการชำระเงินเดิม",
+    reclaimedBox: "กล่องของคุณถูกนำออกไปก่อนหน้านี้ Giraffe ไม่สามารถยืนยันได้ว่าข้อมูลบนดิสก์ถูกลบแล้ว",
+    flyCopies: "Fly อาจเก็บสำเนาดิสก์เดิมไว้ถึง 60 วันหลังจากนำกล่องออก",
+    subscriptionEnded: "แพ็กเกจ Giraffe แบบชำระเงินที่คุณเป็นเจ้าของสิ้นสุดแล้ว",
+    stripeRecords: "หากคุณเคยขอลิงก์ชำระเงิน Stripe อาจเก็บบันทึกการเปิดหน้าชำระเงินและข้อมูลอ้างอิงบัญชีแชตเดิม แม้ว่าคุณจะไม่ได้ชำระเงิน และอาจเก็บบันทึกการชำระเงินที่จำเป็น",
+    return: "หากต้องการเริ่มใหม่ ให้ส่ง /start แล้วแตะเริ่ม",
   },
 } satisfies Record<Language, Readonly<Record<string, string>>>;

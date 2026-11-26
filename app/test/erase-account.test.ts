@@ -2,6 +2,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { expect, test, vi } from "vitest";
 import type { Agent } from "../src/agent/agent";
 import { boxClient } from "../src/box/client";
+import type { CheckoutId } from "../src/billing/stripe";
 import { parseInviteCode, type EpochMs } from "../src/domain";
 import { type SubscriptionId } from "../src/billing/plan";
 import { d1Ledger } from "../src/ledger/ledger";
@@ -39,6 +40,7 @@ test("a confirmed account erase clears private state and requires a fresh decisi
   await c.tap(confirm.data);
   expect(await c.received()).toHaveLength(2);
   expect(c.channel.delivered.at(-1)?.text).toMatch(/deleted your live Giraffe data/);
+  expect(c.channel.delivered.at(-1)?.text).toContain("start fresh");
   expect(await storageOf(stub)).toEqual(emptyAccount);
   expect((await c.snapshot()).agent).toBeNull();
   expect((await env.LEDGER.prepare("SELECT agent_key FROM agent WHERE agent_key = ?").bind(c.agent).all()).results).toEqual([]);
@@ -50,7 +52,7 @@ test("a confirmed account erase clears private state and requires a fresh decisi
   await c.say("Do you still have my old facts?");
   expect(model.calls).toHaveLength(1);
   const start = c.channel.delivered.at(-1)?.button;
-  expect(start?.label).toBe("Start fresh");
+  expect(start?.label).toBe("Start");
   if (!start) throw new Error("fresh consent is missing");
   await c.tap(start.data);
   expect(await stub.billingEvent({ id: "late_after_restart", owner: c.agent, subscription: "sub_old" as SubscriptionId })).toBe("ignored");
@@ -116,6 +118,8 @@ test("an old image erases the workspace but leaves sign-in, so account erasure s
   const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
   await env.LEDGER.prepare("INSERT INTO billing_subscription (id, owner_key, plan, status, seats, updated_at) VALUES ('sub_box_erase', ?, 'standard', 'active', 1, 1)")
     .bind(c.agent).run();
+  await env.LEDGER.prepare("INSERT INTO model_call (id, agent_key, purpose, model, status, estimate_micro, cost_micro, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at) VALUES ('erase_usage', ?, 'turn', '', 'settled', 1, 1, 1, 1, 0, 0, 1)")
+    .bind(c.agent).run();
   await c.say("/claude");
   await runInDurableObject(stub, (_, state) => { state.storage.sql.exec("UPDATE box SET volume = NULL"); });
   const forget = await stub.beginForget({ at: c.clock.now(), seq: null });
@@ -130,6 +134,8 @@ test("an old image erases the workspace but leaves sign-in, so account erasure s
   expect(await stub.endForget(forget.op)).toBe(false);
   expect(closeSubscription).toHaveBeenCalledWith("sub_box_erase", c.agent);
   expect(c.channel.delivered.at(-1)?.text).not.toMatch(/deleted your live Giraffe data/);
+  expect(await env.LEDGER.prepare("SELECT id FROM model_call WHERE agent_key = ?").bind(c.agent).first()).toBeNull();
+  expect(await env.LEDGER.prepare("SELECT id FROM billing_subscription WHERE owner_key = ?").bind(c.agent).first()).toBeNull();
   await c.say("please answer this");
   reportedVolume = "00000000-0000-4000-8000-000000000003";
   accountProof = true;
@@ -157,11 +163,60 @@ test("the fresh consent button preserves the beta invite from a start link", asy
 
   await c.event({ kind: "lifecycle", change: "follow", code, at: c.clock.now() });
   const start = c.channel.delivered.at(-1)?.button;
-  expect(start?.label).toBe("Start fresh");
+  expect(start?.label).toBe("Start");
+  expect(c.channel.delivered.at(-1)?.text).not.toMatch(/start (a new account|fresh)/i);
   if (!start) throw new Error("fresh consent is missing");
   expect((await c.snapshot()).agent).toBeNull();
   await c.tap(start.data);
 
   expect((await c.snapshot()).admission).toMatchObject({ state: "consenting", code });
   expect(c.model.calls).toHaveLength(0);
+});
+
+test("a reclaimed Fly box is disclosed without holding account deletion open", async () => {
+  const c = await devChat("reclaimed-before-erase", { model: null, at: "2099-11-04T10:00" });
+  await c.say("hello");
+  await env.LEDGER.prepare("INSERT INTO boxes (agent_key, name, host, created_at, deleted_at) VALUES (?, 'g-reclaimed', 'fly', 1, 5)")
+    .bind(c.agent).run();
+  await c.say("/erase");
+  const confirm = c.channel.delivered.at(-1)?.button;
+  if (!confirm) throw new Error("missing confirmation");
+  await c.tap(confirm.data);
+
+  const receipt = c.channel.delivered.at(-1)?.text;
+  expect(receipt).toMatch(/deleted your live Giraffe data/);
+  expect(receipt).toMatch(/box was removed earlier.*wipe/i);
+  expect(receipt).toMatch(/Fly.*older disk copies/i);
+  expect(await env.LEDGER.prepare("SELECT name FROM boxes WHERE agent_key = ?").bind(c.agent).first()).toBeNull();
+});
+
+test("erase still clears expired unpaid Stripe sessions and discloses retained references", async () => {
+  const billing = billingOn();
+  let available = false;
+  const closeCheckout = vi.fn(async (_id: CheckoutId) => available
+    ? { ok: true, value: null } as const
+    : { ok: false, status: 503, detail: "Stripe unavailable" } as const);
+  const c = await devChat("erase-unpaid", {
+    model: null,
+    at: "2099-11-04T10:00",
+    billing: { ...billing.deps, stripe: { ...billing.stripe, closeCheckout } },
+  });
+  await c.say("/plan");
+  await c.say("/plan");
+  const expired = [...billing.stripe.sessions].filter(([, status]) => status === "expired").map(([id]) => id);
+  expect(expired.length).toBeGreaterThan(0);
+  await c.say("/erase");
+  const confirm = c.channel.delivered.at(-1)?.button;
+  if (!confirm) throw new Error("missing confirmation");
+  await c.tap(confirm.data);
+  expect(await env.LEDGER.prepare("SELECT id FROM agent WHERE agent_key = ?").bind(c.agent).first()).toBeNull();
+  expect(c.channel.delivered.at(-1)?.text).not.toMatch(/deleted your live Giraffe data/);
+  available = true;
+  c.clock.set((c.clock.now() + 61_000) as EpochMs);
+  await c.settle();
+
+  expect(closeCheckout.mock.calls.map(([id]) => id)).toEqual(expect.arrayContaining(expired));
+  const receipt = c.channel.delivered.at(-1)?.text;
+  expect(receipt).toMatch(/Stripe.*checkout.*even if you didn’t pay/i);
+  expect(receipt).not.toMatch(/subscriptions you owned have ended/i);
 });

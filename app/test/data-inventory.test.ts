@@ -23,7 +23,7 @@ const durable = {
   billing_event: { identity: "id", operational: "at" },
   box: { identity: "name url volume", operational: "one host state state_at link_sent_at signin_poll_until attempts next_at poll_at reclaim_at reclaim_reason retire_at image ensure_at" },
   box_session: { chat: "memory reply_backfill", identity: "id", operational: "one seen_seq" },
-  checkout_session: { identity: "id event_key", operational: "created_at" },
+  checkout_session: { identity: "id event_key", operational: "created_at closed" },
   forget: { identity: "op", operational: "one epoch opened_at cutoff_at cutoff_seq" },
   inbox: { chat: "payload", identity: "event_key", operational: "seq kind received_at ready_at status attempts outcome finished_at catch_up catch_up_budget" },
   key_revision: { operational: "one revision" },

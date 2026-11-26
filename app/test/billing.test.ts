@@ -127,6 +127,7 @@ describe("stripe boundary", () => {
     const api = stripeApi(cfg, rules, async (url, init) => {
       const path = new URL(url).pathname;
       requests.push(`${init?.method} ${path}`);
+      if (path === "/v1/checkout/sessions") return Response.json({ data: [{ id: checkout }], has_more: false });
       if (path.endsWith("/expire")) {
         checkoutOpen = false;
         return Response.json({ error: { code: "checkout_session_not_open" } }, { status: 400 });
@@ -149,10 +150,39 @@ describe("stripe boundary", () => {
       "GET /v1/checkout/sessions/cs_erasure", "POST /v1/checkout/sessions/cs_erasure/expire",
       "GET /v1/checkout/sessions/cs_erasure", "POST /v1/checkout/sessions/cs_erasure",
       "GET /v1/subscriptions/sub_erasure", "POST /v1/subscriptions/sub_erasure", "DELETE /v1/subscriptions/sub_erasure",
+      "GET /v1/checkout/sessions", "GET /v1/checkout/sessions/cs_erasure",
     ]);
     requests.length = 0;
     expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: "settled" });
-    expect(requests).toEqual(["GET /v1/subscriptions/sub_erasure"]);
+    expect(requests).toEqual([
+      "GET /v1/subscriptions/sub_erasure", "GET /v1/checkout/sessions", "GET /v1/checkout/sessions/cs_erasure",
+    ]);
+  });
+
+  test("erasure finds a historical Checkout Session by its owned subscription and clears its chat metadata", async () => {
+    const owner = agent("erase-historical-checkout");
+    const subscription = "sub_historical" as SubscriptionId;
+    const checkout = "cs_historical";
+    let metadata: { agent_key?: string } = { agent_key: owner };
+    const api = stripeApi(cfg, rules, async (url, init) => {
+      const target = new URL(url);
+      if (target.pathname.endsWith(subscription)) {
+        return Response.json({ id: subscription, status: "canceled", metadata: {} });
+      }
+      if (target.pathname.endsWith("/checkout/sessions")) {
+        expect(target.searchParams.get("subscription")).toBe(subscription);
+        return Response.json({ data: [{ id: checkout }], has_more: false });
+      }
+      expect(target.pathname).toBe(`/v1/checkout/sessions/${checkout}`);
+      if (init?.method === "POST") {
+        expect(new URLSearchParams(String(init.body)).get("metadata[agent_key]")).toBe("");
+        metadata = {};
+      }
+      return Response.json({ id: checkout, status: "complete", client_reference_id: owner, metadata, subscription });
+    });
+
+    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: "settled" });
+    expect(metadata).toEqual({});
   });
 
   test("the signature is HMAC-SHA256 over 't.payload'; a wrong secret, a changed body, a stale or missing header fail", async () => {
@@ -184,7 +214,6 @@ describe("stripe boundary", () => {
     expect(sent[0].headers.get("content-type")).toBe("application/x-www-form-urlencoded");
     expect(Object.fromEntries(new URLSearchParams(sent[0].body))).toEqual({
       mode: "subscription",
-      client_reference_id: "p:dev:ann",
       success_url: "https://giraffes.test/billing/done",
       cancel_url: "https://giraffes.test/billing/cancel",
       "metadata[agent_key]": "p:dev:ann",

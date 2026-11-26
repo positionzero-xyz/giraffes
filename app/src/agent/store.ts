@@ -1146,7 +1146,7 @@ export class AgentStore {
 
   openCheckouts(): readonly { readonly id: CheckoutId; readonly eventKey: EventKey }[] {
     return this.sql
-      .exec<{ id: CheckoutId; event_key: EventKey }>("SELECT id, event_key FROM checkout_session ORDER BY created_at, id")
+      .exec<{ id: CheckoutId; event_key: EventKey }>("SELECT id, event_key FROM checkout_session WHERE closed = 0 ORDER BY created_at, id")
       .toArray()
       .map((r) => ({ id: r.id, eventKey: r.event_key }));
   }
@@ -1156,7 +1156,12 @@ export class AgentStore {
   }
 
   checkoutClosed(id: CheckoutId): void {
-    this.sql.exec("DELETE FROM checkout_session WHERE id = ?", id);
+    this.sql.exec("UPDATE checkout_session SET closed = 1 WHERE id = ?", id);
+  }
+
+  checkoutIds(): readonly CheckoutId[] {
+    return this.sql.exec<{ id: CheckoutId }>("SELECT id FROM checkout_session ORDER BY created_at, id")
+      .toArray().map(({ id }) => id);
   }
 
   billingEventSeen(id: string): boolean {
@@ -1793,7 +1798,7 @@ export class AgentStore {
     return this.forget().op !== null;
   }
 
-  clearForErasure(job: Extract<Erasure, { kind: "cleaning" }>): void {
+  clearForErasure(job: Extract<Erasure, { kind: "preparing" }>): void {
     this.tx(() => {
       const tables = this.sql.exec<{ name: string }>(
         `SELECT name FROM sqlite_master WHERE type = 'table'

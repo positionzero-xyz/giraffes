@@ -542,6 +542,9 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE billing_alert ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE billing_alert ADD COLUMN closed_as TEXT CHECK (closed_as IN ('sent', 'gone'));
   `,
+  `
+  ALTER TABLE checkout_session ADD COLUMN closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1));
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

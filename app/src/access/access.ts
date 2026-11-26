@@ -477,8 +477,10 @@ export class ModelAccess {
     switch (fault) {
       case "credential":
         return t.keyRefused(label);
-      case "payment":
-        return t.keyNoCredit(label, until === null ? null : toLocal(until, a?.tz ?? DEFAULT_TIME_ZONE).replace("T", " "));
+      case "payment": {
+        const retryMinute = until === null ? null : ((Math.ceil(until / MIN_MS) * MIN_MS) as EpochMs);
+        return t.keyNoCredit(label, retryMinute === null ? null : toLocal(retryMinute, a?.tz ?? DEFAULT_TIME_ZONE).replace("T", " "));
+      }
       case "model":
         return t.keyNoModel(label, k.model);
       case "rate":

@@ -10,6 +10,24 @@ A person's own Claude plan, run in an unmodified Claude Code inside their box. L
 
 `--mock` signs the CLI in with a fake API key against `box/mock-api.mjs` inside the container, with every Anthropic host resolved to loopback. Without `--mock` the box starts signed out.
 
+## Scripting the mock
+
+With `MOCK_DUMPS` set, the mock reads `<dumps>/mock-script.json` again for every request, so a drive can arm, rewrite or delete it while the box runs. Write it atomically (write a temp file, then rename) because a half-written or missing file just means unscripted. The file is:
+
+```json
+{
+  "calls": [{ "name": "remember", "input": { "note": "the mock scripted this" } }],
+  "text": "the final reply text",
+  "holdMs": 0
+}
+```
+
+- Scripting applies to `/agent` turns only, the ones carrying the `mcp__giraffe__*` tools. `calls` are emitted one per model round-trip in order — the first request gets `calls[0]` as a tool use, the CLI runs it against the Worker's tool endpoint, and the follow-up request carrying that tool result gets `calls[1]`, until the results since the turn's own user message catch up with the list. `input` must satisfy the tool's schema or the Worker's tool endpoint refuses it and the model sees the refusal instead. Because a resumed session re-sends earlier tool results, count on the per-turn indexing, not the session's total.
+- Once the calls are consumed the mock answers `text`, which is what the person receives. `/parse` turns don't take scripted tool calls; the script only changes their final text.
+- `holdMs` delays every scripted response, which is how a turn is kept running long enough to erase under it or to test a stop.
+- A minimal script that just changes the reply is `{"calls": [], "text": "Noted."}`. Deleting the file returns the mock to its plain `ok` answer; while a file is absent or mid-write the mock answers unscripted rather than crashing.
+- Prove what the box actually sent through the `req-*.json` dumps in the same folder, newest first, and the mock's own `/dumps/mock.log` inside the container (host `<dumps>/mock.log` when the mount is writable).
+
 ## Checks
 
 - **Connect.** `$GV say <user> /claude`. A mock box is already signed in, so no link is sent. The outbox gets a "Setting up" reply and then a pushed "Your Claude plan is connected" within a second (`$GV wait <user> 's.turns.some(t => /plan is connected/.test(t.text))' 60`). `$GV dosql <user> "SELECT state FROM box"` reads `signed_in`, and the snapshot's `access.lanes` is `["box"]`.

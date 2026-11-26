@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # usage: gates.sh <out-dir> <rev>...   one detached worktree per rev, one TSV row per rev
 set -u
+export MSYS_NO_PATHCONV=1
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CHECKOUT=$(git -C "$HERE" rev-parse --show-toplevel)
 REPO=$(cd "$(git -C "$HERE" rev-parse --path-format=absolute --git-common-dir)/.." && pwd)
 CHECK="$CHECKOUT/.githooks/check-private.mjs"
 mkdir -p "$1" && OUT=$(cd "$1" && pwd); shift
 TSV="$OUT/gates.tsv"
-[ -f "$TSV" ] || printf 'rev\tsha\ttypecheck\tapp_tests\tbox_tests\tleak_check\n' > "$TSV"
+[ -f "$TSV" ] || printf 'rev\tsha\ttypecheck\tapp_tests\tbox_tests\tlinux_box\tleak_check\n' > "$TSV"
 
 count() { grep -Eo "$2" "$1" | tail -1 | grep -Eo '[0-9]+' | head -1; }
 winrepo=$(cygpath -w "$REPO")
@@ -64,12 +65,43 @@ for rev in "$@"; do
     fi
   else box="n/a"; fi
 
+  # Linux box gate: build the revision's own image, then run the whole box suite inside it against
+  # the image's Linux CLI, plus the image hardening check. A skip inside the container is a failure here.
+  lbox="n/a"
+  if [ -d "$wt/box/test" ] && [ -f "$wt/box/Dockerfile" ]; then
+    img="giraffes-box-gate-$sha"
+    stage="$OUT/linux-stage-$name"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    cp -r "$wt/box/src" "$stage/src" && cp -r "$wt/box/test" "$stage/test" && cp "$wt/box/mock-api.mjs" "$stage/mock-api.mjs"
+    if ! docker info >/dev/null 2>&1; then
+      lbox="FAIL docker unavailable"
+    elif ! docker build -q -t "$img" "$(cygpath -w "$wt/box")" > "$log.dockerbuild.log" 2>&1; then
+      lbox="FAIL docker build"
+    else
+      docker run --rm -v "$(cygpath -m "$stage"):/boxtest:ro" \
+        -e BOX_TEST_CLI=/opt/box/node_modules/@anthropic-ai/claude-code/bin/claude.exe \
+        "$img" sh -c 'cd /boxtest && node --test test/*.test.ts' > "$log.linuxbox.log" 2>&1; lb=$?
+      lbp=$(count "$log.linuxbox.log" '^(# |ℹ )pass [0-9]+')
+      lbs=$(count "$log.linuxbox.log" '^(# |ℹ )skipped [0-9]+')
+      lskiplines=$(grep -c '^﹣' "$log.linuxbox.log" || true)
+      if [ -f "$wt/box/test/image.sh" ]; then sh "$wt/box/test/image.sh" "$img" > "$log.image.log" 2>&1; im=$?; else im=0; fi
+      if [ "$lb" != 0 ]; then lbox="FAIL exit=$lb pass=${lbp:-0}"
+      elif [ "${lbs:-0}" -gt 0 ] || [ "${lskiplines:-0}" -gt 0 ]; then lbox="SKIP pass=${lbp:-0} skipped=$lskiplines"
+      elif [ "${lbp:-0}" -eq 0 ]; then lbox="FAIL zero tests"
+      elif [ "$im" != 0 ]; then lbox="FAIL image.sh exit=$im"
+      else lbox="PASS ${lbp}"; fi
+      docker rmi "$img" >/dev/null 2>&1
+    fi
+    rm -rf "$stage"
+  fi
+
   printf 'see research/Z-note\n' | (cd "$wt" && node "$CHECK" stdin) >/dev/null 2>&1; ctl=$?
   (cd "$wt" && node "$CHECK" tree > "$log.leak.log" 2>&1); lk=$?
   if [ "$ctl" != 1 ]; then leak="CONTROL_FAIL"; elif [ "$lk" = 0 ]; then leak="PASS"; else leak="FAIL see $name.leak.log"; fi
 
   [ "$tc" = 0 ] && tcs=PASS || tcs="FAIL exit=$tc"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$rev" "$sha" "$tcs" "$app" "$box" "$leak" >> "$TSV"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$rev" "$sha" "$tcs" "$app" "$box" "$lbox" "$leak" >> "$TSV"
 
   powershell -NoProfile -Command "[System.IO.Directory]::Delete('$winwt\\app\\node_modules', \$false)"
   [ -e "$wt/box/node_modules" ] && powershell -NoProfile -Command "[System.IO.Directory]::Delete('$winwt\\box\\node_modules', \$false)"

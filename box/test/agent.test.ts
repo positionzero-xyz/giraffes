@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { createBox } from "../src/server.ts";
 import { startMock, type RunningMock } from "./mock.ts";
 
-const CLI = fileURLToPath(new URL("../node_modules/@anthropic-ai/claude-code/bin/claude.exe", import.meta.url));
+// BOX_TEST_CLI points at the Linux CLI inside the box image; the default is the sibling npm install.
+const CLI = process.env.BOX_TEST_CLI ?? fileURLToPath(new URL("../node_modules/@anthropic-ai/claude-code/bin/claude.exe", import.meta.url));
 const TOKEN = "b-agent-test-token-0123456789abcdefghijklmnop";
 const APPEND = "You are Giraffe, a personal assistant.";
 const GONE = "11111111-2222-3333-4444-555555555555";

@@ -8,6 +8,8 @@ import { checkoutForm, offeredPlans, parseEvent, parseSubscription, stripeApi, v
 import { DEFAULT_AMOUNTS, stripeSetup } from "../src/billing/setup";
 import { formBody, STRIPE_EVENT_TYPES } from "../src/billing/wire";
 import { boxMessage } from "../src/box/machine";
+import { lineChannel } from "../src/channels/line";
+import { telegramChannel } from "../src/channels/telegram";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs, MicroUsd } from "../src/domain";
 import { HAIKU_5_5 } from "../src/model/providers";
@@ -560,6 +562,71 @@ describe("checkout and the portal", () => {
     expect(deliver).toHaveBeenCalledTimes(3);
     expect(operator.delivered).toHaveLength(1);
     expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+  });
+
+  test.each([
+    { channel: "line", channelUserId: "U" + "a".repeat(32), url: "https://api.line.me/v2/bot/message/push",
+      body: { message: "The property, 'to', in the request body is invalid (line: -, column: -)" } },
+    { channel: "telegram", channelUserId: "4242", url: "https://api.telegram.org/bot123:abc/sendMessage",
+      body: { ok: false, error_code: 400, description: "Bad Request: chat not found" } },
+  ] as const)("notifies the customer and stops retrying a permanent $channel recipient error", async ({ channel, channelUserId, url, body }) => {
+    const kit = billingOn();
+    const c = await devChat("missing-operator", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = channel === "line" ? lineChannel({ channelSecret: "fake", accessToken: "fake" })
+      : telegramChannel({ botToken: "123:abc", webhookSecret: "fake" });
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: c.channel, dev: c.channel, [channel]: operator },
+        operatorChat: { channel, channelUserId } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, "missing-operator", "standard");
+    await c.received();
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      expect(String(input)).toBe(url);
+      return Response.json(body, { status: 400 });
+    });
+    try {
+      const extra = { user: "missing-operator", sub: "sub_missing_operator_extra", plan: "included", status: "active" } as const;
+      expect((await stripeChange(kit, extra)).status).toBe(200);
+      await c.settle();
+      expect(await c.received()).toEqual([expect.stringContaining("automatic attempts have stopped")]);
+      await c.advanceTo("2099-11-04T11:00");
+      await stripeChange(kit, extra);
+      await c.settle();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(await c.received()).toEqual([]);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  test.each([
+    { outcome: "sent", confirmation: "I've alerted our billing team" },
+    { outcome: "gone", confirmation: "automatic attempts have stopped" },
+  ] as const)("updates the person after a $outcome alert without claiming their canceled duplicate is still active", async ({ outcome, confirmation }) => {
+    const kit = billingOn();
+    const c = await devChat("resolved-overlap", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel([{ kind: "retry", afterMs: 30_000 }, { kind: outcome }]);
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, "resolved-overlap", "standard");
+    await c.received();
+    const extra = { user: "resolved-overlap", sub: "sub_resolved_overlap_extra", plan: "included", status: "active" } as const;
+    await stripeChange(kit, extra);
+    await c.settle();
+    expect(await c.received()).toEqual([expect.stringContaining("scheduled another attempt")]);
+
+    await stripeChange(kit, { ...extra, status: "canceled" });
+    await c.advanceTo("2099-11-04T10:01");
+    expect(await row(extra.sub)).toMatchObject({ status: "canceled" });
+    const messages = await c.received();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("I detected overlapping paid plans.");
+    expect(messages[0]).toContain(confirmation);
+    expect(messages[0]).not.toContain("you have more than one paid plan");
+    expect(operator.delivered).toHaveLength(outcome === "sent" ? 1 : 0);
   });
 
   test("continues after three failures and caps the application backoff at an hour", async () => {

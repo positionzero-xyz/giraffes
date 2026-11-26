@@ -122,6 +122,27 @@ function outbound(over: Partial<OutboundMessage> = {}): OutboundMessage {
 const fresh = { token: "reply-token-1", expiresAt: (NOW + 50_000) as EpochMs };
 
 describe("LINE delivery", () => {
+  test.each([
+    [{ message: "The property, 'to', in the request body is invalid (line: 1, column: 9)" }, "recipient_gone"],
+    [{ message: "The request body has 1 error(s)", details: [{ property: "to", message: "invalid user ID" }] }, "recipient_gone"],
+    [{ message: "The request body has 1 error(s)", details: [{ property: "messages[0].text", message: "Required" }] }, "failed"],
+    [{ message: "Failed to send messages" }, "failed"],
+  ] as const)("classifies LINE push 400 by the error's field: %j", async (body, kind) => {
+    stubFetch(() => Response.json(body, { status: 400 }));
+    expect(await line().deliver(outbound(), NOW)).toMatchObject({ kind });
+  });
+
+  test("a LINE push recovers from a transient error with the same retry key", async () => {
+    let unavailable = true;
+    const seen = stubFetch(() => unavailable ? new Response(null, { status: 503 })
+      : Response.json({ message: "The retry key is already accepted" }, { status: 409 }));
+    const message = outbound();
+    expect(await line().deliver(message, NOW)).toMatchObject({ kind: "retry" });
+    unavailable = false;
+    expect(await line().deliver(message, NOW)).toEqual({ kind: "sent", via: "push" });
+    expect(seen.map((request) => request.headers.get("x-line-retry-key"))).toEqual([message.id, message.id]);
+  });
+
   test("a button rides on the last text as a postback quick reply that shows its label", async () => {
     const seen = stubFetch(() => Response.json({}));
 
@@ -353,6 +374,16 @@ describe("Telegram delivery", () => {
     vi.restoreAllMocks();
     stubFetch(() => Response.json({ ok: false, error_code: 429, parameters: { retry_after: 5 } }, { status: 429 }));
     expect(await telegram().deliver(msg, NOW)).toMatchObject({ kind: "retry", afterMs: 5000 });
+  });
+
+  test.each([
+    [{ description: "Bad Request: chat not found" }, "recipient_gone"],
+    [{ description: "Bad Request: user is deactivated" }, "recipient_gone"],
+    [{ parameters: { migrate_to_chat_id: -1001234567890 } }, "recipient_gone"],
+    [{ description: "Bad Request: message is too long" }, "failed"],
+  ] as const)("classifies Telegram sendMessage 400 by its description or migration parameter: %j", async (body, kind) => {
+    stubFetch(() => Response.json({ ok: false, error_code: 400, ...body }, { status: 400 }));
+    expect(await telegram().deliver(msg, NOW)).toMatchObject({ kind });
   });
 });
 

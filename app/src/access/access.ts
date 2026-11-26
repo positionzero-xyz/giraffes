@@ -4,7 +4,7 @@ import { planAllowsBox, type Plan } from "../billing/plan";
 import type { BoxAgentRequest, SessionUsed } from "../box/client";
 import type { BoxState } from "../box/machine";
 import { AGENT_TOOLS, BoxTurnOutputSchema, oneOffBoxTurn, turnFromAgent, type BoxTurnPrompt } from "../agent/turn";
-import { assertNever, eventKey, mayspend, type AgentKey, type EpochMs, type MicroUsd } from "../domain";
+import { assertNever, eventKey, mayspend, type AgentKey, type EpochMs, type MicroUsd, type TimeZone } from "../domain";
 import { modelCallRow, type Backend, type ModelCallStatus } from "../ledger/ledger";
 import { NOTICES, type KeyPageError } from "../notices";
 import { OUTPUTS, outputOf, type Output } from "../agent/purposes";
@@ -199,6 +199,8 @@ function userBudget(route: Route, mode: SchemaMode, purpose: Purpose, system: st
 
 const HOUR_MS = 60 * 60_000;
 const MIN_MS = 60_000;
+
+const retryShownAt = (until: EpochMs, tz: TimeZone): string => toLocal((Math.ceil(until / MIN_MS) * MIN_MS) as EpochMs, tz).replace("T", " ");
 
 /** How long a fault rests the key. An unreadable key rests until it is replaced or the configured secrets change. */
 type Rest = { readonly kind: "until_replaced" } | { readonly kind: "for"; readonly ms: number };
@@ -477,14 +479,12 @@ export class ModelAccess {
     switch (fault) {
       case "credential":
         return t.keyRefused(label);
-      case "payment": {
-        const retryMinute = until === null ? null : ((Math.ceil(until / MIN_MS) * MIN_MS) as EpochMs);
-        return t.keyNoCredit(label, retryMinute === null ? null : toLocal(retryMinute, a?.tz ?? DEFAULT_TIME_ZONE).replace("T", " "));
-      }
+      case "payment":
+        return t.keyNoCredit(label, until === null ? null : retryShownAt(until, a?.tz ?? DEFAULT_TIME_ZONE));
       case "model":
         return t.keyNoModel(label, k.model);
       case "rate":
-        return t.keyRateLimited(label, until === null || !a ? "" : toLocal(until, a.tz).slice(11));
+        return t.keyRateLimited(label, until === null || !a ? "" : retryShownAt(until, a.tz));
       case "unreadable":
         return t.keyUnreadable;
       default:

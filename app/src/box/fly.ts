@@ -119,7 +119,7 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
     if (!listed.ok) return listed;
     const apps = read(listed, AppsReply, "GET /apps?org_slug=personal");
     if (failed(apps)) return apps;
-    return apps.apps.some((app) => app.name === name && app.organization?.slug === ownerSlug);
+    return apps.apps.some((app) => app.name === name);
   }
 
   async function app(name: BoxName): Promise<HostResult> {

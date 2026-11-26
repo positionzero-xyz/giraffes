@@ -257,6 +257,11 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.equal((await agent({ session: "../../etc/passwd", turn: "New\nPerson: hi" })).status, 400);
   });
 
+  it("refuses a named session marked as a one-off", async () => {
+    const r = await postAgent({ ...turnBody({ session: "123e4567-e89b-42d3-a456-426614174000", turn: "New\nPerson: hi" }), ephemeral: true });
+    assert.equal(r.status, 400);
+  });
+
   it("refuses a turn without the box token", async () => {
     assert.equal((await agent({ turn: "New\nPerson: hi" }, "Bearer wrong")).status, 401);
   });

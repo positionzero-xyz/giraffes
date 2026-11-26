@@ -126,7 +126,7 @@ function fakeFly(org = "giraffes") {
     if (!app && method === "GET") {
       const orgSlug = url.searchParams.get("org_slug");
       const mine = [...apps.entries()].filter(([, owner]) => (orgSlug === "personal" ? owner !== "someone-else" : owner === orgSlug));
-      return Response.json({ apps: mine.map(([name, owner]) => ({ name, organization: { slug: owner } })) });
+      return Response.json({ apps: mine.map(([name]) => ({ name })) });
     }
     if (!app && method === "POST") {
       if (apps.has(body.app_name)) return Response.json({ error: "Validation failed: Name has already been taken", status: "name_taken" }, { status: 422 });

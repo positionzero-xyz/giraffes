@@ -185,11 +185,13 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
     sendJson(res, reply.status, reply.body);
   }
 
-  function writeLegacySession(id: string): void {
+  function writeLegacySession(id: string): boolean {
     try {
       writeFileSync(sessionFile, id);
+      return true;
     } catch (err) {
       diagnostic({ code: "legacy_session_write_failed", error: errorCode(err) });
+      return false;
     }
   }
 
@@ -208,8 +210,8 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
         const before = parsed.session === null && parsed.ephemeral !== true ? legacySession() : null;
         const named = await agentTurn(cli, parsed, abandoned.signal, configDir);
         if (named.status === 200 && parsed.ephemeral !== true) {
-          writeLegacySession(named.body.session.id);
-          if (before !== null && before !== named.body.session.id && isSessionId(before)) deleteSessionTranscripts(configDir, [before]);
+          const written = writeLegacySession(named.body.session.id);
+          if (written && before !== null && before !== named.body.session.id && isSessionId(before)) deleteSessionTranscripts(configDir, [before]);
         }
         return named;
       }

@@ -226,6 +226,7 @@ export function readAgentRequest(body: unknown): AgentRequest | null {
   if (fresh !== null && (typeof fresh !== "string" || !fresh.trim())) return null;
   const at = readAt(body);
   if (at === undefined || (body.ephemeral !== undefined && typeof body.ephemeral !== "boolean")) return null;
+  if (body.ephemeral === true && typeof session === "string") return null;
   const tools: AgentTool[] = [];
   for (const t of body.tools) {
     if (!isObject(t) || typeof t.name !== "string" || !/^[a-z_]{1,40}$/.test(t.name) || typeof t.description !== "string" || !isObject(t.inputSchema)) return null;

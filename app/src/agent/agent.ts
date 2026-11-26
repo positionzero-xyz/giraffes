@@ -239,11 +239,12 @@ export class Agent extends DurableObject<Env> {
     return "queued";
   }
 
-  billingEvent(e: BillingEvent): Promise<"applied" | "duplicate" | "ignored"> {
+  billingEvent(e: BillingEvent): Promise<"applied" | "duplicate" | "ignored" | "failed"> {
     const run = this.#billing.then(() => this.#billingEvent(e)).catch(() => {
-      throw new Error("billing event failed");
+      diagnostic("stripe_event_failed");
+      return "failed" as const;
     });
-    this.#billing = run.catch(() => undefined);
+    this.#billing = run;
     return run;
   }
 
@@ -262,9 +263,9 @@ export class Agent extends DurableObject<Env> {
     }
     const sub = read.subscription;
     await store.applySubscription(sub, this.#deps.clock.now());
-    await this.refreshPlan(sub.owner);
+    if (!(await this.refreshPlan(sub.owner))) throw new Error("owner refresh failed");
     for (const member of await store.members(sub.id)) {
-      await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member);
+      if (!(await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member))) throw new Error("member refresh failed");
     }
     await this.#flagDuplicate(sub.owner);
     this.#store.billingEventDone(e.id, this.#deps.clock.now());
@@ -286,21 +287,25 @@ export class Agent extends DurableObject<Env> {
     this.ctx.waitUntil(this.alarm());
   }
 
-  async refreshPlan(agent: AgentKey): Promise<void> {
-    const { config, store } = this.#deps.billing;
-    const now = this.#deps.clock.now();
-    const standing = await store.standing(agent, now).catch(() => {
-      throw new Error("billing standing unavailable");
-    });
-    const before = this.#plan(now);
-    const after = planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, config.on, config.rules);
-    const a = this.#store.agent();
-    const text = config.on && a ? planChanged(before, after, now, a.language) : null;
-    const message = text ? { key: eventKey.billing("plan"), message: { texts: [text] as const, note: text } } : null;
-    this.#store.applyStanding(standing, message, now);
-    if (message) {
-      await this.#armNoLaterThan(now);
-      this.ctx.waitUntil(this.alarm());
+  async refreshPlan(agent: AgentKey): Promise<boolean> {
+    try {
+      const { config, store } = this.#deps.billing;
+      const now = this.#deps.clock.now();
+      const standing = await store.standing(agent, now);
+      const before = this.#plan(now);
+      const after = planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, config.on, config.rules);
+      const a = this.#store.agent();
+      const text = config.on && a ? planChanged(before, after, now, a.language) : null;
+      const message = text ? { key: eventKey.billing("plan"), message: { texts: [text] as const, note: text } } : null;
+      this.#store.applyStanding(standing, message, now);
+      if (message) {
+        await this.#armNoLaterThan(now);
+        this.ctx.waitUntil(this.alarm());
+      }
+      return true;
+    } catch {
+      diagnostic("stripe_refresh_failed");
+      return false;
     }
   }
 

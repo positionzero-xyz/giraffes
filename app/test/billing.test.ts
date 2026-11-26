@@ -602,6 +602,7 @@ describe("checkout and the portal", () => {
       available = true;
       await c.advanceTo("2099-11-06T10:00");
       expect(fetch).toHaveBeenCalledTimes(3);
+      expect(fetch.mock.calls[2][1]?.body).toContain("Detected at: 2099-11-04T03:00:00.000Z");
       expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
     } finally {
       fetch.mockRestore();
@@ -663,7 +664,7 @@ describe("checkout and the portal", () => {
         expect.objectContaining({ chat_id: "-4242" }),
         expect.objectContaining({ chat_id: "-1001234567890", text: expect.stringContaining("OPERATOR_CHAT to telegram:-1001234567890") }),
       ]);
-      expect(warn).toHaveBeenCalledWith({ code: "operator_alert_chat_migrated" });
+      expect(warn).toHaveBeenCalledWith({ code: "operator_alert_chat_migrated", oldChatId: "-4242", newChatId: "-1001234567890" });
       expect(await c.received()).toEqual([expect.stringContaining("scheduled another attempt")]);
       await c.advanceTo("2099-11-04T10:01");
       expect(calls[2]).toMatchObject({ chat_id: "-1001234567890" });
@@ -836,24 +837,58 @@ describe("checkout and the portal", () => {
     });
   });
 
-  test("upgrading existing alerts reopens unavailable destinations and preserves sent alerts", async () => {
-    const stub = env.AGENT.get(env.AGENT.idFromName("billing-alert-destination-upgrade"));
-    await runInDurableObject(stub, (_, { storage }) => {
-      const beforeDestinationRecovery = MIGRATIONS.findIndex((migration) => migration.includes("ADD COLUMN operator_route"));
-      storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN operator_route");
-      storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN telegram_redirect");
-      storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN destination_wait");
-      storage.sql.exec(`INSERT INTO billing_alert (subscription_ids, delivery_id, notified, closed_as) VALUES
-        ('sub_a sub_b', 'unavailable-id', 1, 'gone'), ('sub_a sub_c', 'sent-id', 1, 'sent')`);
-      storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeDestinationRecovery));
+  test.each([
+    { state: "closed as gone", user: "billing-alert-closed", recorded: true },
+    { state: "already reopened at epoch zero", user: "billing-alert-epoch-zero", recorded: true },
+    { state: "missing its detection record", user: "billing-alert-undated", recorded: false },
+  ])("startup delivers an old alert $state", async ({ state: previous, user, recorded }) => {
+    const kit = billingOn();
+    const c = await devChat(user, { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("/plan");
+    await c.received();
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    const operator = scriptedChannel();
+    const deliver = vi.spyOn(operator, "deliver");
+    const foundAt = local("2099-11-01T10:00");
+    if (recorded) {
+      await env.LEDGER.prepare("INSERT INTO billing_duplicate (owner_key, subscription_ids, found_at) VALUES (?, ?, ?)")
+        .bind(c.agent, "sub_a sub_b", foundAt).run();
+    }
 
-      migrate(storage);
+    await runInDurableObject(stub, async (_, state) => {
+      const { storage } = state;
+      if (previous === "closed as gone") {
+        const beforeDestinationRecovery = MIGRATIONS.findIndex((migration) => migration.includes("ADD COLUMN operator_route"));
+        storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN operator_route");
+        storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN telegram_redirect");
+        storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN destination_wait");
+        storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeDestinationRecovery));
+        storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, notified, closed_as) VALUES ('sub_a sub_b', 'old-id', 1, 'gone')");
+      } else {
+        storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, ready_at) VALUES ('sub_a sub_b', 'old-id', 0)");
+      }
+      storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, notified, closed_as) VALUES ('sub_a sub_c', 'sent-id', 1, 'sent')");
+      await storage.deleteAlarm();
 
-      expect(storage.sql.exec("SELECT delivery_id, ready_at, notified, closed_as FROM billing_alert ORDER BY subscription_ids").toArray()).toEqual([
-        { delivery_id: "unavailable-id", ready_at: 0, notified: 0, closed_as: null },
-        { delivery_id: "sent-id", ready_at: null, notified: 1, closed_as: "sent" },
-      ]);
+      const beforeStartup = Date.now();
+      const restarted = new Agent(state, { ...env, ...STRIPE_VARS });
+      await state.blockConcurrencyWhile(async () => {});
+      const scheduled = await storage.getAlarm();
+      expect(scheduled).toBeGreaterThanOrEqual(beforeStartup);
+      expect(scheduled).toBeLessThanOrEqual(Date.now());
+      if (previous === "closed as gone") {
+        const [row] = storage.sql.exec<{ ready_at: number }>("SELECT ready_at FROM billing_alert WHERE delivery_id = 'old-id'").toArray();
+        expect(row.ready_at).toBeGreaterThan(0);
+      }
+      restarted.withDeps({ billing: kit.deps, clock: c.clock, channels: { line: c.channel, telegram: operator, dev: c.channel } });
+      await restarted.alarm();
+      await restarted.alarm();
     });
+
+    expect(deliver).toHaveBeenCalledTimes(1);
+    const dateLine = recorded ? `Detected at: ${new Date(foundAt).toISOString()}` : "Detection date unavailable.";
+    expect(deliver.mock.calls[0][0]).toMatchObject({ id: "old-id", texts: [expect.stringContaining(dateLine)] });
+    expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
   });
 
   test("backs off a failed receipt write without re-sending a confirmed operator alert", async () => {

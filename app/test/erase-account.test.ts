@@ -1,6 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { expect, test, vi } from "vitest";
 import type { Agent } from "../src/agent/agent";
+import { boxClient } from "../src/box/client";
 import { parseInviteCode, type EpochMs } from "../src/domain";
 import { type SubscriptionId } from "../src/billing/plan";
 import { d1Ledger } from "../src/ledger/ledger";
@@ -76,13 +77,16 @@ test("an old model reply and messages while deletion is pending never reach the 
   expect((await c.snapshot()).agent).toBeNull();
 });
 
-test("a workspace-only box reply keeps account erasure pending", async () => {
+test("an old image erases the workspace but leaves sign-in, so account erasure stays pending", async () => {
   const user = "erase-with-box";
   const volume = "00000000-0000-4000-8000-000000000002";
   const box = fakeBox({ onlyFor: user, signedIn: true, volume });
   const billing = billingOn();
   const closeSubscription = vi.fn(async () => ({ ok: true, value: "settled" } as const));
   let accountProof = false;
+  let reportedVolume = volume;
+  const files = new Set(["workspace session", "sign-in credentials"]);
+  const requests: { epoch: number; box: string }[] = [];
   const c = await devChat(user, {
     model: null,
     at: "2099-11-04T10:00",
@@ -92,31 +96,53 @@ test("a workspace-only box reply keeps account erasure pending", async () => {
       host: { ...box.deps.host, kind: "static" },
       client: {
         ...box.deps.client,
-        async erase(_url, _token, request) {
-          if (typeof request === "number") throw new Error("workspace erase requested");
-          expect(request).toMatchObject({ scope: "account", box: volume });
-          return {
-            kind: "erased", box: volume, floor: request.epoch,
-            ...(accountProof ? { scope: "account" as const } : {}),
-          };
+        async health() {
+          return { kind: "up", signedIn: true, box: reportedVolume };
         },
+        erase: boxClient(async (_url, init) => {
+          const request = JSON.parse(String(init?.body));
+          expect(request).toMatchObject({ scope: "account", box: volume });
+          requests.push({ epoch: request.epoch, box: request.box });
+          files.delete("workspace session");
+          if (accountProof) files.delete("sign-in credentials");
+          return Response.json({
+            box: volume, floor: request.epoch,
+            ...(accountProof ? { scope: "account" as const } : {}),
+          });
+        }).erase,
       },
     },
   });
+  const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
   await env.LEDGER.prepare("INSERT INTO billing_subscription (id, owner_key, plan, status, seats, updated_at) VALUES ('sub_box_erase', ?, 'standard', 'active', 1, 1)")
     .bind(c.agent).run();
   await c.say("/claude");
+  await runInDurableObject(stub, (_, state) => { state.storage.sql.exec("UPDATE box SET volume = NULL"); });
+  const forget = await stub.beginForget({ at: c.clock.now(), seq: null });
+  c.clock.set((c.clock.now() + 1_000) as EpochMs);
   await c.say("/erase");
   const confirm = c.channel.delivered.at(-1)?.button;
   if (!confirm) throw new Error("missing confirmation");
-  await c.tap(confirm.data);
+  await c.received();
+  await c.say(`/tap ${confirm.data}`);
+  expect(requests[0]).toEqual({ epoch: forget.epoch + 1, box: volume });
+  expect(files).toEqual(new Set(["sign-in credentials"]));
+  expect(await stub.endForget(forget.op)).toBe(false);
   expect(closeSubscription).toHaveBeenCalledWith("sub_box_erase", c.agent);
   expect(c.channel.delivered.at(-1)?.text).not.toMatch(/deleted your live Giraffe data/);
   await c.say("please answer this");
+  reportedVolume = "00000000-0000-4000-8000-000000000003";
   accountProof = true;
   c.clock.set((c.clock.now() + 60_000) as EpochMs);
   await c.settle();
+  expect(requests.every((request) => request.epoch === forget.epoch + 1 && request.box === volume)).toBe(true);
+  expect(files.size).toBe(0);
+  expect(await stub.endForget(forget.op)).toBe(false);
+  expect(await runInDurableObject(stub, (_, state) =>
+    state.storage.sql.exec("SELECT epoch, op FROM forget").one(),
+  )).toEqual({ epoch: 0, op: null });
   expect(c.channel.delivered.at(-1)?.text).toMatch(/deleted your live Giraffe data/);
+  expect(await c.received()).toEqual([expect.stringMatching(/deleted your live Giraffe data/)]);
   expect(closeSubscription).toHaveBeenCalledTimes(1);
   expect((await c.snapshot()).box).toBeNull();
 });

@@ -592,7 +592,7 @@ export class Agent extends DurableObject<Env> {
       if (!boxServes(deps, job.person) || stored.host !== deps.host.kind || (stored.host === "static" && deps.onlyFor !== job.person)) {
         return { kind: "unverified" };
       }
-      const box = { name: stored.name, host: stored.host, url: stored.url, incarnation: this.#store.boxVolume() };
+      const box = { name: stored.name, host: stored.host, url: stored.url, incarnation: this.#store.boxVolume() || null };
       return { kind: stored.host === "fly" ? "locate" : "wipe-static", box };
     }
     if (!deps || deps.host.kind !== step.box.host) throw new Error("box host unavailable");
@@ -607,9 +607,12 @@ export class Agent extends DurableObject<Env> {
       case "wipe-static":
       case "wipe-fly": {
         const token = await boxToken(deps.secret, box.name);
-        const health = box.incarnation ? null : await deps.client.health(box.url, token);
-        const incarnation = box.incarnation ?? (health?.kind === "up" ? health.box : undefined);
-        if (!incarnation) return step;
+        if (!box.incarnation) {
+          const health = await deps.client.health(box.url, token);
+          if (health.kind !== "up" || !health.box) return step;
+          return { ...step, box: { ...box, incarnation: health.box } };
+        }
+        const incarnation = box.incarnation;
         const wipe = await deps.client.erase(box.url, token, { scope: "account", box: incarnation, epoch: job.epoch });
         if (wipe.kind !== "erased" || wipe.scope !== "account" || wipe.box !== incarnation || wipe.floor < job.epoch) return step;
         return step.kind === "wipe-fly" ? { kind: "remove-volume", box, target: step.target } : { kind: "done", host: "static" };

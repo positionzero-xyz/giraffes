@@ -102,14 +102,16 @@ function readAt(body: Json): At | undefined {
 }
 
 type EraseRequest =
-  | { readonly scope: "workspace"; readonly epoch: number }
+  | { readonly scope: "workspace"; readonly epoch: number; readonly box?: string }
   | { readonly scope: "account"; readonly epoch: number; readonly box: string };
 
 export function readEraseRequest(body: unknown): EraseRequest | null {
   if (!isObject(body) || !isEpoch(body.epoch) || body.epoch === 0) return null;
   const { box, epoch, scope } = body;
-  if (scope === undefined && box === undefined) return { scope: "workspace", epoch };
-  if (scope === "account" && typeof box === "string" && SESSION_ID.test(box)) return { scope, epoch, box };
+  if (box === undefined) return scope === undefined ? { scope: "workspace", epoch } : null;
+  if (typeof box !== "string" || !SESSION_ID.test(box)) return null;
+  if (scope === undefined) return { scope: "workspace", epoch, box };
+  if (scope === "account") return { scope, epoch, box };
   return null;
 }
 

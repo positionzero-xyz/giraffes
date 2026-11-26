@@ -212,7 +212,9 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
     const request = readEraseRequest(await readJson(req));
     if (request === null) return sendJson(res, 400, { error: "bad_request" });
     while (wiping) await wiping;
-    if (request.scope === "account" && request.box !== state.box) return sendJson(res, 412, { error: "stale" });
+    if ((request.box !== undefined && request.box !== state.box) || (request.scope === "workspace" && state.retired)) {
+      return sendJson(res, 412, { error: "stale" });
+    }
     const erasing = {
       ...state,
       floor: Math.max(state.floor, request.epoch),

@@ -42,7 +42,7 @@ export interface BoxClient {
   parse(url: string, token: BoxToken, req: BoxRequest): Promise<BoxReply>;
   /** The reply's text is JSON containing the session's answer and its accepted and refused tool calls. */
   agent(url: string, token: BoxToken, req: BoxAgentRequest): Promise<BoxReply>;
-  erase(url: string, token: BoxToken, request: number | AccountBoxErase): Promise<BoxErase>;
+  erase(url: string, token: BoxToken, request: number | BoxAt | AccountBoxErase): Promise<BoxErase>;
 }
 
 export const BOX_TIMEOUTS = { parseMs: 120_000, healthMs: 15_000 } as const;
@@ -123,7 +123,8 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
       if (!res.ok) return { kind: "pending", detail: `erase ${res.status}` };
       const erased = Erased.safeParse(body);
       if (!erased.success || erased.data.floor < erase.epoch) return { kind: "pending", detail: "erase reply unreadable" };
-      if ("scope" in erase && (erased.data.scope !== erase.scope || erased.data.box !== erase.box)) {
+      if ("box" in erase && erased.data.box !== erase.box) return { kind: "pending", detail: "erase disk not verified" };
+      if ("scope" in erase && erased.data.scope !== erase.scope) {
         return { kind: "pending", detail: "account erase not verified" };
       }
       return { kind: "erased", ...erased.data };

@@ -625,6 +625,20 @@ describe("a key pasted into the chat", () => {
   });
 
   test.each([
+    ["memo", "edit memo weds noon"],
+    ["model-name", "Can I use my API key with Qwen3-Coder-480B-A35B-Instruct?"],
+  ] as const)("ordinary chat reaches the model as written: %s", async (id, text) => {
+    const model = scripted([chat("Sure.")]);
+    const c = await devChat(`ordinary-${id}`, { model, at: "2099-11-04T10:00" });
+
+    await c.say(text);
+
+    expect(model.calls).toHaveLength(1);
+    expect(model.calls[0].user).toContain(text);
+    expect((await c.received()).join("\n")).not.toContain(NOTICE.pastedKey(null).split("\n")[0]);
+  });
+
+  test.each([
     ["sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", true],
     ["abcd-efgh-ijkl-mnop", true],
     ["abcd efgh ijkl mnop", true],
@@ -689,8 +703,18 @@ describe("a key pasted into the chat", () => {
     ["my password is dakfUp-nixjy2-qibgyv", true],
     ["Llama-4-Maverick-17B is cheaper", false],
     ["GPT-4o-mini-2024-07-18 is cheaper", false],
+    ["edit memo weds noon", false],
+    ["Can I use my API key with Qwen3-Coder-480B-A35B-Instruct?", false],
+    ["password: Qwen3-Coder-480B-A35B-Instruct", true],
+    ["password is this will take time", true],
   ])("%s is %s", (text, found) => {
     expect(redactSecrets(text).found).toBe(found);
+  });
+
+  test("the context allowance is measured after the end of the hint", () => {
+    const token = "Xk29fLq8Wm2p";
+    expect(redactSecrets(`password:${" ".repeat(31)}${token}`).found).toBe(true);
+    expect(redactSecrets(`password:${" ".repeat(32)}${token}`).found).toBe(false);
   });
 
   const bareKey = "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE";

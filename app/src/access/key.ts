@@ -217,15 +217,14 @@ const GROUPED_APP_PASSWORD = /(?<![A-Za-z0-9_-])[a-z]{4}(?:[- ][a-z]{4}){3}(?![A
 const CONTEXT_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9][A-Za-z0-9_-]{11,30}(?![A-Za-z0-9_-]|[/=:@.][A-Za-z0-9_-])/g;
 /** Thai has no word breaks, so its hints go without `\b`; a bare รหัส (code) counts only on its own, not in รหัสพัสดุ (tracking code). */
 const HINT = String.raw`\b(?:app[- ]password|password|passcode|passwd|pwd|pw|api[- ]key|token|secret)\b|รหัสผ่าน|พาสเวิร์ด|รหัส(?=[\s:=]|คือ|$)`;
-const SECRET_HINT = new RegExp(HINT, "i");
-/** What sits between the last hint and the end of the text. */
-const AFTER_HINT = new RegExp(String.raw`^[\s\S]*(?:${HINT})([\s\S]*)$`, "i");
+const HINT_GLOBAL = new RegExp(HINT, "gi");
 /** `password: x`, `password=x`, `รหัสผ่าน icloud: x`: a label, so the value after it is the secret whatever it looks like. */
 const LABEL_GAP = /^\s*(?:[^\s:=]{1,16}\s*)?[:=]\s*$/;
-/** `password x`, `password is x`, `รหัสผ่านคือ x`. */
-const SAID_GAP = /^\s*(?:is|was|คือ|เป็น)?\s*$/i;
+/** `password is x`, `password for gmail is x`, `รหัสผ่านคือ x`. */
+const SAID_GAP = /^\s*(?:(?:\S+\s+){0,3})(?:is|was|คือ|เป็น)\s*$/i;
 /** `Mistral-Small-2603`, `deepseek-v4-1-flash-1017`, `Llama-4-Maverick-17B`: words and versions joined by dashes name a model. */
-const PRODUCT_NAME = /^(?:[A-Z]?[a-z]+|[A-Z]+|[a-z]?\d+[A-Za-z]{0,2})(?:-(?:[A-Z]?[a-z]+|[A-Z]+|[a-z]?\d+[A-Za-z]{0,2}))+$/;
+const PRODUCT_PART = String.raw`(?:[A-Z][A-Za-z0-9]*|[a-z]+|\d+[A-Za-z]{0,2}|v\d+(?:\.\d+)?)`;
+const PRODUCT_NAME = new RegExp(String.raw`^(?:${PRODUCT_PART})(?:-(?:${PRODUCT_PART}))+$`);
 
 /* About 660 words, so a group of a random app password is one by chance about 1 time in 700; two groups that are words means prose. */
 const COMMON_FOUR_LETTER_WORDS = new Set(
@@ -234,14 +233,14 @@ const COMMON_FOUR_LETTER_WORDS = new Set(
     "belt bend best bike bill bird bite blue boat body boil bold bolt bomb bond bone book boom boot born boss both bowl buns burn bush busy buzz cafe cage cake " +
     "call calm came camp cans cant card care cart case cash cast cats chat chef chip city clay club coal coat code coin cold come cook cool cope copy cord core " +
     "corn cost cozy crab crew crop cube cups cure cute dark data date dawn days dead deal dear debt deck deep deer desk diet dirt dish dock docs does dogs doll " +
-    "done dont door dose down draw drew drop drum duck dull dust duty each earn ease east easy eats edge eggs else even ever exam exit face fact fail fair fall " +
+    "done dont door dose down draw drew drop drum duck dull dust duty each earn ease east easy eats edge edit eggs else even ever exam exit face fact fail fair fall " +
     "fame farm fast fate fear feed feel fees feet fell felt figs file fill film find fine fire firm fish fist five flag flat flew flip flow foil folk fond food " +
     "fool foot fork form fort four free frog from fuel full fund gain game gang gate gave gear gift girl give glad glue goal goat goes gold golf gone good grab " +
     "gray grew grey grid grow gulf haha hair half hall hand hang hard harm hate have head heal heap hear heat hehe held hell help herb here hero hide high hike " +
     "hill hint hire hold hole holy home hood hook hope horn hose host hour huge hung hunt hurt idea inch into iron isnt item jack jail jams jars jazz jeep jobs " +
     "join joke july jump june jury just kale keen keep kept keys kick kids kill kind king kiss kite knee knew knit know lack lady laid lake lamb lamp land lane " +
     "last late lawn lazy lead leaf lean left lend lens less lets life lift like lime line link lion list live lmao load loan lock logo long look loop lord lose " +
-    "loss lost lots loud love luck lump lung made mail main make male mall many mark mask mass math meal mean meat meet melt menu mess mild mile milk mind mine " +
+    "loss lost lots loud love luck lump lung made mail main make male mall many mark mask mass math meal mean meat meet melt memo menu mess mild mile milk mind mine " +
     "mint miss mode mood moon mops more most move much mugs must nail name navy near neat neck need nest news next nice nine none noon nope nose note nuts oats " +
     "okay once only onto open oven over pace pack page paid pain pair palm pans park part pass past path pays peak pear peel pens pick pics pile pill pink pipe " +
     "plan play plot plug plum plus poem poet pole poll pond pool poor pork port pose post pots pour pray pull pump pure push quit race rack rail rain rank rare " +
@@ -250,7 +249,7 @@ const COMMON_FOUR_LETTER_WORDS = new Set(
     "snow soap sock soda sofa soft soil sold sole some song soon sort soup spot star stay step stop such suit sure swim tail take tale talk tall tank tape task " +
     "taxi team tear tell tend tent term test text than thai that them then they thin this tide tidy tile till time tins tiny tips tire tmrw tofu told toll tone " +
     "took tool tour town toys tree trip true tube tuna turn twin type ugly unit upon used user vast very vibe view vote wage wait wake walk wall want warm wash " +
-    "wave ways weak wear week well went were west what when whom wide wife wifi wild will wind wine wing wipe wire wise wish with wolf wont wood wool word wore " +
+    "wave ways weak wear weds week well went were west what when whom wide wife wifi wild will wind wine wing wipe wire wise wish with wolf wont wood wool word wore " +
     "work yard yeah year yoga your zero zone zoom"
   ).split(" "),
 );
@@ -266,18 +265,47 @@ function entropyBits(s: string): number {
 /** Mixed case and digits with some entropy, or 48 or more lowercase hex characters (a Git SHA is 40). */
 const keyLike = (t: string) => (/[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) && entropyBits(t) >= 3.5) || /^[0-9a-f]{48,}$/.test(t);
 
-/** Next to a password hint it takes three words to read as prose, so a labelled password with two chance words still goes. */
+/** The text between the end of the last hint and the token; the 32-character allowance is measured here. */
+function hintGapBefore(text: string, offset: number): string | undefined {
+  const before = text.slice(0, offset);
+  HINT_GLOBAL.lastIndex = 0;
+  let end = -1;
+  for (let m = HINT_GLOBAL.exec(before); m !== null; m = HINT_GLOBAL.exec(before)) end = m.index + m[0].length;
+  return end === -1 ? undefined : before.slice(end);
+}
+
+/** The text between the end of the token and the start of the first following hint. */
+function hintGapAfter(text: string, end: number): string | undefined {
+  const after = text.slice(end, end + 96);
+  HINT_GLOBAL.lastIndex = 0;
+  const m = HINT_GLOBAL.exec(after);
+  return m === null ? undefined : after.slice(0, m.index);
+}
+
+function punctuationLabelBefore(text: string, offset: number): boolean {
+  const gap = hintGapBefore(text, offset);
+  return gap !== undefined && gap.length <= 32 && LABEL_GAP.test(gap);
+}
+
+function explicitLabelBefore(text: string, offset: number): boolean {
+  const gap = hintGapBefore(text, offset);
+  return gap !== undefined && gap.length <= 32 && (LABEL_GAP.test(gap) || SAID_GAP.test(gap));
+}
+
+const hintNearBefore = (text: string, offset: number) => (hintGapBefore(text, offset)?.length ?? 33) <= 32;
+const hintNearAfter = (text: string, end: number) => (hintGapAfter(text, end)?.length ?? 33) <= 32;
+
+/** Without a label, two ordinary words read as prose; a label always wins over that exemption. */
 function groupedAppPassword(match: string, offset: number, text: string): string | null {
-  const before = text.slice(Math.max(0, offset - 48), offset);
-  const after = text.slice(offset + match.length, offset + match.length + 48);
-  const hinted = SECRET_HINT.test(before) || SECRET_HINT.test(after);
+  if (explicitLabelBefore(text, offset)) return KEY_REMOVED;
   const words = match.split(/[- ]/).filter((w) => COMMON_FOUR_LETTER_WORDS.has(w)).length;
-  if (words >= (hinted ? 3 : 2)) return null;
-  if (hinted || !match.includes(" ")) return KEY_REMOVED;
+  if (words >= 2) return null;
+  const end = offset + match.length;
+  if (hintNearBefore(text, offset) || hintNearAfter(text, end) || !match.includes(" ")) return KEY_REMOVED;
   const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
-  const nextLine = text.indexOf("\n", offset + match.length);
+  const nextLine = text.indexOf("\n", end);
   const lineEnd = nextLine === -1 ? text.length : nextLine;
-  const isolated = text.slice(lineStart, offset).trim() === "" && /^[\s.!?]*$/.test(text.slice(offset + match.length, lineEnd));
+  const isolated = text.slice(lineStart, offset).trim() === "" && /^[\s.!?]*$/.test(text.slice(end, lineEnd));
   return isolated ? KEY_REMOVED : null;
 }
 
@@ -285,24 +313,23 @@ function groupedAppPassword(match: string, offset: number, text: string): string
 const mixed = (t: string) => (/[A-Za-z]/.test(t) && /\d/.test(t)) || /[a-z][A-Z]/.test(t);
 
 /**
- * A mixed token with some entropy, scaled down for short ones, goes when a hint is near it on either side. A word or a
- * product name goes only right after a hint: after a label (`password: x`) given some entropy, after `password is` if mixed.
+ * A mixed token with some entropy, scaled down for short ones, goes when a hint is near it on either side. A product
+ * name stays intact unless a punctuation label (`password: x`) explicitly calls the token a secret.
  */
 function shortSecret(match: string, offset: number, text: string): string | null {
-  const product = PRODUCT_NAME.test(match);
-  if (match.length >= 18 && keyLike(match) && !product) return KEY_REMOVED;
+  if (punctuationLabelBefore(text, offset)) return KEY_REMOVED;
+  if (PRODUCT_NAME.test(match)) return null;
+  if (match.length >= 18 && keyLike(match)) return KEY_REMOVED;
   if (!/[A-Za-z]/.test(match)) return null;
-  const before = text.slice(Math.max(0, offset - 32), offset);
   const bits = entropyBits(match);
   const mixedEnough = mixed(match) && bits >= Math.min(3.5, Math.log2(match.length) - 0.6);
-  if (mixedEnough && !product) {
-    const after = text.slice(offset + match.length, offset + match.length + 32);
-    return SECRET_HINT.test(before) || SECRET_HINT.test(after) ? KEY_REMOVED : null;
-  }
-  const gap = AFTER_HINT.exec(before)?.[1];
-  if (gap === undefined) return null;
-  if (LABEL_GAP.test(gap)) return bits >= 3.5 || mixedEnough ? KEY_REMOVED : null;
-  return SAID_GAP.test(gap) && mixedEnough ? KEY_REMOVED : null;
+  const end = offset + match.length;
+  return mixedEnough && (hintNearBefore(text, offset) || hintNearAfter(text, end)) ? KEY_REMOVED : null;
+}
+
+function longSecret(match: string, offset: number, text: string): string | null {
+  if (punctuationLabelBefore(text, offset)) return KEY_REMOVED;
+  return keyLike(match) && !PRODUCT_NAME.test(match) ? KEY_REMOVED : null;
 }
 
 /**
@@ -316,6 +343,6 @@ export function redactSecrets(text: string): { readonly text: string; readonly f
     .replace(PREFIXED, () => ((found = true), KEY_REMOVED))
     .replace(GROUPED_APP_PASSWORD, (m, offset, whole) => secret(groupedAppPassword(m, offset, whole), m))
     .replace(CONTEXT_TOKEN, (m, offset, whole) => secret(shortSecret(m, offset, whole), m))
-    .replace(LONG_TOKEN, (m) => (keyLike(m) ? ((found = true), KEY_REMOVED) : m));
+    .replace(LONG_TOKEN, (m, offset, whole) => secret(longSecret(m, offset, whole), m));
   return { text: out, found };
 }

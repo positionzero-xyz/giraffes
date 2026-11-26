@@ -729,6 +729,7 @@ describe("checkout and the portal", () => {
         subscription_ids TEXT PRIMARY KEY, delivery_id TEXT NOT NULL, ready_at INTEGER, notified INTEGER NOT NULL DEFAULT 0
       )`);
       storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, ready_at) VALUES ('sub_a sub_b', 'existing-id', 9000)");
+      storage.sql.exec("ALTER TABLE checkout_session DROP COLUMN closed");
       storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeAttempts));
       migrate(storage);
       expect(storage.sql.exec("SELECT delivery_id, ready_at, attempts FROM billing_alert").toArray()).toEqual([

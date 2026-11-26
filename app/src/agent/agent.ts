@@ -533,7 +533,7 @@ export class Agent extends DurableObject<Env> {
         this.ctx.storage.kv.put(ERASE_JOB, current);
       }
       while (current.billing.kind === "pending") {
-        const billing = await this.#eraseBillingStep(current.person, current.billing).catch(() => null);
+        const billing: EraseBilling | null = await this.#eraseBillingStep(current.person, current.billing).catch(() => null);
         if (billing === null) break;
         current = { ...current, billing };
         this.ctx.storage.kv.put(ERASE_JOB, current);

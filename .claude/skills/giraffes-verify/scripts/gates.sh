@@ -2,15 +2,15 @@
 # usage: gates.sh <out-dir> <rev>...   one detached worktree per rev, one TSV row per rev
 set -u
 export MSYS_NO_PATHCONV=1
-HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+HERE=$(cygpath -m "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")
 if [ "$#" -lt 2 ]; then
   echo "usage: gates.sh <out-dir> <rev>..." >&2
   exit 2
 fi
 CHECKOUT=$(git -C "$HERE" rev-parse --show-toplevel)
-REPO=$(cd "$(git -C "$HERE" rev-parse --path-format=absolute --git-common-dir)/.." && pwd)
+REPO=$(cygpath -m "$(cd "$(git -C "$HERE" rev-parse --path-format=absolute --git-common-dir)/.." && pwd)")
 CHECK="$CHECKOUT/.githooks/check-private.mjs"
-mkdir -p "$1" && OUT=$(cd "$1" && pwd); shift
+mkdir -p "$1" && OUT=$(cygpath -m "$(cd "$1" && pwd)"); shift
 TSV="$OUT/gates.tsv"
 [ -f "$TSV" ] || printf 'rev\tsha\ttypecheck\tapp_tests\tbox_tests\tlinux_box\tleak_check\n' > "$TSV"
 

@@ -71,6 +71,10 @@ price plus the provider's fee from our price cards, not an invoice.
      marked unreadable and tried again as soon as the configured secret changes, so putting the right
      secret back repairs it.
      `OWN_KEY_CAP_USD` (default 5) is the monthly limit a new key starts with.
+   - `PRIVACY_CONTROLLER` (the operator's legal name and address) and `PRIVACY_CONTACT` (an email for
+     privacy requests). Both appear on the privacy notice at `PUBLIC_URL/privacy`, which the consent message
+     links to. A live deploy refuses to start without them, so on an existing Worker set them before you
+     deploy this version. A dev run without them shows a placeholder operator.
    - `LINE_CHANNEL_SECRET` and `LINE_CHANNEL_ACCESS_TOKEN`
    - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`
 

@@ -11,7 +11,7 @@ import { bytesOf } from "../src/model/prompt";
 import { modelOf, PROVIDERS } from "../src/model/providers";
 import { routeFor } from "../src/model/routes";
 import { NOTICES } from "../src/notices";
-import { chat, devChat, fakeProvider, giveKey, local, schedule, scripted, send, TEST_KEY_SECRET, TEST_KEYS, type ProviderStep } from "./testkit";
+import { chat, devChat, fakeProvider, giveKey, local, PRIVACY_VARS, schedule, scripted, send, TEST_KEY_SECRET, TEST_KEYS, type ProviderStep } from "./testkit";
 
 const NOTICE = NOTICES.en;
 const reply = (text: string, extra: Record<string, unknown> = {}): ProviderStep => ({ kind: "output", value: { actions: [send(text)], tasks: [], about: "", ...extra } });
@@ -81,7 +81,7 @@ describe("no access", () => {
 
   test("MODEL_BACKEND=anthropic, left in an old deploy's env, fails loudly instead of serving on our key", () => {
     expect(() => loadConfig({ MODEL_BACKEND: "anthropic" } as unknown as Env)).toThrow("MODEL_BACKEND=anthropic was removed");
-    expect(loadConfig({ KEY_SECRET: TEST_KEY_SECRET, PUBLIC_URL: "https://giraffes.test" } as unknown as Env)).toMatchObject({
+    expect(loadConfig({ KEY_SECRET: TEST_KEY_SECRET, PUBLIC_URL: "https://giraffes.test", ...PRIVACY_VARS } as unknown as Env)).toMatchObject({
       model: { backend: "live" },
       included: { on: false },
       keys: { on: true },

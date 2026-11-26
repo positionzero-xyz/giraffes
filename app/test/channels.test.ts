@@ -97,7 +97,7 @@ describe("LINE webhook", () => {
       postback: { data },
       deliveryContext: { isRedelivery: false },
     });
-    const body = JSON.stringify({ destination: "Uaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", events: [postback("P1", "a:7.1"), postback("P2", "c"), postback("P3", "x:1")] });
+    const body = JSON.stringify({ destination: "Uaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", events: [postback("P1", "a:7.1"), postback("P2", "c2"), postback("P3", "x:1")] });
     const signature = createHmac("sha256", LINE_SECRET).update(body).digest("base64");
 
     const received = await line().receive(lineWebhook(body, signature));

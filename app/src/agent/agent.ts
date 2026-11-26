@@ -144,6 +144,7 @@ export type AgentDeps = {
   readonly box: BoxDeps | null;
   readonly billing: BillingDeps;
   readonly admission: AdmissionMode;
+  readonly privacyUrl: string;
 };
 
 export type BillingDeps = {
@@ -744,7 +745,8 @@ export class Agent extends DurableObject<Env> {
       this.#commit(planWithoutModel(view, { kind: "admission", commit: admitted, text: null, consent: false }), view, a.key, { kind: "none" });
       return;
     }
-    let step: AdmissionStep = planAdmission(view, null);
+    const admission = { ...view, privacyUrl: this.#deps.privacyUrl };
+    let step: AdmissionStep = planAdmission(admission, null);
     if (step.kind !== "commit") {
       const now = this.#deps.clock.now();
       let answer: AdmissionAnswer;
@@ -757,7 +759,7 @@ export class Agent extends DurableObject<Env> {
         diagnostic("admission_failed");
         return this.#admissionUnavailable(view, a.key);
       }
-      step = planAdmission(view, answer);
+      step = planAdmission(admission, answer);
       if (step.kind !== "commit") throw new Error(`planAdmission asked D1 twice: ${step.kind}`);
     }
     const why = { kind: "admission", commit: step.commit, text: step.text, consent: step.consent } as const;
@@ -1435,5 +1437,6 @@ function defaultDeps(env: Env): AgentDeps {
       stripe: config.billing.on ? stripeApi(config.billing.stripe, config.billing.rules, (input, init) => fetch(input, init)) : null,
     },
     admission: config.admission,
+    privacyUrl: config.privacy.url,
   };
 }

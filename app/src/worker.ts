@@ -11,6 +11,7 @@ import { DONE_PATH, parseEvent, verifySignature } from "./billing/stripe";
 import { makeChannels, tellOperator } from "./channels/channel";
 import { devIdentity } from "./channels/dev";
 import { lineQuota } from "./channels/line";
+import { privacyPage } from "./privacy";
 import { loadConfig, type Config, type Env } from "./config";
 import { CHANNEL_IDS, parseWakeupKey, personAgentKey, type AgentKey, type ChannelId, type EpochMs } from "./domain";
 import { d1Ledger } from "./ledger/ledger";
@@ -64,6 +65,8 @@ async function routeRequest(req: Request, env: Env): Promise<Response> {
     if (req.method === "GET") return new Response(KEY_PAGE, { headers: KEY_PAGE_HEADERS });
     if (req.method === "POST") return keyForm(req, env, config.keys);
   }
+
+  if (req.method === "GET" && url.pathname === "/privacy") return new Response(privacyPage(config.privacy), { headers: { "content-type": "text/html; charset=utf-8" } });
 
   if (config.billing.on) {
     if (req.method === "POST" && url.pathname === "/webhook/stripe") return stripeWebhook(req, env, config.billing);

@@ -20,6 +20,7 @@ import {
   type Seat,
   type WaitlistReason,
   eventKey,
+  mayspend,
   parseChoice,
   personDecision,
   proposalId,
@@ -296,8 +297,8 @@ type PlanCols = {
 export type NoteMessage = { readonly texts: readonly [string, ...string[]]; readonly note: string };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const DEDUPE_WINDOW_MS = 14 * DAY_MS;
-const OUTBOX_KEEP_MS = 30 * DAY_MS;
+export const DEDUPE_WINDOW_MS = 14 * DAY_MS;
+export const OUTBOX_KEEP_MS = 30 * DAY_MS;
 const LOG_RETRY_BASE_MS = 10_000;
 const LOG_RETRY_MAX_MS = 60 * 60 * 1000;
 const COMPACTION_RETRY_BASE_MS = 5 * 60 * 1000;
@@ -868,6 +869,7 @@ export class AgentStore {
         commit.waitForAccess ? 1 : 0,
         JSON.stringify(commit.batchKeys),
       );
+      if (commit.admission || !mayspend(this.admission())) this.clearInboxText(commit.batchKeys);
       this.insertLogs(logs, now);
       return true;
     });
@@ -1253,7 +1255,16 @@ export class AgentStore {
         state.snapshot, state.cursor_item, state.cursor_offset,
       );
       this.sql.exec("UPDATE inbox SET status = 'done', outcome = 'no_model', finished_at = ? WHERE event_key = ?", now, key);
+      if (!mayspend(this.admission())) this.clearInboxText([key]);
     });
+  }
+
+  /** Someone not admitted is answered, but what they wrote is not kept. */
+  private clearInboxText(keys: readonly EventKey[]): void {
+    this.sql.exec(
+      "UPDATE inbox SET payload = json_set(payload, '$.text', '') WHERE kind = 'message' AND event_key IN (SELECT value FROM json_each(?))",
+      JSON.stringify(keys),
+    );
   }
 
   savedPage(ref: SavedReference, agent: AgentRow): SavedPage | null {

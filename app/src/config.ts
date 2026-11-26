@@ -55,6 +55,8 @@ export interface Env {
   STRIPE_PRICE_INCLUDED?: string;
   STRIPE_PORTAL_CONFIGURATION?: string;
   PUBLIC_URL?: string;
+  PRIVACY_CONTROLLER?: string;
+  PRIVACY_CONTACT?: string;
 }
 
 type BoxCommon = { readonly secret: string; readonly appPrefix: string; readonly maxBoxes: number };
@@ -95,7 +97,10 @@ export type Config = {
   readonly billing: BillingConfig;
   /** Who may use the agent. Each mode has one way to redeem a code, so the beta's invites and billing's seats never mix. */
   readonly admission: AdmissionMode;
+  readonly privacy: PrivacyConfig;
 };
+
+export type PrivacyConfig = { readonly url: string; readonly controller: string; readonly contact: string };
 
 const present = (v: string | undefined): v is string => v !== undefined && v !== "";
 
@@ -248,6 +253,21 @@ function httpUrl(name: string, raw: string): string {
   return raw.replace(/\/+$/, "");
 }
 
+const DEV_PRIVACY = { controller: "Giraffe development build (not a real service)", contact: "privacy@example.invalid" } as const;
+
+function privacyConfig(env: Env, publicUrl: string | null, devMode: boolean): PrivacyConfig {
+  const why = "The consent message links to the privacy notice, so it";
+  if (devMode) {
+    return {
+      url: `${publicUrl ?? "http://localhost:8787"}/privacy`,
+      controller: present(env.PRIVACY_CONTROLLER) ? env.PRIVACY_CONTROLLER : DEV_PRIVACY.controller,
+      contact: present(env.PRIVACY_CONTACT) ? env.PRIVACY_CONTACT : DEV_PRIVACY.contact,
+    };
+  }
+  if (publicUrl === null) throw new Error(`${why} needs PUBLIC_URL`);
+  return { url: `${publicUrl}/privacy`, controller: required(env, "PRIVACY_CONTROLLER", why), contact: required(env, "PRIVACY_CONTACT", why) };
+}
+
 function planRules(env: Env): PlanRules {
   const plusSeats = count("PLUS_SEATS", env.PLUS_SEATS, PLAN_DEFAULTS.plusSeats, 1, 50);
   const plusMaxSeats = count("PLUS_MAX_SEATS", env.PLUS_MAX_SEATS, PLAN_DEFAULTS.plusMaxSeats, plusSeats, 50);
@@ -328,5 +348,6 @@ export function loadConfig(env: Env): Config {
     box: boxConfig(env, devMode),
     billing,
     admission: admissionMode(env.ADMISSION, billing),
+    privacy: privacyConfig(env, publicUrl, devMode),
   };
 }

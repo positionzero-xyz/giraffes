@@ -23,7 +23,7 @@ bash app/scripts/launch.sh --dry-run
 bash app/scripts/launch.sh
 ```
 
-It logs you in where needed, creates the ledger, builds and pushes the box image to Fly's registry, deploys the Worker, and sets every secret. It generates `BOX_SECRET`, `KEY_SECRET` and the Telegram webhook secret itself and never prints them, and sets `PUBLIC_URL` to the Worker's URL, where the key page lives. Changing `BOX_SECRET` later orphans every box. The Worker won't start without `KEY_SECRET`. Rotate it as below; changing it any other way makes every saved key unreadable until the old secret is configured again. At the end it offers to provision one throwaway box on Fly and delete it, which proves the Fly path for about a cent.
+It logs you in where needed, creates the ledger, builds and pushes the box image to Fly's registry, deploys the Worker, and sets every secret. It generates `BOX_SECRET`, `KEY_SECRET` and the Telegram webhook secret itself and never prints them, and sets `PUBLIC_URL` to the Worker's URL, where the key page and the privacy notice live. It asks for `PRIVACY_CONTROLLER` (the operator's legal name and address) and `PRIVACY_CONTACT` (an email for privacy requests), which the privacy notice shows; on a Worker that already exists it sets them before deploying, because this version won't start without them. Changing `BOX_SECRET` later orphans every box. The Worker won't start without `KEY_SECRET`. Rotate it as below; changing it any other way makes every saved key unreadable until the old secret is configured again. At the end it offers to provision one throwaway box on Fly and delete it, which proves the Fly path for about a cent.
 
 Run it again whenever you like: it keeps every generated secret, and its dry run prints the same thing twice.
 

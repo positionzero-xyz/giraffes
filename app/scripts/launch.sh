@@ -11,6 +11,7 @@ cd "$app"
 say() { printf '\n== %s\n' "$*"; }
 run() { if [ $dry = 1 ]; then printf '   would run: %s\n' "$*"; else "$@"; fi; }
 ask() { local v; read -r -p "$1 [$2]: " v; printf '%s' "${v:-$2}"; }
+ask_required() { local v=""; while [ -z "$v" ]; do read -r -p "$1: " v; done; printf '%s' "$v"; }
 ask_secret() { local v; read -r -s -p "$1 (input hidden, Enter to skip): " v; echo >&2; printf '%s' "$v"; }
 random() { node -e 'console.log(require("crypto").randomBytes(32).toString("base64url"))'; }
 put() {
@@ -19,6 +20,10 @@ put() {
 }
 has() { printf '%s' "$existing" | grep -q "\"name\": *\"$1\""; }
 put_once() { if has "$1"; then printf '   kept %s\n' "$1"; else put "$1" "$2"; fi; }
+privacy_secrets() {
+  if has PRIVACY_CONTROLLER; then echo "   kept PRIVACY_CONTROLLER"; else put PRIVACY_CONTROLLER "$(ask_required "Operator's legal name and address, shown on the privacy notice")"; fi
+  if has PRIVACY_CONTACT; then echo "   kept PRIVACY_CONTACT"; else put PRIVACY_CONTACT "$(ask_required "Email for privacy requests, shown on the privacy notice")"; fi
+}
 need() { command -v "$1" >/dev/null || { echo "$1 is not installed: $2" >&2; exit 1; }; }
 
 need node "https://nodejs.org"
@@ -73,6 +78,11 @@ run fly auth docker
 if [ $dry = 1 ]; then image="registry.fly.io/$images:<sha>"; echo "   would push $image"; else image=$("$repo/box/push.sh" "$images" | tail -1); fi
 echo "   image $image"
 
+if [ $dry = 0 ] && existing=$(npx wrangler secret list 2>/dev/null); then
+  say "Privacy notice (set before deploying, since this version won't start without it)"
+  privacy_secrets
+fi
+
 say "Deploy"
 if [ $dry = 1 ]; then url="https://giraffes.<you>.workers.dev"; echo "   would run: npx wrangler deploy"; else
   url=$(npx wrangler deploy 2>&1 | tee /dev/stderr | grep -oE 'https://[a-z0-9.-]+\.workers\.dev' | head -1)
@@ -83,6 +93,7 @@ say "Secrets"
 if [ $dry = 1 ]; then existing="[]"; else existing=$(npx wrangler secret list 2>/dev/null || echo "[]"); fi
 put_once KEY_SECRET "$(random)"
 put PUBLIC_URL "$url"
+privacy_secrets
 if has FLY_API_TOKEN || [ $dry = 1 ]; then put_once FLY_API_TOKEN dry; else put FLY_API_TOKEN "$(fly tokens create org --org "$org" --name giraffes-worker --expiry 8760h)"; fi
 put_once BOX_SECRET "$(random)"
 put_once BOX_HOST fly

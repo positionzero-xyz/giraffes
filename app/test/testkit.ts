@@ -531,6 +531,10 @@ export function fakeBox(
   return Object.assign(box, { deps });
 }
 
+export const NOTICE_URL = "https://giraffes.test/privacy";
+
+export const PRIVACY_VARS = { PRIVACY_CONTROLLER: "Giraffe Test Co., 1 Test Road, Bangkok", PRIVACY_CONTACT: "privacy@giraffes.test" } as const;
+
 export const STRIPE_VARS = {
   ADMISSION: "open",
   BILLING: "on",

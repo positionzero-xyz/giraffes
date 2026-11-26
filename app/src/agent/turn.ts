@@ -767,7 +767,7 @@ function textWithoutModel(view: TurnView, notice: string | null): string | null 
 export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit {
   const t: Notices = NOTICES[view.language];
   const replyOutsideBeta = why.kind === "command" && !mayspend(view.admission);
-  const keepInHistory = why.kind !== "feedback" && !replyOutsideBeta;
+  const keepInHistory = why.kind !== "feedback" && why.kind !== "ignored" && mayspend(view.admission);
   const waitForAccess: TurnCommit["waitForAccess"] =
     why.kind === "no_access" && why.waitForConnection ? { kind: "connection" }
     : why.kind === "over_cap" && why.catchUpBudget != null ? { kind: "budget", budget: why.catchUpBudget }

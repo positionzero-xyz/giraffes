@@ -120,6 +120,8 @@ const NO_COST = 0 as MicroUsd;
 const BOX_STEPS_PER_DRAIN = 3;
 const KEY_TICKET_MS = 15 * 60_000;
 const KEY_LINK_NOTE = "<key link>";
+const MAX_BILLING_ALERT_ATTEMPTS = 3;
+const BILLING_ALERT_REFUSED_MS = 300_000;
 
 export type Clock = { now(): EpochMs };
 
@@ -208,6 +210,8 @@ export class Agent extends DurableObject<Env> {
   // Each event re-reads the subscription from Stripe; handling them one at a time keeps a slower, older read
   // from landing after a newer one. Like #drain, it lives and dies with this instance.
   #billing: Promise<unknown> = Promise.resolve();
+  #billingAlertSettlement: Parameters<AgentStore["finishBillingAlertAttempt"]> | null = null;
+  #billingAlertStorageRetryAt = 0;
   /** In memory on purpose: losing it on a restart costs one more try of a box that may still be wedged. */
   #skipBoxUntil = 0;
   readonly #instance = crypto.randomUUID();
@@ -291,23 +295,63 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #deliverBillingAlert(): Promise<void> {
-    const { channels, clock, operatorChat } = this.#deps;
+    const { clock, operatorChat } = this.#deps;
+    if (operatorChat === null || this.#store.held() || clock.now() < this.#billingAlertStorageRetryAt) return;
+    try {
+      this.#billingAlertSettlement ??= await this.#attemptBillingAlert(operatorChat);
+      if (this.#billingAlertSettlement === null) return;
+      this.#store.finishBillingAlertAttempt(...this.#billingAlertSettlement);
+      this.#billingAlertSettlement = null;
+    } catch {
+      this.#billingAlertStorageRetryAt = clock.now() + CHANNEL_RETRY_MS;
+      diagnostic("drain_billing_alert_failed");
+    }
+  }
+
+  async #attemptBillingAlert(to: OperatorChat): Promise<Parameters<AgentStore["finishBillingAlertAttempt"]> | null> {
+    const { channels, clock } = this.#deps;
     const alert = this.#store.nextBillingAlert();
     const now = clock.now();
-    if (operatorChat === null || alert === null || alert.ready_at > now) return;
-    const result = await channels[operatorChat.channel].deliver({
+    if (alert === null || alert.ready_at > now) return null;
+    const person = this.#store.agent();
+    const notices = person && alert.notified === 0 ? NOTICES[person.language] : null;
+    if (alert.attempts >= MAX_BILLING_ALERT_ATTEMPTS) {
+      diagnostic("operator_alert_retries_exhausted");
+      const text = notices?.duplicateAlertStopped;
+      return [alert.subscription_ids, null, text ? { texts: [text], note: text } : null, now];
+    }
+
+    this.#store.startBillingAlertAttempt(alert.subscription_ids, (now + CHANNEL_RETRY_MS) as EpochMs);
+    const result = await channels[to.channel].deliver({
       id: alert.delivery_id,
-      to: operatorChat,
+      to,
       texts: [`Duplicate paid plans\nSubscriptions: ${alert.subscription_ids}\nReview the subscriptions and any extra charges.`],
       intent: "requested",
     }, now).catch(() => ({ kind: "in_doubt", afterMs: CHANNEL_RETRY_MS } as const));
     const after = clock.now();
-    const retryAt = result.kind === "sent" ? null : (after + Math.max(CHANNEL_RETRY_MS, "afterMs" in result ? result.afterMs : 300_000)) as EpochMs;
-    if (retryAt !== null) diagnostic(result.kind === "in_doubt" ? "operator_alert_unconfirmed" : "operator_alert_failed");
-    const person = this.#store.agent();
-    const notices = person && alert.notified === 0 ? NOTICES[person.language] : null;
-    const text = notices && (result.kind === "sent" ? notices.duplicateAlerted : notices.duplicateRetrying(result.kind === "in_doubt", CHANNEL_RETRY_MS / 1000));
-    this.#store.finishBillingAlertAttempt(alert.subscription_ids, retryAt, text ? { texts: [text], note: text } : null, after);
+    const attemptsLeft = MAX_BILLING_ALERT_ATTEMPTS - alert.attempts - 1;
+    let retryAt: EpochMs | null = null;
+    let text = notices?.duplicateAlerted;
+    if (result.kind !== "sent") {
+      const outcome = result.kind === "in_doubt" || result.kind === "retry" ? result.kind : "refused";
+      diagnostic(outcome === "in_doubt" ? "operator_alert_unconfirmed" : "operator_alert_failed");
+      const waitMs = Math.max(CHANNEL_RETRY_MS, "afterMs" in result ? result.afterMs : BILLING_ALERT_REFUSED_MS);
+      if (attemptsLeft === 0) {
+        diagnostic("operator_alert_retries_exhausted");
+        text = notices?.duplicateAlertStopped;
+      } else {
+        retryAt = (after + waitMs) as EpochMs;
+        text = notices?.duplicateRetrying(outcome, Math.ceil(waitMs / 1000), attemptsLeft);
+      }
+    }
+    return [alert.subscription_ids, retryAt, text ? { texts: [text], note: text } : null, after];
+  }
+
+  #billingAlertAt(): EpochMs | null {
+    if (this.#deps.operatorChat === null || this.#store.held()) return null;
+    if (this.#billingAlertSettlement !== null) return this.#billingAlertStorageRetryAt as EpochMs;
+    const next = this.#store.nextBillingAlert();
+    return next && Math.max(next.ready_at, this.#billingAlertStorageRetryAt) as EpochMs;
   }
 
   async refreshPlan(agent: AgentKey): Promise<void> {
@@ -551,7 +595,7 @@ export class Agent extends DurableObject<Env> {
     const clock = this.#deps.clock;
     const started = clock.now();
     try {
-      if (this.#deps.operatorChat && (this.#store.nextBillingAlert()?.ready_at ?? Infinity) <= started) {
+      if ((this.#billingAlertAt() ?? Infinity) <= started) {
         await this.#phase("drain_billing_alert_failed", () => this.#runBilling(() => this.#deliverBillingAlert()));
       }
       await this.#phase("drain_turns_failed", async () => {
@@ -1383,7 +1427,7 @@ export class Agent extends DurableObject<Env> {
       inboxReadyAt: held ? null : (r.inboxReadyAt ?? (catchUp ? now : null)),
       wakeupFireAt: fireTimes.length > 0 ? (Math.min(...fireTimes) as EpochMs) : null,
       outboxReadyAt: held ? null : r.outboxReadyAt,
-      billingAlertAt: this.#deps.operatorChat ? this.#store.nextBillingAlert()?.ready_at ?? null : null,
+      billingAlertAt: this.#billingAlertAt(),
       logsReadyAt: r.logsReadyAt,
       compactionRetryAt: held ? null : r.compactionRetryAt,
       boxAt: this.#deps.box && mayspend(this.#store.admission()) ? r.boxAt : null,

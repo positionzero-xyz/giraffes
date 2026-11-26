@@ -535,7 +535,8 @@ export const MIGRATIONS: readonly string[] = [
     subscription_ids TEXT PRIMARY KEY,
     delivery_id      TEXT NOT NULL,
     ready_at         INTEGER,
-    notified        INTEGER NOT NULL DEFAULT 0
+    notified         INTEGER NOT NULL DEFAULT 0,
+    attempts         INTEGER NOT NULL DEFAULT 0
   );
   `,
 ];

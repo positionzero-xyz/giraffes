@@ -530,9 +530,11 @@ describe("checkout and the portal", () => {
     await c.settle();
     expect(operator.delivered).toHaveLength(1);
     expect(await (await stripeChange(kit, extra)).text()).toBe("duplicate");
-    expect(await runInDurableObject(stub, (_, { storage }) => storage.getAlarm())).toBe(local("2099-11-04T10:00:30"));
+    const firstRetry = (local("2099-11-04T10:00") + 30_000) as EpochMs;
+    expect(await runInDurableObject(stub, (_, { storage }) => storage.getAlarm())).toBe(firstRetry);
 
-    await c.advanceTo("2099-11-04T10:00:30");
+    c.clock.set(firstRetry);
+    await c.settle();
     expect(operator.delivered).toHaveLength(1);
     expect(await runInDurableObject(stub, (_, { storage }) => storage.getAlarm())).toBe(local("2099-11-04T10:01"));
     await runInDurableObject(stub, (_, { storage }) => { storage.sql.exec("DROP TRIGGER fail_billing_receipt"); });

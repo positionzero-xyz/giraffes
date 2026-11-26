@@ -180,12 +180,12 @@ export function nextAlarm(input: {
   readonly inboxReadyAt: EpochMs | null;
   readonly wakeupFireAt: EpochMs | null;
   readonly outboxReadyAt: EpochMs | null;
-  readonly billingAlertAt?: EpochMs | null;
+  readonly billingAlertAt: EpochMs | null;
   readonly logsReadyAt: EpochMs | null;
   readonly compactionRetryAt: EpochMs | null;
   readonly boxAt: EpochMs | null;
 }): EpochMs | null {
-  const times = [input.inboxReadyAt, input.wakeupFireAt, input.outboxReadyAt, input.billingAlertAt ?? null, input.logsReadyAt, input.compactionRetryAt, input.boxAt].filter(
+  const times = [input.inboxReadyAt, input.wakeupFireAt, input.outboxReadyAt, input.billingAlertAt, input.logsReadyAt, input.compactionRetryAt, input.boxAt].filter(
     (t): t is EpochMs => t !== null,
   );
   if (times.length === 0) return null;

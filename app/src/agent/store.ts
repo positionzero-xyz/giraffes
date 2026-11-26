@@ -1164,9 +1164,13 @@ export class AgentStore {
   }
 
   nextBillingAlert() {
-    return this.sql.exec<{ subscription_ids: string; delivery_id: OutboxId; ready_at: EpochMs; notified: number }>(
-      "SELECT subscription_ids, delivery_id, ready_at, notified FROM billing_alert WHERE ready_at IS NOT NULL ORDER BY ready_at, subscription_ids LIMIT 1",
+    return this.sql.exec<{ subscription_ids: string; delivery_id: OutboxId; ready_at: EpochMs; notified: number; attempts: number }>(
+      "SELECT subscription_ids, delivery_id, ready_at, notified, attempts FROM billing_alert WHERE ready_at IS NOT NULL ORDER BY ready_at, subscription_ids LIMIT 1",
     ).toArray()[0] ?? null;
+  }
+
+  startBillingAlertAttempt(ids: string, readyAt: EpochMs): void {
+    this.sql.exec("UPDATE billing_alert SET ready_at = ?, attempts = attempts + 1 WHERE subscription_ids = ?", readyAt, ids);
   }
 
   finishBillingAlertAttempt(ids: string, readyAt: EpochMs | null, message: NoteMessage | null, now: EpochMs): void {

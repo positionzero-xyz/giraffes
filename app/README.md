@@ -134,7 +134,7 @@ price plus the provider's fee from our price cards, not an invoice.
      `STRIPE_PORTAL_CONFIGURATION` and `PUBLIC_URL` (the Worker's HTTPS URL). Successful Checkout
      sessions and the billing portal return to `/billing/done`. Canceled sessions return to
      `/billing/cancel`. Set `OPERATOR_CHAT` to a configured chat before enabling billing.
-     Giraffe alerts that chat about duplicate paid plans and retries until the chat confirms delivery.
+     Giraffe alerts that chat about duplicate paid plans and makes up to three delivery attempts.
      It alerts once per set of subscriptions. An additional subscription makes a new set.
      Optional vars: `TRIAL_DAYS` (default 14,
      counted from a person's first message with billing on, so people from the beta get a full trial

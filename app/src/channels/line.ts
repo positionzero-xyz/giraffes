@@ -9,6 +9,10 @@ const Quota = z.discriminatedUnion("type", [
   z.object({ type: z.literal("limited"), value: z.number().int().nonnegative() }),
 ]);
 const Consumption = z.object({ totalUsage: z.number().int().nonnegative() });
+const ErrorBody = z.object({
+  message: z.string().optional(),
+  details: z.array(z.object({ property: z.string().optional() })).optional(),
+});
 /** LINE says a reply token is good for about one minute. */
 const REPLY_TOKEN_TTL_MS = 60_000;
 const REPLY_TOKEN_SAFETY_MS = 10_000;
@@ -78,7 +82,7 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
     }
   }
 
-  async function push(msg: OutboundMessage, messages: readonly object[]): Promise<Delivery> {
+  async function push(msg: OutboundMessage, messages: readonly object[], operatorAlert = false): Promise<Delivery> {
     try {
       // LINE dedupes pushes on X-Line-Retry-Key and answers 409 to a repeat, so a resend after a crash isn't
       // delivered twice.
@@ -88,7 +92,9 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
         body: JSON.stringify({ to: msg.to.channelUserId, messages }),
       });
       if (res.ok || res.status === 409) return { kind: "sent", via: "push" };
-      return classify(res.status, await res.text());
+      const body = await res.text();
+      if (operatorAlert && res.status === 400 && invalidPushRecipient(body)) return { kind: "recipient_gone" };
+      return classify(res.status, body);
     } catch (err) {
       return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail: String(err) };
     }
@@ -129,6 +135,8 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
       return { kind: "accepted", envelopes, ignored: body.data.events.length - envelopes.length };
     },
 
+    deliverOperatorAlert: (msg) => push(msg, toMessages(msg), true),
+
     async deliver(msg: OutboundMessage, now: EpochMs, live: () => boolean = () => true): Promise<Delivery> {
       const messages = toMessages(msg);
       if (msg.reply && now < msg.reply.expiresAt - REPLY_TOKEN_SAFETY_MS) {
@@ -163,6 +171,18 @@ function classify(status: number, body: string): Delivery {
   if (status === 429 && body.includes("monthly limit")) return { kind: "failed", detail: `quota: ${body}` };
   if (status === 429 || status >= 500) return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail: `${status} ${body}` };
   return { kind: "failed", detail: `${status} ${body}` };
+}
+
+function invalidPushRecipient(body: string): boolean {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  const error = ErrorBody.safeParse(raw).data;
+  return error?.details?.some(({ property }) => property === "to") === true
+    || error?.message?.startsWith("The property, 'to', in the request body is invalid (") === true;
 }
 
 /** This month's message limit (null when the account has none) and the messages sent so far, which count pushes and not replies. */

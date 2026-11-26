@@ -853,6 +853,25 @@ describe("connecting a Claude plan", () => {
     expect(await c.received()).toEqual([say("already_connected")]);
   });
 
+  test("after polling ends, /claude confirms a completed sign-in", async () => {
+    const box = fakeBox();
+    const c = await devChat("late-signin", { model: null, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    c.clock.set(local("2099-11-04T10:30"));
+    await c.alarm();
+    box.signedIn = true;
+    await c.advanceTo("2099-11-04T10:31");
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("signed_out");
+
+    await c.say("/claude");
+
+    expect(await c.received()).toEqual([say("connected")]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+  });
+
   test("a signed-in person's turn runs on their box with their token, reserves no spend, and is logged as backend 'box'", async () => {
     const box = fakeBox({ signedIn: true });
     const model = scripted([]);

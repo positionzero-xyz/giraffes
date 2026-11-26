@@ -21,6 +21,7 @@ export type StepLog = (step: FlyStep, outcome: "created" | "exists" | "updated")
 
 const NameTaken = z.object({ status: z.literal("name_taken") });
 const AppReply = z.object({ organization: z.object({ slug: z.string() }).nullish() });
+const AppsReply = z.object({ apps: z.array(z.object({ name: z.string(), organization: z.object({ slug: z.string() }).nullish() })) });
 const IpsReply = z.object({ ips: z.array(z.object({ ip: z.string(), shared: z.boolean().nullish(), egress: z.boolean().nullish() })).nullable() });
 export const FlyVolumesReply = z.array(z.object({ id: z.string(), name: z.string(), state: z.string(), auto_backup_enabled: z.boolean().optional() }));
 const VolumeReply = z.object({ id: z.string(), auto_backup_enabled: z.literal(false) });
@@ -110,6 +111,17 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
 
   const failed = (x: unknown): x is HostFailure => typeof x === "object" && x !== null && "ok" in x && x.ok === false;
 
+  /** Fly accepts "personal" as an org alias but reports the org's real slug on an app. The list proves this app is ours. */
+  async function ownerInOrg(name: BoxName, ownerSlug: string): Promise<boolean | HostFailure> {
+    if (ownerSlug === cfg.org) return true;
+    if (cfg.org !== "personal") return false;
+    const listed = await call("GET", `/apps?org_slug=${encodeURIComponent(cfg.org)}`);
+    if (!listed.ok) return listed;
+    const apps = read(listed, AppsReply, "GET /apps?org_slug=personal");
+    if (failed(apps)) return apps;
+    return apps.apps.some((app) => app.name === name && app.organization?.slug === ownerSlug);
+  }
+
   async function app(name: BoxName): Promise<HostResult> {
     const created = await call("POST", "/apps", { app_name: name, org_slug: cfg.org, network: name });
     if (!created.ok) return created;
@@ -123,7 +135,11 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
     if (!got.ok) return got;
     const owner = read(got, AppReply, `GET /apps/${name}`);
     if (failed(owner)) return fail(false, `app name ${name} is taken outside ${cfg.org}`);
-    if (owner.organization && owner.organization.slug !== cfg.org) return fail(false, `app ${name} belongs to ${owner.organization.slug}`);
+    if (owner.organization) {
+      const owned = await ownerInOrg(name, owner.organization.slug);
+      if (failed(owned)) return owned;
+      if (!owned) return fail(false, `app ${name} belongs to ${owner.organization.slug}`);
+    }
     log("app", "exists");
     return HOST_OK;
   }

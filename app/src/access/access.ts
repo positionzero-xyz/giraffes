@@ -360,12 +360,13 @@ export class ModelAccess {
   /** A turn as the person's own Claude Code session; its tool calls and reply become a turn output for the usual checks. */
   async #boxAgent(req: CallRequest<"turn">): Promise<LaneResult<"turn">> {
     const box = req.box ?? oneOffBoxTurn(req.prompt);
+    const ephemeral = req.box === undefined;
     const { append, session } = box;
     const route = routeFor({ kind: "box", provider: "claude" }, "turn");
     const turn = this.#fit(route, "strict", { ...req, system: append, prompt: box.turn });
     const fresh = this.#fit(route, "strict", { ...req, system: append, prompt: box.fresh });
     if (turn === null || fresh === null) return { kind: "next", tooLong: true };
-    const answer = await this.deps.box.agent({ model: route.model, append, session, turn: turn.user, fresh: fresh.user, tools: AGENT_TOOLS }, req.claim);
+    const answer = await this.deps.box.agent({ model: route.model, append, session, turn: turn.user, fresh: fresh.user, tools: AGENT_TOOLS, ...(ephemeral ? { ephemeral: true } : {}) }, req.claim);
     if (answer.kind === "fenced") return answer;
     if (answer.kind === "moved_on") return { kind: "next", transient: answer.transient, told: answer.told };
     const output = turnFromAgent(jsonOrNull(answer.reply.text));

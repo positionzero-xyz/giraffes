@@ -136,6 +136,15 @@ describe("every cap that guards a prompt budget is in UTF-8 bytes", () => {
     const newSection = prompt.slice(prompt.indexOf("## New"));
     expect(bytesOf(newSection) - bytesOf(newest)).toBeLessThanOrEqual(TURN.batchBytes + 200);
   });
+
+  test("a clipped earlier batch message is not marked as seen by the box, so it can be backfilled whole", () => {
+    const clipped = `clipped fact ${"x".repeat(2_500)} end`;
+    const commit = planTurn({ actions: [{ type: "send", text: "ok" } as const], tasks: [], about: "" }, view({ batch: { items: [message(clipped), message("newest")] as never } }));
+
+    expect(commit.turns[0].text).toBe(clipped);
+    expect(commit.turns[0].boxView).toBeUndefined();
+    expect(commit.turns[1].boxView).toEqual({ kind: "input" });
+  });
 });
 
 describe("a message too long for the route", () => {

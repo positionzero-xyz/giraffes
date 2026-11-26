@@ -345,6 +345,7 @@ describe("the Durable Object is the one record of the chat for the box session",
     box.replies.push({ kind: "reply", step: chat("Hi again.") });
     await c.say("me again");
     expect(lastBox(box)).toMatchObject({ session: mine, resumed: true });
+    expect(lastBox(box).ephemeral).toBeUndefined();
     expect(lastBox(box).user).not.toContain("hi from the group");
   });
 

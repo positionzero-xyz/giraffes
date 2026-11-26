@@ -123,6 +123,11 @@ function fakeFly(org = "giraffes") {
       return f.body === undefined ? new Response("boom", { status: f.status }) : Response.json(f.body, { status: f.status });
     }
     const [, app, sub, id] = url.pathname.match(/^\/v1\/apps(?:\/([^/]+))?(?:\/(\w+))?(?:\/([^/]+))?$/) ?? [];
+    if (!app && method === "GET") {
+      const orgSlug = url.searchParams.get("org_slug");
+      const mine = [...apps.entries()].filter(([, owner]) => (orgSlug === "personal" ? owner !== "someone-else" : owner === orgSlug));
+      return Response.json({ apps: mine.map(([name, owner]) => ({ name, organization: { slug: owner } })) });
+    }
     if (!app && method === "POST") {
       if (apps.has(body.app_name)) return Response.json({ error: "Validation failed: Name has already been taken", status: "name_taken" }, { status: 422 });
       apps.set(body.app_name, body.org_slug);
@@ -337,6 +342,16 @@ describe("fly host", () => {
     fly.apps.set(app, "someone-else");
     expect(await host.ensure(app, token)).toMatchObject({ ok: false, retryable: false });
     expect(fly.machines.get(app)).toBeUndefined();
+  });
+
+  test("the personal alias accepts an existing app Fly reports under the personal org's real slug", async () => {
+    const fly = fakeFly();
+    fly.apps.set(app, "beam-personal-abc123");
+    const host = flyHost({ ...flyConfig, org: "personal" }, fly.fetch);
+
+    expect(await host.ensure(app, token)).toEqual({ ok: true });
+    expect(fly.requests.some((r) => r.method === "GET" && r.path === "/apps?org_slug=personal")).toBe(true);
+    expect(fly.machines.get(app)).toHaveLength(1);
   });
 
   test("a name Fly refuses for another reason fails with Fly's words, not as a name owned elsewhere", async () => {

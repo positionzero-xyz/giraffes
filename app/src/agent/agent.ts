@@ -74,6 +74,7 @@ import { connect, type Connect } from "../model/client";
 import { bytesOf, renderPrompt, type PromptParts } from "../model/prompt";
 import { PROVIDERS } from "../model/providers";
 import { routeFor, type CallPurpose, type Purpose } from "../model/routes";
+import { estimate, fits } from "../policy/spend";
 import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach";
 import { inLineReserve, type QuotaReading } from "../policy/quota";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
@@ -1124,11 +1125,11 @@ export class Agent extends DurableObject<Env> {
    * with erase refuses work from before its last erase. The claim is checked again after each await, right before a fetch.
    */
   /** True only when the consented backup key is currently healthy and has unspent cap room. */
-  #backupKeyCanServe(now: EpochMs): boolean {
+  #backupKeyCanServe(now: EpochMs, purpose: CallPurpose): boolean {
     const key = this.#store.key();
     if (!key?.backup || key.health.kind !== "ok") return false;
-    const spend = this.#store.spend("byok", utcMonth(now));
-    return spend.spent + spend.reserved < key.capMicro;
+    const route = routeFor({ kind: "key", provider: key.provider, model: key.model }, purpose);
+    return fits(this.#store.spend("byok", utcMonth(now)), estimate(route, route.promptBytes), key.capMicro);
   }
 
   async #onBox(
@@ -1140,7 +1141,8 @@ export class Agent extends DurableObject<Env> {
     const box = this.#store.box();
     const agent = this.#agent().key;
     if (!boxServes(deps, agent) || box?.state !== "signed_in") return { kind: "moved_on", transient: false, told: false };
-    if (this.#deps.clock.now() < this.#skipBoxUntil) return { kind: "moved_on", transient: true, told: false };
+    const startedAt = this.#deps.clock.now();
+    if (startedAt < this.#skipBoxUntil && this.#backupKeyCanServe(startedAt, purpose)) return { kind: "moved_on", transient: true, told: false };
     const token = await boxToken(deps.secret, box.name);
     let volume = this.#store.boxVolume();
     if (volume === null) {
@@ -1171,7 +1173,7 @@ export class Agent extends DurableObject<Env> {
         return { kind: "moved_on", transient: true, told: false };
       case "unavailable":
         diagnostic("box_unavailable");
-        if (this.#backupKeyCanServe(now)) this.#skipBoxUntil = now + BOX.skipAfterUnavailableMs;
+        if (this.#backupKeyCanServe(now, purpose)) this.#skipBoxUntil = now + BOX.skipAfterUnavailableMs;
         this.#store.appendLogs([missed("unavailable")], now);
         return { kind: "moved_on", transient: true, told: false };
       default:

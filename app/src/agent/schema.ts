@@ -531,6 +531,18 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE box ADD COLUMN volume TEXT;
   `,
   `
+  CREATE TABLE billing_alert (
+    subscription_ids TEXT PRIMARY KEY,
+    delivery_id      TEXT NOT NULL,
+    ready_at         INTEGER,
+    notified        INTEGER NOT NULL DEFAULT 0
+  );
+  `,
+  `
+  ALTER TABLE billing_alert ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE billing_alert ADD COLUMN closed_as TEXT CHECK (closed_as IN ('sent', 'gone'));
+  `,
+  `
   CREATE TABLE outside_write (
     id            TEXT PRIMARY KEY,
     intent        TEXT NOT NULL UNIQUE,

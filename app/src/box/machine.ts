@@ -194,7 +194,7 @@ export function beginStep(b: Box, now: EpochMs): Step | null {
 
 export function afterProbe(step: ProbeStep, probe: Probe, now: EpochMs): Transition {
   const b = step.box;
-  if (probe.kind === "up" && probe.signedIn) return { box: to(b, { state: "signed_in" }, now), say: "connected" };
+  if (probe.kind === "up" && probe.signedIn) return onConnected(b, now);
   if (probe.kind === "unauthorized" && step.kind !== "provision") return { box: needsEnsure(b, now), say: null };
   switch (step.kind) {
     case "provision":
@@ -206,6 +206,10 @@ export function afterProbe(step: ProbeStep, probe: Probe, now: EpochMs): Transit
     case "poll":
       return { box: b, say: null };
   }
+}
+
+export function onConnected(b: Provisioning | SignedOut, now: EpochMs): Reply {
+  return { box: to(b, { state: "signed_in" }, now), say: "connected" };
 }
 
 export function onCommand(b: Box, now: EpochMs): Reply {

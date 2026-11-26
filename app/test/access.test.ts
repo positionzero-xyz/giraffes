@@ -239,6 +239,22 @@ describe("a person's own key", () => {
     expect((await c.received())[0]).toBe(NOTICE.keyRateLimited("OpenCode Go", "2099-11-05 00:01"));
   });
 
+  test("when the clocks go back, the retry notice skips the repeated hour so no reading of it is before the deadline", async () => {
+    const provider = fakeProvider([reply("Hi."), { kind: "status", status: 429, retryAfter: "4500" }]);
+    const c = await devChat("rate-london-fall-back", { model: null, provider, at: "2099-10-25T06:00" });
+    await giveKey(c.agent);
+    await c.say("hello");
+    await c.received();
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_a, state) => {
+      state.storage.sql.exec("UPDATE agent SET tz = 'Europe/London'");
+    });
+    c.clock.set(local("2099-10-25T07:15"));
+
+    await c.say("one more thing");
+
+    expect((await c.received())[0]).toBe(NOTICE.keyRateLimited("OpenCode Go", "2099-10-25 02:00"));
+  });
+
   test("a requested reminder still arrives, written by code, while the person's key is refused", async () => {
     const provider = fakeProvider([
       { kind: "output", value: { actions: [schedule("clinic", "2099-11-04T18:00", "call the clinic"), send("Done.")], tasks: [], about: "" } },

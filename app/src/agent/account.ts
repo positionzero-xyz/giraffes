@@ -28,7 +28,7 @@ export type EraseBox =
   | { readonly kind: "none" }
   | { readonly kind: "unverified"; readonly box: EraseBoxReference }
   | { readonly kind: "wiped" | "reclaimed"; readonly host: BoxHostKind }
-  | { readonly kind: "locate" | "wipe-static"; readonly box: EraseBoxTarget }
+  | { readonly kind: "locate" | "relocate" | "wipe-static"; readonly box: EraseBoxTarget }
   | { readonly kind: "wipe-fly" | "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement };
 
 export type EraseBilling =
@@ -50,6 +50,7 @@ type ErasureIdentity = {
   readonly reply?: ReplyHandle;
   readonly startedAt?: EpochMs;
   readonly diagnosedAt?: EpochMs;
+  readonly nextAt?: EpochMs;
 };
 
 export type Erasure = ErasureIdentity & (

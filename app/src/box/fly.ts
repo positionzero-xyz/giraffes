@@ -276,25 +276,38 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       }
       const live = volumes.filter((v) => !GONE_VOLUME.has(v.state));
       const mounted = live.filter((v) => v.state === "created" && v.attached_machine_id);
-      // A single mounted volume can bind the box's own wipe proof. Any other shape (none,
-      // unattached, or several) has no single proof, so retirement destroys every live disk.
-      const one = live.length === 1 && mounted.length === 1 ? mounted[0] : null;
-      return {
-        ok: true,
-        target: {
-          disk: one?.id ?? null,
-          machine: one?.attached_machine_id ?? null,
-          disks: live.map((v) => v.id),
-        },
-      };
+      if (live.length === 0) {
+        return { ok: true, target: { disk: null, machine: null, disks: [] } };
+      }
+      if (live.length === 1) {
+        const only = live[0];
+        return {
+          ok: true,
+          target: {
+            disk: mounted.length === 1 ? only.id : null,
+            machine: mounted.length === 1 ? only.attached_machine_id ?? null : null,
+            disks: [only.id],
+          },
+        };
+      }
+      // More than one live volume: only the single mounted disk is proven. Unknown extras are
+      // left for retireWipedDisk to hold, never added to the deletion set.
+      if (mounted.length === 1) {
+        return {
+          ok: true,
+          target: { disk: mounted[0].id, machine: mounted[0].attached_machine_id ?? null, disks: [mounted[0].id] },
+        };
+      }
+      return fail(true, "cannot identify one mounted disk among several volumes");
     },
     async retireWipedDisk(name, target) {
       const owned = await ownership(name);
       if (failed(owned)) return owned;
       const volumes = await retirementVolumes(name);
       if (failed(volumes)) return volumes;
+      const disks = target.disks ?? (target.disk ? [target.disk] : []);
       const live = volumes.filter((v) => !GONE_VOLUME.has(v.state));
-      const known = new Set(target.disks);
+      const known = new Set(disks);
       if (live.some((v) => !known.has(v.id))) return fail(true, "unexpected live volume remains");
 
       const machines = new Set<string>();
@@ -306,7 +319,7 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
         if (!success(removed.status) && removed.status !== 404) return fail(true, "box machine retirement unverified");
       }
 
-      for (const disk of new Set([...target.disks, ...(target.disk ? [target.disk] : [])])) {
+      for (const disk of new Set([...disks, ...(target.disk ? [target.disk] : [])])) {
         if (GONE_VOLUME.has(volumes.find((v) => v.id === disk)?.state ?? "destroyed")) continue;
         const removed = await call("DELETE", `/apps/${name}/volumes/${encodeURIComponent(disk)}`);
         if (!removed.ok) return removed;
@@ -321,6 +334,9 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
     async removeRetiredApp(name) {
       const owned = await ownership(name);
       if (failed(owned)) return owned.missing ? HOST_OK : owned;
+      const before = await retirementVolumes(name);
+      if (failed(before)) return before.missing ? fail(true, "app disappeared before retirement") : before;
+      if (before.some((v) => !GONE_VOLUME.has(v.state))) return fail(true, "unexpected live volume remains");
       const removedApp = await call("DELETE", `/apps/${name}?force=true`);
       if (!removedApp.ok) return removedApp;
       if (!success(removedApp.status) && removedApp.status !== 404) return fail(true, "box app retirement unverified");

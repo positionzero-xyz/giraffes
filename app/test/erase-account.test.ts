@@ -202,7 +202,7 @@ test("erase retains box identity while the box feature is off, counts capacity, 
   expect(wipes).toEqual([]);
 
   await runInDurableObject(stub, (agent) => agent.withDeps({ box: deps }));
-  c.clock.set((c.clock.now() + 61_000) as EpochMs);
+  c.clock.set((c.clock.now() + 24 * 60 * 60_000 + 1_000) as EpochMs);
   await c.settle();
 
   expect(wipes).toHaveLength(1);

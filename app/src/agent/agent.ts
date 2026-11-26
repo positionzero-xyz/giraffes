@@ -550,6 +550,12 @@ export class Agent extends DurableObject<Env> {
       }
       while (current.box.kind !== "none" && current.box.kind !== "wiped" && current.box.kind !== "reclaimed") {
         const box = await this.#eraseAccountBox(current);
+        if (box.kind === "relocate") {
+          current = { ...current, box };
+          this.ctx.storage.kv.put(ERASE_JOB, current);
+          await this.#retryErasure(ACCOUNT_RETRY_MS);
+          return;
+        }
         if (box === current.box) {
           current = this.#noteEraseHold(current, this.#eraseBoxHoldCode(current));
           this.ctx.storage.kv.put(ERASE_JOB, current);
@@ -587,7 +593,8 @@ export class Agent extends DurableObject<Env> {
   /** At most one operator diagnostic a day per stuck erasure; the value is its age in hours. */
   #noteEraseHold(job: Extract<Erasure, { kind: "cleaning" }>, code: Diagnostic): Extract<Erasure, { kind: "cleaning" }> {
     const now = this.#deps.clock.now();
-    const startedAt = job.startedAt ?? now;
+    // A job persisted before timestamps existed is at least one interval old; report that lower bound.
+    const startedAt = job.startedAt ?? ((now - ERASE_DIAGNOSTIC_MS) as EpochMs);
     const last = job.diagnosedAt ?? startedAt;
     if (now - last < ERASE_DIAGNOSTIC_MS) return job;
     diagnostic(code, Math.floor((now - startedAt) / (60 * 60_000)));
@@ -674,28 +681,31 @@ export class Agent extends DurableObject<Env> {
           ? { kind: "remove-volume", box, target: found.target }
           : { kind: "wipe-fly", box, target: found.target };
       }
+      case "relocate":
+        return { kind: "locate", box };
       case "wipe-static":
       case "wipe-fly": {
         const token = await boxToken(deps.secret, box.name);
+        const fallback = step.kind === "wipe-fly" ? { kind: "relocate" as const, box } : step;
         if (!box.incarnation) {
           const health = await deps.client.health(box.url, token);
-          if (health.kind !== "up" || !health.box) return step;
+          if (health.kind !== "up" || !health.box) return fallback;
           return { ...step, box: { ...box, incarnation: health.box } };
         }
         const incarnation = box.incarnation;
         const wipe = await deps.client.erase(box.url, token, { scope: "account", box: incarnation, epoch: job.epoch });
-        if (wipe.kind !== "erased" || wipe.scope !== "account" || wipe.box !== incarnation || wipe.floor < job.epoch) return step;
+        if (wipe.kind !== "erased" || wipe.scope !== "account" || wipe.box !== incarnation || wipe.floor < job.epoch) return fallback;
         return step.kind === "wipe-fly" ? { kind: "remove-volume", box, target: step.target } : { kind: "wiped", host: "static" };
       }
       case "remove-volume": {
         const retired = await fly?.retireWipedDisk(box.name, step.target);
         if (retired?.ok) return { ...step, kind: "remove-app" };
-        return retired && !retired.ok && retired.missing ? { kind: "locate", box } : step;
+        return retired && !retired.ok && retired.missing ? { kind: "relocate", box } : step;
       }
       case "remove-app": {
         const removed = await fly?.removeRetiredApp(box.name);
         if (removed?.ok) return { kind: "wiped", host: "fly" };
-        return removed && !removed.ok && removed.missing ? { kind: "locate", box } : step;
+        return removed && !removed.ok && removed.missing ? { kind: "relocate", box } : step;
       }
     }
   }
@@ -742,7 +752,12 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #retryErasure(delay = ACCOUNT_RETRY_MS): Promise<void> {
-    await this.ctx.storage.setAlarm(this.#deps.clock.now() + delay);
+    const now = this.#deps.clock.now();
+    const job = this.#erasure();
+    if (job && job.kind !== "receipt") {
+      this.ctx.storage.kv.put(ERASE_JOB, { ...job, nextAt: (now + delay) as EpochMs });
+    }
+    await this.ctx.storage.setAlarm(now + delay);
   }
 
   async #trackAccountRpc<T>(work: Promise<T>): Promise<T> {
@@ -772,6 +787,11 @@ export class Agent extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     const erase = this.#erasure();
     if (erase) {
+      const now = this.#deps.clock.now();
+      if (erase.nextAt !== undefined && now < erase.nextAt) {
+        await this.ctx.storage.setAlarm(erase.nextAt);
+        return;
+      }
       if (!this.#eraseRun) {
         this.#eraseRun = this.#runErasure(erase).finally(() => { this.#eraseRun = null; });
       }

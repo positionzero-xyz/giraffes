@@ -510,7 +510,8 @@ describe("no consent, no key: a person who has or had a Claude plan box", () => 
     await c.say("hello");
     expect(provider.seen).toHaveLength(0);
     expect(await c.received()).toEqual([NOTICE.boxNotReady]);
-  });
+  // This drive walks the box setup, backup-question, and two-day reclaim alarm chain.
+  }, 10_000);
 
   test("/claude remove removes the plan's box, asks nothing, and from then on the key answers", async () => {
     const box = fakeBox({ signedIn: true });

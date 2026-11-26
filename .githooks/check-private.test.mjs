@@ -197,3 +197,16 @@ test("tree mode scans tracked files, and stdin mode scans piped text", () => {
   assert.equal(check(work, ["stdin"], `${HOME_PATH}\n`).status, 1);
   assert.equal(check(work, ["stdin"], "nothing here\n").status, 0);
 });
+
+
+test("binary payloads are scanned when staged, committed in the tree, and pushed", () => {
+  const { work, remote, g } = repo();
+  const payload = Buffer.concat([Buffer.from([0, 1, 255]), Buffer.from(` ${TOKEN} `), Buffer.from([0, 2])]);
+  writeFileSync(join(work, "payload.bin"), payload);
+  g("add", "payload.bin");
+  assert.equal(check(work, ["staged"]).status, 1);
+  g("commit", "-q", "--no-verify", "-m", "binary");
+  assert.equal(check(work, ["tree"]).status, 1);
+  assert.notEqual(spawnSync("git", ["push", "-q", "origin", "main"], { cwd: work, encoding: "utf8" }).status, 0);
+  assert.equal(execFileSync("git", ["--git-dir", remote, "log", "--format=%s", "-1", "main"], { encoding: "utf8" }).trim(), "init");
+});

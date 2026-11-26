@@ -75,7 +75,7 @@ function pushed(stdin, remote) {
     const short = c.slice(0, 7);
     lines.push(...git(["log", "-1", "--format=%B", c]).split("\n").map((text) => ({ where: `${short} message`, text })));
     lines.push(...git(["show", "--format=", "--name-only", "--diff-filter=ACR", c]).split("\n").filter(Boolean).map((text) => ({ where: `${short} new path`, text })));
-    lines.push(...addedLines(git(["show", "--format=", "-U0", "--no-color", "--no-ext-diff", "-C", c]), `${short} `));
+    lines.push(...addedLines(git(["show", "--format=", "--text", "-U0", "--no-color", "--no-ext-diff", "-C", c]), `${short} `));
   }
   return lines;
 }
@@ -85,14 +85,14 @@ function collect(mode, arg) {
     const names = git(["diff", "--cached", "--name-only", "--diff-filter=ACR"]).split("\n").filter(Boolean);
     return [
       ...names.map((text) => ({ where: "new path", text })),
-      ...addedLines(git(["diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "-C"]), "staged "),
+      ...addedLines(git(["diff", "--cached", "--text", "-U0", "--no-color", "--no-ext-diff", "-C"]), "staged "),
     ];
   }
   if (mode === "message") return readFileSync(arg, "utf8").split("\n").filter((l) => !l.startsWith("#")).map((text) => ({ where: "commit message", text }));
   if (mode === "push") return pushed(readFileSync(0, "utf8"), arg ?? "origin");
   if (mode === "tree") {
     const names = git(["ls-files"]).split("\n").filter(Boolean).map((text) => ({ where: "tracked path", text }));
-    const content = git(["grep", "-I", "-n", "-e", ""], { stdio: ["ignore", "pipe", "ignore"] })
+    const content = git(["grep", "--text", "-n", "-e", ""], { stdio: ["ignore", "pipe", "ignore"] })
       .split("\n")
       .filter(Boolean)
       .map((l) => {

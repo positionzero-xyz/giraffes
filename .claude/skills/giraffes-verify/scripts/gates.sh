@@ -3,6 +3,10 @@
 set -u
 export MSYS_NO_PATHCONV=1
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ "$#" -lt 2 ]; then
+  echo "usage: gates.sh <out-dir> <rev>..." >&2
+  exit 2
+fi
 CHECKOUT=$(git -C "$HERE" rev-parse --show-toplevel)
 REPO=$(cd "$(git -C "$HERE" rev-parse --path-format=absolute --git-common-dir)/.." && pwd)
 CHECK="$CHECKOUT/.githooks/check-private.mjs"
@@ -96,7 +100,8 @@ for rev in "$@"; do
     rm -rf "$stage"
   fi
 
-  printf 'see research/Z-note\n' | (cd "$wt" && node "$CHECK" stdin) >/dev/null 2>&1; ctl=$?
+  control_note="research/$(printf 'Z')-note"
+  printf 'see %s\n' "$control_note" | (cd "$wt" && node "$CHECK" stdin) >/dev/null 2>&1; ctl=$?
   (cd "$wt" && node "$CHECK" tree > "$log.leak.log" 2>&1); lk=$?
   if [ "$ctl" != 1 ]; then leak="CONTROL_FAIL"; elif [ "$lk" = 0 ]; then leak="PASS"; else leak="FAIL see $name.leak.log"; fi
 

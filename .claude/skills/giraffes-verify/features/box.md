@@ -23,7 +23,7 @@ With `MOCK_DUMPS` set, the mock reads `<dumps>/mock-script.json` again for every
 ```
 
 - Scripting applies to `/agent` turns only, the ones carrying the `mcp__giraffe__*` tools. `calls` are emitted one per model round-trip in order — the first request gets `calls[0]` as a tool use, the CLI runs it against the Worker's tool endpoint, and the follow-up request carrying that tool result gets `calls[1]`, until the results since the turn's own user message catch up with the list. `input` must satisfy the tool's schema or the Worker's tool endpoint refuses it and the model sees the refusal instead. Because a resumed session re-sends earlier tool results, count on the per-turn indexing, not the session's total.
-- Once the calls are consumed the mock answers `text`, which is what the person receives. `/parse` turns don't take scripted tool calls; the script only changes their final text.
+- Once the calls are consumed the mock answers `text`, which is what the person receives. `/parse` turns are unscripted: they do not take scripted tool calls or scripted final text.
 - `holdMs` delays every scripted response, which is how a turn is kept running long enough to erase under it or to test a stop.
 - A minimal script that just changes the reply is `{"calls": [], "text": "Noted."}`. Deleting the file returns the mock to its plain `ok` answer; while a file is absent or mid-write the mock answers unscripted rather than crashing.
 - Prove what the box actually sent through the `req-*.json` dumps in the same folder, newest first, and the mock's own `/dumps/mock.log` inside the container (host `<dumps>/mock.log` when the mount is writable).

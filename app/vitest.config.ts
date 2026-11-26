@@ -26,6 +26,9 @@ export default defineConfig(async () => ({
   ],
   test: {
     setupFiles: ["./test/setup.ts"],
+    // Integration tests advance fake time through every Durable Object alarm they scheduled; their wall-clock
+    // cost rises with the number of test files running beside them, so each test gets more than vitest's 5 s default.
+    testTimeout: 20_000,
     provide: { d1Migrations: await readD1Migrations("./src/ledger") },
   },
 }));

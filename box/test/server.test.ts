@@ -215,7 +215,7 @@ describe("health and parse", () => {
       body: JSON.stringify(turn("hang")),
       signal: hangUp.signal,
     }).catch(() => null);
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor(() => events().some((e) => e.startsWith("turn start")));
     hangUp.abort();
     await abandoned;
 

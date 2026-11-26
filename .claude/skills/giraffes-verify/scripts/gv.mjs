@@ -3,6 +3,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import path from "node:path";
+import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const USAGE = `usage: gv <command> [args]        RUN_DIR=<scratch dir> is required for every command
@@ -14,12 +15,19 @@ const USAGE = `usage: gv <command> [args]        RUN_DIR=<scratch dir> is requir
   worker                       wrangler dev in the foreground; start it with run_in_background
   bridge                       claude -p bridge in the foreground; start it with run_in_background
   doctor [--wait sec]          read-only: is this instance ours, up, signed in, and answering? --wait polls until it is
-  say <user> <text...>         send one dev-channel message as <user>; /follow and /block work
-  snapshot <user> [name]       print the agent snapshot; with name, also save evidence/<name>.json
-  wait <user> <js-expr> [sec]  poll the snapshot (as s) until the expression is truthy (default 120s)
+  say <user> <text...>         health-check, then send one dev-channel message as <user>
+  script <user> <file>         load scripted model output JSON for one person
+  key <user> <provider> <url> <key> [model]
+                               drive the /key ticket and save the key (prints no key)
+  snapshot <user> [name] [--pick <js-expr>]
+                               print the agent snapshot or a projection of it; with name, save evidence/<name>.json
+  wait <user> <js-expr> [sec] [--pick <js-expr>]
+                               poll the snapshot (as s) until the expression is truthy (default 120s)
   advance <user> <key> [min]   test-only: make a pending wake-up due now (or min minutes late)
-  dosql <user> <sql> [params]  run SQL inside <user>'s Durable Object (reads and test-only writes)
-  ledger <sql>                 query the local D1 ledger
+  dosql <user> <sql> [params]  print matching rows inside <user>'s Durable Object as JSON lines
+  ledger <sql>                 print matching local D1 ledger rows as JSON lines
+  footprint <container> <workload> [name]
+                               record per-process RSS/anon memory and cgroup memory.stat for a named workload
   stop                         kill the worker and bridge trees this RUN_DIR started
   clean                        stop, then delete state and config; evidence/ survives
 
@@ -166,6 +174,70 @@ async function fetchSnapshot(r, user) {
   return res.json();
 }
 
+function revision(appDir) {
+  const git = (argv) => spawnSync("git", ["-C", appDir, ...argv], { encoding: "utf8" });
+  const head = git(["rev-parse", "HEAD"]);
+  const dirty = git(["status", "--porcelain"]);
+  return {
+    head: head.status === 0 ? head.stdout.trim() : null,
+    dirty: dirty.status === 0 ? dirty.stdout.trim().length > 0 : null,
+  };
+}
+
+function writeRevision(name = "revision") {
+  const r = run();
+  mkdirSync(EVIDENCE, { recursive: true });
+  writeFileSync(path.join(EVIDENCE, `${name}.json`), JSON.stringify({ at: new Date().toISOString(), ...revision(r.appDir) }, null, 2) + "\n");
+}
+
+function splitPick(argv) {
+  const at = argv.indexOf("--pick");
+  if (at === -1) return [argv, null];
+  const expr = argv[at + 1];
+  if (!expr) fail("--pick needs a JS expression over s");
+  return [[...argv.slice(0, at), ...argv.slice(at + 2)], expr];
+}
+
+const picked = (s, expr) => (expr ? new Function("s", `return (${expr});`)(s) : s);
+
+function rowsOf(raw) {
+  let body = raw;
+  if (typeof raw === "string") {
+    const starts = [raw.indexOf("["), raw.indexOf("{")].filter((n) => n >= 0);
+    body = null;
+    for (const start of starts.sort((a, b) => a - b)) {
+      try {
+        body = JSON.parse(raw.slice(start));
+        break;
+      } catch {}
+    }
+    if (body === null) fail("the query output was not JSON");
+  }
+  if (Array.isArray(body)) {
+    const entry = body.find((x) => Array.isArray(x?.results));
+    return entry?.results ?? [];
+  }
+  if (Array.isArray(body?.results)) return body.results;
+  return [];
+}
+
+function printRows(raw) {
+  for (const row of rowsOf(raw)) console.log(JSON.stringify(row));
+}
+
+async function requireHealthy(r) {
+  const bad = (await health(r)).filter(([pass]) => !pass);
+  if (bad.length) fail(`refusing to drive an unhealthy run:\n${bad.map(([, msg]) => `FAIL ${msg}`).join("\n")}`);
+}
+
+async function sendText(r, user, text) {
+  await requireHealthy(r);
+  const id = `gv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const res = await fetch(`${base(r)}/webhook/dev`, { method: "POST", body: JSON.stringify({ user, text, id }) });
+  const body = await res.text();
+  return { id, status: res.status, body };
+}
+
 /** Runs SQL inside the person's Durable Object through wrangler's local explorer API. */
 async function doSql(r, user, sql, params) {
   const res = await fetch(`${base(r)}/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces/giraffes-Agent/query`, {
@@ -186,6 +258,32 @@ function d1(r, extra) {
   );
   if (res.status !== 0) fail(`wrangler d1 execute failed (exit ${res.status})\n${res.stdout}\n${res.stderr}`);
   return res.stdout;
+}
+
+function recordBoxImage(boxDir) {
+  const image = process.env.BOX_IMAGE ?? "giraffes-box:mvp";
+  const inspect = spawnSync("docker", ["image", "inspect", image], { encoding: "utf8" });
+  let imageMeta = null;
+  try {
+    imageMeta = inspect.status === 0 ? JSON.parse(inspect.stdout)[0] : null;
+  } catch {}
+  const commit = spawnSync("git", ["-C", boxDir, "log", "-1", "--format=%ct", "--", "."], { encoding: "utf8" });
+  const boxCommitAt = commit.status === 0 ? Number(commit.stdout.trim()) * 1000 : null;
+  const imageCreatedAt = imageMeta?.Created ? Date.parse(imageMeta.Created) : null;
+  const warning = imageMeta === null
+    ? `box image ${image} is not present locally`
+    : boxCommitAt !== null && imageCreatedAt !== null && imageCreatedAt < boxCommitAt
+      ? `box image ${image} is older than the last box/ commit; rebuild it before trusting box results`
+      : null;
+  mkdirSync(EVIDENCE, { recursive: true });
+  writeFileSync(path.join(EVIDENCE, "box-image.json"), JSON.stringify({
+    image,
+    imageId: imageMeta?.Id ?? null,
+    imageCreated: imageMeta?.Created ?? null,
+    boxCommitAt: boxCommitAt === null ? null : new Date(boxCommitAt).toISOString(),
+    warning,
+  }, null, 2) + "\n");
+  if (warning) console.error(`WARNING: ${warning}`);
 }
 
 const commands = {
@@ -231,6 +329,8 @@ const commands = {
       writeFileSync(p("box-token"), boxToken(secret) + "\n", { mode: 0o600 });
     }
     writeFileSync(p("run.json"), JSON.stringify(r, null, 2));
+    writeRevision();
+    if (box) recordBoxImage(boxDir);
 
     // A config outside app/ keeps wrangler's .wrangler/ tmp and state out of the checkout.
     let mains = 0;
@@ -296,25 +396,66 @@ const commands = {
     const r = run();
     const text = words.join(" ");
     if (!user || !text) fail("usage: gv say <user> <text...>");
-    const id = `gv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const res = await fetch(`${base(r)}/webhook/dev`, { method: "POST", body: JSON.stringify({ user, text, id }) });
-    const body = await res.text();
-    console.log(`${res.status} ${body} id=${id} user=${user} text=${JSON.stringify(text)}`);
+    const sent = await sendText(r, user, text);
+    console.log(`${sent.status} ${sent.body} id=${sent.id} user=${user} text=${JSON.stringify(text)}`);
+    if (sent.status !== 200) process.exitCode = 1;
+  },
+
+  async script(user, file) {
+    if (!user || !file) fail("usage: gv script <user> <file>");
+    const r = run();
+    await requireHealthy(r);
+    const body = { ...JSON.parse(readFileSync(file, "utf8")), user };
+    const res = await fetch(`${base(r)}/dev/script`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    console.log(`${res.status} ${await res.text()} user=${user} file=${file}`);
     if (!res.ok) process.exitCode = 1;
   },
 
-  async snapshot(user, name) {
-    if (!user) fail("usage: gv snapshot <user> [name]");
-    const s = JSON.stringify(await fetchSnapshot(run(), user), null, 2);
-    if (name) {
-      mkdirSync(EVIDENCE, { recursive: true });
-      writeFileSync(path.join(EVIDENCE, `${name}.json`), s + "\n");
+  async key(user, provider, baseUrl, key, model = "") {
+    if (!user || !provider || !baseUrl || !key) fail("usage: gv key <user> <provider> <base-url> <key> [model]");
+    const r = run();
+    const sent = await sendText(r, user, "/key");
+    if (sent.status !== 200) fail(`POST /webhook/dev /key -> ${sent.status} ${sent.body}`);
+    const deadline = Date.now() + 20_000;
+    let ticket = null;
+    while (Date.now() <= deadline && ticket === null) {
+      const s = await fetchSnapshot(r, user);
+      ticket = /\/key#t=([^&\s"\\]+)/.exec(JSON.stringify(s.outbox ?? []))?.[1] ?? null;
+      if (ticket === null) await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    console.log(s);
+    if (ticket === null) fail(`no /key ticket appeared in ${user}'s outbox within 20s`);
+    const res = await fetch(`${base(r)}/key`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticket, provider, baseUrl, key, model }),
+    });
+    const body = (await res.text()).replaceAll(key, "<key>");
+    console.log(`${res.status} ${body} user=${user} provider=${provider} baseUrl=${baseUrl}${model ? ` model=${model}` : ""}`);
+    if (!res.ok) process.exitCode = 1;
   },
 
-  async wait(user, expr, seconds = "120") {
-    if (!user || !expr) fail("usage: gv wait <user> <js-expr over s> [seconds]");
+  async snapshot(...argv) {
+    const [positional, pick] = splitPick(argv);
+    const [user, name] = positional;
+    if (!user) fail("usage: gv snapshot <user> [name] [--pick <js-expr>]");
+    const s = await fetchSnapshot(run(), user);
+    const full = JSON.stringify(s, null, 2);
+    if (name) {
+      mkdirSync(EVIDENCE, { recursive: true });
+      writeFileSync(path.join(EVIDENCE, `${name}.json`), full + "\n");
+      writeRevision(`${name}.revision`);
+    }
+    console.log(JSON.stringify(picked(s, pick), null, 2));
+  },
+
+  async wait(...argv) {
+    const [positional, pick] = splitPick(argv);
+    const [user, expr, seconds = "120"] = positional;
+    if (!user || !expr) fail("usage: gv wait <user> <js-expr over s> [seconds] [--pick <js-expr>]");
     const r = run();
     const pred = new Function("s", `return (${expr});`);
     const deadline = Date.now() + Number(seconds) * 1000;
@@ -323,17 +464,17 @@ const commands = {
       s = await fetchSnapshot(r, user);
       if (pred(s)) break;
       if (Date.now() > deadline) {
-        console.log(JSON.stringify(s, null, 2));
+        console.log(JSON.stringify(picked(s, pick), null, 2));
         fail(`timed out after ${seconds}s waiting for: ${expr}`);
       }
       await new Promise((res) => setTimeout(res, 1000));
     }
-    console.log(JSON.stringify(s, null, 2));
+    console.log(JSON.stringify(picked(s, pick), null, 2));
   },
 
   async dosql(user, sql, params = "[]") {
     if (!user || !sql) fail("usage: gv dosql <user> <sql> [params-json]");
-    console.log(JSON.stringify(await doSql(run(), user, sql, JSON.parse(params)), null, 2));
+    printRows(await doSql(run(), user, sql, JSON.parse(params)));
   },
 
   async advance(user, key, minutesLate = "0") {
@@ -346,7 +487,27 @@ const commands = {
 
   async ledger(sql) {
     if (!sql) fail("usage: gv ledger <sql>");
-    process.stdout.write(d1(run(), ["--json", "--command", sql]));
+    printRows(d1(run(), ["--json", "--command", sql]));
+  },
+
+  async footprint(container, workload, name) {
+    if (!container || !workload) fail("usage: gv footprint <container> <workload> [name]");
+    const inspect = spawnSync("docker", ["inspect", "--format", "{{.Image}}", container], { encoding: "utf8" });
+    if (inspect.status !== 0) fail(`docker inspect ${container} failed: ${inspect.stderr.trim()}`);
+    const probe = `const fs=require("fs");const rows=[];for(const e of fs.readdirSync("/proc")){if(!/^\\d+$/.test(e))continue;try{const t=fs.readFileSync("/proc/"+e+"/status","utf8");const get=(k)=>{const m=t.match(new RegExp("^"+k+":\\\\s*(\\\\S+)","m"));return m?m[1]:null};rows.push({pid:Number(e),comm:get("Name"),rssKb:Number(get("VmRSS")??0),anonKb:Number(get("RssAnon")??0)})}catch{}}const cgroup={};try{for(const line of fs.readFileSync("/sys/fs/cgroup/memory.stat","utf8").split("\\n")){const [k,v]=line.split(/\\s+/);if(k)cgroup[k]=Number(v)}}catch{}console.log(JSON.stringify({processes:rows,cgroup}))`;
+    const res = spawnSync("docker", ["exec", container, "node", "-e", probe], { encoding: "utf8" });
+    if (res.status !== 0) fail(`reading memory inside ${container} failed: ${res.stderr.trim() || res.stdout.trim()}`);
+    let memory;
+    try {
+      memory = JSON.parse(res.stdout);
+    } catch {
+      fail(`memory probe in ${container} did not print JSON: ${res.stdout.slice(0, 300)}`);
+    }
+    const safe = (name ?? `footprint-${workload}`).replace(/[^\w.-]+/g, "-");
+    const out = { at: new Date().toISOString(), host: hostname(), container, image: inspect.stdout.trim(), workload, ...memory };
+    mkdirSync(EVIDENCE, { recursive: true });
+    writeFileSync(path.join(EVIDENCE, `${safe}.json`), JSON.stringify(out, null, 2) + "\n");
+    console.log(JSON.stringify(out, null, 2));
   },
 
   async stop() {

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -7,11 +6,10 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createBox } from "../src/server.ts";
+import { startMock, type RunningMock } from "./mock.ts";
 
 const CLI = fileURLToPath(new URL("../node_modules/@anthropic-ai/claude-code/bin/claude.exe", import.meta.url));
-const MOCK = fileURLToPath(new URL("../mock-api.mjs", import.meta.url));
 const TOKEN = "b-agent-test-token-0123456789abcdefghijklmnop";
-const MOCK_PORT = 18791;
 const APPEND = "You are Giraffe, a personal assistant.";
 const GONE = "11111111-2222-3333-4444-555555555555";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -48,7 +46,7 @@ function sent(): Sent[] {
 }
 const userTexts = (s: Sent): string[] => s.messages.filter((m) => m.role === "user").map((m) => textOf(m.content)).filter((t) => t.trim());
 
-let mock: ChildProcess;
+let mock: RunningMock;
 let base = "";
 const stateDir = join(dir, "state");
 mkdirSync(stateDir, { recursive: true });
@@ -64,17 +62,16 @@ const agent = (t: Turn, auth?: string) => postAgent(turnBody(t), auth);
 describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CLI) ? false : "the pinned CLI is not installed (npm ci in box/)" }, () => {
   before(async () => {
     for (const k of Object.keys(process.env)) if (k.startsWith("CLAUDE") || k.startsWith("ANTHROPIC")) delete process.env[k];
-    Object.assign(process.env, { CLAUDE_CONFIG_DIR: join(dir, "config"), ANTHROPIC_BASE_URL: `http://127.0.0.1:${MOCK_PORT}`, ANTHROPIC_API_KEY: "sk-ant-api03-mock-not-a-key" });
     writeFileSync(script, JSON.stringify({ calls: [], text: "" }));
     mkdirSync(dumps);
-    mock = spawn(process.execPath, [MOCK, mockLog, String(MOCK_PORT), dumps, script], { stdio: ["ignore", "pipe", "inherit"] });
-    await new Promise<void>((resolve) => mock.stdout?.once("data", () => resolve()));
+    mock = await startMock(mockLog, dumps, script);
+    Object.assign(process.env, { CLAUDE_CONFIG_DIR: join(dir, "config"), ANTHROPIC_BASE_URL: `http://127.0.0.1:${mock.port}`, ANTHROPIC_API_KEY: "sk-ant-api03-mock-not-a-key" });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
   after(() => {
     server.close();
-    mock.kill();
+    mock.proc.kill();
   });
 
   it("returns the reply text, the tool calls Giraffe's server accepted, in order, and the new session it started", async () => {

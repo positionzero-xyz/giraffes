@@ -143,10 +143,10 @@ describe("auth", () => {
     assert.doesNotMatch(page.text, /<script[^>]+src=/, "no external scripts");
   });
 
-  it("tells people who signed in to wait for confirmation in chat in English and Thai", async () => {
+  it("tells people how to check the connection if chat confirmation does not arrive", async () => {
     const page = await call("GET", "/signin");
-    assert.ok(page.text.includes("Signed in to Claude. Give Giraffe about a minute to connect your plan. Wait for the confirmation in chat before sending a message."));
-    assert.ok(page.text.includes("ลงชื่อเข้าใช้ Claude แล้ว ให้เวลา Giraffe เชื่อมแพ็กเกจประมาณหนึ่งนาที รอข้อความยืนยันในแชตแล้วค่อยส่งข้อความนะคะ"));
+    assert.ok(page.text.includes("If it doesn't arrive, send /claude in chat to check the connection."));
+    assert.ok(page.text.includes("ถ้ายังไม่ได้รับ ให้ส่ง /claude ในแชทเพื่อตรวจสอบการเชื่อมต่อ"));
   });
 
   it("refuses to start without BOX_TOKEN", () => {

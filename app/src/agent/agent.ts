@@ -500,6 +500,8 @@ export class Agent extends DurableObject<Env> {
         const box = stored && { name: stored.name, host: stored.host, url: stored.url, incarnation: this.#store.boxVolume() };
         current = { ...current, kind: "preparing", box, checkouts: this.#store.checkoutIds() };
         this.#store.clearForErasure(current);
+        this.#billingAlertSettlement = null;
+        this.#billingAlertStorageRetryAt = 0;
         this.#devSavedPages.clear();
         this.#devModel = null;
       }

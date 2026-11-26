@@ -802,6 +802,54 @@ describe("checkout and the portal", () => {
     expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
   });
 
+  test("an operator alert receipt awaiting a storage retry cannot reach a fresh account after erase", async () => {
+    const kit = billingOn();
+    const c = await devChat("erase-alert", {
+      model: scripted([]),
+      at: "2099-11-04T10:00",
+      billing: {
+        ...kit.deps,
+        stripe: {
+          ...kit.stripe,
+          closeCheckout: async () => ({ ok: true, value: null }),
+          closeSubscription: async () => ({ ok: true, value: "settled" }),
+        },
+      },
+    });
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    const operator = scriptedChannel();
+    await runInDurableObject(stub, (agent, { storage }) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+      storage.sql.exec(`CREATE TRIGGER fail_billing_receipt BEFORE UPDATE ON billing_alert
+        WHEN NEW.ready_at IS NULL BEGIN SELECT RAISE(ABORT, 'receipt write unavailable'); END`);
+    });
+    await c.say("/plan");
+    await pay(kit, c, "erase-alert", "standard");
+    await stripeChange(kit, { user: "erase-alert", sub: "sub_erase_alert_extra", plan: "included", status: "active" });
+    await c.settle();
+    expect(operator.delivered).toHaveLength(1);
+    expect(await runInDurableObject(stub, (_, { storage }) => storage.getAlarm())).toBe(c.clock.now() + 30_000);
+    await runInDurableObject(stub, (agent) => agent.withDeps({ firstContactConsent: true }));
+
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erase confirmation");
+    await c.tap(confirm.data);
+    expect(c.channel.delivered.at(-1)?.text).toContain("deleted your live Giraffe data");
+    await c.received();
+    c.clock.set(local("2099-11-04T10:02"));
+    await c.post("/start");
+    const start = c.channel.delivered.at(-1)?.button;
+    if (!start) throw new Error("missing start confirmation");
+    await c.tap(start.data);
+
+    const snapshot = await c.snapshot();
+    expect(snapshot.agent).not.toBeNull();
+    expect(snapshot.turns.map(({ text }) => text)).not.toEqual(expect.arrayContaining([expect.stringContaining("I've alerted our billing team")]));
+    expect(await c.received()).not.toEqual(expect.arrayContaining([expect.stringContaining("I've alerted our billing team")]));
+    expect(operator.delivered).toHaveLength(1);
+  });
+
   test("does not re-alert or notify for the same subscriptions after Stripe event dedupe expires", async () => {
     const kit = billingOn();
     const c = await devChat("retained", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });

@@ -1,5 +1,7 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
+import { Agent } from "../src/agent/agent";
+import { MIGRATIONS, migrate } from "../src/agent/schema";
 import { planAllowsBox, planOf, type CustomerId, type PlanRules, type Subscription, type SubscriptionId } from "../src/billing/plan";
 import { d1Billing, type BillingStore } from "../src/billing/store";
 import { checkoutForm, offeredPlans, parseEvent, parseSubscription, stripeApi, verifySignature, type CheckoutId } from "../src/billing/stripe";
@@ -10,6 +12,7 @@ import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs, MicroUsd } from "../src/domain";
 import { HAIKU_5_5 } from "../src/model/providers";
 import { NOTICES } from "../src/notices";
+import worker from "../src/worker";
 import {
   billingOn,
   chat,
@@ -23,6 +26,7 @@ import {
   quiet,
   schedule,
   scripted,
+  scriptedChannel,
   signStripe,
   STRIPE_VARS,
   stripeChange,
@@ -90,7 +94,7 @@ describe("configuration", () => {
     expect(off.on && offeredPlans(off.stripe)).toEqual(["standard", "plus"]);
   });
 
-  test.each(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_STANDARD", "STRIPE_PRICE_PLUS", "STRIPE_PRICE_SEAT", "STRIPE_PORTAL_CONFIGURATION", "PUBLIC_URL"])(
+  test.each(["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_STANDARD", "STRIPE_PRICE_PLUS", "STRIPE_PRICE_SEAT", "STRIPE_PORTAL_CONFIGURATION", "PUBLIC_URL", "OPERATOR_CHAT"])(
     "BILLING=on without %s fails at load",
     (name) => {
       const vars: Record<string, string> = { ...STRIPE_VARS };
@@ -142,7 +146,7 @@ describe("stripe boundary", () => {
       mode: "subscription",
       client_reference_id: "p:dev:ann",
       success_url: "https://giraffes.test/billing/done",
-      cancel_url: "https://giraffes.test/billing/done",
+      cancel_url: "https://giraffes.test/billing/cancel",
       "metadata[agent_key]": "p:dev:ann",
       "metadata[plan]": "plus",
       "subscription_data[metadata][agent_key]": "p:dev:ann",
@@ -157,6 +161,16 @@ describe("stripe boundary", () => {
     });
     expect(formBody({ "a[b]": "x y" })).toBe("a%5Bb%5D=x%20y");
     expect(Object.keys(checkoutForm(cfg, rules, { agent: agent("ann"), plan: "standard", idempotencyKey: "k" }))).not.toContain("optional_items[0][price]");
+  });
+
+  test("leaving Checkout without paying shows a cancellation page with no charge", async () => {
+    const { cancel_url, success_url } = checkoutForm(cfg, rules, { agent: agent("ann"), plan: "standard", idempotencyKey: "cancel" });
+    const bindings = { ...env, ...STRIPE_VARS };
+    const cancelled = await worker.fetch(new Request(String(cancel_url)), bindings);
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.headers.get("content-type")).toContain("text/html");
+    expect(await cancelled.text()).toContain("You weren't charged for this checkout.");
+    expect(await (await worker.fetch(new Request(String(success_url)), bindings)).text()).toContain("All done.");
   });
 
   test("the subscription read, session expiry and portal session call Stripe as documented", async () => {
@@ -406,24 +420,340 @@ describe("checkout and the portal", () => {
     expect(await c.received()).toEqual([`You're on the Standard plan.\n${NOTICE.noPortal}`]);
   });
 
-  test("a second paying subscription is logged and recorded, nothing is cancelled, and the person is told once", async () => {
+  test("a second paying subscription alerts the operator immediately and tells the person once", async () => {
     const kit = billingOn();
     const c = await devChat("ike", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel();
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
     await c.say("/plan");
     await c.received();
     const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
     await stripeChange(kit, { user: "ike", sub: "sub_ike_1", plan: "standard", status: "active" });
+    expect(operator.delivered).toEqual([]);
     await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "included", status: "active" });
+    expect(operator.delivered.map(({ text }) => text)).toEqual([expect.stringContaining("sub_ike_1 sub_ike_2")]);
     await stripeChange(kit, { user: "ike", sub: "sub_ike_2", plan: "included", status: "active" });
     await c.settle();
 
-    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", NOTICE.duplicate]);
+    expect(operator.delivered).toHaveLength(1);
+    expect(await c.received()).toEqual(["Thanks. Your Standard plan is active.", expect.stringContaining("They can review it now")]);
     expect(warnings).toHaveBeenCalledWith({ code: "stripe_duplicate_subscription" });
     expect(JSON.stringify(warnings.mock.calls)).not.toContain("sub_ike_");
     warnings.mockRestore();
     const found = await env.LEDGER.prepare("SELECT owner_key, subscription_ids FROM billing_duplicate").all();
     expect(found.results).toEqual([{ owner_key: "p:dev:ike", subscription_ids: "sub_ike_1 sub_ike_2" }]);
     expect([(await row("sub_ike_1"))?.status, (await row("sub_ike_2"))?.status]).toEqual(["active", "active"]);
+  });
+
+  test.each([
+    { kind: "retry", language: "en", delivery: "delivery hasn't been confirmed", timing: "another attempt in 30 seconds", billing: "payment statement" },
+    { kind: "in_doubt", language: "th", delivery: "ทีมอาจได้รับการแจ้งเตือนแล้ว", timing: "ลองอีกครั้งในอีก 30 วินาที", billing: "รายการเดินบัญชี" },
+    { kind: "throw", language: "en", delivery: "may already have received the alert", timing: "another attempt in 30 seconds", billing: "payment statement" },
+  ] as const)("retries a $kind operator alert on the alarm and gives the person the next steps in $language", async ({ kind, language, delivery, timing, billing }) => {
+    const kit = billingOn();
+    const c = await devChat("june", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const first = kind === "throw" ? { kind } : { kind, afterMs: 30_000 };
+    const operator = scriptedChannel([first, { kind: "retry", afterMs: 30_000 }]);
+    const deliver = vi.spyOn(operator, "deliver");
+    await c.say("/plan");
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent, state) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+      state.storage.sql.exec("UPDATE agent SET language = ?", language);
+    });
+    await c.received();
+    await pay(kit, c, "june", "standard");
+    await c.received();
+
+    const second = { id: "evt_june_extra", user: "june", sub: "sub_june_extra", plan: "included", status: "active", customer: "cus_june_extra" } as const;
+    expect((await stripeChange(kit, second)).status).toBe(200);
+    await c.settle();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    const messages = await c.received();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain(delivery);
+    expect(messages[0]).toContain(timing);
+    expect(messages[0]).toContain(billing);
+    expect(messages[0]).not.toContain("/plan");
+
+    expect(await (await stripeChange(kit, second)).text()).toBe("duplicate");
+    await c.advanceTo("2099-11-04T10:02");
+    expect(operator.delivered).toEqual([expect.objectContaining({ text: expect.stringContaining("sub_june sub_june_extra"), at: local("2099-11-04T10:00") + 90_000 })]);
+    expect(deliver.mock.calls.map(([message, at]) => [message.id, at - local("2099-11-04T10:00")])).toEqual([
+      [expect.any(String), 0], [deliver.mock.calls[0]?.[0].id, 30_000], [deliver.mock.calls[0]?.[0].id, 90_000],
+    ]);
+    expect(await c.received()).toEqual([expect.stringContaining(language === "th" ? "แจ้งทีมดูแลการชำระเงินแล้ว" : "I've alerted our billing team")]);
+  });
+
+  test("a temporary refusal retries after five minutes and reports confirmed delivery", async () => {
+    const kit = billingOn();
+    const c = await devChat("refused", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel();
+    vi.spyOn(operator, "deliver").mockResolvedValueOnce({ kind: "failed", detail: "fake refusal" });
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, "refused", "standard");
+    await c.received();
+    const extra = { user: "refused", sub: "sub_refused_extra", plan: "included", status: "active" } as const;
+    expect((await stripeChange(kit, extra)).status).toBe(200);
+    await c.settle();
+    expect(await c.received()).toEqual([expect.stringContaining("The billing alert couldn't be delivered. I've scheduled another attempt in 300 seconds. I'll keep trying")]);
+    await c.advanceTo("2099-11-04T10:05");
+    expect(operator.delivered).toEqual([expect.objectContaining({ at: local("2099-11-04T10:05") })]);
+    expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+  });
+
+  test.each([false, true])("closes a permanently gone chat, including after a prior retry (%s)", async (priorRetry) => {
+    const kit = billingOn();
+    const c = await devChat("gone", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel(priorRetry ? [{ kind: "retry", afterMs: 30_000 }, { kind: "gone" }] : [{ kind: "gone" }]);
+    const deliver = vi.spyOn(operator, "deliver");
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, "gone", "standard");
+    await c.received();
+    const extra = { user: "gone", sub: "sub_gone_extra", plan: "included", status: "active" } as const;
+    await stripeChange(kit, extra);
+    await c.settle();
+    if (priorRetry) {
+      expect(await c.received()).toEqual([expect.stringContaining("scheduled another attempt")]);
+      await c.advanceTo("2099-11-04T10:01");
+    }
+    expect(await c.received()).toEqual([expect.stringContaining("The billing chat is no longer reachable, so automatic attempts have stopped.")]);
+    await c.advanceTo("2099-11-04T11:00");
+    await stripeChange(kit, extra);
+    await c.settle();
+    expect(deliver).toHaveBeenCalledTimes(priorRetry ? 2 : 1);
+    expect(await c.received()).toEqual([]);
+  });
+
+  test("a one-minute outage and a fresh webhook do not lose the alert or reset its backoff", async () => {
+    const kit = billingOn();
+    const c = await devChat("outage", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel();
+    const send = operator.deliver;
+    const offlineThrough = local("2099-11-04T10:01");
+    const deliver = vi.spyOn(operator, "deliver").mockImplementation((message, at) =>
+      at > offlineThrough ? send(message, at) : Promise.resolve({ kind: "retry", afterMs: 30_000, detail: "offline" }),
+    );
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, "outage", "standard");
+    await c.received();
+    const extra = { user: "outage", sub: "sub_outage_extra", plan: "included", status: "active" } as const;
+    await stripeChange(kit, extra);
+    await c.settle();
+    expect(await c.received()).toEqual([expect.stringContaining("scheduled another attempt")]);
+    await c.advanceTo("2099-11-04T10:01");
+    await stripeChange(kit, extra);
+    await c.settle();
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(await c.received()).toEqual([]);
+    await c.advanceTo("2099-11-04T10:02");
+    expect(deliver).toHaveBeenCalledTimes(3);
+    expect(operator.delivered).toHaveLength(1);
+    expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+  });
+
+  test("continues after three failures and caps the application backoff at an hour", async () => {
+    const kit = billingOn();
+    const c = await devChat("long-outage", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel(Array.from({ length: 9 }, () => ({ kind: "retry", afterMs: 30_000 })));
+    const deliver = vi.spyOn(operator, "deliver");
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, "long-outage", "standard");
+    await c.received();
+    await stripeChange(kit, { user: "long-outage", sub: "sub_long_outage_extra", plan: "included", status: "active" });
+    await c.settle();
+    expect(await c.received()).toEqual([expect.stringContaining("I'll keep trying unless the billing chat is permanently unavailable")]);
+    await c.advanceTo("2099-11-04T14:00");
+    expect(deliver.mock.calls.map(([, at]) => (at - local("2099-11-04T10:00")) / 1000)).toEqual([
+      0, 30, 90, 210, 450, 930, 1890, 3810, 7410, 11010,
+    ]);
+    expect(operator.delivered).toHaveLength(1);
+    expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+  });
+
+  test("resumes a failed alert after a Durable Object reset without changing the delivery ID or retry time", async () => {
+    const kit = billingOn();
+    const c = await devChat("alert-reset", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    const operator = scriptedChannel([{ kind: "retry", afterMs: 120_000 }]);
+    const deliver = vi.spyOn(operator, "deliver");
+    const attach = () => runInDurableObject(stub, (agent) => {
+      agent.withDeps({ billing: kit.deps, clock: c.clock, channels: { line: c.channel, telegram: operator, dev: c.channel },
+        operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await attach();
+    await c.say("/plan");
+    await pay(kit, c, "alert-reset", "standard");
+    await c.received();
+    await stripeChange(kit, { user: "alert-reset", sub: "sub_alert_reset_extra", plan: "included", status: "active" });
+    await c.settle();
+    expect(await c.received()).toEqual([expect.stringContaining("scheduled another attempt in 120 seconds")]);
+    await runInDurableObject(stub, async (_, state) => {
+      const restarted = new Agent(state, env);
+      restarted.withDeps({ billing: kit.deps, clock: c.clock, channels: { line: c.channel, telegram: operator, dev: c.channel },
+        operatorChat: { channel: "telegram", channelUserId: "4242" } });
+      c.clock.set(local("2099-11-04T10:01"));
+      await restarted.alarm();
+      expect(deliver).toHaveBeenCalledTimes(1);
+      c.clock.set(local("2099-11-04T10:02"));
+      await restarted.alarm();
+    });
+    expect(deliver.mock.calls[1]?.[0].id).toBe(deliver.mock.calls[0]?.[0].id);
+    expect(operator.delivered).toHaveLength(1);
+    expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+  });
+
+  test("a second webhook and an alarm do not repeat an operator send already in flight", async () => {
+    const kit = billingOn();
+    const c = await devChat("alert-flight", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel();
+    await c.say("/plan");
+    await pay(kit, c, "alert-flight", "standard");
+    await c.received();
+    const extra = { user: "alert-flight", sub: "sub_alert_flight_extra", plan: "included", status: "active" } as const;
+    kit.stripe.subscriptions.set(extra.sub, stripeSubscription(extra));
+    const first = parseEvent(subscriptionEvent(extra));
+    const second = parseEvent(subscriptionEvent(extra));
+    if (first.kind !== "event" || second.kind !== "event") throw new Error("invalid billing event fixture");
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), async (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const send = operator.deliver;
+      const deliver = vi.spyOn(operator, "deliver").mockImplementationOnce(async (message, at) => {
+        entered.resolve();
+        await release.promise;
+        return send(message, at);
+      });
+      const firstWebhook = agent.billingEvent(first.event);
+      await entered.promise;
+      const secondWebhook = agent.billingEvent(second.event);
+      const alarm = agent.alarm();
+      release.resolve();
+      expect(await Promise.all([firstWebhook, secondWebhook])).toEqual(["applied", "applied"]);
+      await alarm;
+      expect(deliver).toHaveBeenCalledTimes(1);
+    });
+    await c.settle();
+    expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+  });
+
+  test("the retry counter upgrades an existing billing alert table without changing its deadline", async () => {
+    const stub = env.AGENT.get(env.AGENT.idFromName("billing-alert-upgrade"));
+    await runInDurableObject(stub, (_, { storage }) => {
+      const beforeAttempts = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE billing_alert")) + 1;
+      storage.sql.exec("DROP TABLE billing_alert");
+      storage.sql.exec(`CREATE TABLE billing_alert (
+        subscription_ids TEXT PRIMARY KEY, delivery_id TEXT NOT NULL, ready_at INTEGER, notified INTEGER NOT NULL DEFAULT 0
+      )`);
+      storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, ready_at) VALUES ('sub_a sub_b', 'existing-id', 9000)");
+      storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeAttempts));
+      migrate(storage);
+      expect(storage.sql.exec("SELECT delivery_id, ready_at, attempts FROM billing_alert").toArray()).toEqual([
+        { delivery_id: "existing-id", ready_at: 9000, attempts: 0 },
+      ]);
+    });
+  });
+
+  test("backs off a failed receipt write without re-sending a confirmed operator alert", async () => {
+    const kit = billingOn();
+    const c = await devChat("receipt", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    const operator = scriptedChannel();
+    await runInDurableObject(stub, (agent, { storage }) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+      storage.sql.exec(`CREATE TRIGGER fail_billing_receipt BEFORE UPDATE ON billing_alert
+        WHEN NEW.ready_at IS NULL BEGIN SELECT RAISE(ABORT, 'receipt write unavailable'); END`);
+    });
+    await c.say("/plan");
+    await pay(kit, c, "receipt", "standard");
+    await c.received();
+    const extra = { id: "evt_receipt_extra", user: "receipt", sub: "sub_receipt_extra", plan: "included", status: "active" } as const;
+    expect((await stripeChange(kit, extra)).status).toBe(200);
+    await c.settle();
+    expect(operator.delivered).toHaveLength(1);
+    expect(await (await stripeChange(kit, extra)).text()).toBe("duplicate");
+    const firstRetry = (local("2099-11-04T10:00") + 30_000) as EpochMs;
+    expect(await runInDurableObject(stub, (_, { storage }) => storage.getAlarm())).toBe(firstRetry);
+
+    c.clock.set(firstRetry);
+    await c.settle();
+    expect(operator.delivered).toHaveLength(1);
+    expect(await runInDurableObject(stub, (_, { storage }) => storage.getAlarm())).toBe(local("2099-11-04T10:01"));
+    await runInDurableObject(stub, (_, { storage }) => { storage.sql.exec("DROP TRIGGER fail_billing_receipt"); });
+    await c.advanceTo("2099-11-04T10:10");
+    await stripeChange(kit, { ...extra, id: "evt_receipt_later" });
+    await c.settle();
+    expect(operator.delivered).toHaveLength(1);
+    expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+  });
+
+  test("a failed receipt delays both the first retry notice and the delivery deadline it states", async () => {
+    const kit = billingOn();
+    const c = await devChat("retry-receipt", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    const operator = scriptedChannel();
+    const deliver = vi.spyOn(operator, "deliver").mockResolvedValueOnce({ kind: "failed", detail: "fake refusal" });
+    await runInDurableObject(stub, (agent, { storage }) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+      storage.sql.exec(`CREATE TRIGGER fail_retry_receipt BEFORE UPDATE ON billing_alert
+        WHEN NEW.notified = 1 BEGIN SELECT RAISE(ABORT, 'receipt write unavailable'); END`);
+    });
+    await c.say("/plan");
+    await pay(kit, c, "retry-receipt", "standard");
+    await c.received();
+    await stripeChange(kit, { user: "retry-receipt", sub: "sub_retry_receipt_extra", plan: "included", status: "active" });
+    await c.settle();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(await c.received()).toEqual([]);
+
+    await runInDurableObject(stub, (_, { storage }) => { storage.sql.exec("DROP TRIGGER fail_retry_receipt"); });
+    const receiptTime = (c.clock.now() + 30_000) as EpochMs;
+    c.clock.set(receiptTime);
+    await c.settle();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(await c.received()).toEqual([expect.stringContaining("scheduled another attempt in 300 seconds")]);
+    expect(await runInDurableObject(stub, (_, { storage }) => storage.getAlarm())).toBe(receiptTime + 300_000);
+    c.clock.set((receiptTime + 300_000) as EpochMs);
+    await c.settle();
+    expect(operator.delivered).toHaveLength(1);
+    expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+  });
+
+  test("does not re-alert or notify for the same subscriptions after Stripe event dedupe expires", async () => {
+    const kit = billingOn();
+    const c = await devChat("retained", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel();
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, "retained", "standard");
+    const extra = { user: "retained", sub: "sub_retained_2", plan: "included", status: "active" } as const;
+    await stripeChange(kit, extra);
+    await c.settle();
+    expect(operator.delivered).toHaveLength(1);
+    c.clock.set(local("2099-11-20T10:00"));
+    await c.settle();
+    await c.received();
+
+    await stripeChange(kit, extra);
+    await c.settle();
+    expect(operator.delivered).toHaveLength(1);
+    expect(await c.received()).toEqual([]);
   });
 });
 

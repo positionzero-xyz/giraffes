@@ -294,6 +294,10 @@ type PlanCols = {
 };
 
 export type NoteMessage = { readonly texts: readonly [string, ...string[]]; readonly note: string };
+export type BillingAlertSettlement = {
+  readonly subscriptionIds: string;
+  readonly text: string | undefined;
+} & ({ readonly kind: "retry"; readonly delayMs: number } | { readonly kind: "sent" | "gone" });
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEDUPE_WINDOW_MS = 14 * DAY_MS;
@@ -1157,6 +1161,29 @@ export class AgentStore {
 
   billingEventDone(id: string, now: EpochMs): void {
     this.sql.exec("INSERT OR IGNORE INTO billing_event (id, at) VALUES (?, ?)", id, now);
+  }
+
+  queueBillingAlert(ids: string, now: EpochMs): void {
+    this.sql.exec("INSERT OR IGNORE INTO billing_alert (subscription_ids, delivery_id, ready_at) VALUES (?, ?, ?)", ids, crypto.randomUUID(), now);
+  }
+
+  nextBillingAlert() {
+    return this.sql.exec<{ subscription_ids: string; delivery_id: OutboxId; ready_at: EpochMs; notified: number; attempts: number }>(
+      "SELECT subscription_ids, delivery_id, ready_at, notified, attempts FROM billing_alert WHERE ready_at IS NOT NULL ORDER BY ready_at, subscription_ids LIMIT 1",
+    ).toArray()[0] ?? null;
+  }
+
+  startBillingAlertAttempt(ids: string, readyAt: EpochMs): void {
+    this.sql.exec("UPDATE billing_alert SET ready_at = ?, attempts = attempts + 1 WHERE subscription_ids = ?", readyAt, ids);
+  }
+
+  finishBillingAlertAttempt(settlement: BillingAlertSettlement, now: EpochMs): void {
+    this.tx(() => {
+      const { text, subscriptionIds, kind } = settlement;
+      if (text && this.agent()) this.insertMessage(eventKey.billing("duplicate"), { texts: [text], note: text }, now);
+      this.sql.exec("UPDATE billing_alert SET ready_at = ?, notified = max(notified, ?), closed_as = ? WHERE subscription_ids = ?",
+        kind === "retry" ? now + settlement.delayMs : null, text ? 1 : 0, kind === "retry" ? null : kind, subscriptionIds);
+    });
   }
 
   appendLogs(logs: readonly LogRow[], now: EpochMs): void {

@@ -4,6 +4,22 @@
  */
 import type { PaidPlan, PlanRow, Standing, SubscriptionId } from "../billing/plan";
 import type { CheckoutId } from "../billing/stripe";
+import { canonicalJsonObject, parseJsonObject, type JsonObject } from "../action/json";
+import type {
+  ApprovalConsumption,
+  ApprovalDecision,
+  NewOutsideApproval,
+  NewOutsideWrite,
+  OutsideApproval,
+  OutsideApprovalId,
+  OutsideApprovalStatus,
+  OutsideWrite,
+  OutsideWriteId,
+  OutsideWritePut,
+  OutsideWriteStatus,
+  WriteFinish,
+  WriteReconciliation,
+} from "../action/writes";
 import type { BoxHostKind } from "../box/host";
 import { dueAt, type Box, type BoxState, type ReclaimReason } from "../box/machine";
 import { commandOf } from "./commands";
@@ -267,6 +283,35 @@ export type KeyTicket = {
 
 export type NewKey = Omit<StoredKey, "backup" | "backupAskedAt" | "revision" | "health">;
 
+type OutsideWriteCols = {
+  id: OutsideWriteId;
+  intent: string;
+  provider: string;
+  action: string;
+  operation_id: OutsideWrite["operationId"];
+  args: string;
+  status: OutsideWriteStatus;
+  attempt: number;
+  in_doubt: number;
+  lease_until: EpochMs | null;
+  receipt: string | null;
+  failure: string | null;
+  created_at: EpochMs;
+  updated_at: EpochMs;
+};
+
+type OutsideApprovalCols = {
+  id: OutsideApprovalId;
+  write_id: OutsideWriteId;
+  owner_key: OutsideApproval["owner"];
+  status: OutsideApprovalStatus;
+  expires_at: EpochMs;
+  created_at: EpochMs;
+  decided_at: EpochMs | null;
+  decided_by: OutsideApproval["owner"] | null;
+  consumed_at: EpochMs | null;
+};
+
 type BoxCols = {
   name: BoxName;
   host: BoxHostKind;
@@ -318,6 +363,45 @@ const toReservation = (r: ReservationCols): Reservation => ({
 
 function fromJson<T>(text: string): T {
   return JSON.parse(text);
+}
+
+function jsonObject(text: string): JsonObject {
+  const parsed = parseJsonObject(JSON.parse(text));
+  if (parsed === undefined) throw new Error("invalid JSON object in durable state");
+  return parsed;
+}
+
+function toOutsideWrite(r: OutsideWriteCols): OutsideWrite {
+  return {
+    id: r.id,
+    intent: r.intent,
+    provider: r.provider,
+    action: r.action,
+    operationId: r.operation_id,
+    args: jsonObject(r.args),
+    status: r.status,
+    attempt: r.attempt,
+    inDoubt: r.in_doubt === 1,
+    leaseUntil: r.lease_until,
+    receipt: r.receipt === null ? null : jsonObject(r.receipt),
+    failure: r.failure,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function toOutsideApproval(r: OutsideApprovalCols): OutsideApproval {
+  return {
+    id: r.id,
+    writeId: r.write_id,
+    owner: r.owner_key,
+    status: r.status,
+    expiresAt: r.expires_at,
+    createdAt: r.created_at,
+    decidedAt: r.decided_at,
+    decidedBy: r.decided_by,
+    consumedAt: r.consumed_at,
+  };
 }
 
 /** The id D1 knows a task by, unique across people. */
@@ -1603,6 +1687,188 @@ export class AgentStore {
     );
   }
 
+  putOutsideWrite(write: NewOutsideWrite, approval: NewOutsideApproval | null): OutsideWritePut {
+    return this.tx(() => {
+      const inserted = this.sql.exec(
+        `INSERT OR IGNORE INTO outside_write (id, intent, provider, action, operation_id, args, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        write.id,
+        write.intent,
+        write.provider,
+        write.action,
+        write.operationId,
+        canonicalJsonObject(write.args),
+        write.status,
+        write.now,
+        write.now,
+      ).rowsWritten;
+      if (inserted > 0) {
+        if (approval) {
+          this.sql.exec(
+            "INSERT INTO outside_approval (id, write_id, owner_key, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+            approval.id,
+            approval.writeId,
+            approval.owner,
+            approval.expiresAt,
+            approval.now,
+          );
+        }
+        const created = this.outsideWrite(write.id);
+        if (!created) throw new Error("outside write insert missing");
+        return { kind: "created", write: created, approval: approval ? this.outsideApproval(approval.id) : null };
+      }
+      const existing = this.sql
+        .exec<OutsideWriteCols>(
+          "SELECT id, intent, provider, action, operation_id, args, status, attempt, in_doubt, lease_until, receipt, failure, created_at, updated_at FROM outside_write WHERE intent = ?",
+          write.intent,
+        )
+        .toArray()[0];
+      if (!existing) throw new Error("outside write conflict missing");
+      const current = toOutsideWrite(existing);
+      const existingApproval = this.approvalForWrite(current.id);
+      const sameAction =
+        current.provider === write.provider && current.action === write.action && canonicalJsonObject(current.args) === canonicalJsonObject(write.args);
+      const sameApproval =
+        approval === null
+          ? existingApproval === null
+          : existingApproval !== null && existingApproval.owner === approval.owner;
+      if (!sameAction || !sameApproval) return { kind: "conflict", write: current };
+      return { kind: "existing", write: current, approval: existingApproval };
+    });
+  }
+
+  outsideWrite(id: OutsideWriteId): OutsideWrite | null {
+    const r = this.sql
+      .exec<OutsideWriteCols>(
+        "SELECT id, intent, provider, action, operation_id, args, status, attempt, in_doubt, lease_until, receipt, failure, created_at, updated_at FROM outside_write WHERE id = ?",
+        id,
+      )
+      .toArray()[0];
+    return r ? toOutsideWrite(r) : null;
+  }
+
+  outsideApproval(id: OutsideApprovalId): OutsideApproval | null {
+    const r = this.sql
+      .exec<OutsideApprovalCols>(
+        "SELECT id, write_id, owner_key, status, expires_at, created_at, decided_at, decided_by, consumed_at FROM outside_approval WHERE id = ?",
+        id,
+      )
+      .toArray()[0];
+    return r ? toOutsideApproval(r) : null;
+  }
+
+  approvalForWrite(writeId: OutsideWriteId): OutsideApproval | null {
+    const r = this.sql
+      .exec<OutsideApprovalCols>(
+        "SELECT id, write_id, owner_key, status, expires_at, created_at, decided_at, decided_by, consumed_at FROM outside_approval WHERE write_id = ?",
+        writeId,
+      )
+      .toArray()[0];
+    return r ? toOutsideApproval(r) : null;
+  }
+
+  beginOutsideWrite(id: OutsideWriteId, now: EpochMs, leaseMs: number): { readonly attempt: number } | null {
+    const r = this.sql
+      .exec<{ attempt: number }>(
+        `UPDATE outside_write SET status = 'verifying', attempt = attempt + 1, lease_until = ?, updated_at = ?
+         WHERE id = ? AND status = 'ready' RETURNING attempt`,
+        (now + leaseMs) as EpochMs,
+        now,
+        id,
+      )
+      .toArray()[0];
+    return r ?? null;
+  }
+
+  finishOutsideWrite(id: OutsideWriteId, attempt: number, outcome: WriteFinish, now: EpochMs): boolean {
+    return (
+      this.sql.exec(
+        `UPDATE outside_write SET status = ?, in_doubt = ?, lease_until = NULL, receipt = ?, failure = ?, updated_at = ?
+         WHERE id = ? AND attempt = ? AND status = 'verifying'`,
+        outcome.kind,
+        outcome.kind === "uncertain" ? 1 : 0,
+        outcome.kind === "succeeded" ? canonicalJsonObject(outcome.receipt) : null,
+        outcome.kind === "failed" ? outcome.reason : null,
+        now,
+        id,
+        attempt,
+      ).rowsWritten > 0
+    );
+  }
+
+  reconcileOutsideWrite(id: OutsideWriteId, attempt: number, outcome: WriteReconciliation, now: EpochMs): boolean {
+    return (
+      this.sql.exec(
+        `UPDATE outside_write SET status = ?, in_doubt = ?, lease_until = NULL, receipt = ?, failure = ?, updated_at = ?
+         WHERE id = ? AND attempt = ? AND status IN ('verifying', 'uncertain')`,
+        outcome.kind,
+        outcome.kind === "uncertain" ? 1 : 0,
+        outcome.kind === "succeeded" ? canonicalJsonObject(outcome.receipt) : null,
+        outcome.kind === "failed" ? outcome.reason : null,
+        now,
+        id,
+        attempt,
+      ).rowsWritten > 0
+    );
+  }
+
+  private expireOutsideApproval(id: OutsideApprovalId, writeId: OutsideWriteId, now: EpochMs): void {
+    this.sql.exec("UPDATE outside_approval SET status = 'expired' WHERE id = ? AND status IN ('pending', 'approved')", id);
+    this.sql.exec(
+      "UPDATE outside_write SET status = 'failed', lease_until = NULL, failure = 'approval expired', updated_at = ? WHERE id = ? AND status = 'approval_pending'",
+      now,
+      writeId,
+    );
+  }
+
+  decideOutsideApproval(id: OutsideApprovalId, actor: OutsideApproval["owner"], decision: "approve" | "refuse", now: EpochMs): ApprovalDecision {
+    return this.tx(() => {
+      const approval = this.outsideApproval(id);
+      if (!approval) return { kind: "missing" };
+      if (approval.owner !== actor) return { kind: "wrong_owner" };
+      if (approval.status === "consumed") return { kind: "used" };
+      if (approval.status === "expired" || approval.expiresAt <= now) {
+        this.expireOutsideApproval(id, approval.writeId, now);
+        return { kind: "expired" };
+      }
+      if (approval.status === "approved") return { kind: "already_approved" };
+      if (approval.status === "refused") return { kind: "already_refused" };
+      const status = decision === "approve" ? "approved" : "refused";
+      this.sql.exec("UPDATE outside_approval SET status = ?, decided_at = ?, decided_by = ? WHERE id = ? AND status = 'pending'", status, now, actor, id);
+      if (decision === "refuse") {
+        this.sql.exec(
+          "UPDATE outside_write SET status = 'failed', lease_until = NULL, failure = 'approval refused', updated_at = ? WHERE id = ? AND status = 'approval_pending'",
+          now,
+          approval.writeId,
+        );
+      }
+      return { kind: status };
+    });
+  }
+
+  consumeOutsideApproval(id: OutsideApprovalId, writeId: OutsideWriteId, now: EpochMs): ApprovalConsumption {
+    return this.tx(() => {
+      const approval = this.outsideApproval(id);
+      if (!approval) return { kind: "missing" };
+      if (approval.writeId !== writeId) return { kind: "mismatched" };
+      if (approval.status === "consumed") return { kind: "used" };
+      if (approval.status === "expired" || approval.expiresAt <= now) {
+        this.expireOutsideApproval(id, approval.writeId, now);
+        return { kind: "expired" };
+      }
+      if (approval.status !== "approved") return { kind: "not_approved" };
+      if (this.outsideWrite(writeId)?.status !== "approval_pending") return { kind: "unavailable" };
+      const consumed = this.sql.exec(
+        "UPDATE outside_approval SET status = 'consumed', consumed_at = ? WHERE id = ? AND status = 'approved'",
+        now,
+        id,
+      ).rowsWritten;
+      if (consumed === 0) return { kind: "used" };
+      this.sql.exec("UPDATE outside_write SET status = 'ready', updated_at = ? WHERE id = ? AND status = 'approval_pending'", now, writeId);
+      return { kind: "consumed" };
+    });
+  }
+
   recordGroup(group: AgentKey, version: number): void {
     this.sql.exec(
       "INSERT INTO owned_group (group_key, version) VALUES (?, ?) ON CONFLICT (group_key) DO UPDATE SET version = excluded.version",
@@ -1794,6 +2060,16 @@ export class AgentStore {
       );
       this.sql.exec("UPDATE inbox SET catch_up = NULL, catch_up_budget = NULL WHERE catch_up IS NOT NULL");
       this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'forgotten', closed_at = ? WHERE status IN ('pending', 'sending')", now);
+      this.sql.exec(
+        `UPDATE outside_write SET status = 'dropped', lease_until = NULL,
+           in_doubt = CASE WHEN status IN ('verifying', 'uncertain') THEN 1 ELSE in_doubt END, updated_at = ?
+         WHERE status IN ('approval_pending', 'ready', 'verifying', 'uncertain')`,
+        now,
+      );
+      this.sql.exec(
+        `UPDATE outside_approval SET status = 'expired'
+         WHERE status IN ('pending', 'approved') AND write_id IN (SELECT id FROM outside_write WHERE status = 'dropped')`,
+      );
       return { op, epoch };
     });
   }

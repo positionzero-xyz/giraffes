@@ -38,6 +38,8 @@ const durable = {
     chat: "texts", secret: "reply_token reply_expires", identity: "id event_key task_id saved_snapshot",
     operational: "trigger_kind intent ready_at status admitted_day in_doubt attempts via drop_reason created_at closed_at purpose choice reply_only saved_item saved_offset",
   },
+  outside_approval: { identity: "id write_id owner_key decided_by", operational: "status expires_at created_at decided_at consumed_at" },
+  outside_write: { saved: "args receipt", identity: "id intent operation_id", operational: "provider action status attempt in_doubt lease_until failure created_at updated_at" },
   owned_group: { identity: "group_key", operational: "version" },
   plan: { identity: "own_subscription seat_subscription seat_owner", operational: "one trial_ends_at own_plan updated_at" },
   proposal: { chat: "text", identity: "id task_id outbox_id", operational: "version kind status created_at decided_at" },

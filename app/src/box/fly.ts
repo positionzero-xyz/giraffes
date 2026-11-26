@@ -312,7 +312,9 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       }
       const live = volumes.filter((v) => !GONE_VOLUME.has(v.state));
       const saved = target.disk ? [target.disk] : target.disks ?? [];
-      if (live.length === 0) return { ok: true, state: "gone" };
+      // Ownership above proved the app still exists, so an empty volume list means its data is
+      // gone, not that the app is absent. Keep the reservation and let app evidence decide.
+      if (live.length === 0) return fail(true, "app remains without a live volume");
       if (!target.disk && saved.length > 1) return fail(true, "retirement target includes several unproven disks");
       for (const v of live) {
         if (!saved.includes(v.id)) return fail(true, "a different live volume appeared");
@@ -350,9 +352,9 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
         }
       }
 
-      const machines = new Set<string>();
-      if (target.machine) machines.add(target.machine);
-      for (const v of volumes) if (v.attached_machine_id && known.has(v.id)) machines.add(v.attached_machine_id);
+      // Delete only the saved machine. A machine read from the current volume row may be a
+      // replacement, including one attached to a volume already being destroyed.
+      const machines = target.machine ? [target.machine] : [];
       for (const machine of machines) {
         const removed = await call("DELETE", `/apps/${name}/machines/${encodeURIComponent(machine)}?force=true`);
         if (!removed.ok) return removed;

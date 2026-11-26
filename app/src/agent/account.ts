@@ -28,6 +28,17 @@ export type EraseBox =
   | { readonly kind: "none" }
   | { readonly kind: "unverified"; readonly box: EraseBoxReference }
   | { readonly kind: "wiped" | "reclaimed"; readonly host: BoxHostKind }
+  /**
+   * Box state invariants:
+   * - App absence needs app-level evidence: a 404 on the app plus a successful org app list that
+   *   omits the name. A 404 on the volume list alone never proves the app is gone.
+   * - Deletion authority is the saved resource identity: the same disk id, and for an attached
+   *   disk the same machine id. A replacement volume or a new machine is never deleted or wiped.
+   * - A wiped outcome requires an acknowledged wipe bound to the saved disk. Deleting a detached
+   *   disk is not a wipe and must keep the "could not verify a disk wipe" receipt line.
+   * - While either fact is uncertain, keep the job, alarm and capacity reservation and announce
+   *   nothing.
+   */
   | {
     readonly kind: "relocate";
     readonly box: EraseBoxTarget;
@@ -35,7 +46,8 @@ export type EraseBox =
     readonly resume: "wipe-fly" | "remove-volume" | "remove-app";
   }
   | { readonly kind: "locate" | "wipe-static"; readonly box: EraseBoxTarget }
-  | { readonly kind: "wipe-fly" | "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement };
+  | { readonly kind: "wipe-fly"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement; readonly verify?: boolean }
+  | { readonly kind: "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement };
 
 export type EraseBilling =
   | { readonly kind: "pending"; readonly checkouts: readonly CheckoutId[]; readonly subscriptions: readonly SubscriptionId[]; readonly endedSubscription: boolean; readonly stripeRetained: boolean }

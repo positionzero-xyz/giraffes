@@ -127,7 +127,8 @@ test("retirement volume-list 404 stays at two reads per due alarm", async () => 
   expect(reads).toBe(2);
   person.chat.clock.set(nextAt as EpochMs);
   await person.chat.settle();
-  expect(reads).toBe(4);
+  // One empty list with a live app now holds before a second list call.
+  expect(reads).toBe(3);
 });
 
 test("a resume from the prior revision target cannot promote its unwiped extra to known", async () => {

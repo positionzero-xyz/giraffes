@@ -679,7 +679,7 @@ export class Agent extends DurableObject<Env> {
         if (!found?.ok) return step;
         return found.target.disk === null
           ? { kind: "remove-volume", box, target: found.target }
-          : { kind: "wipe-fly", box, target: found.target };
+          : { kind: "wipe-fly", box, target: found.target, verify: false };
       }
       case "relocate": {
         // A job persisted by the earlier relocate shape has no saved target. Hold rather than
@@ -694,7 +694,9 @@ export class Agent extends DurableObject<Env> {
             ? { kind: "reclaimed", host: "fly" }
             : { kind: "remove-app", box, target: step.target };
         }
-        return { kind: step.resume, box, target: step.target };
+        return step.resume === "wipe-fly"
+          ? { kind: "wipe-fly", box, target: step.target, verify: true }
+          : { kind: step.resume, box, target: step.target };
       }
       case "wipe-static":
       case "wipe-fly": {
@@ -706,6 +708,13 @@ export class Agent extends DurableObject<Env> {
           const health = await deps.client.health(box.url, token);
           if (health.kind !== "up" || !health.box) return fallback;
           return { ...step, box: { ...box, incarnation: health.box } };
+        }
+        if (step.kind === "wipe-fly" && step.verify !== false) {
+          // Identity must still be the saved disk and machine at the point of the destructive call.
+          // A job persisted before this flag existed is verified; only a fresh locate skips it.
+          const check = await fly?.retirementRecheck(box.name, step.target);
+          if (check && !check.ok && check.missing) return { kind: "reclaimed", host: "fly" };
+          if (!check?.ok || check.state !== "present") return fallback;
         }
         const incarnation = box.incarnation;
         const wipe = await deps.client.erase(box.url, token, { scope: "account", box: incarnation, epoch: job.epoch });
@@ -721,7 +730,12 @@ export class Agent extends DurableObject<Env> {
       }
       case "remove-app": {
         const removed = await fly?.removeRetiredApp(box.name);
-        if (removed?.ok) return { kind: "wiped", host: "fly" };
+        if (removed?.ok) {
+          // No disk ever acknowledged a wipe, so deletion is not a wiped outcome.
+          return step.target.disk === null
+            ? { kind: "reclaimed", host: "fly" }
+            : { kind: "wiped", host: "fly" };
+        }
         return removed && !removed.ok && removed.missing
           ? { kind: "relocate", box, target: step.target, resume: "remove-app" }
           : step;
@@ -773,9 +787,7 @@ export class Agent extends DurableObject<Env> {
   async #retryErasure(delay = ACCOUNT_RETRY_MS): Promise<void> {
     const now = this.#deps.clock.now();
     const job = this.#erasure();
-    if (job && job.kind !== "receipt") {
-      this.ctx.storage.kv.put(ERASE_JOB, { ...job, nextAt: (now + delay) as EpochMs });
-    }
+    if (job) this.ctx.storage.kv.put(ERASE_JOB, { ...job, nextAt: (now + delay) as EpochMs });
     await this.ctx.storage.setAlarm(now + delay);
   }
 

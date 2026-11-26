@@ -1,4 +1,4 @@
-import type { AgentKey, EpochMs, ForgetEpoch, Identity, Language, OutboxId, ReplyHandle } from "../domain";
+import type { AgentKey, EpochMs, ForgetEpoch, Identity, InviteCode, Language, OutboxId, ReplyHandle } from "../domain";
 import type { CheckoutId } from "../billing/stripe";
 import type { BoxName } from "../box/names";
 import type { BoxHostKind, FlyDiskRetirement } from "../box/host";
@@ -11,6 +11,7 @@ export const START_CHALLENGE = "account:start-confirmation";
 export const ERASE_JOB = "account:erase";
 
 export type AccountChallenge = { readonly digest: string; readonly expiresAt: EpochMs; readonly epoch: ForgetEpoch };
+export type StartChallenge = AccountChallenge & { readonly invite?: InviteCode };
 
 type EraseBoxTarget = {
   readonly name: BoxName;

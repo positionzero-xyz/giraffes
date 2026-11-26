@@ -1,8 +1,9 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { expect, test, vi } from "vitest";
 import type { Agent } from "../src/agent/agent";
-import { type EpochMs } from "../src/domain";
+import { parseInviteCode, type EpochMs } from "../src/domain";
 import { type SubscriptionId } from "../src/billing/plan";
+import { d1Ledger } from "../src/ledger/ledger";
 import { chat, devChat, fakeBox, hold, scripted } from "./testkit";
 
 test("a confirmed account erase clears private state and requires a fresh decision to return", async () => {
@@ -111,4 +112,23 @@ test("a workspace-only box reply keeps account erasure pending", async () => {
   await c.settle();
   expect(c.channel.delivered.at(-1)?.text).toMatch(/deleted your live Giraffe data/);
   expect((await c.snapshot()).box).toBeNull();
+});
+
+test("the fresh consent button preserves the beta invite from a start link", async () => {
+  const code = parseInviteCode("ERASE8");
+  if (!code) throw new Error("invalid fixture invite");
+  const c = await devChat("457234", { model: null, at: "2099-11-04T10:00", channel: "telegram", admission: "beta" });
+  const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+  await runInDurableObject(stub, (agent) => agent.withDeps({ firstContactConsent: true, ledger: d1Ledger(env.LEDGER) }));
+  await env.LEDGER.prepare("INSERT INTO invite_code VALUES (?, 'recruit', 'intl_telegram', 'operator', 1)").bind(code).run();
+
+  await c.event({ kind: "lifecycle", change: "follow", code, at: c.clock.now() });
+  const start = c.channel.delivered.at(-1)?.button;
+  expect(start?.label).toBe("Start fresh");
+  if (!start) throw new Error("fresh consent is missing");
+  expect((await c.snapshot()).agent).toBeNull();
+  await c.tap(start.data);
+
+  expect((await c.snapshot()).admission).toMatchObject({ state: "consenting", code });
+  expect(c.model.calls).toHaveLength(0);
 });

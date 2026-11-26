@@ -83,12 +83,12 @@ import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach"
 import { inLineReserve, type QuotaReading } from "../policy/quota";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
 import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../policy/time";
-import { ADMISSION, planAdmission, type AdmissionAnswer, type AdmissionMode, type AdmissionStep } from "./admission";
+import { ADMISSION, inviteIn, planAdmission, type AdmissionAnswer, type AdmissionMode, type AdmissionStep } from "./admission";
 import { COMPACTION, compactionCommit, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import {
   ACCOUNT_COPY, ACCOUNT_RECEIPT_MS, ACCOUNT_RETRY_MS, ERASE_CHALLENGE, ERASE_JOB, START_CHALLENGE,
-  digestChallenge, newAccountChallenge, type AccountChallenge, type EraseBox, type Erasure,
+  digestChallenge, newAccountChallenge, type AccountChallenge, type EraseBox, type Erasure, type StartChallenge,
 } from "./account";
 import { coveredByForget, providerOrder, type Claim, type ProviderOrder } from "./forget";
 import { migrate } from "./schema";
@@ -243,12 +243,13 @@ export class Agent extends DurableObject<Env> {
   /** "stale": the person's last forget already covers this event, so nothing of it was stored. */
   async enqueue(given: InboundEnvelope): Promise<"queued" | "duplicate" | "stale"> {
     const now = this.#deps.clock.now();
-    if (await this.#accountControl(given, now)) return "stale";
+    const control = await this.#accountControl(given, now);
+    if (control === "handled") return "stale";
     if (this.#erasure()) return "stale";
     const e = given.event;
-    const starting = e.kind === "choice" && e.choice.kind === "start";
+    const starting = typeof control === "object";
     const envelope = starting
-      ? { ...given, event: { kind: "lifecycle", change: "follow", at: now, reply: e.reply } as const }
+      ? { ...given, event: { kind: "lifecycle", change: "follow", at: now, reply: e.reply, code: control.invite } as const }
       : withoutSecrets(given);
     const first = {
       tz: DEFAULT_TIME_ZONE,
@@ -416,7 +417,7 @@ export class Agent extends DurableObject<Env> {
     return this.ctx.storage.kv.get<Erasure>(ERASE_JOB);
   }
 
-  async #accountControl(envelope: InboundEnvelope, now: EpochMs): Promise<boolean> {
+  async #accountControl(envelope: InboundEnvelope, now: EpochMs): Promise<"continue" | "handled" | { readonly invite?: InviteCode }> {
     const { event, identity } = envelope;
     const remove = event.kind === "message" && event.text.trim().toLowerCase() === "/erase";
     const erasing = this.#erasure();
@@ -425,7 +426,7 @@ export class Agent extends DurableObject<Env> {
         id: crypto.randomUUID() as OutboxId, to: identity, texts: [ACCOUNT_COPY[erasing.language].pending],
         intent: "reply", reply: event.reply, replyOnly: identity.channel === "line",
       }, now);
-      return true;
+      return "handled";
     }
     const current = this.#store.agent();
     const language = current?.language ?? envelope.initialLanguage ?? CHANNEL_LANGUAGE[identity.channel];
@@ -437,11 +438,13 @@ export class Agent extends DurableObject<Env> {
     if (choice?.kind === "start" || choice?.kind === "erase") {
       const key = choice.kind === "erase" ? ERASE_CHALLENGE : START_CHALLENGE;
       const digest = await digestChallenge(choice.challenge);
-      const challenge = this.ctx.storage.kv.get<AccountChallenge>(key);
+      const challenge = this.ctx.storage.kv.get<StartChallenge>(key);
       if (this.#erasure() || !challenge || challenge.digest !== digest || challenge.expiresAt <= now ||
-          challenge.epoch !== this.#store.forget().epoch || coveredByForget(envelope, this.#store.forget())) return true;
+          challenge.epoch !== this.#store.forget().epoch || coveredByForget(envelope, this.#store.forget())) return "handled";
       this.ctx.storage.kv.delete(key);
-      if (choice.kind === "start") return !firstContact || this.#store.agent() !== null;
+      if (choice.kind === "start") {
+        return firstContact && this.#store.agent() === null ? { invite: challenge.invite } : "handled";
+      }
       const trigger = providerOrder(envelope) ?? { at: now, seq: null };
       this.ctx.storage.transactionSync(() => {
         const { epoch } = this.#store.beginForget(trigger, now);
@@ -455,19 +458,20 @@ export class Agent extends DurableObject<Env> {
       this.#accountVersion++;
       await this.ctx.storage.setAlarm(now);
       this.ctx.waitUntil(this.alarm());
-      return true;
+      return "handled";
     }
 
-    if (!remove && !firstContact) return false;
-    if (event.kind === "choice" || (event.kind === "lifecycle" && event.change === "block") || coveredByForget(envelope, state)) return true;
+    if (!remove && !firstContact) return "continue";
+    if (event.kind === "choice" || (event.kind === "lifecycle" && event.change === "block") || coveredByForget(envelope, state)) return "handled";
     const order = providerOrder(envelope);
-    if (order && now - order.at > ACCOUNT_RECEIPT_MS) return true;
+    if (order && now - order.at > ACCOUNT_RECEIPT_MS) return "handled";
     const { raw, record } = await newAccountChallenge(state.epoch, now);
-    if (this.#erasure() || state.epoch !== this.#store.forget().epoch) return true;
+    if (this.#erasure() || state.epoch !== this.#store.forget().epoch) return "handled";
     const action = remove ? "erase" : "start";
-    this.ctx.storage.kv.put(remove ? ERASE_CHALLENGE : START_CHALLENGE, record);
+    const invite = !remove && this.#deps.admission === "beta" ? inviteIn(event) : null;
+    this.ctx.storage.kv.put(remove ? ERASE_CHALLENGE : START_CHALLENGE, invite ? { ...record, invite } : record);
     await this.#armNoLaterThan(record.expiresAt);
-    if (this.#erasure() || state.epoch !== this.#store.forget().epoch) return true;
+    if (this.#erasure() || state.epoch !== this.#store.forget().epoch) return "handled";
     await this.#deliverAccountNotice({
       id: crypto.randomUUID() as OutboxId,
       to: identity,
@@ -480,7 +484,7 @@ export class Agent extends DurableObject<Env> {
         label: remove ? copy.confirmButton : copy.restartButton,
       },
     }, now);
-    return true;
+    return "handled";
   }
 
   async #runErasure(started: Erasure): Promise<void> {

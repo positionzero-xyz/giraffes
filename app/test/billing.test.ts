@@ -450,6 +450,42 @@ describe("checkout and the portal", () => {
   });
 
   test.each([
+    { problem: "an invalid detection date", user: "invalid-alert-date", readFails: false },
+    { problem: "a failed date lookup", user: "failed-alert-date", readFails: true },
+  ])("sends the operator alert despite $problem", async ({ user, readFails }) => {
+    const store = d1Billing(env.LEDGER);
+    if (readFails) {
+      vi.spyOn(store, "duplicateDetectedAt").mockRejectedValue(new Error("lookup failed for a private record"));
+    }
+    const kit = billingOn({}, store);
+    const c = await devChat(user, { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel();
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, user, "standard");
+    await c.received();
+    const extra = `sub_${user}_extra`;
+    if (!readFails) {
+      await env.LEDGER.prepare("INSERT INTO billing_duplicate (owner_key, subscription_ids, found_at) VALUES (?, ?, ?)")
+        .bind(c.agent, `sub_${user} ${extra}`, 9e15).run();
+    }
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect((await stripeChange(kit, { user, sub: extra, plan: "included", status: "active" })).status).toBe(200);
+      await c.settle();
+      await c.advanceTo("2099-11-05T10:00");
+      expect(operator.delivered.map(({ text }) => text)).toEqual([expect.stringContaining("Detection date unavailable.")]);
+      expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+      const lookupWarnings = warnings.mock.calls.filter(([warning]) => warning?.code === "operator_alert_date_lookup_failed");
+      expect(lookupWarnings).toEqual(readFails ? [[{ code: "operator_alert_date_lookup_failed" }]] : []);
+    } finally {
+      warnings.mockRestore();
+    }
+  });
+
+  test.each([
     { kind: "retry", language: "en", delivery: "delivery hasn't been confirmed", timing: "another attempt in 30 seconds", billing: "payment statement" },
     { kind: "in_doubt", language: "th", delivery: "ทีมอาจได้รับการแจ้งเตือนแล้ว", timing: "ลองอีกครั้งในอีก 30 วินาที", billing: "รายการเดินบัญชี" },
     { kind: "throw", language: "en", delivery: "may already have received the alert", timing: "another attempt in 30 seconds", billing: "payment statement" },

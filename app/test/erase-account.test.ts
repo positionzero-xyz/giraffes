@@ -2,8 +2,9 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { expect, test, vi } from "vitest";
 import type { Agent } from "../src/agent/agent";
 import { boxClient } from "../src/box/client";
+import type { BoxName } from "../src/box/names";
 import type { CheckoutId } from "../src/billing/stripe";
-import { parseInviteCode, type EpochMs } from "../src/domain";
+import { parseInviteCode, personAgentKey, type EpochMs } from "../src/domain";
 import { type SubscriptionId } from "../src/billing/plan";
 import { d1Ledger } from "../src/ledger/ledger";
 import { billingOn, chat, devChat, fakeBox, hold, scripted } from "./testkit";
@@ -84,7 +85,7 @@ test("an old image erases the workspace but leaves sign-in, so account erasure s
   const volume = "00000000-0000-4000-8000-000000000002";
   const box = fakeBox({ onlyFor: user, signedIn: true, volume });
   const billing = billingOn();
-  const closeSubscription = vi.fn(async () => ({ ok: true, value: "settled" } as const));
+  const closeSubscription = vi.fn(async () => ({ ok: true, value: { retained: false } } as const));
   let accountProof = false;
   let reportedVolume = volume;
   const files = new Set(["workspace session", "sign-in credentials"]);
@@ -92,7 +93,7 @@ test("an old image erases the workspace but leaves sign-in, so account erasure s
   const c = await devChat(user, {
     model: null,
     at: "2099-11-04T10:00",
-    billing: { ...billing.deps, stripe: { ...billing.stripe, closeSubscription, closeCheckout: async () => ({ ok: true, value: null }) } },
+    billing: { ...billing.deps, stripe: { ...billing.stripe, closeSubscription, closeCheckout: async () => ({ ok: true, value: { subscription: null, retained: false } }) } },
     box: {
       ...box.deps,
       host: { ...box.deps.host, kind: "static" },
@@ -153,6 +154,124 @@ test("an old image erases the workspace but leaves sign-in, so account erasure s
   expect((await c.snapshot()).box).toBeNull();
 });
 
+test("erase retains box identity while the box feature is off, counts capacity, and rechecks when restored", async () => {
+  const user = "erase-box-off";
+  const volume = "00000000-0000-4000-8000-0000000000d4";
+  const box = fakeBox({ onlyFor: user, signedIn: true, volume });
+  const wipes: { epoch: number; box: string }[] = [];
+  const deps = {
+    ...box.deps,
+    host: { ...box.deps.host, kind: "static" as const },
+    client: {
+      ...box.deps.client,
+      async health() {
+        return { kind: "up" as const, signedIn: true, box: volume };
+      },
+      erase: boxClient(async (_url, init) => {
+        const request = JSON.parse(String(init?.body));
+        wipes.push({ epoch: request.epoch, box: request.box });
+        return Response.json({ box: volume, floor: request.epoch, scope: "account" as const });
+      }).erase,
+    },
+  };
+  const c = await devChat(user, { model: null, at: "2099-11-04T10:00", box: deps });
+  const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+  await runInDurableObject(stub, (agent) => agent.withDeps({ ledger: d1Ledger(env.LEDGER) }));
+  await c.say("/claude");
+  const name = (await env.LEDGER.prepare("SELECT name FROM boxes WHERE agent_key = ?").bind(c.agent).first<{ name: BoxName }>())?.name;
+  if (!name) throw new Error("the fixture box was not registered");
+
+  await runInDurableObject(stub, (agent) => agent.withDeps({ box: null }));
+  await c.say("/erase");
+  const confirm = c.channel.delivered.at(-1)?.button;
+  if (!confirm) throw new Error("missing confirmation");
+  await c.tap(confirm.data);
+
+  const job = await runInDurableObject(stub, (_, state) => state.storage.kv.get<Record<string, unknown>>("account:erase"));
+  expect(job?.box).toMatchObject({ kind: "unverified", box: { name, host: "static" } });
+  const held = await env.LEDGER.prepare("SELECT agent_key, deleted_at FROM boxes WHERE name = ?").bind(name).first<{ agent_key: string; deleted_at: number | null }>();
+  expect(held).toMatchObject({ deleted_at: null });
+  expect(held?.agent_key).toMatch(/^erasure:/);
+  const other = personAgentKey({ channel: "dev", channelUserId: "erase-box-off-other" });
+  expect(await d1Ledger(env.LEDGER).claimBox({ agent: other, name: "gbox-capacity" as BoxName, host: "static", at: 1 as EpochMs, max: 1 })).toBe("full");
+  expect(wipes).toEqual([]);
+
+  await runInDurableObject(stub, (agent) => agent.withDeps({ box: deps }));
+  c.clock.set((c.clock.now() + 61_000) as EpochMs);
+  await c.settle();
+
+  expect(wipes).toHaveLength(1);
+  expect(c.channel.delivered.at(-1)?.text).toMatch(/deleted your live Giraffe data/);
+  expect(await env.LEDGER.prepare("SELECT name FROM boxes WHERE name = ?").bind(name).first()).toBeNull();
+});
+
+test("an active static box known only to the ledger is wiped from its derived URL", async () => {
+  const user = "erase-registered-box";
+  const volume = "00000000-0000-4000-8000-0000000000e1";
+  const box = fakeBox({ onlyFor: user, signedIn: true, volume });
+  const wipes: { epoch: number; box: string }[] = [];
+  const c = await devChat(user, {
+    model: null,
+    at: "2099-11-04T10:00",
+    box: {
+      ...box.deps,
+      host: { ...box.deps.host, kind: "static" },
+      client: {
+        ...box.deps.client,
+        async health() {
+          return { kind: "up", signedIn: true, box: volume };
+        },
+        erase: boxClient(async (_url, init) => {
+          const request = JSON.parse(String(init?.body));
+          wipes.push({ epoch: request.epoch, box: request.box });
+          return Response.json({ box: volume, floor: request.epoch, scope: "account" as const });
+        }).erase,
+      },
+    },
+  });
+  await c.say("hello");
+  const name = await box.nameOf(user);
+  await env.LEDGER.prepare("INSERT INTO boxes (agent_key, name, host, created_at, deleted_at) VALUES (?, ?, 'static', 1, NULL)")
+    .bind(c.agent, name).run();
+  await c.say("/erase");
+  const confirm = c.channel.delivered.at(-1)?.button;
+  if (!confirm) throw new Error("missing confirmation");
+  await c.tap(confirm.data);
+
+  expect(wipes).toHaveLength(1);
+  expect(c.channel.delivered.at(-1)?.text).toMatch(/deleted your live Giraffe data/);
+  expect(await env.LEDGER.prepare("SELECT name FROM boxes WHERE name = ?").bind(name).first()).toBeNull();
+});
+
+test("a confirmed missing Fly box finishes as reclaimed and releases capacity", async () => {
+  const user = "erase-box-missing";
+  const box = fakeBox({ onlyFor: user });
+  const c = await devChat(user, {
+    model: null,
+    at: "2099-11-04T10:00",
+    box: {
+      ...box.deps,
+      host: Object.assign({ ...box.deps.host }, {
+        retirementTarget: async () => ({ ok: false as const, retryable: false, detail: "GET volumes: 404", missing: true as const }),
+        retireWipedDisk: async () => ({ ok: true as const }),
+        removeRetiredApp: async () => ({ ok: true as const }),
+      }),
+    },
+  });
+  await c.say("hello");
+  await env.LEDGER.prepare("INSERT INTO boxes (agent_key, name, host, created_at, deleted_at) VALUES (?, 'gbox-missing', 'fly', 1, NULL)")
+    .bind(c.agent).run();
+  await c.say("/erase");
+  const confirm = c.channel.delivered.at(-1)?.button;
+  if (!confirm) throw new Error("missing confirmation");
+  await c.tap(confirm.data);
+
+  const receipt = c.channel.delivered.at(-1)?.text;
+  expect(receipt).toMatch(/deleted your live Giraffe data/);
+  expect(receipt).toMatch(/box was removed earlier.*wipe/i);
+  expect(await env.LEDGER.prepare("SELECT name FROM boxes WHERE name = 'gbox-missing'").first()).toBeNull();
+});
+
 test("the fresh consent button preserves the beta invite from a start link", async () => {
   const code = parseInviteCode("ERASE8");
   if (!code) throw new Error("invalid fixture invite");
@@ -194,7 +313,7 @@ test("erase still clears expired unpaid Stripe sessions and discloses retained r
   const billing = billingOn();
   let available = false;
   const closeCheckout = vi.fn(async (_id: CheckoutId) => available
-    ? { ok: true, value: null } as const
+    ? { ok: true, value: { subscription: null, retained: false } } as const
     : { ok: false, status: 503, detail: "Stripe unavailable" } as const);
   const c = await devChat("erase-unpaid", {
     model: null,
@@ -219,4 +338,29 @@ test("erase still clears expired unpaid Stripe sessions and discloses retained r
   const receipt = c.channel.delivered.at(-1)?.text;
   expect(receipt).toMatch(/Stripe.*checkout.*even if you didn’t pay/i);
   expect(receipt).not.toMatch(/subscriptions you owned have ended/i);
+  const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+  expect(await runInDurableObject(stub, (_, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM checkout_session").one())).toEqual({ n: 0 });
+});
+
+test("a permanent Stripe metadata refusal is disclosed once instead of blocking erasure", async () => {
+  const billing = billingOn();
+  const closeCheckout = vi.fn(async (_id: CheckoutId) => ({ ok: true, value: { subscription: null, retained: true } } as const));
+  const c = await devChat("erase-stripe-retained", {
+    model: null,
+    at: "2099-11-04T10:00",
+    billing: { ...billing.deps, stripe: { ...billing.stripe, closeCheckout } },
+  });
+  await c.say("/plan");
+  const opened = [...billing.stripe.sessions.keys()].sort();
+  await c.say("/erase");
+  const confirm = c.channel.delivered.at(-1)?.button;
+  if (!confirm) throw new Error("missing confirmation");
+  await c.tap(confirm.data);
+
+  expect(opened.length).toBeGreaterThan(0);
+  expect(closeCheckout.mock.calls.map(([id]) => id).sort()).toEqual(opened);
+  const receipt = c.channel.delivered.at(-1)?.text;
+  expect(receipt).toMatch(/deleted your live Giraffe data/);
+  expect(receipt?.match(/Stripe refused removal/g)).toHaveLength(1);
+  expect(receipt).toMatch(/Stripe refused removal.*references remain/i);
 });

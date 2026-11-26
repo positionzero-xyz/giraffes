@@ -33,9 +33,10 @@ export async function prepareLedgerErasure(db: D1Database, person: AgentKey) {
   return { invitees, members, subscriptions };
 }
 
-export async function erasePersonLedger(db: D1Database, person: AgentKey): Promise<void> {
+export async function erasePersonLedger(db: D1Database, person: AgentKey, boxHoldKey: string | null = null): Promise<void> {
   const query = (sql: string): D1PreparedStatement => db.prepare(sql).bind(person);
   await db.batch([
+    ...(boxHoldKey ? [db.prepare("UPDATE boxes SET agent_key = ?2 WHERE agent_key = ?1 AND deleted_at IS NULL").bind(person, boxHoldKey)] : []),
     ...personLedgerTables.map((table) => query(`DELETE FROM ${table} WHERE agent_key = ?1`)),
     query(`DELETE FROM invite_code WHERE issuer = ?1 OR code IN (SELECT code FROM enrollment WHERE agent_key = ?1)`),
     query("UPDATE enrollment SET inviter = NULL, code = 'retired:' || hex(randomblob(16)) WHERE inviter = ?1"),

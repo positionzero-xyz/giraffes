@@ -144,8 +144,8 @@ describe("stripe boundary", () => {
       if (init?.method === "DELETE") subscriptionStatus = "canceled";
       return Response.json({ id: subscription, status: subscriptionStatus, metadata: subscriptionMetadata });
     });
-    expect(await api.closeCheckout(checkout, owner)).toEqual({ ok: true, value: subscription });
-    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: "settled" });
+    expect(await api.closeCheckout(checkout, owner)).toEqual({ ok: true, value: { subscription, retained: false } });
+    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: { retained: false } });
     expect(requests).toEqual([
       "GET /v1/checkout/sessions/cs_erasure", "POST /v1/checkout/sessions/cs_erasure/expire",
       "GET /v1/checkout/sessions/cs_erasure", "POST /v1/checkout/sessions/cs_erasure",
@@ -153,7 +153,7 @@ describe("stripe boundary", () => {
       "GET /v1/checkout/sessions", "GET /v1/checkout/sessions/cs_erasure",
     ]);
     requests.length = 0;
-    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: "settled" });
+    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: { retained: false } });
     expect(requests).toEqual([
       "GET /v1/subscriptions/sub_erasure", "GET /v1/checkout/sessions", "GET /v1/checkout/sessions/cs_erasure",
     ]);
@@ -181,8 +181,56 @@ describe("stripe boundary", () => {
       return Response.json({ id: checkout, status: "complete", client_reference_id: owner, metadata, subscription });
     });
 
-    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: "settled" });
+    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: { retained: false } });
     expect(metadata).toEqual({});
+  });
+
+  test("erasure does not expire a terminal checkout and reports a permanent metadata refusal", async () => {
+    const owner = agent("erase-stripe-refusal");
+    const checkout = "cs_refusal" as CheckoutId;
+    let expires = 0;
+    let clears = 0;
+    const api = stripeApi(cfg, rules, async (url, init) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/expire")) {
+        expires++;
+        return Response.json({ error: { code: "checkout_session_not_open" } }, { status: 400 });
+      }
+      expect(path).toBe(`/v1/checkout/sessions/${checkout}`);
+      if (init?.method === "POST") {
+        clears++;
+        return Response.json({ error: { type: "invalid_request_error", code: "metadata_update_unsupported" } }, { status: 400 });
+      }
+      return Response.json({ id: checkout, status: "expired", client_reference_id: owner, metadata: { agent_key: owner }, subscription: null });
+    });
+
+    expect(await api.closeCheckout(checkout, owner)).toEqual({ ok: true, value: { subscription: null, retained: true } });
+    expect({ expires, clears }).toEqual({ expires: 0, clears: 1 });
+  });
+
+  test("erasure still cancels a subscription when Stripe permanently refuses editable metadata removal", async () => {
+    const owner = agent("erase-subscription-refusal");
+    const subscription = "sub_refusal" as SubscriptionId;
+    let status = "active";
+    let deletes = 0;
+    const api = stripeApi(cfg, rules, async (url, init) => {
+      const target = new URL(url);
+      if (target.pathname.endsWith("/checkout/sessions")) {
+        return Response.json({ data: [], has_more: false });
+      }
+      expect(target.pathname).toBe(`/v1/subscriptions/${subscription}`);
+      if (init?.method === "POST") {
+        return Response.json({ error: { type: "invalid_request_error", code: "metadata_update_unsupported" } }, { status: 400 });
+      }
+      if (init?.method === "DELETE") {
+        deletes++;
+        status = "canceled";
+      }
+      return Response.json({ id: subscription, status, metadata: { agent_key: owner } });
+    });
+
+    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: { retained: true } });
+    expect(deletes).toBe(1);
   });
 
   test("the signature is HMAC-SHA256 over 't.payload'; a wrong secret, a changed body, a stale or missing header fail", async () => {
@@ -812,8 +860,8 @@ describe("checkout and the portal", () => {
         ...kit.deps,
         stripe: {
           ...kit.stripe,
-          closeCheckout: async () => ({ ok: true, value: null }),
-          closeSubscription: async () => ({ ok: true, value: "settled" }),
+          closeCheckout: async () => ({ ok: true, value: { subscription: null, retained: false } }),
+          closeSubscription: async () => ({ ok: true, value: { retained: false } }),
         },
       },
     });

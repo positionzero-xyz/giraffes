@@ -6,7 +6,7 @@ export type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 export const BOX_HOST_KINDS = ["fly", "static"] as const;
 export type BoxHostKind = (typeof BOX_HOST_KINDS)[number];
 
-export type HostFailure = { readonly ok: false; readonly retryable: boolean; readonly detail: string };
+export type HostFailure = { readonly ok: false; readonly retryable: boolean; readonly detail: string; readonly missing?: true };
 export type HostResult = { readonly ok: true } | HostFailure;
 
 export const HOST_OK: HostResult = { ok: true };

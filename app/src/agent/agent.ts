@@ -89,7 +89,7 @@ import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import {
   ACCOUNT_COPY, ACCOUNT_RECEIPT_MS, ACCOUNT_RETRY_MS, ERASE_CHALLENGE, ERASE_JOB, START_CHALLENGE,
   digestChallenge, newAccountChallenge, type AccountChallenge, type EraseBilling, type EraseBox,
-  type EraseBoxTarget, type Erasure, type StartChallenge,
+  type EraseBoxReference, type EraseBoxTarget, type Erasure, type StartChallenge,
 } from "./account";
 import { coveredByForget, providerOrder, type Claim, type ProviderOrder } from "./forget";
 import { migrate } from "./schema";
@@ -507,18 +507,21 @@ export class Agent extends DurableObject<Env> {
       }
       if (current?.kind === "preparing") {
         const { box: stored, checkouts, ...identity } = current;
-        const box = await this.#accountBoxTarget(identity.person, stored);
+        const registered = await this.env.LEDGER.prepare("SELECT name, host, deleted_at FROM boxes WHERE agent_key = ?")
+          .bind(identity.person).first<{ name: BoxName; host: EraseBoxReference["host"]; deleted_at: EpochMs | null }>();
+        const boxLedgerKey = registered?.deleted_at === null ? `erasure:${crypto.randomUUID()}` : null;
+        const box = this.#accountBoxTarget(identity.person, stored, registered);
         const { invitees, members, subscriptions } = await prepareLedgerErasure(this.env.LEDGER, identity.person);
         current = {
-          ...identity, kind: "cleaning", box,
+          ...identity, kind: "cleaning", box, boxLedgerKey,
           ledger: { kind: "sweep", invitees, members },
-          billing: { kind: "pending", checkouts, subscriptions, endedSubscription: false },
+          billing: { kind: "pending", checkouts, subscriptions, endedSubscription: false, stripeRetained: false },
         };
         this.ctx.storage.kv.put(ERASE_JOB, current);
       }
       if (current?.kind !== "cleaning") return;
       if (current.ledger.kind === "sweep") {
-        await erasePersonLedger(this.env.LEDGER, current.person);
+        await erasePersonLedger(this.env.LEDGER, current.person, current.boxLedgerKey);
         current = { ...current, ledger: { ...current.ledger, kind: "detach" } };
         this.ctx.storage.kv.put(ERASE_JOB, current);
       }
@@ -547,15 +550,19 @@ export class Agent extends DurableObject<Env> {
         current = { ...current, box };
         this.ctx.storage.kv.put(ERASE_JOB, current);
       }
-      const { box, billing, id, person, to, language, epoch, reply } = current;
+      const { box, boxLedgerKey, billing, id, person, to, language, epoch, reply } = current;
       if (billing.kind === "pending") {
         await this.#retryErasure();
         return;
       }
+      if (boxLedgerKey !== null) {
+        await this.env.LEDGER.prepare("DELETE FROM boxes WHERE agent_key = ?").bind(boxLedgerKey).run();
+      }
       const receipt: Erasure = {
         kind: "receipt", id, person, to, language, epoch, reply,
         expiresAt: (this.#deps.clock.now() + ACCOUNT_RECEIPT_MS) as EpochMs,
-        attempted: false, endedSubscription: billing.endedSubscription, box: box.kind === "none" ? null : box,
+        attempted: false, endedSubscription: billing.endedSubscription, stripeRetained: billing.stripeRetained,
+        box: box.kind === "none" ? null : box,
       };
       this.ctx.storage.kv.put(ERASE_JOB, receipt);
       await this.#sendErasureReceipt(receipt);
@@ -577,42 +584,59 @@ export class Agent extends DurableObject<Env> {
       const closed = await stripe?.closeCheckout?.(checkout, person);
       if (!closed?.ok) return null;
       return {
-        ...billing, checkouts,
-        subscriptions: closed.value && !billing.subscriptions.includes(closed.value)
-          ? [...billing.subscriptions, closed.value] : billing.subscriptions,
+        ...billing, checkouts, stripeRetained: billing.stripeRetained || closed.value.retained,
+        subscriptions: closed.value.subscription && !billing.subscriptions.includes(closed.value.subscription)
+          ? [...billing.subscriptions, closed.value.subscription] : billing.subscriptions,
       };
     }
     if (subscription) {
       const closed = await stripe?.closeSubscription?.(subscription, person);
-      return closed?.ok ? { ...billing, subscriptions, endedSubscription: true } : null;
+      return closed?.ok
+        ? { ...billing, subscriptions, endedSubscription: true, stripeRetained: billing.stripeRetained || closed.value.retained }
+        : null;
     }
-    return { kind: "done", endedSubscription: billing.endedSubscription };
+    return { kind: "done", endedSubscription: billing.endedSubscription, stripeRetained: billing.stripeRetained };
   }
 
-  async #accountBoxTarget(person: AgentKey, stored: EraseBoxTarget | null): Promise<EraseBox> {
-    const registered = await this.env.LEDGER.prepare("SELECT name, host, deleted_at FROM boxes WHERE agent_key = ?")
-      .bind(person).first<{ name: BoxName; host: EraseBoxTarget["host"]; deleted_at: EpochMs | null }>();
+  #resolveAccountBox(person: AgentKey, box: EraseBoxReference): EraseBox {
+    const deps = this.#deps.box;
+    if (!boxServes(deps, person) || box.host !== deps.host.kind || (box.host === "static" && deps.onlyFor !== person)) {
+      return { kind: "unverified", box };
+    }
+    const target: EraseBoxTarget = { ...box, url: box.url ?? deps.host.urlOf(box.name) };
+    return { kind: box.host === "fly" ? "locate" : "wipe-static", box: target };
+  }
+
+  #accountBoxTarget(
+    person: AgentKey,
+    stored: EraseBoxTarget | null,
+    registered: { readonly name: BoxName; readonly host: EraseBoxReference["host"]; readonly deleted_at: EpochMs | null } | null,
+  ): EraseBox {
     if (registered && registered.deleted_at !== null && (!stored || stored.name === registered.name)) {
       return { kind: "reclaimed", host: registered.host };
     }
-    if (!stored) return { kind: registered ? "unverified" : "none" };
-    const deps = this.#deps.box;
-    if (!boxServes(deps, person) || stored.host !== deps.host.kind || (stored.host === "static" && deps.onlyFor !== person)) {
-      return { kind: "unverified" };
-    }
-    return { kind: stored.host === "fly" ? "locate" : "wipe-static", box: stored };
+    const reference: EraseBoxReference | null = stored ?? (registered && registered.deleted_at === null
+      ? { name: registered.name, host: registered.host, url: null, incarnation: null }
+      : null);
+    if (!reference) return { kind: "none" };
+    return this.#resolveAccountBox(person, reference);
   }
 
   async #eraseAccountBox(job: Extract<Erasure, { kind: "cleaning" }>): Promise<EraseBox> {
     const step = job.box;
     const deps = this.#deps.box;
     if (!("box" in step)) return step;
-    if (!deps || deps.host.kind !== step.box.host) throw new Error("box host unavailable");
+    if (step.kind === "unverified") {
+      const resolved = this.#resolveAccountBox(job.person, step.box);
+      return resolved.kind === "unverified" ? step : resolved;
+    }
+    if (!deps || !boxServes(deps, job.person) || deps.host.kind !== step.box.host) return step;
     const fly = "retirementTarget" in deps.host ? deps.host as BoxHost & FlyBoxRetirement : null;
     const { box } = step;
     switch (step.kind) {
       case "locate": {
         const found = await fly?.retirementTarget(box.name);
+        if (found && !found.ok && found.missing) return { kind: "reclaimed", host: "fly" };
         if (!found?.ok) return step;
         return { kind: "wipe-fly", box, target: found.target };
       }
@@ -649,6 +673,7 @@ export class Agent extends DurableObject<Env> {
         ...(job.box?.host === "fly" ? [copy.flyCopies] : []),
         ...(job.endedSubscription ? [copy.subscriptionEnded] : []),
         copy.stripeRecords,
+        ...(job.stripeRetained ? [copy.stripeRetained] : []),
         copy.return,
       ].join("\n\n")],
     }, now);

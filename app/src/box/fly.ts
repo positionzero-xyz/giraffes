@@ -104,7 +104,9 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
   }
 
   function read<T>(r: Reply, schema: z.ZodType<T>, what: string): T | HostFailure {
-    if (!success(r.status)) return fail(false, `${what}: ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+    if (!success(r.status)) {
+      return { ...fail(false, `${what}: ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`), ...(r.status === 404 ? { missing: true as const } : {}) };
+    }
     const parsed = schema.safeParse(r.body);
     return parsed.success ? parsed.data : fail(false, `${what}: unexpected reply`);
   }

@@ -14,23 +14,25 @@ export const ERASE_JOB = "account:erase";
 export type AccountChallenge = { readonly digest: string; readonly expiresAt: EpochMs; readonly epoch: ForgetEpoch };
 export type StartChallenge = AccountChallenge & { readonly invite?: InviteCode };
 
-export type EraseBoxTarget = {
+export type EraseBoxReference = {
   readonly name: BoxName;
   readonly host: BoxHostKind;
-  readonly url: string;
+  readonly url: string | null;
   readonly incarnation: string | null;
 };
 
+export type EraseBoxTarget = EraseBoxReference & { readonly url: string };
+
 export type EraseBox =
   | { readonly kind: "none" }
-  | { readonly kind: "unverified" }
+  | { readonly kind: "unverified"; readonly box: EraseBoxReference }
   | { readonly kind: "wiped" | "reclaimed"; readonly host: BoxHostKind }
   | { readonly kind: "locate" | "wipe-static"; readonly box: EraseBoxTarget }
   | { readonly kind: "wipe-fly" | "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement };
 
 export type EraseBilling =
-  | { readonly kind: "pending"; readonly checkouts: readonly CheckoutId[]; readonly subscriptions: readonly SubscriptionId[]; readonly endedSubscription: boolean }
-  | { readonly kind: "done"; readonly endedSubscription: boolean };
+  | { readonly kind: "pending"; readonly checkouts: readonly CheckoutId[]; readonly subscriptions: readonly SubscriptionId[]; readonly endedSubscription: boolean; readonly stripeRetained: boolean }
+  | { readonly kind: "done"; readonly endedSubscription: boolean; readonly stripeRetained: boolean };
 
 type EraseLedger =
   | { readonly kind: "sweep" | "detach"; readonly invitees: readonly AgentKey[]; readonly members: readonly AgentKey[] }
@@ -50,8 +52,8 @@ type ErasureIdentity = {
 export type Erasure = ErasureIdentity & (
   | { readonly kind: "starting" }
   | { readonly kind: "preparing"; readonly checkouts: readonly CheckoutId[]; readonly box: EraseBoxTarget | null }
-  | { readonly kind: "cleaning"; readonly ledger: EraseLedger; readonly billing: EraseBilling; readonly box: EraseBox }
-  | { readonly kind: "receipt"; readonly expiresAt: EpochMs; readonly attempted: boolean; readonly box: EraseBoxReceipt | null; readonly endedSubscription: boolean }
+  | { readonly kind: "cleaning"; readonly ledger: EraseLedger; readonly billing: EraseBilling; readonly box: EraseBox; readonly boxLedgerKey: string | null }
+  | { readonly kind: "receipt"; readonly expiresAt: EpochMs; readonly attempted: boolean; readonly box: EraseBoxReceipt | null; readonly endedSubscription: boolean; readonly stripeRetained: boolean }
 );
 
 export async function digestChallenge(value: string): Promise<string> {
@@ -77,6 +79,7 @@ export const ACCOUNT_COPY = {
     flyCopies: "Fly may retain older disk copies for up to 60 days after removal.",
     subscriptionEnded: "Any Giraffe subscriptions you owned have ended.",
     stripeRecords: "If you requested a payment link, Stripe may keep checkout records and historical chat account references, even if you didn’t pay. Stripe may also keep required payment records.",
+    stripeRetained: "Stripe refused removal of some editable chat account references, so those references remain in Stripe records.",
     return: "To start fresh, send /start and tap Start.",
   },
   th: {
@@ -90,6 +93,7 @@ export const ACCOUNT_COPY = {
     flyCopies: "Fly อาจเก็บสำเนาดิสก์เดิมไว้ถึง 60 วันหลังจากนำกล่องออก",
     subscriptionEnded: "แพ็กเกจ Giraffe แบบชำระเงินที่คุณเป็นเจ้าของสิ้นสุดแล้ว",
     stripeRecords: "หากคุณเคยขอลิงก์ชำระเงิน Stripe อาจเก็บบันทึกการเปิดหน้าชำระเงินและข้อมูลอ้างอิงบัญชีแชตเดิม แม้ว่าคุณจะไม่ได้ชำระเงิน และอาจเก็บบันทึกการชำระเงินที่จำเป็น",
+    stripeRetained: "Stripe ปฏิเสธการลบข้อมูลอ้างอิงบัญชีแชตบางส่วนที่แก้ไขได้ ข้อมูลเหล่านั้นจึงยังคงอยู่ในบันทึกของ Stripe",
     return: "หากต้องการเริ่มใหม่ ให้ส่ง /start แล้วแตะเริ่ม",
   },
 } satisfies Record<Language, Readonly<Record<string, string>>>;

@@ -209,6 +209,28 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.equal(transcriptExists(r.body.session.id), false);
   });
 
+  it("keeps a one-off out of the rollback pointer and preserves the live personal session", async () => {
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Personal fresh." }));
+    const personal = await agent({ session: null, turn: "New\nPerson: personal fresh", fresh: "New\nPerson: personal fresh" });
+    assert.equal(personal.status, 200);
+    assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), personal.body.session.id);
+    assert.equal(transcriptExists(personal.body.session.id), true);
+
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Group once." }));
+    const once = await postAgent({ ...turnBody({ session: null, turn: "New\nPerson: group one-off", fresh: "New\nPerson: group one-off" }), ephemeral: true });
+    assert.equal(once.status, 200);
+    assert.notEqual(once.body.session.id, personal.body.session.id);
+    assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), personal.body.session.id);
+    assert.equal(transcriptExists(personal.body.session.id), true);
+    assert.equal(transcriptExists(once.body.session.id), false);
+
+    writeFileSync(script, JSON.stringify({ calls: [], text: "After group." }));
+    const legacyTurn = { model: "claude-haiku-5-5", append: APPEND, tools: [SCHEDULE, REMEMBER] };
+    const afterGroup = await postAgent({ ...legacyTurn, turn: "New\nPerson: after group" });
+    assert.equal(afterGroup.status, 200);
+    assert.deepEqual(afterGroup.body.session, { id: personal.body.session.id, resumed: true });
+  });
+
   it("answers a good turn when the rollback pointer can't be written", async () => {
     writeFileSync(script, JSON.stringify({ calls: [], text: "Still good." }));
     rmSync(join(dir, ".giraffe-session"), { recursive: true, force: true });

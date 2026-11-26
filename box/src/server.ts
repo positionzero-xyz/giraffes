@@ -205,17 +205,17 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
     });
     const reply = await turnAt(parsed.at, arrivedAfter, abandoned, async () => {
       if (parsed.session !== undefined) {
-        const before = parsed.session === null ? legacySession() : null;
+        const before = parsed.session === null && parsed.ephemeral !== true ? legacySession() : null;
         const named = await agentTurn(cli, parsed, abandoned.signal, configDir);
-        if (named.status === 200) {
+        if (named.status === 200 && parsed.ephemeral !== true) {
           writeLegacySession(named.body.session.id);
           if (before !== null && before !== named.body.session.id && isSessionId(before)) deleteSessionTranscripts(configDir, [before]);
         }
         return named;
       }
-      const session = legacySession();
+      const session = parsed.ephemeral === true ? null : legacySession();
       const result = await agentTurn(cli, { ...parsed, session }, abandoned.signal, configDir);
-      if (result.status === 200 && !result.body.session.resumed) writeLegacySession(result.body.session.id);
+      if (result.status === 200 && parsed.ephemeral !== true && !result.body.session.resumed) writeLegacySession(result.body.session.id);
       return result;
     });
     sendJson(res, reply.status, reply.body);

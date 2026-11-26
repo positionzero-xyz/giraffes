@@ -340,7 +340,7 @@ describe("the Durable Object is the one record of the chat for the box session",
     box.replies.push({ kind: "reply", step: chat("For the group.") });
     const prompt = { sections: [{ title: "New", keep: ["Person: hi from the group"], trim: [], dropRank: 0 }] };
     expect(await owner.serve({ group, ownershipVersion: 1, purpose: "turn", system: "s", prompt })).toMatchObject({ kind: "ok", call: { lane: "box" } });
-    expect(lastBox(box)).toMatchObject({ session: null, resumed: false, append: AGENT_SYSTEM, user: "## New\nPerson: hi from the group" });
+    expect(lastBox(box)).toMatchObject({ session: null, resumed: false, ephemeral: true, append: AGENT_SYSTEM, user: "## New\nPerson: hi from the group" });
 
     box.replies.push({ kind: "reply", step: chat("Hi again.") });
     await c.say("me again");

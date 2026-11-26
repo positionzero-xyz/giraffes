@@ -20,7 +20,7 @@ grep -qxF 'research/[A-Z]-' "$PATTERNS" || printf 'research/[A-Z]-\n' >> "$PATTE
 export PRIVATE_PATTERNS_FILE="$PATTERNS"
 
 for rev in "$@"; do
-  sha=$(git -C "$REPO" rev-parse --short "$rev")
+  sha=$(git -C "$CHECKOUT" rev-parse --short "$rev")
   name=$(echo "$rev" | tr '/' '-')
   wt="$OUT/wt/$name"
   log="$OUT/$name"

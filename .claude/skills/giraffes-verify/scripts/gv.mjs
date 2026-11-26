@@ -447,8 +447,8 @@ const commands = {
     if (name) {
       mkdirSync(EVIDENCE, { recursive: true });
       writeFileSync(path.join(EVIDENCE, `${name}.json`), full + "\n");
-      writeRevision(`${name}.revision`);
     }
+    writeRevision(name ? `${name}.revision` : "snapshot.revision");
     console.log(JSON.stringify(picked(s, pick), null, 2));
   },
 

@@ -17,7 +17,7 @@ describe("the consent message", () => {
     expect(NOTICES.en.privacy(NOTICE_URL)).toBe(`Before we start, here is how your messages are handled.
 • I keep our chat and the notes, reminders and tasks I make for you, so I can help over time. Send /memory to see your notes, reminders and tasks.
 • To answer you, I send your messages and what I've saved to an AI: the one you connect, such as Anthropic or your Claude plan, or on some plans one Giraffe provides. LINE or Telegram also carries every message.
-• Our own logs keep times, counts and costs, never your words.
+• Our own logs keep your chat app ID, times, counts and costs, never your words.
 • Some of these services are outside Thailand.
 • If you share health or other private details, I keep them the same way, only to help you.
 • You need to be 20 or over.
@@ -27,7 +27,7 @@ Tap the button to agree.`);
     expect(NOTICES.th.privacy(NOTICE_URL)).toBe(`ก่อนเริ่ม ขอแจ้งให้ทราบว่าข้อความของคุณจะถูกจัดการอย่างไรนะคะ
 • เราเก็บแชต รวมถึงโน้ต การเตือน และงานที่บันทึกไว้ให้คุณ เพื่อช่วยคุณได้ต่อเนื่อง ส่ง /memory เพื่อดูโน้ต การเตือน และงานของคุณ
 • เพื่อตอบคุณ ข้อความและสิ่งที่บันทึกไว้จะถูกส่งไปยัง AI ที่คุณเชื่อมไว้ เช่น Anthropic หรือแพ็กเกจ Claude ของคุณ หรือ AI ที่ Giraffe จัดให้ในบางแพ็กเกจ และ LINE หรือ Telegram ก็รับส่งทุกข้อความด้วย
-• บันทึกของเราเก็บเวลา จำนวนครั้ง และค่าใช้จ่าย ไม่เก็บข้อความของคุณ
+• บันทึกของเราเก็บ ID แอปแชต เวลา จำนวนครั้ง และค่าใช้จ่าย ไม่เก็บข้อความของคุณ
 • บางบริการเหล่านี้อยู่นอกประเทศไทย
 • ถ้าคุณเล่าเรื่องสุขภาพหรือเรื่องส่วนตัวที่อ่อนไหว เราจะเก็บไว้แบบเดียวกัน เพื่อช่วยคุณเท่านั้น
 • ต้องมีอายุ 20 ปีขึ้นไป
@@ -73,8 +73,8 @@ describe("the privacy notice page", () => {
   test("states the retention periods the store enforces", () => {
     expect(RETENTION_DAYS).toEqual({ sentCopies: 30, handledIncoming: 14, unusedBox: 2 });
     const page = privacyPage({ controller: PRIVACY_VARS.PRIVACY_CONTROLLER, contact: PRIVACY_VARS.PRIVACY_CONTACT });
-    expect(page).toContain(`Copies of messages Giraffe sent you: ${RETENTION_DAYS.sentCopies} days.`);
-    expect(page).toContain(`ข้อความขาเข้า หลังจาก Giraffe จัดการแล้ว: ${RETENTION_DAYS.handledIncoming} วัน`);
+    expect(page).toContain(`Copies of messages Giraffe sent you: removed at the first cleanup after ${RETENTION_DAYS.sentCopies} days.`);
+    expect(page).toContain(`ข้อความขาเข้า หลังจาก Giraffe จัดการแล้ว: ลบในการล้างข้อมูลครั้งแรกหลัง ${RETENTION_DAYS.handledIncoming} วัน`);
   });
 
   test("escapes the operator's name and contact", () => {

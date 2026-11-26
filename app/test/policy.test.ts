@@ -437,6 +437,15 @@ describe("lateness", () => {
   });
 });
 
+describe("words of someone not admitted", () => {
+  test.each([{ kind: "poison" }, { kind: "model_failed" }, { kind: "too_long" }] as const)("a $kind turn keeps none of their words in history, while an admitted person's does", (why) => {
+    const stranger = planWithoutModel(view({ batch: { items: [item(message("my sister Ploy"))] }, admission: { state: "stranger" } }), why);
+    expect(stranger.turns).toEqual([]);
+    const admitted = planWithoutModel(view({ batch: { items: [item(message("my sister Ploy"))] } }), why);
+    expect(admitted.turns.map((turn) => turn.text)).toContain("my sister Ploy");
+  });
+});
+
 describe("wake-up origin", () => {
   test("only the person's own message can make a person wake-up, and only when asked", () => {
     expect(wakeupOrigin("message", true)).toBe("person");

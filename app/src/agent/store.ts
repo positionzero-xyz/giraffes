@@ -20,6 +20,7 @@ import {
   type Seat,
   type WaitlistReason,
   eventKey,
+  mayspend,
   parseChoice,
   personDecision,
   proposalId,
@@ -868,7 +869,7 @@ export class AgentStore {
         commit.waitForAccess ? 1 : 0,
         JSON.stringify(commit.batchKeys),
       );
-      if (commit.admission) {
+      if (commit.admission || !mayspend(this.admission())) {
         this.sql.exec(
           "UPDATE inbox SET payload = json_set(payload, '$.text', '') WHERE kind = 'message' AND event_key IN (SELECT value FROM json_each(?))",
           JSON.stringify(commit.batchKeys),

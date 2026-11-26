@@ -551,7 +551,7 @@ export class Agent extends DurableObject<Env> {
       while (current.box.kind !== "none" && current.box.kind !== "wiped" && current.box.kind !== "reclaimed") {
         const box = await this.#eraseAccountBox(current);
         if (box.kind === "relocate") {
-          current = { ...current, box };
+          current = this.#noteEraseHold({ ...current, box }, this.#eraseBoxHoldCode({ ...current, box }));
           this.ctx.storage.kv.put(ERASE_JOB, current);
           await this.#retryErasure(ACCOUNT_RETRY_MS);
           return;
@@ -681,12 +681,22 @@ export class Agent extends DurableObject<Env> {
           ? { kind: "remove-volume", box, target: found.target }
           : { kind: "wipe-fly", box, target: found.target };
       }
-      case "relocate":
-        return { kind: "locate", box };
+      case "relocate": {
+        // A job persisted by the earlier relocate shape has no saved target. Hold rather than
+        // re-select a volume that was never part of the original proof.
+        if (!("target" in step) || !step.target || !step.resume) return step;
+        const check = await fly?.retirementRecheck(box.name, step.target);
+        if (check && !check.ok && check.missing) return { kind: "reclaimed", host: "fly" };
+        if (!check?.ok) return step;
+        if (check.state === "gone") return { kind: "remove-app", box, target: step.target };
+        return { kind: step.resume, box, target: step.target };
+      }
       case "wipe-static":
       case "wipe-fly": {
         const token = await boxToken(deps.secret, box.name);
-        const fallback = step.kind === "wipe-fly" ? { kind: "relocate" as const, box } : step;
+        const fallback = step.kind === "wipe-fly"
+          ? { kind: "relocate" as const, box, target: step.target, resume: "wipe-fly" as const }
+          : step;
         if (!box.incarnation) {
           const health = await deps.client.health(box.url, token);
           if (health.kind !== "up" || !health.box) return fallback;
@@ -700,12 +710,16 @@ export class Agent extends DurableObject<Env> {
       case "remove-volume": {
         const retired = await fly?.retireWipedDisk(box.name, step.target);
         if (retired?.ok) return { ...step, kind: "remove-app" };
-        return retired && !retired.ok && retired.missing ? { kind: "relocate", box } : step;
+        return retired && !retired.ok && retired.missing
+          ? { kind: "relocate", box, target: step.target, resume: "remove-volume" }
+          : step;
       }
       case "remove-app": {
         const removed = await fly?.removeRetiredApp(box.name);
         if (removed?.ok) return { kind: "wiped", host: "fly" };
-        return removed && !removed.ok && removed.missing ? { kind: "relocate", box } : step;
+        return removed && !removed.ok && removed.missing
+          ? { kind: "relocate", box, target: step.target, resume: "remove-app" }
+          : step;
       }
     }
   }

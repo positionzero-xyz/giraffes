@@ -300,12 +300,32 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       }
       return fail(true, "cannot identify one mounted disk among several volumes");
     },
+    async retirementRecheck(name, target) {
+      const owned = await ownership(name);
+      if (failed(owned)) return owned;
+      const volumes = await retirementVolumes(name);
+      if (failed(volumes)) return volumes;
+      const live = volumes.filter((v) => !GONE_VOLUME.has(v.state));
+      const saved = target.disk ? [target.disk] : target.disks ?? [];
+      if (live.length === 0) return { ok: true, state: "gone" };
+      if (!target.disk && saved.length > 1) return fail(true, "retirement target includes several unproven disks");
+      if (live.some((v) => !saved.includes(v.id))) return fail(true, "a different live volume appeared");
+      return { ok: true, state: "present" };
+    },
     async retireWipedDisk(name, target) {
       const owned = await ownership(name);
       if (failed(owned)) return owned;
       const volumes = await retirementVolumes(name);
       if (failed(volumes)) return volumes;
       const disks = target.disks ?? (target.disk ? [target.disk] : []);
+      // Only the disk whose wipe was proven may be deleted. A persisted target from an older
+      // revision may list extra live volumes; hold rather than promote them to trusted.
+      if (target.disk !== null && disks.some((id) => id !== target.disk)) {
+        return fail(true, "retirement target includes an unproven disk");
+      }
+      if (target.disk === null && disks.length > 1) {
+        return fail(true, "retirement target includes several unproven disks");
+      }
       const live = volumes.filter((v) => !GONE_VOLUME.has(v.state));
       const known = new Set(disks);
       if (live.some((v) => !known.has(v.id))) return fail(true, "unexpected live volume remains");
@@ -337,7 +357,7 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       const before = await retirementVolumes(name);
       if (failed(before)) return before.missing ? fail(true, "app disappeared before retirement") : before;
       if (before.some((v) => !GONE_VOLUME.has(v.state))) return fail(true, "unexpected live volume remains");
-      const removedApp = await call("DELETE", `/apps/${name}?force=true`);
+      const removedApp = await call("DELETE", `/apps/${name}`);
       if (!removedApp.ok) return removedApp;
       if (!success(removedApp.status) && removedApp.status !== 404) return fail(true, "box app retirement unverified");
       const app = await call("GET", `/apps/${name}`);

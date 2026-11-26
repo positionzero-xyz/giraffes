@@ -28,7 +28,13 @@ export type EraseBox =
   | { readonly kind: "none" }
   | { readonly kind: "unverified"; readonly box: EraseBoxReference }
   | { readonly kind: "wiped" | "reclaimed"; readonly host: BoxHostKind }
-  | { readonly kind: "locate" | "relocate" | "wipe-static"; readonly box: EraseBoxTarget }
+  | {
+    readonly kind: "relocate";
+    readonly box: EraseBoxTarget;
+    readonly target: FlyDiskRetirement;
+    readonly resume: "wipe-fly" | "remove-volume" | "remove-app";
+  }
+  | { readonly kind: "locate" | "wipe-static"; readonly box: EraseBoxTarget }
   | { readonly kind: "wipe-fly" | "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement };
 
 export type EraseBilling =

@@ -19,9 +19,15 @@ export type FlyDiskRetirement = {
   readonly disks: readonly string[];
 };
 
+export type FlyRetirementCheck =
+  | { readonly ok: true; readonly state: "present" | "gone" }
+  | HostFailure;
+
 export interface FlyBoxRetirement {
   /** Run before wiping so the authenticated box proof can be bound to the mounted disk. */
   retirementTarget(name: BoxName): Promise<{ readonly ok: true; readonly target: FlyDiskRetirement } | HostFailure>;
+  /** Re-read ownership and the saved identity without choosing a replacement volume. */
+  retirementRecheck(name: BoxName, target: FlyDiskRetirement): Promise<FlyRetirementCheck>;
   /** Run after the identified disk has acknowledged an account wipe. */
   retireWipedDisk(name: BoxName, target: FlyDiskRetirement): Promise<HostResult>;
   /** Run after the caller has durably recorded the disk retirement proof. */

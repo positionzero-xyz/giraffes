@@ -219,13 +219,13 @@ const CONTEXT_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9][A-Za-z0-9_-]{11,30}(?![
 const HINT = String.raw`\b(?:app[- ]password|password|passcode|passwd|pwd|pw|api[- ]key|token|secret)\b|รหัสผ่าน|พาสเวิร์ด|รหัส(?=[\s:=]|คือ|$)`;
 const SECRET_HINT = new RegExp(HINT, "i");
 /** What sits between the last hint and the end of the text. */
-const AFTER_HINT = new RegExp(String.raw`^[\s\S]*(?:${HINT})([^\n]*)$`, "i");
+const AFTER_HINT = new RegExp(String.raw`^[\s\S]*(?:${HINT})([\s\S]*)$`, "i");
 /** `password: x`, `password=x`, `รหัสผ่าน icloud: x`: a label, so the value after it is the secret whatever it looks like. */
 const LABEL_GAP = /^\s*(?:[^\s:=]{1,16}\s*)?[:=]\s*$/;
 /** `password x`, `password is x`, `รหัสผ่านคือ x`. */
 const SAID_GAP = /^\s*(?:is|was|คือ|เป็น)?\s*$/i;
-/** `Mistral-Small-2603`, `deepseek-v4-1-flash-1017`: words and version numbers joined by dashes name a model or product. */
-const PRODUCT_NAME = /^(?:[A-Z]?[a-z]+|[A-Z]+|[a-z]?\d+)(?:-(?:[A-Z]?[a-z]+|[A-Z]+|[a-z]?\d+))+$/;
+/** `Mistral-Small-2603`, `deepseek-v4-1-flash-1017`, `Llama-4-Maverick-17B`: words and versions joined by dashes name a model. */
+const PRODUCT_NAME = /^(?:[A-Z]?[a-z]+|[A-Z]+|[a-z]?\d+[A-Za-z]{0,2})(?:-(?:[A-Z]?[a-z]+|[A-Z]+|[a-z]?\d+[A-Za-z]{0,2}))+$/;
 
 /* About 660 words, so a group of a random app password is one by chance about 1 time in 700; two groups that are words means prose. */
 const COMMON_FOUR_LETTER_WORDS = new Set(
@@ -285,16 +285,22 @@ function groupedAppPassword(match: string, offset: number, text: string): string
 const mixed = (t: string) => (/[A-Za-z]/.test(t) && /\d/.test(t)) || /[a-z][A-Z]/.test(t);
 
 /**
- * A hint has to come right before the token. After a label (`password: x`) anything with letters and some entropy goes;
- * after `password is` only a mixed token does, with an entropy bar that scales down for short ones, so prose stays.
+ * A mixed token with some entropy, scaled down for short ones, goes when a hint is near it on either side. A word or a
+ * product name goes only right after a hint: after a label (`password: x`) given some entropy, after `password is` if mixed.
  */
 function shortSecret(match: string, offset: number, text: string): string | null {
-  if (match.length >= 18 && keyLike(match) && !PRODUCT_NAME.test(match)) return KEY_REMOVED;
+  const product = PRODUCT_NAME.test(match);
+  if (match.length >= 18 && keyLike(match) && !product) return KEY_REMOVED;
   if (!/[A-Za-z]/.test(match)) return null;
-  const gap = AFTER_HINT.exec(text.slice(Math.max(0, offset - 32), offset))?.[1];
-  if (gap === undefined) return null;
+  const before = text.slice(Math.max(0, offset - 32), offset);
   const bits = entropyBits(match);
   const mixedEnough = mixed(match) && bits >= Math.min(3.5, Math.log2(match.length) - 0.6);
+  if (mixedEnough && !product) {
+    const after = text.slice(offset + match.length, offset + match.length + 32);
+    return SECRET_HINT.test(before) || SECRET_HINT.test(after) ? KEY_REMOVED : null;
+  }
+  const gap = AFTER_HINT.exec(before)?.[1];
+  if (gap === undefined) return null;
   if (LABEL_GAP.test(gap)) return bits >= 3.5 || mixedEnough ? KEY_REMOVED : null;
   return SAID_GAP.test(gap) && mixedEnough ? KEY_REMOVED : null;
 }

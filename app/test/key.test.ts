@@ -680,6 +680,15 @@ describe("a key pasted into the chat", () => {
     ["password: Mistral-Small-2603", true],
     ["password: unpredictable", true],
     ["my app password is book qwer tyui work", true],
+    ["x8Kp2Qz9Lm4Rt7B is my app password", true],
+    ["password for gmail is x8Kp2Qz9Lm4Rt7B", true],
+    ["password:\nx8Kp2Qz9Lm4Rt7B", true],
+    ["password for icloud is Xk29fLq8Wm2p", true],
+    ["รหัสผ่าน icloud คือ Xk29fLq8Wm2p", true],
+    ["dakfUp-nixjy2-qibgyv", true],
+    ["my password is dakfUp-nixjy2-qibgyv", true],
+    ["Llama-4-Maverick-17B is cheaper", false],
+    ["GPT-4o-mini-2024-07-18 is cheaper", false],
   ])("%s is %s", (text, found) => {
     expect(redactSecrets(text).found).toBe(found);
   });

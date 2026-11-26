@@ -213,8 +213,8 @@ const en: Notices = {
     unavailable: () => "Connecting your own Claude plan isn't available yet.",
     full: () => "I can't connect another Claude plan right now. Please try again later.",
     busy: () => "I can't start setting up your Claude connection right now. Please try again in a few minutes.",
-    setting_up: () => "Setting up your Claude connection. I'll send you a sign-in link in a few minutes.",
-    still_setting_up: () => "Your Claude connection is still being set up. I'll send the sign-in link when it's ready.",
+    setting_up: () => "Setting up your Claude connection.",
+    still_setting_up: () => "Your Claude connection is still being set up.",
     link: (link) => `Sign in to Claude here to connect your plan. The link works for 30 minutes.\n${link}`,
     signed_out_link: (link) =>
       `Your Claude plan is signed out. Once you sign in, I'll answer requests from the last 24 hours. The link works for 30 minutes.\n${link}`,
@@ -398,8 +398,8 @@ const th: Notices = {
     unavailable: () => "ตอนนี้ยังเชื่อมแพ็กเกจ Claude ของตัวเองไม่ได้ค่ะ",
     full: () => "ตอนนี้เชื่อมแพ็กเกจ Claude เพิ่มไม่ได้แล้วค่ะ ลองใหม่ภายหลังนะคะ",
     busy: () => "ตอนนี้ยังเริ่มตั้งค่าการเชื่อม Claude ไม่ได้ค่ะ ลองใหม่ในอีกไม่กี่นาทีนะคะ",
-    setting_up: () => "กำลังตั้งค่าการเชื่อม Claude อยู่ค่ะ อีกไม่กี่นาทีจะส่งลิงก์เข้าสู่ระบบให้",
-    still_setting_up: () => "ยังตั้งค่าการเชื่อม Claude อยู่ค่ะ พร้อมเมื่อไหร่จะส่งลิงก์เข้าสู่ระบบให้",
+    setting_up: () => "กำลังตั้งค่าการเชื่อม Claude อยู่ค่ะ",
+    still_setting_up: () => "ยังตั้งค่าการเชื่อม Claude อยู่ค่ะ",
     link: (link) => `เข้าสู่ระบบ Claude ที่ลิงก์นี้เพื่อเชื่อมแพ็กเกจได้เลยค่ะ ลิงก์ใช้ได้ 30 นาที\n${link}`,
     signed_out_link: (link) =>
       `แพ็กเกจ Claude ออกจากระบบอยู่ค่ะ เมื่อเข้าสู่ระบบแล้ว จะตอบคำขอที่คุณส่งมาในช่วง 24 ชั่วโมงที่ผ่านมานะคะ ลิงก์ใช้ได้ 30 นาที\n${link}`,

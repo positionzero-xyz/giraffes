@@ -266,7 +266,7 @@ function toolCalls(events: readonly Json[]): ToolCalls {
   return out;
 }
 
-function agentArgs(req: AgentRequest, toolsFile: string, session: { readonly id: string; readonly resume: boolean }): string[] {
+export function agentArgs(req: AgentRequest, toolsFile: string, session: { readonly id: string; readonly resume: boolean }): string[] {
   const mcp = { mcpServers: { giraffe: { type: "stdio", command: process.execPath, args: [MCP_SERVER, toolsFile] } } };
   return [
     "-p",
@@ -280,6 +280,7 @@ function agentArgs(req: AgentRequest, toolsFile: string, session: { readonly id:
     "--mcp-config", JSON.stringify(mcp),
     "--allowedTools", req.tools.map((t) => `${TOOL_PREFIX}${t.name}`).join(","),
     "--setting-sources", "",
+    ...(req.ephemeral === true ? ["--no-session-persistence"] : []),
     ...(session.resume ? ["--resume", session.id] : ["--session-id", session.id]),
   ];
 }

@@ -231,6 +231,31 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.deepEqual(afterGroup.body.session, { id: personal.body.session.id, resumed: true });
   });
 
+  it("cleans the replaced chat session when a later named turn repairs a failed pointer write", async () => {
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Old live." }));
+    const first = await agent({ session: null, turn: "New\nPerson: old live", fresh: "New\nPerson: old live" });
+    assert.equal(first.status, 200);
+    assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), first.body.session.id);
+
+    mkdirSync(join(dir, ".giraffe-session.next"));
+    writeFileSync(script, JSON.stringify({ calls: [], text: "New live." }));
+    const second = await agent({ session: null, turn: "New\nPerson: new live", fresh: "New\nPerson: new live" });
+    assert.equal(second.status, 200);
+    assert.notEqual(second.body.session.id, first.body.session.id);
+    assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), first.body.session.id);
+    assert.equal(transcriptExists(first.body.session.id), true);
+    assert.equal(transcriptExists(second.body.session.id), true);
+    rmSync(join(dir, ".giraffe-session.next"), { recursive: true, force: true });
+
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Resumed new." }));
+    const resumed = await agent({ session: second.body.session.id, turn: "New\nPerson: resume new", fresh: "New\nPerson: resume new" });
+    assert.equal(resumed.status, 200);
+    assert.deepEqual(resumed.body.session, { id: second.body.session.id, resumed: true });
+    assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), second.body.session.id);
+    assert.equal(transcriptExists(first.body.session.id), false);
+    assert.equal(transcriptExists(second.body.session.id), true);
+  });
+
   it("answers a good turn when the rollback pointer can't be written", async () => {
     writeFileSync(script, JSON.stringify({ calls: [], text: "Still good." }));
     rmSync(join(dir, ".giraffe-session"), { recursive: true, force: true });

@@ -872,6 +872,67 @@ describe("connecting a Claude plan", () => {
     expect((await c.snapshot()).box?.state).toBe("signed_in");
   });
 
+  const NOT_READY = [
+    {
+      lang: "en" as const,
+      channel: undefined,
+      ids: ["not-ready-setup", "not-ready-gone-out", "not-ready-gone-in"],
+      text: "Your Claude plan isn't ready to answer yet. Send /claude to see where it stands. If setup is still running, I'll say so. If you need to sign in, I'll send a link, and if you're already signed in, I'll confirm it's connected.",
+    },
+    {
+      lang: "th" as const,
+      channel: "line" as const,
+      ids: ["U00000000000000000000000000000b01", "U00000000000000000000000000000b02", "U00000000000000000000000000000b03"],
+      text: "ตอนนี้แพ็กเกจ Claude ของคุณยังไม่พร้อมตอบค่ะ ส่ง /claude เพื่อดูสถานะได้เลยนะคะ ถ้ายังตั้งค่าอยู่จะแจ้งให้ทราบ ถ้าต้องเข้าสู่ระบบจะส่งลิงก์ให้ และถ้าเข้าสู่ระบบไว้แล้วจะยืนยันว่าเชื่อมแพ็กเกจแล้วค่ะ",
+    },
+  ];
+
+  test.each(NOT_READY)("in $lang, a request while setup runs gets the not-ready notice, and /claude says setup is still running", async ({ lang, channel, ids, text }) => {
+    const retry = { retryable: true, detail: "503" };
+    const box = fakeBox({ host: [retry, retry, retry, retry] });
+    const c = await devChat(ids[0], { model: null, at: "2099-11-04T10:00", box: box.deps, channel });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([boxMessage("setting_up", lang, null).text]);
+    expect((await c.snapshot()).box?.state).toBe("provisioning");
+
+    await c.say("hello");
+    expect(await c.received()).toEqual([text]);
+
+    await c.say("/claude");
+    expect(await c.received()).toEqual([boxMessage("still_setting_up", lang, null).text]);
+  });
+
+  test.each(NOT_READY)("in $lang, a request after the box is gone gets the not-ready notice, and /claude sets it up and sends a link", async ({ lang, channel, ids, text }) => {
+    const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }] });
+    const c = await devChat(ids[1], { model: null, at: "2099-11-04T10:00", box: box.deps, channel });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([boxMessage("setting_up", lang, null).text, boxMessage("setup_failed", lang, null).text]);
+    expect((await c.snapshot()).box).toBeNull();
+
+    await c.say("hello");
+    expect(await c.received()).toEqual([text]);
+
+    await c.say("/claude");
+    const [setup, link, ...rest] = await c.received();
+    expect([setup, rest]).toEqual([boxMessage("setting_up", lang, null).text, []]);
+    expect(link.replace(LINK, "<sign-in link>")).toBe(boxMessage("link", lang, null).note);
+  });
+
+  test.each(NOT_READY)("in $lang, a request after the box is gone gets the not-ready notice, and /claude confirms a sign-in the box already has", async ({ lang, channel, ids, text }) => {
+    const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }], signedIn: true });
+    const c = await devChat(ids[2], { model: null, at: "2099-11-04T10:00", box: box.deps, channel });
+    await c.say("/claude");
+    await c.received();
+    expect((await c.snapshot()).box).toBeNull();
+
+    await c.say("hello");
+    expect(await c.received()).toEqual([text]);
+
+    await c.say("/claude");
+    expect(await c.received()).toEqual([boxMessage("setting_up", lang, null).text, boxMessage("connected", lang, null).text]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+  });
+
   test("a signed-in person's turn runs on their box with their token, reserves no spend, and is logged as backend 'box'", async () => {
     const box = fakeBox({ signedIn: true });
     const model = scripted([]);

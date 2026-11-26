@@ -59,7 +59,10 @@ function supportedLanguage(code: string | undefined): Language | undefined {
   }
 }
 
-const SendError = z.object({ parameters: z.object({ retry_after: z.number() }).optional() });
+const SendError = z.object({
+  description: z.string().optional(),
+  parameters: z.object({ retry_after: z.number().optional(), migrate_to_chat_id: z.number().int().optional() }).optional(),
+});
 
 export const SEND_MESSAGE_MAX_CHARS = 4096;
 
@@ -128,8 +131,13 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
         const body: unknown = await res.json().catch(() => null);
         const detail = `${res.status} ${JSON.stringify(body)}`;
         if (res.status === 403) return { kind: "recipient_gone" };
+        const error = SendError.safeParse(body).data;
+        if (res.status === 400 && (error?.description === "Bad Request: chat not found"
+          || error?.description === "Bad Request: private chat not found" || error?.parameters?.migrate_to_chat_id !== undefined)) {
+          return { kind: "recipient_gone" };
+        }
         if (res.status === 429) {
-          const retryAfter = SendError.safeParse(body).data?.parameters?.retry_after;
+          const retryAfter = error?.parameters?.retry_after;
           return { kind: "retry", afterMs: retryAfter === undefined ? CHANNEL_RETRY_MS : retryAfter * 1000, detail };
         }
         if (res.status >= 500) return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail };

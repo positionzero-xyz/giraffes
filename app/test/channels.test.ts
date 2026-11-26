@@ -378,7 +378,7 @@ describe("Telegram delivery", () => {
 
   test.each([
     [{ description: "Bad Request: chat not found" }, "recipient_gone"],
-    [{ description: "Bad Request: user is deactivated" }, "recipient_gone"],
+    [{ description: "Bad Request: private chat not found" }, "recipient_gone"],
     [{ parameters: { migrate_to_chat_id: -1001234567890 } }, "recipient_gone"],
     [{ description: "Bad Request: message is too long" }, "failed"],
   ] as const)("classifies Telegram sendMessage 400 by its description or migration parameter: %j", async (body, kind) => {

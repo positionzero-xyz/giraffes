@@ -215,16 +215,45 @@ const LONG_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-]|[/=
 const GROUPED_APP_PASSWORD = /(?<![A-Za-z0-9_-])[a-z]{4}(?:[- ][a-z]{4}){3}(?![A-Za-z0-9_-])/g;
 /** Shorter than LONG_TOKEN, so context has to name it as a secret before it is removed. */
 const CONTEXT_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9][A-Za-z0-9_-]{11,30}(?![A-Za-z0-9_-]|[/=:@.][A-Za-z0-9_-])/g;
-const SECRET_HINT = /\b(?:password|passcode|app[- ]password|api[- ]key|token|secret)\b/i;
+/** Thai has no word breaks, so its hints go without `\b`; a bare รหัส (code) counts only on its own, not in รหัสพัสดุ (tracking code). */
+const HINT = String.raw`\b(?:app[- ]password|password|passcode|passwd|pwd|pw|api[- ]key|token|secret)\b|รหัสผ่าน|พาสเวิร์ด|รหัส(?=[\s:=]|คือ|$)`;
+const SECRET_HINT = new RegExp(HINT, "i");
+/** What sits between the last hint and the end of the text. */
+const AFTER_HINT = new RegExp(String.raw`^[\s\S]*(?:${HINT})([^\n]*)$`, "i");
+/** `password: x`, `password=x`, `รหัสผ่าน icloud: x`: a label, so the value after it is the secret whatever it looks like. */
+const LABEL_GAP = /^\s*(?:[^\s:=]{1,16}\s*)?[:=]\s*$/;
+/** `password x`, `password is x`, `รหัสผ่านคือ x`. */
+const SAID_GAP = /^\s*(?:is|was|คือ|เป็น)?\s*$/i;
+/** `Mistral-Small-2603`, `deepseek-v4-1-flash-1017`: words and version numbers joined by dashes name a model or product. */
+const PRODUCT_NAME = /^(?:[A-Z]?[a-z]+|[A-Z]+|[a-z]?\d+)(?:-(?:[A-Z]?[a-z]+|[A-Z]+|[a-z]?\d+))+$/;
 
-/* Enough ordinary four-letter words that a chance group in a random password is still rare; three or more means English, not a secret. */
-const COMMON_FOUR_LETTER_WORDS = new Set([
-  "away", "back", "best", "busy", "call", "came", "chat", "come", "does", "done", "door", "down", "easy", "even", "fast", "fine", "food", "free", "from", "full",
-  "gave", "give", "goes", "good", "hard", "have", "held", "here", "hold", "home", "into", "just", "keep", "kept", "know", "last", "late", "less", "life", "like",
-  "long", "look", "love", "make", "many", "meet", "more", "most", "much", "need", "next", "okay", "only", "open", "over", "plan", "rain", "said", "same", "seem",
-  "send", "slow", "some", "soon", "such", "sure", "take", "talk", "tell", "text", "than", "that", "them", "then", "they", "this", "time", "told", "very", "want",
-  "well", "went", "were", "what", "when", "will", "with", "work", "your",
-]);
+/* About 660 words, so a group of a random app password is one by chance about 1 time in 700; two groups that are words means prose. */
+const COMMON_FOUR_LETTER_WORDS = new Set(
+  (
+    "able acid aged also area army asap aunt away baby back bags baht bake ball band bank bare bark base bath bead beam bean bear beat beds beef been beer bell " +
+    "belt bend best bike bill bird bite blue boat body boil bold bolt bomb bond bone book boom boot born boss both bowl buns burn bush busy buzz cafe cage cake " +
+    "call calm came camp cans cant card care cart case cash cast cats chat chef chip city clay club coal coat code coin cold come cook cool cope copy cord core " +
+    "corn cost cozy crab crew crop cube cups cure cute dark data date dawn days dead deal dear debt deck deep deer desk diet dirt dish dock docs does dogs doll " +
+    "done dont door dose down draw drew drop drum duck dull dust duty each earn ease east easy eats edge eggs else even ever exam exit face fact fail fair fall " +
+    "fame farm fast fate fear feed feel fees feet fell felt figs file fill film find fine fire firm fish fist five flag flat flew flip flow foil folk fond food " +
+    "fool foot fork form fort four free frog from fuel full fund gain game gang gate gave gear gift girl give glad glue goal goat goes gold golf gone good grab " +
+    "gray grew grey grid grow gulf haha hair half hall hand hang hard harm hate have head heal heap hear heat hehe held hell help herb here hero hide high hike " +
+    "hill hint hire hold hole holy home hood hook hope horn hose host hour huge hung hunt hurt idea inch into iron isnt item jack jail jams jars jazz jeep jobs " +
+    "join joke july jump june jury just kale keen keep kept keys kick kids kill kind king kiss kite knee knew knit know lack lady laid lake lamb lamp land lane " +
+    "last late lawn lazy lead leaf lean left lend lens less lets life lift like lime line link lion list live lmao load loan lock logo long look loop lord lose " +
+    "loss lost lots loud love luck lump lung made mail main make male mall many mark mask mass math meal mean meat meet melt menu mess mild mile milk mind mine " +
+    "mint miss mode mood moon mops more most move much mugs must nail name navy near neat neck need nest news next nice nine none noon nope nose note nuts oats " +
+    "okay once only onto open oven over pace pack page paid pain pair palm pans park part pass past path pays peak pear peel pens pick pics pile pill pink pipe " +
+    "plan play plot plug plum plus poem poet pole poll pond pool poor pork port pose post pots pour pray pull pump pure push quit race rack rail rain rank rare " +
+    "rate read real rear rely rent rest rice rich ride ring rise risk road rock role roll roof room root rope rose rude rule rush safe sage said sail sake sale " +
+    "salt same sand save seat seed seek seem seen self sell send sent ship shoe shop shot show shut sick side sign silk sing sink site size skin skip slip slow " +
+    "snow soap sock soda sofa soft soil sold sole some song soon sort soup spot star stay step stop such suit sure swim tail take tale talk tall tank tape task " +
+    "taxi team tear tell tend tent term test text than thai that them then they thin this tide tidy tile till time tins tiny tips tire tmrw tofu told toll tone " +
+    "took tool tour town toys tree trip true tube tuna turn twin type ugly unit upon used user vast very vibe view vote wage wait wake walk wall want warm wash " +
+    "wave ways weak wear week well went were west what when whom wide wife wifi wild will wind wine wing wipe wire wise wish with wolf wont wood wool word wore " +
+    "work yard yeah year yoga your zero zone zoom"
+  ).split(" "),
+);
 
 function entropyBits(s: string): number {
   const counts = new Map<string, number>();
@@ -237,14 +266,14 @@ function entropyBits(s: string): number {
 /** Mixed case and digits with some entropy, or 48 or more lowercase hex characters (a Git SHA is 40). */
 const keyLike = (t: string) => (/[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) && entropyBits(t) >= 3.5) || /^[0-9a-f]{48,}$/.test(t);
 
+/** Next to a password hint it takes three words to read as prose, so a labelled password with two chance words still goes. */
 function groupedAppPassword(match: string, offset: number, text: string): string | null {
-  const groups = match.split(/[- ]/);
-  const ordinary = groups.filter((w) => COMMON_FOUR_LETTER_WORDS.has(w)).length >= 3;
-  if (ordinary) return null;
-  if (!match.includes(" ")) return KEY_REMOVED;
   const before = text.slice(Math.max(0, offset - 48), offset);
   const after = text.slice(offset + match.length, offset + match.length + 48);
-  if (SECRET_HINT.test(before) || SECRET_HINT.test(after)) return KEY_REMOVED;
+  const hinted = SECRET_HINT.test(before) || SECRET_HINT.test(after);
+  const words = match.split(/[- ]/).filter((w) => COMMON_FOUR_LETTER_WORDS.has(w)).length;
+  if (words >= (hinted ? 3 : 2)) return null;
+  if (hinted || !match.includes(" ")) return KEY_REMOVED;
   const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
   const nextLine = text.indexOf("\n", offset + match.length);
   const lineEnd = nextLine === -1 ? text.length : nextLine;
@@ -252,12 +281,22 @@ function groupedAppPassword(match: string, offset: number, text: string): string
   return isolated ? KEY_REMOVED : null;
 }
 
+/** Letters with digits, or a capital inside lower case: what a generated password has and a word doesn't. */
+const mixed = (t: string) => (/[A-Za-z]/.test(t) && /\d/.test(t)) || /[a-z][A-Z]/.test(t);
+
+/**
+ * A hint has to come right before the token. After a label (`password: x`) anything with letters and some entropy goes;
+ * after `password is` only a mixed token does, with an entropy bar that scales down for short ones, so prose stays.
+ */
 function shortSecret(match: string, offset: number, text: string): string | null {
-  if (match.length >= 18 && keyLike(match)) return KEY_REMOVED;
-  if (entropyBits(match) < 3.5) return null;
-  const before = text.slice(Math.max(0, offset - 32), offset);
-  const after = text.slice(offset + match.length, offset + match.length + 32);
-  return SECRET_HINT.test(before) || SECRET_HINT.test(after) ? KEY_REMOVED : null;
+  if (match.length >= 18 && keyLike(match) && !PRODUCT_NAME.test(match)) return KEY_REMOVED;
+  if (!/[A-Za-z]/.test(match)) return null;
+  const gap = AFTER_HINT.exec(text.slice(Math.max(0, offset - 32), offset))?.[1];
+  if (gap === undefined) return null;
+  const bits = entropyBits(match);
+  const mixedEnough = mixed(match) && bits >= Math.min(3.5, Math.log2(match.length) - 0.6);
+  if (LABEL_GAP.test(gap)) return bits >= 3.5 || mixedEnough ? KEY_REMOVED : null;
+  return SAID_GAP.test(gap) && mixedEnough ? KEY_REMOVED : null;
 }
 
 /**

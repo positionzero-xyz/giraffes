@@ -613,6 +613,17 @@ describe("a key pasted into the chat", () => {
     expect(model.calls[0].user).toContain(KEY_REMOVED);
   });
 
+  test("four short ordinary words reach the model as written, with no key warning", async () => {
+    const model = scripted([chat("Sure.")]);
+    const c = await devChat("max", { model, at: "2099-11-04T10:00" });
+
+    await c.say("book cafe near work");
+
+    expect(model.calls).toHaveLength(1);
+    expect(model.calls[0].user).toContain("book cafe near work");
+    expect((await c.received()).join("\n")).not.toContain(NOTICE.pastedKey(null).split("\n")[0]);
+  });
+
   test.each([
     ["sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", true],
     ["abcd-efgh-ijkl-mnop", true],
@@ -645,6 +656,30 @@ describe("a key pasted into the chat", () => {
     ["ANTHROPIC_API_KEY=sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", true],
     ["commit 3f9a2c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39 and 1f9a2c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39", false],
     ["https://github.com/org/repo/commit/3f9a2c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39", false],
+    ["book cafe near work", false],
+    ["pick milk eggs soap", false],
+    ["shopping list:\nmilk eggs rice soap\nbread", false],
+    ["I forgot my password, book cafe near work", false],
+    ["my password is unpredictable", false],
+    ["password confirmation", false],
+    ["authentication token", false],
+    ["Mistral-Small-2603 is cheapest", false],
+    ["I switched to Mistral-Small-2603 today", false],
+    ["Mistral-Small-2603 token price", false],
+    ["does my api key work with Mistral-Small-2603", false],
+    ["my api key is for deepseek-v4-1-flash-1017", false],
+    ["รหัสพัสดุ TH0123456789AB", false],
+    ["password: Xk29fLq8Wm2p", true],
+    ["password is Xk29fLq8Wm2p", true],
+    ["รหัสผ่าน icloud: Xk29fLq8Wm2p", true],
+    ["รหัสผ่านคือ Xk29fLq8Wm2p", true],
+    ["พาสเวิร์ด Xk29fLq8Wm2p", true],
+    ["รหัส: Xk29fLq8Wm2p", true],
+    ["รหัสผ่านแอป gmail คือ qwer tyui opas dfgh ช่วยตั้งค่าให้หน่อย", true],
+    ["my gmail app pw is qwer tyui opas dfgh thanks", true],
+    ["password: Mistral-Small-2603", true],
+    ["password: unpredictable", true],
+    ["my app password is book qwer tyui work", true],
   ])("%s is %s", (text, found) => {
     expect(redactSecrets(text).found).toBe(found);
   });

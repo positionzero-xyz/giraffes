@@ -242,8 +242,14 @@ function groupedAppPassword(match: string, offset: number, text: string): string
   const ordinary = groups.filter((w) => COMMON_FOUR_LETTER_WORDS.has(w)).length >= 3;
   if (ordinary) return null;
   if (!match.includes(" ")) return KEY_REMOVED;
-  const continues = /^ [a-z]{4}(?![a-z])/.test(text.slice(offset + match.length));
-  return continues ? null : KEY_REMOVED;
+  const before = text.slice(Math.max(0, offset - 48), offset);
+  const after = text.slice(offset + match.length, offset + match.length + 48);
+  if (SECRET_HINT.test(before) || SECRET_HINT.test(after)) return KEY_REMOVED;
+  const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
+  const nextLine = text.indexOf("\n", offset + match.length);
+  const lineEnd = nextLine === -1 ? text.length : nextLine;
+  const isolated = text.slice(lineStart, offset).trim() === "" && /^[\s.!?]*$/.test(text.slice(offset + match.length, lineEnd));
+  return isolated ? KEY_REMOVED : null;
 }
 
 function shortSecret(match: string, offset: number, text: string): string | null {

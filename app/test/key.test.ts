@@ -276,6 +276,7 @@ describe("entering a key on the page", () => {
     expect(html).toContain("DeepSeek V4.1 Flash");
     expect(html).toContain("Another model");
     expect(html).toContain("id=\"modelPick\"");
+    expect(html).toContain('if (!$("modelRow").hidden && typedModel === "")');
     expect(html).toContain(NOTICES.th.keyPage.connect);
   });
 
@@ -588,6 +589,8 @@ describe("a key pasted into the chat", () => {
     ["sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", true],
     ["abcd-efgh-ijkl-mnop", true],
     ["abcd efgh ijkl mnop", true],
+    ["My app password is abcd efgh ijkl mnop keep it private.", true],
+    ["They both read each page.", false],
     ["password: x8Kp2Qz9Lm4Rt7Bv3N", true],
     ["x8Kp2Qz9Lm4Rt7Bv3N is my app password", true],
     ["x8Kp2Qz9Lm4Rt7Bv3N", true],
@@ -626,6 +629,11 @@ describe("a key pasted into the chat", () => {
 
   test.each([`${bareKey}.com`, `a.${bareKey}.b`, `https://h/${bareKey}/x`, `${bareKey}/path`])("keeps a host or path intact: %s", (text) => {
     expect(redactSecrets(text)).toEqual({ text, found: false });
+  });
+
+  test("an explicit app-password label wins over following prose, while ordinary prose stays intact", () => {
+    expect(redactSecrets("My app password is abcd efgh ijkl mnop keep it private.")).toEqual({ text: `My app password is ${KEY_REMOVED} keep it private.`, found: true });
+    expect(redactSecrets("They both read each page.")).toEqual({ text: "They both read each page.", found: false });
   });
 
   test("a key inside a link is removed and the rest of the link is kept", () => {

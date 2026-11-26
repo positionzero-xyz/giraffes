@@ -87,6 +87,11 @@
   if (!ticket) say(t.errors.expired, true);
   $("form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
+    const typedModel = $("model").value.trim();
+    if (!$("modelRow").hidden && typedModel === "") {
+      say(t.errors.no_model, true);
+      return;
+    }
     $("connect").disabled = true;
     say(t.checking, false);
     let answer = { ok: false, error: "unreachable" };
@@ -94,7 +99,7 @@
       const res = await fetch("/key", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ticket, provider: $("provider").value, model: $("modelPick").value || $("model").value, baseUrl: $("baseUrl").value, key: $("key").value }),
+        body: JSON.stringify({ ticket, provider: $("provider").value, model: $("modelPick").value || typedModel, baseUrl: $("baseUrl").value, key: $("key").value }),
       });
       answer = await res.json();
     } catch {}

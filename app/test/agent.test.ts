@@ -509,7 +509,7 @@ describe("time zone and language", () => {
     expect(await c.received()).toEqual(["ตั้งให้แล้วค่ะ\n(อ่านเวลานั้นไม่ออก เลยยังไม่ได้ตั้งเตือนให้ค่ะ)"]);
   });
 
-  test("a LINE person's fixed notices are in Thai from the first message", async () => {
+  test("a LINE person's fixed notices are in Thai from their first message after consent", async () => {
     const model = scripted([throws(), throws(), throws()]);
     const c = await devChat("U0123456789abcdef0123456789abcdef", { model, at: "2099-11-04T10:00", channel: "line" });
     await c.consent();

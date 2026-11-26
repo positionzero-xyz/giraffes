@@ -55,7 +55,7 @@ describe("entering a key on the page", () => {
 
     expect((await submit(await keyLink(c))).status).toBe(200);
     await c.settle();
-    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5")]);
+    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "deepseek-v4.1-flash")]);
     expect(provider.seen).toHaveLength(2);
     expect(c.logs("turn").at(-1)?.outcome).toBe("refused_budget");
 
@@ -82,7 +82,7 @@ describe("entering a key on the page", () => {
     expect(await c.received()).toEqual([refused]);
     expect((await submit(await keyLink(c))).status).toBe(200);
     await c.settle();
-    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5")]);
+    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "deepseek-v4.1-flash")]);
     expect(provider.seen).toHaveLength(3);
   });
 
@@ -93,7 +93,7 @@ describe("entering a key on the page", () => {
     await c.received();
     expect((await submit(await keyLink(c))).status).toBe(200);
     await c.settle();
-    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5")]);
+    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "deepseek-v4.1-flash")]);
     expect(provider.seen).toHaveLength(2);
     if (status === "processing") {
       await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_agent, state) => {
@@ -115,7 +115,7 @@ describe("entering a key on the page", () => {
     await c.received();
     expect((await submit(await keyLink(c))).status).toBe(200);
     await c.settle();
-    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5")]);
+    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "deepseek-v4.1-flash")]);
     expect(provider.seen).toHaveLength(2);
     await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_agent, state) => {
       state.storage.sql.exec("UPDATE inbox SET status = 'done', outcome = 'acted' WHERE event_key = ?", eventKey.dev("old-worker-answer"));
@@ -139,7 +139,7 @@ describe("entering a key on the page", () => {
     await c.settle();
 
     expect(await c.received()).toEqual([
-      NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5"),
+      NOTICE.keyConnected("OpenCode Go", "deepseek-v4.1-flash"),
       "Here's my answer to what you sent earlier.\nThe market opens at 8.",
     ]);
     expect(provider.seen).toHaveLength(2);
@@ -147,7 +147,7 @@ describe("entering a key on the page", () => {
 
     expect((await submit(await keyLink(c))).status).toBe(200);
     await c.settle();
-    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5")]);
+    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "deepseek-v4.1-flash")]);
     expect(provider.seen).toHaveLength(3);
   });
 
@@ -202,7 +202,7 @@ describe("entering a key on the page", () => {
 
     expect(await c.received()).toEqual([
       NOTICE.noAccess({ box: false, key: true, included: false }),
-      NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5"),
+      NOTICE.keyConnected("OpenCode Go", "deepseek-v4.1-flash"),
       `${NOTICE.catchUp}\nI can't check live exchange rates.`,
       "It depends on the route.",
     ]);
@@ -237,7 +237,7 @@ describe("entering a key on the page", () => {
     await c.settle();
 
     expect(await c.received()).toEqual([
-      NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5"),
+      NOTICE.keyConnected("OpenCode Go", "deepseek-v4.1-flash"),
       `${NOTICE.catchUp}\nI'll remind you to check the oven at 1 pm.\n${NOTICE.reminderPast}`,
     ]);
     expect(provider.seen).toHaveLength(2);
@@ -273,7 +273,24 @@ describe("entering a key on the page", () => {
     const html = await res.text();
     expect(html).not.toMatch(/<script[^>]+src=/);
     expect(html).toContain("OpenCode Go");
+    expect(html).toContain("DeepSeek V4.1 Flash");
+    expect(html).toContain("Another model");
+    expect(html).toContain("id=\"modelPick\"");
     expect(html).toContain(NOTICES.th.keyPage.connect);
+  });
+
+  test("the page lists priced models in recommendation order and offers another", async () => {
+    const html = await (await SELF.fetch("https://giraffes.test/key")).text();
+    const data = JSON.parse(/<script type="application\/json" id="data">(.*?)<\/script>/.exec(html)?.[1] ?? "") as {
+      providers: { id: string; models: { id: string; pick: string | null }[] }[];
+    };
+
+    expect(data.providers.find((p) => p.id === "opencode-go")?.models.map((m) => [m.id, m.pick])).toEqual([
+      ["deepseek-v4.1-flash", "recommended"],
+      ["claude-haiku-5-5", null],
+    ]);
+    expect(data.providers.find((p) => p.id === "mistral")?.models.map((m) => m.id)).toEqual(["deepseek-v4-1-flash-1017", "mistral-small-2603"]);
+    expect(html).toContain("Another model");
   });
 
   test.each([true, false])("rejects an oversized form early, declared length %s", async (declared) => {
@@ -305,10 +322,10 @@ describe("entering a key on the page", () => {
     await c.settle();
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, provider: "OpenCode Go", model: "claude-haiku-5-5" });
+    expect(await res.json()).toEqual({ ok: true, provider: "OpenCode Go", model: "deepseek-v4.1-flash" });
     expect(provider.seen).toHaveLength(1);
     expect(provider.seen[0].body).toMatchObject({ max_tokens: 64, output_config: { format: { type: "json_schema" } } });
-    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5")]);
+    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "deepseek-v4.1-flash")]);
     expect(c.logs("model_call").map((l) => [l.purpose, l.backend, l.status])).toEqual([["probe", "key", "settled"]]);
 
     await c.say("hello");
@@ -328,7 +345,7 @@ describe("entering a key on the page", () => {
 
     const again = await submit(ticket, { key: "oc_sk_someone_else_entirely_0000" });
 
-    expect(await again.json()).toEqual({ ok: true, provider: "OpenCode Go", model: "claude-haiku-5-5" });
+    expect(await again.json()).toEqual({ ok: true, provider: "OpenCode Go", model: "deepseek-v4.1-flash" });
     expect(provider.seen).toHaveLength(1);
   });
 
@@ -408,7 +425,7 @@ describe("the key commands", () => {
     await c.say("/key");
 
     const [text] = await c.received();
-    expect(text).toContain("Your key: OpenCode Go, claude-haiku-5-5, ending 6789.");
+    expect(text).toContain("Your key: OpenCode Go, deepseek-v4.1-flash, ending 6789.");
     expect(text).toContain("This month: $0.00 of your $5.00 limit.");
     expect(text).toMatch(LINK);
     expect(text).not.toContain(KEY);
@@ -438,7 +455,7 @@ describe("a key alongside a Claude plan", () => {
 
     await submit(ticket);
     await c.settle();
-    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5"), NOTICE.backupAsk("OpenCode Go")]);
+    expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "deepseek-v4.1-flash"), NOTICE.backupAsk("OpenCode Go")]);
     const button = c.channel.delivered.at(-1)?.button;
     expect(button).toEqual({ label: NOTICE.backupButton, data: expect.stringMatching(/^b:\d+$/) });
     expect((await c.snapshot()).access.key?.backup).toBe(false);
@@ -569,6 +586,14 @@ describe("a key pasted into the chat", () => {
 
   test.each([
     ["sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", true],
+    ["abcd-efgh-ijkl-mnop", true],
+    ["abcd efgh ijkl mnop", true],
+    ["password: x8Kp2Qz9Lm4Rt7Bv3N", true],
+    ["x8Kp2Qz9Lm4Rt7Bv3N is my app password", true],
+    ["x8Kp2Qz9Lm4Rt7Bv3N", true],
+    ["this will take some time", false],
+    ["this-will-take-time", false],
+    ["please make sure your door is closed", false],
     ["oc_sk_9f8e7d6c5b4a3210fedcba", true],
     ["sk-or-v1-0123456789abcdef0123456789abcdef", true],
     ["my key is aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE ok", true],
@@ -711,17 +736,24 @@ describe("every key write is compare-and-set on the key's revision", () => {
 });
 
 describe("the Mistral preset", () => {
-  test("a pasted Mistral key with no model gets Mistral Small 4 on Mistral's own URL", () => {
+  test("a pasted Mistral key with no model gets DeepSeek V4.1 Flash on Mistral's own URL", () => {
     expect(draftKey({ provider: "mistral", model: "", baseUrl: "", key: "AbCdEfGhIjKlMnOpQrStUvWxYz012345" }, { devMode: false })).toMatchObject({
       ok: true,
-      value: { provider: "mistral", baseUrl: "https://api.mistral.ai/v1", model: "mistral-small-2603" },
+      value: { provider: "mistral", baseUrl: "https://api.mistral.ai/v1", model: "deepseek-v4-1-flash-1017" },
     });
   });
 
-  test("a pasted Vibe plan key with no model gets the same Small 4 on the same URL", () => {
+  test("a pasted Vibe plan key with no model gets the same DeepSeek model on the same URL", () => {
     expect(draftKey({ provider: "mistral-vibe", model: "", baseUrl: "", key: "AbCdEfGhIjKlMnOpQrStUvWxYz012345" }, { devMode: false })).toMatchObject({
       ok: true,
-      value: { provider: "mistral-vibe", baseUrl: "https://api.mistral.ai/v1", model: "mistral-small-2603" },
+      value: { provider: "mistral-vibe", baseUrl: "https://api.mistral.ai/v1", model: "deepseek-v4-1-flash-1017" },
+    });
+  });
+
+  test("an explicitly typed unlisted model is kept for the provider to judge", () => {
+    expect(draftKey({ provider: "mistral", model: "mistral-medium-2608", baseUrl: "", key: "AbCdEfGhIjKlMnOpQrStUvWxYz012345" }, { devMode: false })).toMatchObject({
+      ok: true,
+      value: { provider: "mistral", model: "mistral-medium-2608" },
     });
   });
 });

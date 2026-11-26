@@ -18,7 +18,10 @@ export type RateCard = Price & {
   readonly contextTokens: number | null;
 };
 
-export type ProviderModel = { readonly card: RateCard; readonly effort: boolean };
+/** How the key page tags a model next to its name. */
+export type ModelPick = "recommended" | "cheaper" | "stronger" | null;
+
+export type ProviderModel = { readonly name: string; readonly pick: ModelPick; readonly card: RateCard; readonly effort: boolean };
 
 export type Provider = {
   readonly label: string;
@@ -28,9 +31,10 @@ export type Provider = {
   readonly auth: Auth;
   /** A typo check on the pasted key, not a validation. */
   readonly keyShape: RegExp | null;
-  /** Null: the person types one. */
-  readonly defaultModel: string | null;
-  /** Models whose every price is published; any other model is priced at its protocol's dearest card and shown as approximate. */
+  /**
+   * Models whose every price is published, in the order the key page recommends them; the first is the default, and
+   * none means the person types one. Any other model is priced at its protocol's dearest card and shown as approximate.
+   */
   readonly models: Readonly<Record<string, ProviderModel>>;
   /** "probe": the connect probe decides between strict and loose. */
   readonly schema: "strict" | "probe" | "loose";
@@ -65,6 +69,9 @@ const openaiCard = (input: number, cacheRead: number, output: number, longPrompt
   contextTokens: null,
 });
 
+/** OpenCode's pay-as-you-go card. Go lists half of it off-peak, so this never under-counts. Cache writes bill as input. */
+const GO_DEEPSEEK: RateCard = { inputPerM: usd(0.3), outputPerM: usd(1.2), cacheWritePerM: usd(0.3), cacheReadPerM: usd(0.006), longPrompt: null, contextTokens: null };
+
 const none = () => ({});
 
 /** A Vibe plan key spends the plan's Vibe budget instead of its API credit, on the same API and models. */
@@ -74,9 +81,10 @@ const MISTRAL_STUDIO: Provider = {
   baseUrl: "https://api.mistral.ai/v1",
   auth: "bearer",
   keyShape: null,
-  defaultModel: "mistral-small-2603",
-  /** Mistral publishes no cached-input price for Small 4, so a cache read is priced as input. */
-  models: { "mistral-small-2603": { card: openaiCard(0.15, 0.15, 0.6), effort: false } },
+  models: {
+    "deepseek-v4-1-flash-1017": { name: "DeepSeek V4.1 Flash", pick: "recommended", card: openaiCard(0.3, 0.007, 1.2), effort: false },
+    "mistral-small-2603": { name: "Mistral Small 4", pick: "cheaper", card: openaiCard(0.15, 0.015, 0.6), effort: false },
+  },
   schema: "probe",
   feeBps: 0,
   headers: none,
@@ -91,8 +99,7 @@ export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
     baseUrl: "https://api.anthropic.com",
     auth: "x-api-key",
     keyShape: /^sk-ant-/,
-    defaultModel: "claude-haiku-5-5",
-    models: { "claude-haiku-5-5": { card: HAIKU_5_5, effort: true } },
+    models: { "claude-haiku-5-5": { name: "Claude Haiku 5.5", pick: null, card: HAIKU_5_5, effort: true } },
     schema: "strict",
     feeBps: 0,
     headers: none,
@@ -105,8 +112,11 @@ export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
     baseUrl: "https://opencode.ai/inference/go/anthropic",
     auth: "bearer",
     keyShape: /^oc_sk_/,
-    defaultModel: "claude-haiku-5-5",
-    models: { "claude-haiku-5-5": { card: GO_HAIKU, effort: true } },
+    /** Go meters each model against its own monthly allowance at list price: $100 for DeepSeek V4.1 Flash, $15 for Haiku. */
+    models: {
+      "deepseek-v4.1-flash": { name: "DeepSeek V4.1 Flash", pick: "recommended", card: GO_DEEPSEEK, effort: false },
+      "claude-haiku-5-5": { name: "Claude Haiku 5.5", pick: null, card: GO_HAIKU, effort: true },
+    },
     schema: "probe",
     feeBps: 0,
     headers: ({ session }) => ({ "user-agent": "giraffes/1", "x-opencode-session": session }),
@@ -119,8 +129,7 @@ export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
     baseUrl: "https://openrouter.ai/api/v1",
     auth: "bearer",
     keyShape: /^sk-or-/,
-    defaultModel: "anthropic/claude-haiku-5.5",
-    models: { "anthropic/claude-haiku-5.5": { card: HAIKU_5_5, effort: false } },
+    models: { "anthropic/claude-haiku-5.5": { name: "Claude Haiku 5.5", pick: null, card: HAIKU_5_5, effort: false } },
     schema: "strict",
     feeBps: 550,
     headers: none,
@@ -133,8 +142,7 @@ export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
     baseUrl: "https://api.deepinfra.com/v1/openai",
     auth: "bearer",
     keyShape: null,
-    defaultModel: "deepseek-ai/DeepSeek-V4-Flash-0731",
-    models: { "deepseek-ai/DeepSeek-V4-Flash-0731": { card: openaiCard(0.06, 0.015, 0.18), effort: false } },
+    models: { "deepseek-ai/DeepSeek-V4-Flash-0731": { name: "DeepSeek V4 Flash", pick: null, card: openaiCard(0.06, 0.015, 0.18), effort: false } },
     schema: "strict",
     feeBps: 0,
     headers: none,
@@ -147,8 +155,7 @@ export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
     baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     auth: "bearer",
     keyShape: /^sk-/,
-    defaultModel: "qwen3.7-flash",
-    models: { "qwen3.7-flash": { card: openaiCard(0.03, 0.006, 0.13, { aboveTokens: 32_000, price: null }), effort: false } },
+    models: { "qwen3.7-flash": { name: "Qwen3.7 Flash", pick: null, card: openaiCard(0.03, 0.006, 0.13, { aboveTokens: 32_000, price: null }), effort: false } },
     schema: "loose",
     feeBps: 0,
     headers: none,
@@ -163,7 +170,6 @@ export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
     baseUrl: null,
     auth: "bearer",
     keyShape: null,
-    defaultModel: null,
     models: {},
     schema: "probe",
     feeBps: 0,
@@ -177,7 +183,6 @@ export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
     baseUrl: null,
     auth: "bearer",
     keyShape: null,
-    defaultModel: null,
     models: {},
     schema: "probe",
     feeBps: 0,
@@ -186,6 +191,8 @@ export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
     signup: null,
   },
 };
+
+export const defaultModelOf = (p: Provider): string | null => Object.keys(p.models)[0] ?? null;
 
 const dearness = (c: RateCard) => c.inputPerM + c.outputPerM;
 
@@ -205,5 +212,5 @@ export function modelOf(
     .filter((p) => p.protocol === protocol)
     .flatMap((p) => Object.values(p.models).map((m) => m.card));
   const card = cards.reduce((a, b) => (dearness(b) > dearness(a) ? b : a), cards[0] ?? HAIKU_5_5);
-  return { model: { card, effort: false }, priced: false };
+  return { model: { name: model, pick: null, card, effort: false }, priced: false };
 }

@@ -1,6 +1,6 @@
 import type { AgentKey, EpochMs, LocalDate, MicroUsd } from "../domain";
 import { SecretKey, type Endpoint, type KeyFault, type SchemaMode } from "../model/client";
-import { isProviderId, PROVIDERS, type Auth, type ProviderId } from "../model/providers";
+import { defaultModelOf, isProviderId, PROVIDERS, type Auth, type ProviderId } from "../model/providers";
 import type { KeyPageError } from "../notices";
 
 export type Sealed = { readonly kid: string; readonly iv: Uint8Array; readonly ciphertext: Uint8Array };
@@ -159,7 +159,7 @@ export function draftKey(f: KeyFields, opts: { readonly devMode: boolean }): { r
   const stub = opts.devMode && p.baseUrl !== null && f.baseUrl.trim() !== "";
   const baseUrl = stub ? baseUrlOf(f.baseUrl, "loopback") : (p.baseUrl ?? baseUrlOf(f.baseUrl, opts.devMode ? "dev" : "public"));
   if (baseUrl === null) return { ok: false, error: "bad_url" };
-  const model = f.model.trim() || p.defaultModel || "";
+  const model = f.model.trim() || defaultModelOf(p) || "";
   if (!MODEL_ID.test(model)) return { ok: false, error: "no_model" };
   const key = SecretKey.from(f.key);
   if (!key || (p.keyShape && !p.keyShape.test(key.reveal()))) return { ok: false, error: "key_shape" };
@@ -211,6 +211,20 @@ export const KEY_REMOVED = "<a key, removed>";
 const PREFIXED = /(?<![A-Za-z0-9_-])(?:sk-ant-|sk-or-|oc_sk_|sk-)[A-Za-z0-9_-]{16,}/g;
 /** Not after a slash, dot or @, so a link's path, a host name or an address is left alone; after = or : it counts. */
 const LONG_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-]|[/=:@.][A-Za-z0-9_-])/g;
+/** Apple and Google app passwords are sixteen lowercase letters shown as four groups of four. */
+const GROUPED_APP_PASSWORD = /(?<![A-Za-z0-9_-])[a-z]{4}(?:[- ][a-z]{4}){3}(?![A-Za-z0-9_-])/g;
+/** Shorter than LONG_TOKEN, so context has to name it as a secret before it is removed. */
+const CONTEXT_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9][A-Za-z0-9_-]{11,30}(?![A-Za-z0-9_-]|[/=:@.][A-Za-z0-9_-])/g;
+const SECRET_HINT = /\b(?:password|passcode|app[- ]password|api[- ]key|token|secret)\b/i;
+
+/* Enough ordinary four-letter words that a chance group in a random password is still rare; three or more means English, not a secret. */
+const COMMON_FOUR_LETTER_WORDS = new Set([
+  "away", "back", "best", "busy", "call", "came", "chat", "come", "does", "done", "door", "down", "easy", "even", "fast", "fine", "food", "free", "from", "full",
+  "gave", "give", "goes", "good", "hard", "have", "held", "here", "hold", "home", "into", "just", "keep", "kept", "know", "last", "late", "less", "life", "like",
+  "long", "look", "love", "make", "many", "meet", "more", "most", "much", "need", "next", "okay", "only", "open", "over", "plan", "rain", "said", "same", "seem",
+  "send", "slow", "some", "soon", "such", "sure", "take", "talk", "tell", "text", "than", "that", "them", "then", "they", "this", "time", "told", "very", "want",
+  "well", "went", "were", "what", "when", "will", "with", "work", "your",
+]);
 
 function entropyBits(s: string): number {
   const counts = new Map<string, number>();
@@ -223,14 +237,34 @@ function entropyBits(s: string): number {
 /** Mixed case and digits with some entropy, or 48 or more lowercase hex characters (a Git SHA is 40). */
 const keyLike = (t: string) => (/[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) && entropyBits(t) >= 3.5) || /^[0-9a-f]{48,}$/.test(t);
 
+function groupedAppPassword(match: string, offset: number, text: string): string | null {
+  const groups = match.split(/[- ]/);
+  const ordinary = groups.filter((w) => COMMON_FOUR_LETTER_WORDS.has(w)).length >= 3;
+  if (ordinary) return null;
+  if (!match.includes(" ")) return KEY_REMOVED;
+  const continues = /^ [a-z]{4}(?![a-z])/.test(text.slice(offset + match.length));
+  return continues ? null : KEY_REMOVED;
+}
+
+function shortSecret(match: string, offset: number, text: string): string | null {
+  if (match.length >= 18 && keyLike(match)) return KEY_REMOVED;
+  if (entropyBits(match) < 3.5) return null;
+  const before = text.slice(Math.max(0, offset - 32), offset);
+  const after = text.slice(offset + match.length, offset + match.length + 32);
+  return SECRET_HINT.test(before) || SECRET_HINT.test(after) ? KEY_REMOVED : null;
+}
+
 /**
- * Pure. Removes anything that looks like an API key: a known key prefix anywhere, links and query strings included,
- * or a long token that looks random, unless it sits in a link's path or a host name, where it is usually an id.
+ * Pure. Removes anything that looks like an API key or app password: a known key prefix anywhere, links and query strings
+ * included, or a token that looks random, unless it sits in a link's path or a host name, where it is usually an id.
  */
 export function redactSecrets(text: string): { readonly text: string; readonly found: boolean } {
   let found = false;
+  const secret = (replacement: string | null, original: string) => (replacement === null ? original : ((found = true), replacement));
   const out = text
     .replace(PREFIXED, () => ((found = true), KEY_REMOVED))
+    .replace(GROUPED_APP_PASSWORD, (m, offset, whole) => secret(groupedAppPassword(m, offset, whole), m))
+    .replace(CONTEXT_TOKEN, (m, offset, whole) => secret(shortSecret(m, offset, whole), m))
     .replace(LONG_TOKEN, (m) => (keyLike(m) ? ((found = true), KEY_REMOVED) : m));
   return { text: out, found };
 }

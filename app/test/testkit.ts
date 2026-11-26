@@ -24,7 +24,7 @@ import { devLane, DEV_URL_SCRIPTED, type IncludedConfig, type KeysConfig } from 
 import { seal } from "../src/access/key";
 import { AgentStore } from "../src/agent/store";
 import { connect, SecretKey, type Fetch, type ProviderTimeouts, type SchemaMode } from "../src/model/client";
-import { PROVIDERS, type ProviderId } from "../src/model/providers";
+import { defaultModelOf, PROVIDERS, type ProviderId } from "../src/model/providers";
 
 export { scripted };
 
@@ -166,7 +166,7 @@ export async function giveKey(
   await runInDurableObject(stub, (_agent, state) => {
     const store = new AgentStore(state.storage);
     const saved = store.saveKey(
-      { provider, baseUrl, model: k.model ?? p.defaultModel ?? "custom-model", auth: p.auth, mode: k.mode ?? "strict", sealed, hint: key.hint, capMicro: (k.capMicro ?? 5_000_000) as MicroUsd, connectedAt: 0 as EpochMs },
+      { provider, baseUrl, model: k.model ?? defaultModelOf(p) ?? "custom-model", auth: p.auth, mode: k.mode ?? "strict", sealed, hint: key.hint, capMicro: (k.capMicro ?? 5_000_000) as MicroUsd, connectedAt: 0 as EpochMs },
       store.keyRevision(),
       null,
       [],

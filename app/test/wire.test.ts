@@ -4,7 +4,7 @@ import { TurnOutputSchema } from "../src/agent/turn";
 import type { MicroUsd } from "../src/domain";
 import { classify, connect, jsonSchemaOf, runParse, SecretKey, type Attempt, type Endpoint, type Fetch, type Meter, type WireResult } from "../src/model/client";
 import { fitPrompt, bytesOf, type PromptParts } from "../src/model/prompt";
-import { PROVIDER_IDS, PROVIDERS } from "../src/model/providers";
+import { defaultModelOf, PROVIDER_IDS, PROVIDERS } from "../src/model/providers";
 import { PROMPT_FLOOR_BYTES, PROMPT_OVERHEAD_TOKENS, routeFor } from "../src/model/routes";
 
 const Answer = z.object({ answer: z.number() });
@@ -34,7 +34,7 @@ function endpoint(provider: keyof typeof PROVIDERS, key = "sk-test-0123456789"):
   };
 }
 
-const route = (provider: keyof typeof PROVIDERS, model = PROVIDERS[provider].defaultModel ?? "custom-model") => routeFor({ kind: "key", provider, model }, "turn");
+const route = (provider: keyof typeof PROVIDERS, model = defaultModelOf(PROVIDERS[provider]) ?? "custom-model") => routeFor({ kind: "key", provider, model }, "turn");
 
 type Metered = Meter & { readonly settled: Attempt<unknown>["kind"][]; readonly reserved: number[] };
 
@@ -140,8 +140,22 @@ describe("OpenAI-compatible protocol", () => {
     expect(out.last).toMatchObject({ kind: "ok", value: { answer: 42 } });
     expect(f.seen[0].url).toBe("https://api.mistral.ai/v1/chat/completions");
     expect(f.seen[0].headers.get("authorization")).toBe("Bearer sk-test-0123456789");
-    expect(f.seen[0].body).toMatchObject({ model: "mistral-small-2603", max_tokens: 18_000, response_format: { type: "json_schema", json_schema: { strict: true } } });
+    expect(f.seen[0].body).toMatchObject({ model: "deepseek-v4-1-flash-1017", max_tokens: 18_000, response_format: { type: "json_schema", json_schema: { strict: true } } });
     expect(f.seen[0].body).not.toHaveProperty("reasoning_effort");
+  });
+
+  test("a reasoning model's reply as thinking and text chunks is read from its text chunk alone", async () => {
+    const chunks = [
+      { type: "thinking", thinking: [{ type: "text", text: "six sevens" }] },
+      { type: "text", text: '{"answer":42}' },
+    ];
+    const f = fakeFetch(() =>
+      Response.json({ choices: [{ message: { content: chunks }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5 } }),
+    );
+
+    const out = await runParse(connect(f)(endpoint("mistral")), ask(route("mistral")), meter());
+
+    expect(out.last).toMatchObject({ kind: "ok", value: { answer: 42 } });
   });
 
   test("OpenRouter asks only for endpoints that honour the schema, and its reported cost is kept", async () => {

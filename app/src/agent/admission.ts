@@ -16,7 +16,7 @@ import { checkinWakeup, type NewWakeup } from "../policy/schedule";
 import { localDate } from "../policy/time";
 import type { Batch } from "./turn";
 
-export const ADMISSION = { caps: { recruit: 40, joiner: 60 }, invitesPerPerson: 5 } as const;
+export const ADMISSION = { caps: { recruit: 40, joiner: 60 }, invitesPerPerson: 5, inviteChecksPerHour: 5, feedbackPerDay: 5 } as const;
 
 /** `beta` admits by invite code and consent; `open` admits everyone at first contact. */
 export const ADMISSION_MODES = ["beta", "open"] as const;

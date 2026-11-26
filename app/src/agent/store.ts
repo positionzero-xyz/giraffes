@@ -90,6 +90,8 @@ export type AgentRow = {
   readonly statusAt: EpochMs;
 };
 
+export type RateEventKind = "feedback" | "invite";
+
 type SavedReference = SavedCursor & { readonly snapshot: string | null };
 
 export type OutboxRow = Omit<OutboundMessage, "texts"> & {
@@ -605,6 +607,17 @@ export class AgentStore {
       this.sql.exec("SELECT 1 FROM inbox WHERE outcome = ? AND finished_at >= ? AND kind IN ('message', 'lifecycle') LIMIT 1", outcome, dayStart).toArray()
         .length > 0
     );
+  }
+
+  /** Records one event and answers whether the rolling window was already full. */
+  rateLimited(kind: RateEventKind, now: EpochMs, windowMs: number, limit: number): boolean {
+    return this.tx(() => {
+      this.sql.exec("DELETE FROM rate_event WHERE kind = ? AND at <= ?", kind, now - windowMs);
+      const count = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM rate_event WHERE kind = ?", kind).one().n;
+      if (count >= limit) return true;
+      this.sql.exec("INSERT INTO rate_event (kind, at) VALUES (?, ?)", kind, now);
+      return false;
+    });
   }
 
   admission(): Admission {

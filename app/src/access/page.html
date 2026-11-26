@@ -26,8 +26,12 @@
     <label for="baseUrl" id="baseUrlLabel"></label>
     <input id="baseUrl" name="baseUrl" type="url" inputmode="url" spellcheck="false">
   </div>
-  <label for="model" id="modelLabel"></label>
-  <input id="model" name="model" spellcheck="false">
+  <label for="modelPick" id="modelLabel"></label>
+  <select id="modelPick"></select>
+  <div id="modelRow" hidden>
+    <label for="model" id="otherModelLabel"></label>
+    <input id="model" name="model" spellcheck="false">
+  </div>
   <label for="key" id="keyLabel"></label>
   <input id="key" name="key" type="password" spellcheck="false" autocomplete="off">
   <button id="connect" type="submit"></button>
@@ -43,6 +47,7 @@
   document.documentElement.lang = lang;
   const $ = (id) => document.getElementById(id);
   for (const [id, key] of [["title", "title"], ["intro", "intro"], ["providerLabel", "provider"], ["baseUrlLabel", "baseUrl"], ["modelLabel", "model"], ["keyLabel", "key"], ["connect", "connect"]]) $(id).textContent = t[key];
+  $("otherModelLabel").textContent = t.picks.otherModel;
   document.title = t.title;
   for (const p of data.providers) {
     const o = document.createElement("option");
@@ -50,14 +55,30 @@
     o.textContent = p.label;
     $("provider").append(o);
   }
+  const OTHER = "";
+  function typed() {
+    $("modelRow").hidden = $("modelPick").value !== OTHER;
+  }
   function pick() {
     const p = data.providers.find((x) => x.id === $("provider").value);
     $("baseUrlRow").hidden = !p.custom;
-    $("model").placeholder = p.defaultModel || "";
+    $("modelPick").replaceChildren();
+    for (const m of [...p.models, { id: OTHER, name: t.picks.other, pick: null }]) {
+      const o = document.createElement("option");
+      o.value = m.id;
+      o.textContent = m.pick ? `${m.name} (${t.picks[m.pick]})` : m.name;
+      $("modelPick").append(o);
+    }
+    $("modelPick").hidden = p.models.length === 0;
+    $("modelLabel").htmlFor = p.models.length === 0 ? "model" : "modelPick";
+    $("otherModelLabel").hidden = p.models.length === 0;
+    $("model").value = "";
+    typed();
     $("signup").hidden = !p.signup;
     if (p.signup) { $("signup").href = p.signup; $("signup").textContent = t.getKey; }
   }
   $("provider").addEventListener("change", pick);
+  $("modelPick").addEventListener("change", typed);
   pick();
   function say(text, error) {
     $("status").textContent = text;
@@ -73,7 +94,7 @@
       const res = await fetch("/key", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ticket, provider: $("provider").value, model: $("model").value, baseUrl: $("baseUrl").value, key: $("key").value }),
+        body: JSON.stringify({ ticket, provider: $("provider").value, model: $("modelPick").value || $("model").value, baseUrl: $("baseUrl").value, key: $("key").value }),
       });
       answer = await res.json();
     } catch {}

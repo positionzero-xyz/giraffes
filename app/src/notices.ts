@@ -119,6 +119,8 @@ export type KeyPageText = {
   readonly checking: string;
   readonly connected: string;
   readonly getKey: string;
+  /** Tags after a model's name in the model list, and the list's last entry, which lets the person type a model. */
+  readonly picks: { readonly recommended: string; readonly cheaper: string; readonly stronger: string; readonly other: string; readonly otherModel: string };
   readonly errors: Readonly<Record<KeyPageError, string>>;
 };
 
@@ -311,6 +313,7 @@ const en: Notices = {
     checking: "Checking your key with one tiny request…",
     connected: "Connected. You can go back to the chat.",
     getKey: "Get a key",
+    picks: { recommended: "recommended", cheaper: "cheapest", stronger: "strongest", other: "Another model…", otherModel: "Model name" },
     errors: {
       bad_form: "Something in the form is missing. Check it and try again.",
       unknown_provider: "Pick a provider from the list.",
@@ -496,6 +499,7 @@ const th: Notices = {
     checking: "กำลังตรวจ key ด้วยคำขอเล็กๆ หนึ่งครั้งค่ะ…",
     connected: "เชื่อมต่อแล้วค่ะ กลับไปที่แชตได้เลย",
     getKey: "สมัครรับ key",
+    picks: { recommended: "แนะนำ", cheaper: "ถูกที่สุด", stronger: "เก่งที่สุด", other: "โมเดลอื่น…", otherModel: "ชื่อโมเดล" },
     errors: {
       bad_form: "ข้อมูลในฟอร์มยังไม่ครบค่ะ ตรวจแล้วลองใหม่อีกครั้งนะคะ",
       unknown_provider: "เลือกผู้ให้บริการจากรายการนะคะ",

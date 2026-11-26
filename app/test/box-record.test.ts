@@ -70,7 +70,7 @@ describe("the Durable Object is the one record of the chat for the box session",
     await c.received();
     box.replies.push({ kind: "reply", step: chat("Initial reply.") });
     await c.say("hello");
-    const connected = NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5");
+    const connected = NOTICE.keyConnected("OpenCode Go", "deepseek-v4.1-flash");
     const offer = NOTICE.backupAsk("OpenCode Go");
     const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
     await runInDurableObject(stub, (_agent, state) => {

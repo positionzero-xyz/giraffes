@@ -330,7 +330,7 @@ describe("operator transitions", () => {
     await c.received();
     await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_a, s) =>
       new AgentStore(s.storage).reserve(
-        { id: "r-dead", month: "2099-11" as UtcMonth, scope: "byok", purpose: "turn", model: "opencode-go:claude-haiku-5-5", backend: "key", estimate: 1234 as MicroUsd, instance: "" },
+        { id: "r-dead", month: "2099-11" as UtcMonth, scope: "byok", purpose: "turn", model: "opencode-go:deepseek-v4.1-flash", backend: "key", estimate: 1234 as MicroUsd, instance: "" },
         local("2099-11-04T10:00"),
       ),
     );
@@ -472,12 +472,12 @@ describe("money a provider may have billed", () => {
 describe("pricing a model no preset lists", () => {
   test("an unlisted model is priced at the dearest card its protocol's presets publish, and marked approximate", () => {
     const dear = { ...PROVIDERS.anthropic.models["claude-haiku-5-5"].card, inputPerM: 3_000_000, outputPerM: 15_000_000 };
-    const table = { ...PROVIDERS, deepinfra: { ...PROVIDERS.deepinfra, models: { ...PROVIDERS.deepinfra.models, "big-model": { card: { ...dear, longPrompt: null }, effort: false } } } };
+    const table = { ...PROVIDERS, deepinfra: { ...PROVIDERS.deepinfra, models: { ...PROVIDERS.deepinfra.models, "big-model": { name: "Big", pick: null, card: { ...dear, longPrompt: null }, effort: false } } } };
 
     const openai = modelOf("openai-compatible", "whatever", table);
     expect(openai.priced).toBe(false);
     expect(openai.model.card.outputPerM).toBe(15_000_000);
-    expect(modelOf("anthropic-compatible", "whatever", table).model.card.outputPerM).toBe(PROVIDERS.anthropic.models["claude-haiku-5-5"].card.outputPerM);
+    expect(modelOf("anthropic-compatible", "whatever", table).model.card.outputPerM).toBe(PROVIDERS["opencode-go"].models["deepseek-v4.1-flash"].card.outputPerM);
     expect(modelOf("deepinfra", "big-model", table).priced).toBe(true);
   });
 

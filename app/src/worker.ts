@@ -100,7 +100,7 @@ const KEY_PAGE = keyPage.replace(
     providers: PROVIDER_IDS.map((id) => ({
       id,
       label: PROVIDERS[id].label,
-      defaultModel: PROVIDERS[id].defaultModel,
+      models: Object.entries(PROVIDERS[id].models).map(([model, m]) => ({ id: model, name: m.name, pick: m.pick })),
       custom: PROVIDERS[id].baseUrl === null,
       signup: PROVIDERS[id].signup,
     })),

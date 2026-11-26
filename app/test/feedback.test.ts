@@ -1,5 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
+import { ADMISSION } from "../src/agent/admission";
 import { d1Ledger } from "../src/ledger/ledger";
 import { NOTICES } from "../src/notices";
 import { chat, devChat, local, memoryLedger, scripted, scriptedChannel } from "./testkit";
@@ -61,6 +62,22 @@ describe("/feedback", () => {
 
     expect(deliver).not.toHaveBeenCalled();
     expect(await c.received()).toEqual(["Thanks for the feedback!"]);
+  });
+
+  test("caps recorded feedback per person each day while still thanking the sender", async () => {
+    const ledger = memoryLedger();
+    const c = await devChat("feedback-cap", { at, model: scripted([]), ledger });
+    const over = ADMISSION.feedbackPerDay + 2;
+
+    for (let i = 0; i < over; i++) await c.say(`/feedback note ${i}`);
+
+    expect(await c.received()).toEqual(Array(over).fill("Thanks for the feedback!"));
+    expect(c.logs("feedback")).toHaveLength(ADMISSION.feedbackPerDay);
+
+    await c.advanceTo("2099-11-05T00:01");
+    await c.say("/feedback after the window");
+
+    expect(c.logs("feedback")).toHaveLength(ADMISSION.feedbackPerDay + 1);
   });
 
   test("thanks a Thai speaker in Thai without calling a model", async () => {

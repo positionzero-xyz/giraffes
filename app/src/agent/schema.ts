@@ -530,6 +530,14 @@ export const MIGRATIONS: readonly string[] = [
   INSERT INTO forget (one) VALUES (1);
   ALTER TABLE box ADD COLUMN volume TEXT;
   `,
+  `
+  CREATE TABLE rate_event (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind  TEXT NOT NULL CHECK (kind IN ('feedback', 'invite')),
+    at    INTEGER NOT NULL
+  );
+  CREATE INDEX rate_event_kind_at ON rate_event (kind, at);
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

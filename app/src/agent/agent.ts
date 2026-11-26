@@ -30,6 +30,7 @@ import {
   needsLink,
   newBox,
   onCommand,
+  onConnected,
   onPlan,
   onRemove,
   onSignedOut,
@@ -42,9 +43,9 @@ import {
   type Step,
 } from "../box/machine";
 import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
-import { makeChannels, type ChannelRegistry } from "../channels/channel";
+import { CHANNEL_RETRY_MS, makeChannels, type ChannelRegistry } from "../channels/channel";
 import { commandOf, type Command } from "./commands";
-import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env } from "../config";
+import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env, type OperatorChat } from "../config";
 import {
   assertNever,
   CHANNEL_LANGUAGE,
@@ -86,6 +87,7 @@ import type { Claim, ProviderOrder } from "./forget";
 import { migrate } from "./schema";
 import {
   AgentStore,
+  type BillingAlertSettlement,
   globalTaskId,
   type AgentRow,
   type NoteMessage,
@@ -120,6 +122,8 @@ const NO_COST = 0 as MicroUsd;
 const BOX_STEPS_PER_DRAIN = 3;
 const KEY_TICKET_MS = 15 * 60_000;
 const KEY_LINK_NOTE = "<key link>";
+const BILLING_ALERT_REFUSED_MS = 300_000;
+const BILLING_ALERT_MAX_BACKOFF_MS = 3_600_000;
 
 export type Clock = { now(): EpochMs };
 
@@ -143,6 +147,7 @@ export type AgentDeps = {
   readonly clock: Clock;
   readonly box: BoxDeps | null;
   readonly billing: BillingDeps;
+  readonly operatorChat: OperatorChat | null;
   readonly admission: AdmissionMode;
 };
 
@@ -207,6 +212,8 @@ export class Agent extends DurableObject<Env> {
   // Each event re-reads the subscription from Stripe; handling them one at a time keeps a slower, older read
   // from landing after a newer one. Like #drain, it lives and dies with this instance.
   #billing: Promise<unknown> = Promise.resolve();
+  #billingAlertSettlement: BillingAlertSettlement | null = null;
+  #billingAlertStorageRetryAt = 0;
   /** In memory on purpose: losing it on a restart costs one more try of a box that may still be wedged. */
   #skipBoxUntil = 0;
   readonly #instance = crypto.randomUUID();
@@ -240,11 +247,17 @@ export class Agent extends DurableObject<Env> {
   }
 
   billingEvent(e: BillingEvent): Promise<"applied" | "duplicate" | "ignored" | "failed"> {
-    const run = this.#billing.then(() => this.#billingEvent(e)).catch(() => {
+    const run = this.#runBilling(() => this.#billingEvent(e)).catch(() => {
       diagnostic("stripe_event_failed");
       return "failed" as const;
     });
     this.#billing = run;
+    return run;
+  }
+
+  #runBilling<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.#billing.then(work);
+    this.#billing = run.catch(() => undefined);
     return run;
   }
 
@@ -272,19 +285,75 @@ export class Agent extends DurableObject<Env> {
     return "applied";
   }
 
-  /** Two paying subscriptions need a person to decide which to refund, so nothing is cancelled here. */
   async #flagDuplicate(owner: AgentKey): Promise<void> {
     const { store } = this.#deps.billing;
     const now = this.#deps.clock.now();
     const owned = await store.owned(owner, now);
     if (owned.length < 2) return;
+    const ids = owned.join(" ");
     diagnostic("stripe_duplicate_subscription");
     await store.recordDuplicate(owner, owned, now);
-    const a = this.#store.agent();
-    const text = a ? NOTICES[a.language].duplicate : null;
-    this.#store.notifyOnce(`duplicate:${owned.join(" ")}`, eventKey.billing("duplicate"), text ? { texts: [text], note: text } : null, now);
     await this.#armNoLaterThan(now);
+    this.#store.queueBillingAlert(ids, now);
+    await this.#deliverBillingAlert();
     this.ctx.waitUntil(this.alarm());
+  }
+
+  async #deliverBillingAlert(): Promise<void> {
+    const { clock, operatorChat } = this.#deps;
+    if (operatorChat === null || this.#store.held() || clock.now() < this.#billingAlertStorageRetryAt) return;
+    try {
+      this.#billingAlertSettlement ??= await this.#attemptBillingAlert(operatorChat);
+      if (this.#billingAlertSettlement === null) return;
+      this.#store.finishBillingAlertAttempt(this.#billingAlertSettlement, clock.now());
+      this.#billingAlertSettlement = null;
+    } catch {
+      this.#billingAlertStorageRetryAt = clock.now() + CHANNEL_RETRY_MS;
+      diagnostic("drain_billing_alert_failed");
+    }
+  }
+
+  async #attemptBillingAlert(to: OperatorChat): Promise<BillingAlertSettlement | null> {
+    const { channels, clock } = this.#deps;
+    const alert = this.#store.nextBillingAlert();
+    const now = clock.now();
+    if (alert === null || alert.ready_at > now) return null;
+    const person = this.#store.agent();
+    const notices = person ? NOTICES[person.language] : null;
+    const backoffMs = Math.min(BILLING_ALERT_MAX_BACKOFF_MS, CHANNEL_RETRY_MS * 2 ** alert.attempts);
+    this.#store.startBillingAlertAttempt(alert.subscription_ids, (now + backoffMs) as EpochMs);
+    const result = await channels[to.channel].deliver({
+      id: alert.delivery_id,
+      to,
+      texts: [`Duplicate paid plans\nSubscriptions: ${alert.subscription_ids}\nReview the subscriptions and any extra charges.`],
+      intent: "requested",
+    }, now).catch(() => ({ kind: "in_doubt", afterMs: CHANNEL_RETRY_MS } as const));
+    const settlement = { subscriptionIds: alert.subscription_ids };
+    if (result.kind === "sent") return { ...settlement, kind: "sent", text: notices?.duplicateAlerted };
+    if (result.kind === "fenced") {
+      return { ...settlement, kind: "retry", delayMs: backoffMs, text: undefined };
+    }
+    if (result.kind === "recipient_gone") {
+      diagnostic("operator_alert_recipient_gone");
+      return { ...settlement, kind: "gone", text: notices?.duplicateAlertGone };
+    }
+
+    const outcome = result.kind === "failed" ? "refused" : result.kind;
+    diagnostic(outcome === "in_doubt" ? "operator_alert_unconfirmed" : "operator_alert_failed");
+    const waitMs = Math.max(backoffMs, "afterMs" in result ? result.afterMs : BILLING_ALERT_REFUSED_MS);
+    return {
+      ...settlement,
+      kind: "retry",
+      delayMs: waitMs,
+      text: alert.notified === 0 ? notices?.duplicateRetrying(outcome, Math.ceil(waitMs / 1000)) : undefined,
+    };
+  }
+
+  #billingAlertAt(): EpochMs | null {
+    if (this.#deps.operatorChat === null || this.#store.held()) return null;
+    if (this.#billingAlertSettlement !== null) return this.#billingAlertStorageRetryAt as EpochMs;
+    const next = this.#store.nextBillingAlert();
+    return next && Math.max(next.ready_at, this.#billingAlertStorageRetryAt) as EpochMs;
   }
 
   async refreshPlan(agent: AgentKey): Promise<boolean> {
@@ -532,6 +601,9 @@ export class Agent extends DurableObject<Env> {
     const clock = this.#deps.clock;
     const started = clock.now();
     try {
+      if ((this.#billingAlertAt() ?? Infinity) <= started) {
+        await this.#phase("drain_billing_alert_failed", () => this.#runBilling(() => this.#deliverBillingAlert()));
+      }
       await this.#phase("drain_turns_failed", async () => {
         if (this.#store.held()) return;
         const poisoned = this.#store.recover(started, this.#instance);
@@ -1016,8 +1088,12 @@ export class Agent extends DurableObject<Env> {
     const deps = this.#deps.box;
     if (!boxServes(deps, agent)) return this.#boxReply(view, agent, null, { box: null, say: "unavailable" });
     if (!planAllowsBox(this.#plan(view.now).kind)) return this.#boxReply(view, agent, null, { box: null, say: "not_in_plan" });
-    const now = this.#deps.clock.now();
     const current = this.#store.box();
+    if (current?.state === "signed_out") {
+      const health = await deps.client.health(current.url, await boxToken(deps.secret, current.name));
+      if (health.kind === "up" && health.signedIn) return this.#boxReply(view, agent, deps, onConnected(current, this.#deps.clock.now()));
+    }
+    const now = this.#deps.clock.now();
     if (current) return this.#boxReply(view, agent, deps, onCommand(current, now));
 
     const name = await deps.host.nameFor(agent);
@@ -1366,6 +1442,7 @@ export class Agent extends DurableObject<Env> {
       inboxReadyAt: held ? null : (r.inboxReadyAt ?? (catchUp ? now : null)),
       wakeupFireAt: fireTimes.length > 0 ? (Math.min(...fireTimes) as EpochMs) : null,
       outboxReadyAt: held ? null : r.outboxReadyAt,
+      billingAlertAt: this.#billingAlertAt(),
       logsReadyAt: r.logsReadyAt,
       compactionRetryAt: held ? null : r.compactionRetryAt,
       boxAt: this.#deps.box && mayspend(this.#store.admission()) ? r.boxAt : null,
@@ -1437,6 +1514,7 @@ function defaultDeps(env: Env): AgentDeps {
     included: config.included,
     ledger: d1Ledger(env.LEDGER),
     channels: makeChannels(config),
+    operatorChat: config.operatorChat,
     clock: { now: () => Date.now() as EpochMs },
     box: boxDeps(config.box),
     billing: {

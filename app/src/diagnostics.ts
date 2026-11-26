@@ -1,4 +1,4 @@
-export type DrainPhase = "drain_turns_failed" | "drain_box_failed" | "drain_delivery_failed"
+export type DrainPhase = "drain_turns_failed" | "drain_box_failed" | "drain_delivery_failed" | "drain_billing_alert_failed"
   | "drain_log_flush_failed" | "drain_compaction_failed" | "drain_prune_failed";
 
 type Diagnostic = DrainPhase
@@ -16,6 +16,8 @@ type Diagnostic = DrainPhase
   | "line_quota"
   | "line_quota_unavailable"
   | "operator_alert_failed"
+  | "operator_alert_unconfirmed"
+  | "operator_alert_recipient_gone"
   | "request_failed"
   | "stripe_checkout_expiry_failed"
   | "stripe_checkout_failed"

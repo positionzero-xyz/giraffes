@@ -18,12 +18,14 @@ import type { Batch } from "./turn";
 
 export const ADMISSION = { caps: { recruit: 40, joiner: 60 }, invitesPerPerson: 5 } as const;
 
-/** `beta` admits by invite code and consent; `open` admits everyone at first contact. */
+/** `beta` admits by invite code and consent; `open` admits anyone who consents. */
 export const ADMISSION_MODES = ["beta", "open"] as const;
 export type AdmissionMode = (typeof ADMISSION_MODES)[number];
 
 export type InviteCheck = { readonly kind: "ok"; readonly cohort: Cohort; readonly half: Half | null } | { readonly kind: "bad_code" | "used" | "full" };
 export type SeatAnswer = { readonly kind: "granted"; readonly seat: Seat } | { readonly kind: "bad_code" | "used" | "full" };
+
+export const STAFF: Seat = { cohort: "staff", half: null, code: null, inviter: null };
 
 export const ADMISSION_CHANGES = ["waitlisted", "consenting", "consented", "removed"] as const;
 export type AdmissionChange = (typeof ADMISSION_CHANGES)[number];
@@ -33,6 +35,8 @@ export type AdmissionCommit = {
   /** Logged; null when nothing a gate reads changed, such as a daily reminder to send a code. */
   readonly change: AdmissionChange | null;
   readonly ensureCheckin: NewWakeup | null;
+  /** Set when this commit admits the person while billing is on: their trial starts at admission. */
+  readonly trialEndsAt: EpochMs | null;
 };
 
 export type AdmissionView = {
@@ -43,6 +47,8 @@ export type AdmissionView = {
   readonly admission: Admission;
   readonly batch: Batch;
   readonly privacyUrl: string;
+  /** When a trial that started now would end; null while billing is off. */
+  readonly trialEndsAt: EpochMs | null;
 };
 
 export type AdmissionAnswer = { readonly kind: "checked"; readonly check: InviteCheck } | { readonly kind: "claimed"; readonly seat: SeatAnswer };
@@ -57,27 +63,41 @@ export type AdmissionStep =
  * A code is checked when it is presented and the seat is claimed when the person consents. Anyone not admitted
  * is told to send a code at most once per local day.
  */
+const say = (next: Admission, change: AdmissionChange | null, text: string | null, consent = false): AdmissionStep => ({
+  kind: "commit",
+  commit: { next, change, ensureCheckin: null, trialEndsAt: null },
+  text,
+  consent,
+});
+
+const admit = (view: AdmissionView, seat: Seat): AdmissionStep => ({
+  kind: "commit",
+  commit: {
+    next: { state: "admitted", seat, at: view.now },
+    change: "consented",
+    ensureCheckin: checkinWakeup(view.now, view.tz, view.checkinLocal),
+    trialEndsAt: view.trialEndsAt,
+  },
+  text: NOTICES[view.language].welcome,
+  consent: false,
+});
+
+const consentedIn = (batch: Batch) => batch.items.some((i) => i.event.kind === "choice" && i.event.choice.kind === "consent");
+
 export function planAdmission(view: AdmissionView, answer: AdmissionAnswer | null): AdmissionStep {
   const a = view.admission;
   const t = NOTICES[view.language];
   const today = localDate(view.now, view.tz);
-  const say = (next: Admission, change: AdmissionChange | null, text: string | null, consent = false, ensureCheckin: NewWakeup | null = null): AdmissionStep => ({
-    kind: "commit",
-    commit: { next, change, ensureCheckin },
-    text,
-    consent,
-  });
   const waitlist = (reason: WaitlistReason) => say({ state: "waitlisted", reason, toldOn: today }, "waitlisted", t.waitlist[reason]);
 
   const first = view.batch.items[0].event;
   if (first.kind === "wakeup" || first.kind === "checkin" || a.state === "admitted") return say(a, null, null);
   if (a.state === "removed") return say(a, null, t.removed);
-  const consented = view.batch.items.some((i) => i.event.kind === "choice" && i.event.choice.kind === "consent");
-  if (a.state === "consenting" && consented) {
+  if (a.state === "consenting" && consentedIn(view.batch)) {
     if (answer?.kind !== "claimed") return { kind: "claim", code: a.code };
     const seat = answer.seat;
     if (seat.kind !== "granted") return waitlist(seat.kind);
-    return say({ state: "admitted", seat: seat.seat, at: view.now }, "consented", t.welcome, false, checkinWakeup(view.now, view.tz, view.checkinLocal));
+    return admit(view, seat.seat);
   }
 
   const code = codeIn(view.batch);
@@ -98,4 +118,18 @@ function codeIn(batch: Batch): InviteCode | null {
     if (e.kind === "message") code = parseInviteCode(/^\/join\s+(\S+)$/i.exec(e.text.trim())?.[1] ?? e.text) ?? code;
   }
   return code;
+}
+
+/**
+ * Open admission needs no code, so a person who hasn't consented stays a stranger and gets the consent message
+ * with each message until they tap, as a beta person does while consenting. Nothing they wrote before is kept.
+ */
+export function planOpenAdmission(view: AdmissionView): AdmissionStep {
+  const a = view.admission;
+  const t = NOTICES[view.language];
+  const first = view.batch.items[0].event;
+  if (first.kind === "wakeup" || first.kind === "checkin" || a.state === "admitted") return say(a, null, null);
+  if (a.state === "removed") return say(a, null, t.removed);
+  if (consentedIn(view.batch)) return admit(view, STAFF);
+  return say(a, null, t.privacy(view.privacyUrl), true);
 }

@@ -105,7 +105,7 @@ Prices live in Stripe, never in code. `app/src/billing/` holds the plan rules (`
 
 | Plan | Box | Own API key | Our quota | Who |
 |---|---|---|---|---|
-| `trial` | yes | yes | no | everyone for `TRIAL_DAYS` (default 14) from their first message with `BILLING=on`, people from the beta included |
+| `trial` | yes | yes | no | everyone for `TRIAL_DAYS` (default 14) from their admission, or from their first message with `BILLING=on` if admitted before, people from the beta included |
 | `standard` | yes | yes | no | a person with their own Standard subscription |
 | `plus` | yes | yes | no | the owner of a Plus subscription, and each person holding one of its seats |
 | `included` | no | yes | `INCLUDED_CAP_USD` a month, only with `INCLUDED=on` and no access of their own | a person with their own included subscription |
@@ -135,7 +135,7 @@ A seat holds a place while its subscription is a paying Plus and fewer than `sea
 
 Each person's DO keeps a projection, `plan: { trialEndsAt | null, own: {subscription, plan} | null, seat: {subscription, owner} | null }`. With `BILLING=on`, every model turn reads the person's standing from D1 in one query and computes the plan from it (`planOf`), so a lost refresh or a past_due running out changes the next turn. The projection stands in only when D1 can't be read, and drives the box decision, compaction and the snapshot. The trial ending needs no timer either way.
 
-`trialEndsAt` is written on the person's first message with `BILLING=on`, and never while billing is off. The DO migration that made it nullable cleared every trial end the beta wrote, so people from the beta start a full trial when billing turns on.
+`trialEndsAt` is written when the person is admitted with `BILLING=on` (the consent tap under open sign-up), or on the first message with `BILLING=on` of someone admitted earlier, and never while billing is off. The DO migration that made it nullable cleared every trial end the beta wrote, so people from the beta start a full trial when billing turns on.
 
 ### Commands
 

@@ -128,7 +128,8 @@ price plus the provider's fee from our price cards, not an invoice.
      Enrolled people get joiner codes with `/invite`. It can't run with `BILLING=on`.
      Send `/feedback <text>` to register a feedback event. The ledger keeps the event and cohort. The service discards the message and operator alerts still cover LINE quota.
      Send `/memory` to see the saved notes, reminders, tasks and personal settings for this chat, even without connected AI. Send `/memory next` for another page when prompted.
-   - `ADMISSION=open`: everyone is admitted at first contact, and `/invite` and `/join` are billing's.
+   - `ADMISSION=open`: no code is needed. A person on LINE or Telegram gets the consent message and is admitted when they tap
+     the button, and `/invite` and `/join` are billing's.
 
    Plans and payments (`/plan`, `/invite`, `/join <code>`, `/leave`, see `docs/design/BOX.md`) follow `BILLING`:
    - `BILLING=off` (the default): nobody pays, nobody lapses and no trial clock runs. `/plan` says it is
@@ -137,8 +138,8 @@ price plus the provider's fee from our price cards, not an invoice.
      `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`,
      `STRIPE_PORTAL_CONFIGURATION` and `PUBLIC_URL` (the Worker's https URL; Checkout and the billing
      portal send people back to `PUBLIC_URL/billing/done`). Optional vars: `TRIAL_DAYS` (default 14,
-     counted from a person's first message with billing on, so people from the beta get a full trial
-     too), `PLUS_SEATS` (default 3 people, the owner included) and `PLUS_MAX_SEATS` (default 6). `/plan`
+     counted from when a person consents and is admitted, or, for someone admitted before billing
+     turned on, from their first message with billing on, so people from the beta get a full trial too), `PLUS_SEATS` (default 3 people, the owner included) and `PLUS_MAX_SEATS` (default 6). `/plan`
      sells the included plan only while `INCLUDED=on`.
 
    Create the Stripe side with a test key first. It makes the products, THB monthly prices, the customer

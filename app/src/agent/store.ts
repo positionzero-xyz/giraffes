@@ -430,14 +430,7 @@ export class AgentStore {
   ): "inserted" | "duplicate" | "stale" {
     return this.tx(() => {
       if (coveredByForget(envelope, this.forget())) return "stale";
-      if (envelope.event.kind === "message") {
-        this.sql.exec(
-          `INSERT INTO plan (one, trial_ends_at, updated_at) VALUES (1, ?, ?)
-           ON CONFLICT (one) DO UPDATE SET trial_ends_at = COALESCE(plan.trial_ends_at, excluded.trial_ends_at)`,
-          first.trialEndsAt,
-          now,
-        );
-      }
+      if (envelope.event.kind === "message" && mayspend(this.admission())) this.startTrial(first.trialEndsAt, now);
       const created = this.sql.exec(
         `INSERT OR IGNORE INTO agent (one, agent_key, channel, channel_user_id, tz, language, checkin_local, created_at)
          VALUES (1, ?, ?, ?, ?, ?, ?, ?)`,
@@ -455,7 +448,7 @@ export class AgentStore {
           now,
         );
         if (first.admit) {
-          this.writeAdmission({ next: { state: "admitted", seat: first.admit, at: now }, change: "consented", ensureCheckin: first.checkin }, now);
+          this.writeAdmission({ next: { state: "admitted", seat: first.admit, at: now }, change: "consented", ensureCheckin: first.checkin, trialEndsAt: first.trialEndsAt }, now);
         }
       }
       return this.insertInbox(envelope.key, envelope.event, envelope.receivedAt, now);
@@ -614,6 +607,16 @@ export class AgentStore {
     );
   }
 
+  /** The first trial end recorded holds; a later one never moves it. */
+  private startTrial(endsAt: EpochMs | null, now: EpochMs): void {
+    this.sql.exec(
+      `INSERT INTO plan (one, trial_ends_at, updated_at) VALUES (1, ?, ?)
+       ON CONFLICT (one) DO UPDATE SET trial_ends_at = COALESCE(plan.trial_ends_at, excluded.trial_ends_at)`,
+      endsAt,
+      now,
+    );
+  }
+
   private writeAdmission(c: AdmissionCommit, now: EpochMs): void {
     const a = c.next;
     if (a.state === "stranger") return;
@@ -632,6 +635,7 @@ export class AgentStore {
       a.state === "waitlisted" ? a.toldOn : null,
     );
     if (c.ensureCheckin) this.insertWakeup(c.ensureCheckin, "system", now);
+    if (c.trialEndsAt !== null) this.startTrial(c.trialEndsAt, now);
     if (c.change !== null) this.logAdmission(c.change, a.state === "waitlisted" ? a.reason : (seat?.cohort ?? null), now);
   }
 
@@ -654,7 +658,7 @@ export class AgentStore {
     this.tx(() => {
       this.deleteKey();
       if (this.admission().state === "removed") return;
-      this.writeAdmission({ next: { state: "removed", at: now }, change: "removed", ensureCheckin: null }, now);
+      this.writeAdmission({ next: { state: "removed", at: now }, change: "removed", ensureCheckin: null, trialEndsAt: null }, now);
       this.sql.exec("DELETE FROM key_ticket");
       const agent = this.agent()?.key;
       const unasked = this.sql

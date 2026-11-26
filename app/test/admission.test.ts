@@ -16,7 +16,7 @@ const consent: AgentEvent = { kind: "choice", choice: { kind: "consent" }, at: N
 
 function view(admission: Admission, event: AgentEvent, now: EpochMs = NOW): AdmissionView {
   const item: InboxItem = { key: "tg:1" as EventKey, event, attempts: 1, receivedAt: now };
-  return { now, tz: "Asia/Bangkok" as TimeZone, language: "en", checkinLocal: "09:00", admission, batch: { items: [item] }, privacyUrl: NOTICE_URL };
+  return { now, tz: "Asia/Bangkok" as TimeZone, language: "en", checkinLocal: "09:00", admission, batch: { items: [item] }, privacyUrl: NOTICE_URL, trialEndsAt: null };
 }
 
 const stranger: Admission = { state: "stranger" };
@@ -34,7 +34,7 @@ describe("a code is checked when it is presented", () => {
     const step = planAdmission(view(stranger, follow(code)), { kind: "checked", check: { kind: "ok", cohort: "recruit", half: "intl_telegram" } });
     expect(step).toEqual({
       kind: "commit",
-      commit: { next: { state: "consenting", code, at: NOW }, change: "consenting", ensureCheckin: null },
+      commit: { next: { state: "consenting", code, at: NOW }, change: "consenting", ensureCheckin: null, trialEndsAt: null },
       text: t.privacy(NOTICE_URL),
       consent: true,
     });
@@ -45,7 +45,7 @@ describe("a code is checked when it is presented", () => {
       const step = planAdmission(view(stranger, message(code)), { kind: "checked", check: { kind } });
       expect(step, kind).toEqual({
         kind: "commit",
-        commit: { next: { state: "waitlisted", reason: kind, toldOn: TODAY }, change: "waitlisted", ensureCheckin: null },
+        commit: { next: { state: "waitlisted", reason: kind, toldOn: TODAY }, change: "waitlisted", ensureCheckin: null, trialEndsAt: null },
         text: t.waitlist[kind],
         consent: false,
       });
@@ -58,16 +58,16 @@ describe("without a code", () => {
     const first = planAdmission(view(stranger, follow()), null);
     expect(first).toEqual({
       kind: "commit",
-      commit: { next: { state: "waitlisted", reason: "no_code", toldOn: TODAY }, change: "waitlisted", ensureCheckin: null },
+      commit: { next: { state: "waitlisted", reason: "no_code", toldOn: TODAY }, change: "waitlisted", ensureCheckin: null, trialEndsAt: null },
       text: t.waitlist.no_code,
       consent: false,
     });
     const told: Admission = { state: "waitlisted", reason: "no_code", toldOn: TODAY };
-    expect(planAdmission(view(told, message("hello?")), null)).toEqual({ kind: "commit", commit: { next: told, change: null, ensureCheckin: null }, text: null, consent: false });
+    expect(planAdmission(view(told, message("hello?")), null)).toEqual({ kind: "commit", commit: { next: told, change: null, ensureCheckin: null, trialEndsAt: null }, text: null, consent: false });
     const tomorrow = (NOW + 24 * 60 * 60 * 1000) as EpochMs;
     expect(planAdmission(view(told, message("hello?"), tomorrow), null)).toEqual({
       kind: "commit",
-      commit: { next: { ...told, toldOn: "2099-11-05" }, change: null, ensureCheckin: null },
+      commit: { next: { ...told, toldOn: "2099-11-05" }, change: null, ensureCheckin: null, trialEndsAt: null },
       text: t.waitlist.no_code,
       consent: false,
     });
@@ -90,6 +90,7 @@ describe("the seat is claimed at consent", () => {
         next: { state: "admitted", seat, at: NOW },
         change: "consented",
         ensureCheckin: { key: "daily-checkin", kind: "checkin", origin: "system", note: "Daily check-in", dueAt: Date.parse("2099-11-05T09:00:00+07:00") },
+        trialEndsAt: null,
       },
       text: t.welcome,
       consent: false,
@@ -104,7 +105,7 @@ describe("the seat is claimed at consent", () => {
   test("anything else while consenting shows the privacy notice again and changes nothing", () => {
     expect(planAdmission(view(consenting, message("what is this?")), null)).toEqual({
       kind: "commit",
-      commit: { next: consenting, change: null, ensureCheckin: null },
+      commit: { next: consenting, change: null, ensureCheckin: null, trialEndsAt: null },
       text: t.privacy(NOTICE_URL),
       consent: true,
     });
@@ -115,7 +116,7 @@ test("a removed person gets a fixed reply and stays removed", () => {
   const removed: Admission = { state: "removed", at: NOW };
   expect(planAdmission(view(removed, message(code)), null)).toEqual({
     kind: "commit",
-    commit: { next: removed, change: null, ensureCheckin: null },
+    commit: { next: removed, change: null, ensureCheckin: null, trialEndsAt: null },
     text: t.removed,
     consent: false,
   });

@@ -249,7 +249,7 @@ const en: Notices = {
   acceptButton: "Accept plan",
   consentButton: "I'm 18+ and agree",
   privacy:
-    "Before we start: I keep our chat and the notes I make about you so I can help you over time. Nobody else reads them, and you can ask me to forget something at any time. You need to be 18 or over. Tap the button to agree.",
+    "Before we start: I keep our chat and the notes I make about you so I can help you over time. Nobody else reads them. You can ask me to forget a note, or send /erase to stop and delete your account. You need to be 18 or over. Tap the button to agree.",
   welcome: "You're in. Tell me what you'd like a hand with. I may send a morning check-in when I have AI access and something useful to share.",
   waitlist: {
     no_code: "Hi! I'm in a small invite-only beta for now. If you have an invite code, send it here.",
@@ -444,7 +444,7 @@ const th: Notices = {
   acceptButton: "ยอมรับแผนนี้",
   consentButton: "อายุ 18+ และยอมรับ",
   privacy:
-    "ก่อนเริ่มนะคะ: เราจะเก็บแชตและโน้ตเกี่ยวกับคุณไว้เพื่อช่วยคุณได้ต่อเนื่อง ไม่มีใครอื่นอ่าน และขอให้ลืมเรื่องไหนก็ได้ทุกเมื่อ ต้องมีอายุ 18 ปีขึ้นไป กดปุ่มด้านล่างเพื่อยอมรับค่ะ",
+    "ก่อนเริ่มนะคะ: เราจะเก็บแชตและโน้ตเกี่ยวกับคุณไว้เพื่อช่วยคุณได้ต่อเนื่อง ไม่มีใครอื่นอ่าน ขอให้ลืมโน้ตเรื่องไหนก็ได้ หรือส่ง /erase เพื่อหยุดและลบข้อมูลบัญชีของคุณ ต้องมีอายุ 18 ปีขึ้นไป กดปุ่มด้านล่างเพื่อยอมรับค่ะ",
   welcome: "เข้าร่วมรุ่นทดลองแล้วค่ะ อยากให้ช่วยเรื่องไหนบอกได้เลย ถ้าใช้ AI ได้และมีเรื่องที่น่าบอก อาจทักไปตอนเช้านะคะ",
   waitlist: {
     no_code: "สวัสดีค่ะ ตอนนี้เปิดให้ใช้เฉพาะคนที่ได้รับเชิญก่อน ถ้ามีรหัสเชิญ ส่งมาที่นี่ได้เลยค่ะ",

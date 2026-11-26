@@ -7,6 +7,7 @@ import type { BoxHostKind, FlyDiskRetirement } from "../box/host";
 export const ACCOUNT_CHALLENGE_MS = 15 * 60_000;
 export const ACCOUNT_RETRY_MS = 60_000;
 export const ACCOUNT_RECEIPT_MS = 24 * 60 * 60_000;
+export const ERASE_DIAGNOSTIC_MS = 24 * 60 * 60_000;
 export const ERASE_CHALLENGE = "account:erase-confirmation";
 export const START_CHALLENGE = "account:start-confirmation";
 export const ERASE_JOB = "account:erase";
@@ -47,6 +48,8 @@ type ErasureIdentity = {
   readonly language: Language;
   readonly epoch: ForgetEpoch;
   readonly reply?: ReplyHandle;
+  readonly startedAt?: EpochMs;
+  readonly diagnosedAt?: EpochMs;
 };
 
 export type Erasure = ErasureIdentity & (

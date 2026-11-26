@@ -3,7 +3,7 @@ import { expect, test, vi } from "vitest";
 import type { Agent } from "../src/agent/agent";
 import { boxClient } from "../src/box/client";
 import type { BoxName } from "../src/box/names";
-import type { CheckoutId } from "../src/billing/stripe";
+import type { CheckoutId, StripeReply } from "../src/billing/stripe";
 import { parseInviteCode, personAgentKey, type EpochMs } from "../src/domain";
 import { type SubscriptionId } from "../src/billing/plan";
 import { d1Ledger } from "../src/ledger/ledger";
@@ -16,6 +16,11 @@ test("a confirmed account erase clears private state and requires a fresh decisi
   await c.say("A private message.");
   expect(await c.received()).toEqual(["A private reply."]);
   await runInDurableObject(stub, (agent) => agent.withDeps({ firstContactConsent: true }));
+  // A later release can add a session table beside box_session; erasure discovers tables, not names.
+  await runInDurableObject(stub, (_, state) => {
+    state.storage.sql.exec("CREATE TABLE session (id TEXT, memory TEXT)");
+    state.storage.sql.exec("INSERT INTO session VALUES ('old-session', 'private words')");
+  });
 
   await c.say("/erase");
   const confirm = c.channel.delivered.at(-1)?.button;
@@ -205,6 +210,31 @@ test("erase retains box identity while the box feature is off, counts capacity, 
   expect(await env.LEDGER.prepare("SELECT name FROM boxes WHERE name = ?").bind(name).first()).toBeNull();
 });
 
+test("a stuck box erasure reports a non-content operator diagnostic once a day", async () => {
+  const user = "erase-diagnostic";
+  const box = fakeBox({ onlyFor: user, signedIn: true });
+  const c = await devChat(user, {
+    model: null,
+    at: "2099-11-04T10:00",
+    box: { ...box.deps, host: { ...box.deps.host, kind: "static" } },
+  });
+  await c.say("/claude");
+  const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+  await runInDurableObject(stub, (agent) => agent.withDeps({ box: box.deps }));
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+  await c.say("/erase");
+  const confirm = c.channel.delivered.at(-1)?.button;
+  if (!confirm) throw new Error("missing confirmation");
+  await c.received();
+  await c.tap(confirm.data);
+  c.clock.set((c.clock.now() + 25 * 60 * 60_000) as EpochMs);
+  await c.settle();
+
+  expect(warn.mock.calls.map(([line]) => line)).toContainEqual({ code: "erase_box_host_mismatch", value: 25 });
+  warn.mockRestore();
+});
+
 test("an active static box known only to the ledger is wiped from its derived URL", async () => {
   const user = "erase-registered-box";
   const volume = "00000000-0000-4000-8000-0000000000e1";
@@ -340,6 +370,40 @@ test("erase still clears expired unpaid Stripe sessions and discloses retained r
   expect(receipt).not.toMatch(/subscriptions you owned have ended/i);
   const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
   expect(await runInDurableObject(stub, (_, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM checkout_session").one())).toEqual({ n: 0 });
+});
+
+test("a subscription 404 leaves billing pending instead of promising it ended", async () => {
+  const billing = billingOn();
+  let available = false;
+  const closeSubscription = vi.fn(async (): Promise<StripeReply<{ readonly retained: boolean }>> => available
+    ? { ok: true, value: { retained: false } }
+    : { ok: false, status: 404, detail: "subscription read 404" });
+  const c = await devChat("erase-sub-404", {
+    model: null,
+    at: "2099-11-04T10:00",
+    billing: { ...billing.deps, stripe: { ...billing.stripe, closeSubscription } },
+  });
+  await env.LEDGER.prepare("INSERT INTO billing_subscription (id, owner_key, plan, status, seats, updated_at) VALUES ('sub_404', ?, 'standard', 'active', 1, 1)")
+    .bind(c.agent).run();
+  await c.say("/erase");
+  const confirm = c.channel.delivered.at(-1)?.button;
+  if (!confirm) throw new Error("missing confirmation");
+  await c.received();
+  await c.tap(confirm.data);
+
+  expect(closeSubscription).toHaveBeenCalledWith("sub_404", c.agent);
+  expect(await c.received()).toEqual([]);
+  const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+  expect(await runInDurableObject(stub, (_, state) => state.storage.kv.get<Record<string, unknown>>("account:erase")))
+    .toMatchObject({ kind: "cleaning", billing: { kind: "pending", subscriptions: ["sub_404"] } });
+  expect(await env.LEDGER.prepare("SELECT id FROM billing_subscription WHERE owner_key = ?").bind(c.agent).first()).toBeNull();
+
+  available = true;
+  c.clock.set((c.clock.now() + 61_000) as EpochMs);
+  await c.settle();
+  const receipt = c.channel.delivered.at(-1)?.text;
+  expect(receipt).toMatch(/deleted your live Giraffe data/);
+  expect(receipt).toMatch(/subscriptions you owned have ended/i);
 });
 
 test("a permanent Stripe metadata refusal is disclosed once instead of blocking erasure", async () => {

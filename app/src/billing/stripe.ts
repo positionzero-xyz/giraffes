@@ -219,10 +219,9 @@ export function stripeApi(cfg: StripeConfig, rules: PlanRules, fetch: Fetch): St
     async closeSubscription(id, owner) {
       const path = `/subscriptions/${encodeURIComponent(id)}`;
       const r = await call("read subscription for erasure", "GET", path);
-      if (!r.ok) {
-        if (r.status === 404) return { ok: true, value: { retained: false } };
-        return r;
-      }
+      // Stripe keeps canceled subscriptions readable. A 404 here means the key, mode or account
+      // changed, so the caller holds and retries instead of telling the person their plan ended.
+      if (!r.ok) return r;
       const subscription = ErasingSubscription.safeParse(r.value);
       if (!subscription.success || subscription.data.id !== id || (subscription.data.metadata.agent_key && subscription.data.metadata.agent_key !== owner)) {
         return { ok: false, status: 200, detail: "subscription identity unverified" };

@@ -12,8 +12,11 @@ export type HostResult = { readonly ok: true } | HostFailure;
 export const HOST_OK: HostResult = { ok: true };
 
 export type FlyDiskRetirement = {
-  readonly disk: string;
-  readonly machine: string;
+  /** The mounted disk whose account wipe binds the proof; null when no single mounted disk can be proven. */
+  readonly disk: string | null;
+  readonly machine: string | null;
+  /** Every live volume the app owns, so retirement destroys older or unattached disks too. */
+  readonly disks: readonly string[];
 };
 
 export interface FlyBoxRetirement {

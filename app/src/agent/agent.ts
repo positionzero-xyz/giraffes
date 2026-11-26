@@ -1,4 +1,4 @@
-import { diagnostic, type DrainPhase } from "../diagnostics";
+import { diagnostic, type Diagnostic, type DrainPhase } from "../diagnostics";
 import { DurableObject } from "cloudflare:workers";
 import { draftKey, issueTicket, redactSecrets, seal, type KeyFields } from "../access/key";
 import {
@@ -87,7 +87,7 @@ import { ADMISSION, inviteIn, planAdmission, type AdmissionAnswer, type Admissio
 import { COMPACTION, compactionCommit, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import {
-  ACCOUNT_COPY, ACCOUNT_RECEIPT_MS, ACCOUNT_RETRY_MS, ERASE_CHALLENGE, ERASE_JOB, START_CHALLENGE,
+  ACCOUNT_COPY, ACCOUNT_RECEIPT_MS, ACCOUNT_RETRY_MS, ERASE_CHALLENGE, ERASE_DIAGNOSTIC_MS, ERASE_JOB, START_CHALLENGE,
   digestChallenge, newAccountChallenge, type AccountChallenge, type EraseBilling, type EraseBox,
   type EraseBoxReference, type EraseBoxTarget, type Erasure, type StartChallenge,
 } from "./account";
@@ -498,7 +498,10 @@ export class Agent extends DurableObject<Env> {
       if (current?.kind === "starting") {
         const stored = this.#store.box();
         const box = stored && { name: stored.name, host: stored.host, url: stored.url, incarnation: this.#store.boxVolume() };
-        current = { ...current, kind: "preparing", box, checkouts: this.#store.checkoutIds() };
+        current = {
+          ...current, kind: "preparing", box, checkouts: this.#store.checkoutIds(),
+          startedAt: this.#deps.clock.now(), diagnosedAt: this.#deps.clock.now(),
+        };
         this.#store.clearForErasure(current);
         this.#billingAlertSettlement = null;
         this.#billingAlertStorageRetryAt = 0;
@@ -537,13 +540,19 @@ export class Agent extends DurableObject<Env> {
       }
       while (current.billing.kind === "pending") {
         const billing: EraseBilling | null = await this.#eraseBillingStep(current.person, current.billing).catch(() => null);
-        if (billing === null) break;
+        if (billing === null) {
+          current = this.#noteEraseHold(current, "erase_billing_hold");
+          this.ctx.storage.kv.put(ERASE_JOB, current);
+          break;
+        }
         current = { ...current, billing };
         this.ctx.storage.kv.put(ERASE_JOB, current);
       }
       while (current.box.kind !== "none" && current.box.kind !== "wiped" && current.box.kind !== "reclaimed") {
         const box = await this.#eraseAccountBox(current);
         if (box === current.box) {
+          current = this.#noteEraseHold(current, this.#eraseBoxHoldCode(current));
+          this.ctx.storage.kv.put(ERASE_JOB, current);
           await this.#retryErasure(box.kind === "unverified" && current.billing.kind === "done" ? ACCOUNT_RECEIPT_MS : ACCOUNT_RETRY_MS);
           return;
         }
@@ -552,6 +561,8 @@ export class Agent extends DurableObject<Env> {
       }
       const { box, boxLedgerKey, billing, id, person, to, language, epoch, reply } = current;
       if (billing.kind === "pending") {
+        current = this.#noteEraseHold(current, "erase_billing_hold");
+        this.ctx.storage.kv.put(ERASE_JOB, current);
         await this.#retryErasure();
         return;
       }
@@ -567,8 +578,29 @@ export class Agent extends DurableObject<Env> {
       this.ctx.storage.kv.put(ERASE_JOB, receipt);
       await this.#sendErasureReceipt(receipt);
     } catch {
+      const held = this.#erasure();
+      if (held?.kind === "cleaning") this.ctx.storage.kv.put(ERASE_JOB, this.#noteEraseHold(held, "erase_failed"));
       await this.#retryErasure();
     }
+  }
+
+  /** At most one operator diagnostic a day per stuck erasure; the value is its age in hours. */
+  #noteEraseHold(job: Extract<Erasure, { kind: "cleaning" }>, code: Diagnostic): Extract<Erasure, { kind: "cleaning" }> {
+    const now = this.#deps.clock.now();
+    const startedAt = job.startedAt ?? now;
+    const last = job.diagnosedAt ?? startedAt;
+    if (now - last < ERASE_DIAGNOSTIC_MS) return job;
+    diagnostic(code, Math.floor((now - startedAt) / (60 * 60_000)));
+    return { ...job, startedAt, diagnosedAt: now };
+  }
+
+  #eraseBoxHoldCode(job: Extract<Erasure, { kind: "cleaning" }>): Diagnostic {
+    const step = job.box;
+    const deps = this.#deps.box;
+    if (!("box" in step)) return "erase_box_hold";
+    if (!deps || !boxServes(deps, job.person)) return "erase_box_unverified";
+    if (deps.host.kind !== step.box.host) return "erase_box_host_mismatch";
+    return step.kind === "unverified" ? "erase_box_unverified" : "erase_box_hold";
   }
 
   async eraseInviterReference(inviter: AgentKey): Promise<void> {
@@ -638,7 +670,9 @@ export class Agent extends DurableObject<Env> {
         const found = await fly?.retirementTarget(box.name);
         if (found && !found.ok && found.missing) return { kind: "reclaimed", host: "fly" };
         if (!found?.ok) return step;
-        return { kind: "wipe-fly", box, target: found.target };
+        return found.target.disk === null
+          ? { kind: "remove-volume", box, target: found.target }
+          : { kind: "wipe-fly", box, target: found.target };
       }
       case "wipe-static":
       case "wipe-fly": {
@@ -653,10 +687,16 @@ export class Agent extends DurableObject<Env> {
         if (wipe.kind !== "erased" || wipe.scope !== "account" || wipe.box !== incarnation || wipe.floor < job.epoch) return step;
         return step.kind === "wipe-fly" ? { kind: "remove-volume", box, target: step.target } : { kind: "wiped", host: "static" };
       }
-      case "remove-volume":
-        return (await fly?.retireWipedDisk(box.name, step.target))?.ok ? { ...step, kind: "remove-app" } : step;
-      case "remove-app":
-        return (await fly?.removeRetiredApp(box.name))?.ok ? { kind: "wiped", host: "fly" } : step;
+      case "remove-volume": {
+        const retired = await fly?.retireWipedDisk(box.name, step.target);
+        if (retired?.ok) return { ...step, kind: "remove-app" };
+        return retired && !retired.ok && retired.missing ? { kind: "locate", box } : step;
+      }
+      case "remove-app": {
+        const removed = await fly?.removeRetiredApp(box.name);
+        if (removed?.ok) return { kind: "wiped", host: "fly" };
+        return removed && !removed.ok && removed.missing ? { kind: "locate", box } : step;
+      }
     }
   }
 

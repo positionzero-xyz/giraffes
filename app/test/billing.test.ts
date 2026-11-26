@@ -185,6 +185,21 @@ describe("stripe boundary", () => {
     expect(metadata).toEqual({});
   });
 
+  test("erasure holds when a subscription read is 404 instead of claiming it ended", async () => {
+    const owner = agent("erase-subscription-404");
+    const subscription = "sub_404" as SubscriptionId;
+    let calls = 0;
+    const api = stripeApi(cfg, rules, async (url) => {
+      calls++;
+      expect(new URL(url).pathname).toBe(`/v1/subscriptions/${subscription}`);
+      return Response.json({ error: { type: "invalid_request_error", code: "resource_missing" } }, { status: 404 });
+    });
+
+    const closed = await api.closeSubscription(subscription, owner);
+    expect(closed).toMatchObject({ ok: false, status: 404 });
+    expect(calls).toBe(1);
+  });
+
   test("erasure does not expire a terminal checkout and reports a permanent metadata refusal", async () => {
     const owner = agent("erase-stripe-refusal");
     const checkout = "cs_refusal" as CheckoutId;

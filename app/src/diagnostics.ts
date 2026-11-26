@@ -17,7 +17,7 @@ type Diagnostic = DrainPhase
   | "line_quota_unavailable"
   | "operator_alert_failed"
   | "operator_alert_unconfirmed"
-  | "operator_alert_retries_exhausted"
+  | "operator_alert_recipient_gone"
   | "request_failed"
   | "stripe_checkout_expiry_failed"
   | "stripe_checkout_failed"

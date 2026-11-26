@@ -294,6 +294,10 @@ type PlanCols = {
 };
 
 export type NoteMessage = { readonly texts: readonly [string, ...string[]]; readonly note: string };
+export type BillingAlertSettlement = {
+  readonly subscriptionIds: string;
+  readonly text: string | undefined;
+} & ({ readonly kind: "retry"; readonly delayMs: number } | { readonly kind: "sent" | "gone" });
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEDUPE_WINDOW_MS = 14 * DAY_MS;
@@ -1173,10 +1177,12 @@ export class AgentStore {
     this.sql.exec("UPDATE billing_alert SET ready_at = ?, attempts = attempts + 1 WHERE subscription_ids = ?", readyAt, ids);
   }
 
-  finishBillingAlertAttempt(ids: string, readyAt: EpochMs | null, message: NoteMessage | null, now: EpochMs): void {
+  finishBillingAlertAttempt(settlement: BillingAlertSettlement, now: EpochMs): void {
     this.tx(() => {
-      if (message && this.agent()) this.insertMessage(eventKey.billing("duplicate"), message, now);
-      this.sql.exec("UPDATE billing_alert SET ready_at = ?, notified = 1 WHERE subscription_ids = ?", readyAt, ids);
+      const { text, subscriptionIds, kind } = settlement;
+      if (text && this.agent()) this.insertMessage(eventKey.billing("duplicate"), { texts: [text], note: text }, now);
+      this.sql.exec("UPDATE billing_alert SET ready_at = ?, notified = max(notified, ?), closed_as = ? WHERE subscription_ids = ?",
+        kind === "retry" ? now + settlement.delayMs : null, text ? 1 : 0, kind === "retry" ? null : kind, subscriptionIds);
     });
   }
 

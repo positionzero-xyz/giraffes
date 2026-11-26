@@ -655,8 +655,11 @@ describe("checkout and the portal", () => {
     const stub = env.AGENT.get(env.AGENT.idFromName("billing-alert-upgrade"));
     await runInDurableObject(stub, (_, { storage }) => {
       const beforeAttempts = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE billing_alert")) + 1;
+      storage.sql.exec("DROP TABLE billing_alert");
+      storage.sql.exec(`CREATE TABLE billing_alert (
+        subscription_ids TEXT PRIMARY KEY, delivery_id TEXT NOT NULL, ready_at INTEGER, notified INTEGER NOT NULL DEFAULT 0
+      )`);
       storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, ready_at) VALUES ('sub_a sub_b', 'existing-id', 9000)");
-      storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN attempts");
       storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeAttempts));
       migrate(storage);
       expect(storage.sql.exec("SELECT delivery_id, ready_at, attempts FROM billing_alert").toArray()).toEqual([
@@ -693,6 +696,38 @@ describe("checkout and the portal", () => {
     await runInDurableObject(stub, (_, { storage }) => { storage.sql.exec("DROP TRIGGER fail_billing_receipt"); });
     await c.advanceTo("2099-11-04T10:10");
     await stripeChange(kit, { ...extra, id: "evt_receipt_later" });
+    await c.settle();
+    expect(operator.delivered).toHaveLength(1);
+    expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+  });
+
+  test("a failed receipt delays both the first retry notice and the delivery deadline it states", async () => {
+    const kit = billingOn();
+    const c = await devChat("retry-receipt", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    const operator = scriptedChannel();
+    const deliver = vi.spyOn(operator, "deliver").mockResolvedValueOnce({ kind: "failed", detail: "fake refusal" });
+    await runInDurableObject(stub, (agent, { storage }) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+      storage.sql.exec(`CREATE TRIGGER fail_retry_receipt BEFORE UPDATE ON billing_alert
+        WHEN NEW.notified = 1 BEGIN SELECT RAISE(ABORT, 'receipt write unavailable'); END`);
+    });
+    await c.say("/plan");
+    await pay(kit, c, "retry-receipt", "standard");
+    await c.received();
+    await stripeChange(kit, { user: "retry-receipt", sub: "sub_retry_receipt_extra", plan: "included", status: "active" });
+    await c.settle();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(await c.received()).toEqual([]);
+
+    await runInDurableObject(stub, (_, { storage }) => { storage.sql.exec("DROP TRIGGER fail_retry_receipt"); });
+    const receiptTime = (c.clock.now() + 30_000) as EpochMs;
+    c.clock.set(receiptTime);
+    await c.settle();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(await c.received()).toEqual([expect.stringContaining("scheduled another attempt in 300 seconds")]);
+    expect(await runInDurableObject(stub, (_, { storage }) => storage.getAlarm())).toBe(receiptTime + 300_000);
+    c.clock.set((receiptTime + 300_000) as EpochMs);
     await c.settle();
     expect(operator.delivered).toHaveLength(1);
     expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);

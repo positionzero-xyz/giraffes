@@ -86,6 +86,7 @@ import type { Claim, ProviderOrder } from "./forget";
 import { migrate } from "./schema";
 import {
   AgentStore,
+  type BillingAlertSettlement,
   globalTaskId,
   type AgentRow,
   type NoteMessage,
@@ -120,8 +121,8 @@ const NO_COST = 0 as MicroUsd;
 const BOX_STEPS_PER_DRAIN = 3;
 const KEY_TICKET_MS = 15 * 60_000;
 const KEY_LINK_NOTE = "<key link>";
-const MAX_BILLING_ALERT_ATTEMPTS = 3;
 const BILLING_ALERT_REFUSED_MS = 300_000;
+const BILLING_ALERT_MAX_BACKOFF_MS = 3_600_000;
 
 export type Clock = { now(): EpochMs };
 
@@ -210,7 +211,7 @@ export class Agent extends DurableObject<Env> {
   // Each event re-reads the subscription from Stripe; handling them one at a time keeps a slower, older read
   // from landing after a newer one. Like #drain, it lives and dies with this instance.
   #billing: Promise<unknown> = Promise.resolve();
-  #billingAlertSettlement: Parameters<AgentStore["finishBillingAlertAttempt"]> | null = null;
+  #billingAlertSettlement: BillingAlertSettlement | null = null;
   #billingAlertStorageRetryAt = 0;
   /** In memory on purpose: losing it on a restart costs one more try of a box that may still be wedged. */
   #skipBoxUntil = 0;
@@ -300,7 +301,7 @@ export class Agent extends DurableObject<Env> {
     try {
       this.#billingAlertSettlement ??= await this.#attemptBillingAlert(operatorChat);
       if (this.#billingAlertSettlement === null) return;
-      this.#store.finishBillingAlertAttempt(...this.#billingAlertSettlement);
+      this.#store.finishBillingAlertAttempt(this.#billingAlertSettlement, clock.now());
       this.#billingAlertSettlement = null;
     } catch {
       this.#billingAlertStorageRetryAt = clock.now() + CHANNEL_RETRY_MS;
@@ -308,43 +309,40 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
-  async #attemptBillingAlert(to: OperatorChat): Promise<Parameters<AgentStore["finishBillingAlertAttempt"]> | null> {
+  async #attemptBillingAlert(to: OperatorChat): Promise<BillingAlertSettlement | null> {
     const { channels, clock } = this.#deps;
     const alert = this.#store.nextBillingAlert();
     const now = clock.now();
     if (alert === null || alert.ready_at > now) return null;
     const person = this.#store.agent();
-    const notices = person && alert.notified === 0 ? NOTICES[person.language] : null;
-    if (alert.attempts >= MAX_BILLING_ALERT_ATTEMPTS) {
-      diagnostic("operator_alert_retries_exhausted");
-      const text = notices?.duplicateAlertStopped;
-      return [alert.subscription_ids, null, text ? { texts: [text], note: text } : null, now];
-    }
-
-    this.#store.startBillingAlertAttempt(alert.subscription_ids, (now + CHANNEL_RETRY_MS) as EpochMs);
+    const notices = person ? NOTICES[person.language] : null;
+    const backoffMs = Math.min(BILLING_ALERT_MAX_BACKOFF_MS, CHANNEL_RETRY_MS * 2 ** alert.attempts);
+    this.#store.startBillingAlertAttempt(alert.subscription_ids, (now + backoffMs) as EpochMs);
     const result = await channels[to.channel].deliver({
       id: alert.delivery_id,
       to,
       texts: [`Duplicate paid plans\nSubscriptions: ${alert.subscription_ids}\nReview the subscriptions and any extra charges.`],
       intent: "requested",
     }, now).catch(() => ({ kind: "in_doubt", afterMs: CHANNEL_RETRY_MS } as const));
-    const after = clock.now();
-    const attemptsLeft = MAX_BILLING_ALERT_ATTEMPTS - alert.attempts - 1;
-    let retryAt: EpochMs | null = null;
-    let text = notices?.duplicateAlerted;
-    if (result.kind !== "sent") {
-      const outcome = result.kind === "in_doubt" || result.kind === "retry" ? result.kind : "refused";
-      diagnostic(outcome === "in_doubt" ? "operator_alert_unconfirmed" : "operator_alert_failed");
-      const waitMs = Math.max(CHANNEL_RETRY_MS, "afterMs" in result ? result.afterMs : BILLING_ALERT_REFUSED_MS);
-      if (attemptsLeft === 0) {
-        diagnostic("operator_alert_retries_exhausted");
-        text = notices?.duplicateAlertStopped;
-      } else {
-        retryAt = (after + waitMs) as EpochMs;
-        text = notices?.duplicateRetrying(outcome, Math.ceil(waitMs / 1000), attemptsLeft);
-      }
+    const settlement = { subscriptionIds: alert.subscription_ids };
+    if (result.kind === "sent") return { ...settlement, kind: "sent", text: notices?.duplicateAlerted };
+    if (result.kind === "fenced") {
+      return { ...settlement, kind: "retry", delayMs: backoffMs, text: undefined };
     }
-    return [alert.subscription_ids, retryAt, text ? { texts: [text], note: text } : null, after];
+    if (result.kind === "recipient_gone") {
+      diagnostic("operator_alert_recipient_gone");
+      return { ...settlement, kind: "gone", text: notices?.duplicateAlertGone };
+    }
+
+    const outcome = result.kind === "failed" ? "refused" : result.kind;
+    diagnostic(outcome === "in_doubt" ? "operator_alert_unconfirmed" : "operator_alert_failed");
+    const waitMs = Math.max(backoffMs, "afterMs" in result ? result.afterMs : BILLING_ALERT_REFUSED_MS);
+    return {
+      ...settlement,
+      kind: "retry",
+      delayMs: waitMs,
+      text: alert.notified === 0 ? notices?.duplicateRetrying(outcome, Math.ceil(waitMs / 1000)) : undefined,
+    };
   }
 
   #billingAlertAt(): EpochMs | null {

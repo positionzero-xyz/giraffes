@@ -281,9 +281,12 @@ describe("health and parse", () => {
       body: JSON.stringify(turn("hang")),
       signal: hangUp.signal,
     }).catch(() => null);
-    await new Promise((r) => setTimeout(r, 300));
-    hangUp.abort();
-    await abandoned;
+    try {
+      await waitFor(() => events().some((event) => event.startsWith("turn start")));
+    } finally {
+      hangUp.abort();
+      await abandoned;
+    }
 
     const started = Date.now();
     assert.equal((await call("POST", "/parse", { auth: bearer, body: turn("next") })).status, 200);

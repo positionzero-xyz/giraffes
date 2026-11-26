@@ -220,7 +220,7 @@ export async function verifySignature(payload: string, header: string | null, se
 
 
 /** Which subscription an event is about and whose DO handles it; the state itself is fetched from Stripe. */
-export type BillingEvent = { readonly id: string; readonly subscription: SubscriptionId; readonly owner: AgentKey };
+export type BillingEvent = { readonly id: string; readonly subscription: SubscriptionId; readonly owner: AgentKey; readonly checkout?: CheckoutId };
 
 type ParsedEvent =
   | { readonly kind: "event"; readonly event: BillingEvent }
@@ -230,7 +230,7 @@ type ParsedEvent =
 const AGENT_KEY = new RegExp(`^p:(${CHANNEL_IDS.join("|")}):[^:]+$`);
 const Metadata = z.record(z.string(), z.string()).nullish();
 const Envelope = z.object({ id: z.string().min(1), type: z.string(), data: z.object({ object: z.unknown() }) });
-const Session = z.object({ mode: z.string(), client_reference_id: z.string().nullish(), metadata: Metadata, subscription: z.string().nullish() });
+const Session = z.object({ id: z.string().min(1).optional(), mode: z.string(), client_reference_id: z.string().nullish(), metadata: Metadata, subscription: z.string().nullish() });
 const EventSubscription = z.object({ id: z.string().min(1), metadata: Metadata });
 
 const agentKey = (raw: string | null | undefined): AgentKey | null => (raw && AGENT_KEY.test(raw) ? (raw as AgentKey) : null);
@@ -247,7 +247,8 @@ export function parseEvent(raw: unknown): ParsedEvent {
     if (s.data.mode !== "subscription" || !s.data.subscription) return { kind: "ignored", reason: "not a subscription checkout" };
     const owner = agentKey(s.data.client_reference_id ?? s.data.metadata?.agent_key);
     if (!owner) return { kind: "ignored", reason: "checkout without our agent key" };
-    return { kind: "event", event: { id, subscription: s.data.subscription as SubscriptionId, owner } };
+    const checkout = s.data.id;
+    return { kind: "event", event: { id, subscription: s.data.subscription as SubscriptionId, owner, ...(checkout ? { checkout: checkout as CheckoutId } : {}) } };
   }
 
   if (!(STRIPE_EVENT_TYPES as readonly string[]).includes(type)) return { kind: "ignored", reason: `event type ${type}` };

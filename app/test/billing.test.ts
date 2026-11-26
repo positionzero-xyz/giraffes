@@ -289,7 +289,7 @@ describe("stripe boundary", () => {
   test("an event names the subscription and the owner's agent key, and carries no state", () => {
     expect(parseEvent(checkoutEvent({ user: "ann", sub: "sub_1", plan: "plus", id: "evt_c" }))).toEqual({
       kind: "event",
-      event: { id: "evt_c", subscription: "sub_1", owner: "p:dev:ann" },
+      event: { id: "evt_c", subscription: "sub_1", owner: "p:dev:ann", checkout: "cs_0" },
     });
     expect(parseEvent(subscriptionEvent({ user: "ann", sub: "sub_1", plan: "plus", status: "canceled", id: "evt_s" }))).toEqual({
       kind: "event",

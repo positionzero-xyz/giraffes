@@ -5,6 +5,14 @@ export const personLedgerTables = [
   "safety_incident", "survey_response", "task", "task_fact", "turn_log", "unasked_message",
 ] as const;
 
+export async function revokeErasedInvites(db: D1Database, person: AgentKey): Promise<readonly AgentKey[]> {
+  const [, dependents] = await db.batch<{ agent_key: AgentKey }>([
+    db.prepare("DELETE FROM invite_code WHERE issuer = ?").bind(person),
+    db.prepare("SELECT agent_key FROM enrollment WHERE inviter = ?").bind(person),
+  ]);
+  return dependents.results.map(({ agent_key }) => agent_key);
+}
+
 export async function erasePersonLedger(db: D1Database, person: AgentKey): Promise<void> {
   const query = (sql: string): D1PreparedStatement => db.prepare(sql).bind(person);
   const owned = "SELECT id FROM billing_subscription WHERE owner_key = ?1";

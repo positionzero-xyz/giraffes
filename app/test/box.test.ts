@@ -877,13 +877,13 @@ describe("connecting a Claude plan", () => {
       lang: "en" as const,
       channel: undefined,
       ids: ["not-ready-setup", "not-ready-gone-out", "not-ready-gone-in"],
-      text: "Your Claude plan isn't ready to answer yet. Send /claude to see where it stands. If setup is still running, I'll say so. If you need to sign in, I'll send a link, and if you're already signed in, I'll confirm it's connected.",
+      text: "Your Claude plan isn't ready to answer yet. Send /claude to see where it stands. I might say setup is still running, send you a sign-in link, or confirm it's connected.",
     },
     {
       lang: "th" as const,
       channel: "line" as const,
       ids: ["U00000000000000000000000000000b01", "U00000000000000000000000000000b02", "U00000000000000000000000000000b03"],
-      text: "ตอนนี้แพ็กเกจ Claude ของคุณยังไม่พร้อมตอบค่ะ ส่ง /claude เพื่อดูสถานะได้เลยนะคะ ถ้ายังตั้งค่าอยู่จะแจ้งให้ทราบ ถ้าต้องเข้าสู่ระบบจะส่งลิงก์ให้ และถ้าเข้าสู่ระบบไว้แล้วจะยืนยันว่าเชื่อมแพ็กเกจแล้วค่ะ",
+      text: "ตอนนี้แพ็กเกจ Claude ของคุณยังไม่พร้อมตอบค่ะ ส่ง /claude เพื่อดูสถานะได้เลยนะคะ คำตอบอาจเป็นการแจ้งว่ายังตั้งค่าอยู่ ลิงก์เข้าสู่ระบบ หรือการยืนยันว่าเชื่อมแพ็กเกจแล้วค่ะ",
     },
   ];
 

@@ -275,7 +275,7 @@ const en: Notices = {
           "Your reminders still go out either way.",
         ].join("\n")
       : "I can't connect an AI for you yet. Your reminders still go out.",
-  boxNotReady: "Your Claude plan isn't ready to answer yet. Send /claude to see where it stands. If setup is still running, I'll say so. If you need to sign in, I'll send a link, and if you're already signed in, I'll confirm it's connected.",
+  boxNotReady: "Your Claude plan isn't ready to answer yet. Send /claude to see where it stands. I might say setup is still running, send you a sign-in link, or confirm it's connected.",
   boxSignedOut: "Your Claude plan isn't signed in. Once you sign in, I'll answer requests from the last 24 hours. Send /claude for a sign-in link.",
   catchUp: "Here's my answer to what you sent earlier.",
   ownCapReached: (cap) => `You've used the $${cap} monthly limit you set for your key. Send /key cap <dollars> to change it. It resets on the 1st.`,
@@ -470,7 +470,7 @@ const th: Notices = {
           "การแจ้งเตือนที่คุณขอไว้ยังส่งถึงคุณตามปกติค่ะ",
         ].join("\n")
       : "ตอนนี้ยังเชื่อม AI ให้ไม่ได้ค่ะ แต่การแจ้งเตือนที่คุณขอไว้ยังส่งถึงคุณตามปกตินะคะ",
-  boxNotReady: "ตอนนี้แพ็กเกจ Claude ของคุณยังไม่พร้อมตอบค่ะ ส่ง /claude เพื่อดูสถานะได้เลยนะคะ ถ้ายังตั้งค่าอยู่จะแจ้งให้ทราบ ถ้าต้องเข้าสู่ระบบจะส่งลิงก์ให้ และถ้าเข้าสู่ระบบไว้แล้วจะยืนยันว่าเชื่อมแพ็กเกจแล้วค่ะ",
+  boxNotReady: "ตอนนี้แพ็กเกจ Claude ของคุณยังไม่พร้อมตอบค่ะ ส่ง /claude เพื่อดูสถานะได้เลยนะคะ คำตอบอาจเป็นการแจ้งว่ายังตั้งค่าอยู่ ลิงก์เข้าสู่ระบบ หรือการยืนยันว่าเชื่อมแพ็กเกจแล้วค่ะ",
   boxSignedOut: "ตอนนี้ Claude ของคุณยังไม่ได้ลงชื่อเข้าใช้ค่ะ เมื่อลงชื่อเข้าใช้แล้ว จะตอบคำขอที่คุณส่งมาในช่วง 24 ชั่วโมงที่ผ่านมานะคะ ส่ง /claude เพื่อรับลิงก์ลงชื่อเข้าใช้ค่ะ",
   catchUp: "ขอตอบข้อความที่คุณส่งมาก่อนหน้านี้นะคะ",
   ownCapReached: (cap) => `ใช้ key ของคุณครบวงเงิน $${cap} ต่อเดือนที่ตั้งไว้แล้วค่ะ ส่ง /key cap <จำนวนดอลลาร์> เพื่อเปลี่ยน วงเงินจะเริ่มใหม่วันที่ 1 ค่ะ`,

@@ -1163,7 +1163,7 @@ export class Agent extends DurableObject<Env> {
         return { kind: "moved_on", transient: true, told: false };
       case "unavailable":
         diagnostic("box_unavailable");
-        this.#skipBoxUntil = now + BOX.skipAfterUnavailableMs;
+        if (this.#store.key()?.backup === true) this.#skipBoxUntil = now + BOX.skipAfterUnavailableMs;
         this.#store.appendLogs([missed("unavailable")], now);
         return { kind: "moved_on", transient: true, told: false };
       default:

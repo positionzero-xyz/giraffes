@@ -891,7 +891,7 @@ describe("connecting a Claude plan", () => {
     expect(box.parses).toHaveLength(2);
   });
 
-  test("an unavailable box backs the turn off, never spends anyone's money, skips the box for 5 minutes, and then tries it again", async () => {
+  test("an unavailable box blip backs the turn off, retries it on the box, and never spends anyone's money", async () => {
     const box = fakeBox({ signedIn: true });
     const model = scripted([]);
     const c = await devChat("hal", { model, at: "2099-11-04T10:00", box: box.deps });
@@ -900,17 +900,19 @@ describe("connecting a Claude plan", () => {
 
     box.replies.push({ kind: "status", status: 503 });
     await c.say("hello");
-    await c.advanceTo("2099-11-04T10:04");
-    expect(await c.received()).toEqual([NOTICE.failed]);
-    expect((await c.snapshot()).box?.state).toBe("signed_in");
-    expect(box.parses).toHaveLength(1);
+    box.replies.push({ kind: "reply", step: chat("Recovered on your plan.") });
+    await c.advanceTo("2099-11-04T10:01");
 
-    c.clock.set(local("2099-11-04T10:05"));
+    expect(await c.received()).toEqual(["Recovered on your plan."]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+    expect(box.parses).toHaveLength(2);
+
     box.replies.push({ kind: "reply", step: chat("Back on your plan.") });
     await c.say("later");
     expect(await c.received()).toEqual(["Back on your plan."]);
     expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
       ["box", "unavailable"],
+      ["box", "settled"],
       ["box", "settled"],
     ]);
     expect(model.calls).toHaveLength(0);
@@ -946,7 +948,7 @@ describe("connecting a Claude plan", () => {
     await c.received();
     await giveKey(c.agent);
 
-    box.replies.push({ kind: "status", status: 503 });
+    box.replies.push({ kind: "status", status: 503 }, { kind: "status", status: 503 }, { kind: "status", status: 503 });
     await c.say("hello");
     await c.advanceTo("2099-11-04T10:04");
     expect(await c.received()).toEqual([NOTICE.backupAsk("OpenCode Go"), NOTICE.failed]);
@@ -958,6 +960,8 @@ describe("connecting a Claude plan", () => {
     await c.say("again");
     expect(await c.received()).toEqual(["From your key."]);
     expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
+      ["box", "unavailable"],
+      ["box", "unavailable"],
       ["box", "unavailable"],
       ["box", "unavailable"],
       ["key", "settled"],

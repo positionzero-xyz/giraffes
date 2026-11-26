@@ -231,7 +231,7 @@ The owner's key, cap and fault notices stay with the owner's DO.
 
 ## Querying across users
 
-Every log row lands in D1 (`app/src/ledger/d1-schema.sql`). The MVP gates are views over it. Nobody is a participant until the operator sets the beta's start in `beta`:
+Every log row lands in D1 (`app/src/ledger/migrations`). The MVP gates are views over it. Nobody is a participant until the operator sets the beta's start in `beta`:
 
 ```sh
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_summary"

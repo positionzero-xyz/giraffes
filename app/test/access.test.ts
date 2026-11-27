@@ -285,6 +285,22 @@ describe("a person's own key", () => {
     ]);
   });
 
+  test("someone who adds the agent over the monthly limit they set gets the cap notice then, and not again that day", async () => {
+    const provider = fakeProvider();
+    const c = await devChat("eff", { model: null, provider, at: "2099-11-04T10:00" });
+    await giveKey(c.agent, { capMicro: 10 });
+
+    await c.say("/follow");
+    expect(await c.received()).toEqual([NOTICE.ownCapReached("0.00")]);
+    await c.say("hello");
+    expect(await c.received()).toEqual([]);
+    expect(provider.seen).toHaveLength(0);
+    expect(c.logs("turn").map((l) => [l.eventKind, l.outcome])).toEqual([
+      ["lifecycle", "refused_budget"],
+      ["message", "refused_budget"],
+    ]);
+  });
+
   test("in loose mode a bad reply is repaired once, and both attempts are charged", async () => {
     const provider = fakeProvider([{ kind: "text", text: "Sure! Here you go" }, reply("Repaired.")]);
     const c = await devChat("eli", { model: null, provider, at: "2099-11-04T10:00" });

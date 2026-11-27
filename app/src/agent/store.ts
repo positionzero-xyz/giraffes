@@ -809,6 +809,14 @@ export class AgentStore {
     return r ? { id: r.id, seenSeq: r.seen_seq, memory: r.memory, replyBackfill: fromJson(r.reply_backfill) } : null;
   }
 
+  oldestBoxHistory(after: number): readonly SeqTurn[] {
+    return this.sql.exec<SeqTurn>(
+      "SELECT seq, role, text, at FROM turn WHERE seq > MAX(?, (SELECT through_turn_seq FROM memory)) ORDER BY seq LIMIT ?",
+      after,
+      COMPACTION.promptTurns,
+    ).toArray();
+  }
+
   /**
    * Saves a turn only while its batch is still claimed: a forget that began during the turn closed the batch's rows, so
    * the turn's result is dropped whole. False when it was.
@@ -822,7 +830,8 @@ export class AgentStore {
       const tasks = this.applyTasks(commit.tasks, commit.trigger, commit.outbound ? outboxId : null, now);
       let seenSeq = seen?.sentThrough ?? 0;
       let gap = seen !== null && this.sql.exec("SELECT seq FROM turn WHERE seq > ? LIMIT 1", seenSeq).toArray().length > 0;
-      const replyBackfill: BoxReplyBackfill[] = [];
+      const previous = seen ? this.boxSession() : null;
+      const replyBackfill: BoxReplyBackfill[] = previous && previous.id === seen?.id ? previous.replyBackfill.filter((r) => r.seq > seenSeq) : [];
       for (const t of commit.turns) {
         const { seq } = this.sql.exec<{ seq: number }>("INSERT INTO turn (role, text, at, event_key) VALUES (?, ?, ?, ?) RETURNING seq", t.role, t.text, t.at, t.eventKey).one();
         if (!seen) continue;

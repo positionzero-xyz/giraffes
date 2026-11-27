@@ -8,11 +8,11 @@ import { join, relative } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createBox } from "../src/server.ts";
+import { mockPort } from "./mock-port.ts";
 
 const CLI = fileURLToPath(new URL("../node_modules/@anthropic-ai/claude-code/bin/claude.exe", import.meta.url));
 const MOCK = fileURLToPath(new URL("../mock-api.mjs", import.meta.url));
 const TOKEN = "b-erase-test-token-0123456789abcdefghijklmnop";
-const MOCK_PORT = 18792;
 const APPEND = "You are Giraffe, a personal assistant.";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CREDENTIALS = JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-fake", refreshToken: "sk-ant-ort01-fake", expiresAt: 4102444800000, scopes: ["user:inference"] } });
@@ -105,14 +105,13 @@ describe("erasing the person's words from the box", { skip: existsSync(CLI) ? fa
       TEMP: tmp,
       TMP: tmp,
       TMPDIR: tmp,
-      ANTHROPIC_BASE_URL: `http://127.0.0.1:${MOCK_PORT}`,
       ANTHROPIC_API_KEY: "sk-ant-api03-mock-not-a-key",
     });
     writeFileSync(join(config, ".credentials.json"), CREDENTIALS);
     writeFileSync(join(config, ".claude.json"), JSON.stringify({ oauthAccount: ACCOUNT, tipsHistory: { "MARKER-ZERO-6020": 1 } }));
     writeFileSync(script, JSON.stringify({ calls: [], text: "Noted." }));
-    mock = spawn(process.execPath, [MOCK, mockLog, String(MOCK_PORT), dumps, script], { stdio: ["ignore", "pipe", "inherit"] });
-    await new Promise<void>((resolve) => mock.stdout?.once("data", () => resolve()));
+    mock = spawn(process.execPath, [MOCK, mockLog, "0", dumps, script], { stdio: ["ignore", "pipe", "inherit"] });
+    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${await mockPort(mock)}`;
     base = await listen();
   });
   after(() => {

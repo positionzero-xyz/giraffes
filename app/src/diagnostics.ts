@@ -23,9 +23,11 @@ type Diagnostic = DrainPhase
   | "stripe_checkout_expiry_failed"
   | "stripe_checkout_failed"
   | "stripe_duplicate_subscription"
+  | "stripe_event_failed"
   | "stripe_event_ignored"
   | "stripe_event_rejected"
   | "stripe_portal_failed"
+  | "stripe_refresh_failed"
   | "stripe_standing_unavailable"
   | "telegram_callback_failed"
   | "turn_compaction_failed";

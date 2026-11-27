@@ -23,7 +23,7 @@ accounts.
 
 ```sh
 cp .dev.vars.example .dev.vars        # MODEL_BACKEND=bridge, DEV_MODE=1
-npx wrangler d1 execute giraffes-ledger --local --file src/ledger/d1-schema.sql   # once
+npx wrangler d1 migrations apply giraffes-ledger --local   # once
 
 npm run bridge                        # terminal 1: runs `claude -p` per call on 127.0.0.1:8789
 npm run dev                           # terminal 2: wrangler dev on http://localhost:8787
@@ -62,7 +62,7 @@ price plus the provider's fee from our price cards, not an invoice.
 1. Create the ledger and load its schema:
    ```sh
    npx wrangler d1 create giraffes-ledger          # copy the database_id into wrangler.jsonc
-   npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
+   npx wrangler d1 migrations apply giraffes-ledger --remote
    ```
 2. Set the secrets with `npx wrangler secret put <NAME>`:
    - `KEY_SECRET` (32 or more random characters) and `PUBLIC_URL` (the Worker's https URL), which turn on
@@ -172,6 +172,5 @@ person's latest answer. `tasks_by_type` counts tasks opened and completed per ki
 
 ### Update an existing ledger
 
-Apply `src/ledger/d1-schema.sql` before deploying this Worker. On an existing ledger, the file adds write guards,
-clears the historical message and diagnostic fields, and updates the completion view. Apply it with `--local`
-to upgrade a dev ledger. An older Worker may fail to flush diagnostics until it is replaced.
+Apply the D1 migrations before deploying this Worker: `npx wrangler d1 migrations apply giraffes-ledger --remote`.
+Use `--local` to upgrade a dev ledger. An older Worker may fail to flush diagnostics until it is replaced.

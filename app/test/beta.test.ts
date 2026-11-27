@@ -6,7 +6,7 @@ import { MIGRATIONS, migrate } from "../src/agent/schema";
 import { AgentStore } from "../src/agent/store";
 import { eventKey, type AgentKey, type InviteCode } from "../src/domain";
 import { NOTICES } from "../src/notices";
-import { chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, rewindForgetCommandSchema, type DevChat, type MemoryLedger, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
+import { chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, postTelegramUpdate, rewindForgetCommandSchema, type DevChat, type MemoryLedger, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
 
 const t = NOTICES.en;
 const FULL_BETA = "The beta is full right now. There's no date for new places yet. To check again, send your invite code here.";
@@ -52,6 +52,32 @@ describe("admission to the beta", () => {
     expect(s.pendingWakeups).toEqual([]);
     expect(model.calls).toEqual([]);
     expect(c.logs("admission").map((r) => [r.change, r.reason])).toEqual([["waitlisted", "no_code"]]);
+  });
+
+  test.each([
+    { code: "th", notice: NOTICES.th.waitlist.no_code },
+    { code: "en", notice: NOTICES.en.waitlist.no_code },
+  ])("a Telegram stranger's first message gets the beta notice in their $code language before a model call", async ({ code, notice }) => {
+    const model = scripted([]);
+    const c = await devChat("777000111", { model, at: "2099-11-04T10:00", channel: "telegram", admission: "beta" });
+
+    const response = await postTelegramUpdate(
+      {
+        update_id: 1,
+        message: {
+          date: Date.UTC(2099, 10, 4, 3) / 1000,
+          chat: { id: 777000111, type: "private" },
+          from: { id: 777000111, is_bot: false, first_name: "Pim", language_code: code },
+          text: "hello",
+        },
+      },
+      { ADMISSION: "beta" },
+    );
+    expect(response.status).toBe(200);
+    await c.settle();
+
+    expect(await c.received()).toEqual([notice]);
+    expect(model.calls).toEqual([]);
   });
 
   test("a Telegram recruit's start code asks for consent, and consent claims the seat, admits them and starts check-ins", async () => {
@@ -380,6 +406,41 @@ describe("admission to the beta", () => {
     expect(box.created.has(await box.nameOf("rem-connected"))).toBe(false);
     expect((await next.snapshot()).box?.state).toBe("signed_in");
     expect(await c.received()).toEqual([]);
+  });
+
+  test("two overlapping removals retire a connected box only once", async () => {
+    const box = fakeBox({ signedIn: true });
+    const eraseStarted = Promise.withResolvers<void>();
+    const finishErase = Promise.withResolvers<void>();
+    const erase = vi.fn<typeof box.deps.client.erase>(async (url, token, request) => {
+      eraseStarted.resolve();
+      await finishErase.promise;
+      return box.deps.client.erase(url, token, request);
+    });
+    const deps = { ...box.deps, client: { ...box.deps.client, erase } };
+    const c = await devChat("rem-overlap", { model: null, at: "2099-11-04T10:00", admission: "beta", box: deps });
+    await c.say("/claude");
+    await c.received();
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, async (agent) => {
+      await agent.remove();
+      const firstAlarm = agent.alarm();
+      await eraseStarted.promise;
+
+      const secondRemoval = agent.remove();
+      c.clock.set(local("2099-11-04T10:01"));
+      const secondAlarm = agent.alarm();
+      for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 1));
+      finishErase.resolve();
+      await Promise.all([firstAlarm, secondAlarm, secondRemoval]);
+    });
+    await c.settle();
+
+    expect(erase).toHaveBeenCalledTimes(1);
+    expect(box.destroyCalls).toEqual([await box.nameOf("rem-overlap")]);
+    expect((await c.snapshot()).box).toBeNull();
   });
 
   test("a person removed before box retirement was added can still remove their box in open admission", async () => {

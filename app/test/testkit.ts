@@ -231,6 +231,17 @@ export function scriptedChannel(steps: readonly DeliveryStep[] = []): ScriptedCh
   };
 }
 
+const TELEGRAM_TEST_SECRET = "A0_-".repeat(8);
+
+export async function postTelegramUpdate(update: object, vars: Record<string, string> = {}): Promise<Response> {
+  const req = new Request("https://agent.test/webhook/telegram", {
+    method: "POST",
+    headers: { "x-telegram-bot-api-secret-token": TELEGRAM_TEST_SECRET },
+    body: JSON.stringify(update),
+  });
+  return worker.fetch(req, { ...env, TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_WEBHOOK_SECRET: TELEGRAM_TEST_SECRET, ...vars });
+}
+
 export type DevChat = {
   readonly agent: AgentKey;
   readonly model: ScriptedModel;

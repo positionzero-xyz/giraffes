@@ -12,6 +12,7 @@ Status: closed beta in preparation (November 2026). This file says what works to
 | Reminders from plain words ("remind me Friday 9 am"), in the person's time zone | Works on the dev page with a real model; fires on the Durable Object alarm |
 | Routines ("every weekday at 8"), rescheduled by code, not by the model | Works on the dev page; covered by tests, including a clock change |
 | Messages first when a reminder or routine is due | Works on the dev page; a real two-minute reminder fired without a shortcut |
+| Correcting a saved fact ("that's wrong, it's Y") everywhere it was kept, and keeping a message the person asks not to be remembered out of notes and the summary | Covered by tests and a local run with the scripted backend and a mock box; not yet run with a real model |
 | Limits enforced in code: 20 pending reminders, 3 unasked messages a day, quiet hours 22:00 to 08:00, message length | Covered by tests |
 | A turn on the person's own Claude plan: unmodified Claude Code in their box as the agent, acting only through Giraffe's tools | Tested against the real Claude Code CLI with a mock model API; not yet run on a real Claude plan |
 | Bring your own API key (one-time page, sealed per person, pasted keys removed from chat) | Covered by tests and a local stub provider; not yet run against a real provider |

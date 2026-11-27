@@ -62,6 +62,7 @@ import {
 } from "./tasks";
 import type { AdmissionCommit } from "./admission";
 import { FORGET_TEXT } from "./forget-text";
+import { checkCorrection, type Correction } from "./correct";
 
 export const TURN = {
   recentNotes: 50,
@@ -102,6 +103,11 @@ const ActionSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("cancel_wakeup"), key: Slug }),
   z.object({ type: z.literal("remember"), note: z.string().min(1).describe(atMostBytes(TURN.maxNoteBytes)) }),
+  z.object({
+    type: z.literal("correct"),
+    wrong: z.string().describe("The wrong words exactly as your memory, pending wake-ups or open tasks show them"),
+    right: z.string().describe(`The words that replace them. ${atMostBytes(TURN.maxNoteBytes)}`),
+  }),
   z.object({ type: z.literal("quiet") }),
   z.object({
     type: z.literal("set_locale"),
@@ -109,6 +115,7 @@ const ActionSchema = z.discriminatedUnion("type", [
     language: z.enum(LANGUAGES).describe("The language of code-written notices"),
   }),
   z.object({ type: z.literal("forget") }),
+  z.object({ type: z.literal("dont_remember") }),
 ]);
 
 const TaskOpSchema = z.object({
@@ -123,8 +130,12 @@ const AGENT_ACTIONS: Readonly<Partial<Record<z.infer<typeof ActionSchema>["type"
   schedule_wakeup: "Schedule a reminder, or a routine the person asked for, in their local time.",
   cancel_wakeup: "Cancel a pending wake-up by its key. Cancelling a routine's key ends the routine.",
   remember: "Keep a durable note about the person that will matter in a week.",
+  correct:
+    "The person says something you saved is wrong. Code replaces the wrong words with the right ones everywhere they were kept, this turn's messages included, so don't repeat the wrong words in your reply.",
   set_locale: "Set the person's IANA time zone and the language of code-written notices.",
   forget: "The person asked you to forget, delete or stop remembering something. Code then tells them how to choose what goes; nothing else you do this turn is kept.",
+  dont_remember:
+    "The person asked you not to remember or save what they say now. Code keeps only your reply, cancels, a locale change and reminders they asked for from this turn, and leaves it out of your long-term memory.",
 };
 
 export type AgentTool = { readonly name: string; readonly description: string; readonly inputSchema: JsonSchema };
@@ -431,12 +442,16 @@ export type TurnCommit = {
   readonly outcome: TurnOutcome;
   readonly waitForAccess?: { readonly kind: "connection" } | { readonly kind: "budget"; readonly budget: string };
   readonly turns: readonly NewTurn[];
+  /** The person asked not to be remembered: compaction drops these turns unread instead of summarizing them. */
+  readonly transient: boolean;
   readonly outbound: Outbound | null;
   readonly wakeupsCancel: readonly WakeupKey[];
   readonly wakeupsAdd: readonly ReminderAdd[];
   readonly wakeupsRetime: readonly { readonly key: WakeupKey; readonly dueAt: EpochMs }[];
   readonly locale: { readonly tz: TimeZone; readonly language: Language } | null;
   readonly notes: readonly string[];
+  /** Applied last, so they also reach what this turn writes. */
+  readonly corrections: readonly Correction[];
   readonly tasks: TaskCommit;
   /** The event that caused this turn, which the store records as the cause of the facts it adds. */
   readonly trigger: FactCause;
@@ -582,6 +597,7 @@ function triggerNote(e: AgentEvent, tz: TimeZone): string | null {
 
 export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   if (out.actions.some((a) => a.type === "forget")) return planWithoutModel(given, { kind: "forget_offer" });
+  const transient = out.actions.some((a) => a.type === "dont_remember");
   const actions = out.actions.slice(0, TURN.maxActions);
   const setLocale = actions.findLast((a) => a.type === "set_locale");
   const language = setLocale?.language ?? given.language;
@@ -593,6 +609,13 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   const pending = new Map<WakeupKey, NewWakeup>(view.pending.map((w) => [w.key, w]));
   const sends: string[] = [];
   const notes: string[] = [];
+  const corrections: Correction[] = [];
+  const saved = [
+    view.summary,
+    ...view.notes,
+    ...view.pending.flatMap((w) => (w.kind === "reminder" ? [w.key, w.note] : [])),
+    ...view.openTasks.flatMap((t) => [t.ref, t.title]),
+  ];
   const cancelled = new Map<WakeupKey, NewWakeup>();
   const adds = new Map<WakeupKey, ReminderAdd>();
   const askedFor = new Set<WakeupKey>();
@@ -624,7 +647,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
 
   const fx = taskEffects(view);
   for (const r of fx.replies) notices.add(acceptNotice(t, r));
-  const planned = planTasks(out.tasks, view, causeOf(view), fx.commit);
+  const planned = planTasks(transient ? [] : out.tasks, view, causeOf(view), fx.commit);
   const tasks = planned.commit;
   for (const r of planned.rejected) reject(r.action, r.reason, false);
   const sendCap = TURN.maxSendsPerTurn - (tasks.propose ? 1 : 0);
@@ -641,6 +664,10 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
         else reject("send", "too_many_sends", false);
         break;
       case "schedule_wakeup": {
+        if (transient && !a.asked) {
+          keepCancelled(parseWakeupKey(a.key), false);
+          break;
+        }
         const origin = wakeupOrigin(first.kind, a.asked);
         const note = fitBytes(a.note, TURN.maxNoteBytes, actionLabel(a));
         const admission = admitReminder({ key: a.key, at: a.at, note, origin, repeat: a.repeat ?? null }, { now: view.now, tz: view.tz, pending });
@@ -666,11 +693,19 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
         break;
       }
       case "remember":
-        notes.push(fitBytes(a.note, TURN.maxNoteBytes, "remember"));
+        if (!transient) notes.push(fitBytes(a.note, TURN.maxNoteBytes, "remember"));
         break;
+      case "correct": {
+        const checked = checkCorrection(a, saved, TURN.maxNoteBytes);
+        if (first.kind !== "message") reject("correct", "tool_refused", false);
+        else if (checked.ok) corrections.push(checked.correction);
+        else reject("correct", checked.why === "malformed" ? "tool_refused" : "not_pending", false);
+        break;
+      }
       case "quiet":
       case "set_locale":
       case "forget":
+      case "dont_remember":
         break;
       default:
         assertNever(a);
@@ -733,18 +768,20 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   const locale = setLocale ? { tz: view.tz, language } : null;
   const changedTasks = tasks.open.length > 0 || tasks.facts.length > 0;
   const acted =
-    texts.length > 0 || adds.size > 0 || cancelled.size > 0 || notes.length > 0 || effects.reachability !== null || locale !== null || changedTasks;
+    texts.length > 0 || adds.size > 0 || cancelled.size > 0 || notes.length > 0 || corrections.length > 0 || effects.reachability !== null || locale !== null || changedTasks;
   const link = linkOf(view, tasks, out.about);
   return {
     batchKeys: batchKeys(view),
     outcome: acted ? "acted" : "quiet",
     turns,
+    transient,
     outbound: outbound(delivered, askedOf(intent, purposeOf(view, tasks, link)), view, { link, choice: plan === null ? null : "accept_pending" }),
     wakeupsCancel: [...cancelled.keys()],
     wakeupsAdd: [...adds.values()],
     wakeupsRetime,
     locale,
     notes,
+    corrections,
     tasks,
     trigger: causeOf(view),
     ...effects,
@@ -868,12 +905,14 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     outcome,
     ...(waitForAccess ? { waitForAccess } : {}),
     turns,
+    transient: false,
     outbound: out && replyOutsideBeta ? { ...out, replyOnly: true } : out,
     wakeupsCancel: [],
     wakeupsAdd: [],
     wakeupsRetime: [],
     locale: null,
     notes: [],
+    corrections: [],
     tasks: fx.commit,
     trigger: causeOf(view),
     ...lifecycleEffects(view),
@@ -888,12 +927,14 @@ function planAdmissionTurn(view: TurnView, why: Extract<NoModelReason, { kind: "
     batchKeys: batchKeys(view),
     outcome: "not_admitted",
     turns: [],
+    transient: false,
     outbound: out && { ...out, replyOnly: true },
     wakeupsCancel: [],
     wakeupsAdd: [],
     wakeupsRetime: [],
     locale: null,
     notes: [],
+    corrections: [],
     tasks: NO_TASKS,
     trigger: causeOf(view),
     reachability: lifecycleEffects(view).reachability,

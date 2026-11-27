@@ -162,7 +162,7 @@ describe("a message too long for the route", () => {
 });
 
 describe("compaction folds only what it saw", () => {
-  const turn = (seq: number, text: string) => ({ seq, role: "person" as const, text, at: NOW });
+  const turn = (seq: number, text: string) => ({ seq, role: "person" as const, text, at: NOW, transient: false });
 
   test("a turn is sent whole or not at all, and the fold ends at the last turn sent", () => {
     const fact = "the clinic code is 4471";

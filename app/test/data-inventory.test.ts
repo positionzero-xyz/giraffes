@@ -5,6 +5,7 @@ import { erasePersonLedger, personLedgerTables } from "../src/ledger/erase";
 import { personAgentKey } from "../src/domain";
 import type { AgentEvent, TaskFact } from "../src/domain";
 import type { BoxReplyBackfill } from "../src/agent/turn";
+import { DELETED_ON_CORRECTION, WORD_COLUMNS } from "../src/agent/correct";
 
 type Classification = {
   saved?: string;
@@ -57,7 +58,7 @@ const durable = {
   spend_month: { operational: "scope month spent_micro" },
   task: { saved: "ref kind title status opened_at touched_at closed_at", identity: "id cause_key" },
   task_fact: { saved: "kind ref detail completes person_decision cause_kind cause_at at", identity: "id task_id cause_key" },
-  turn: { chat: "text", identity: "event_key", operational: "seq role at" },
+  turn: { chat: "text", identity: "event_key", operational: "seq role at transient" },
   wakeup: { saved: "key note due_at status repeat repeat_anchor", identity: "id task_id created_by", operational: "kind origin created_at closed_at bookkeeping" },
 } satisfies Record<string, Classification>;
 
@@ -112,6 +113,23 @@ test("every Durable Object and D1 column has a data classification, including in
     return header.map((column) => `${name}.${column}`);
   }));
   expect(names.flat().sort()).toEqual(classifiedColumns(d1));
+});
+
+test("a correction rewrites or deletes every chat and saved column that can hold the person's words", () => {
+  const notWords = [
+    "agent.tz", "agent.checkin_local", "agent.language",
+    "task.kind", "task.status", "task.opened_at", "task.touched_at", "task.closed_at",
+    "task_fact.kind", "task_fact.ref", "task_fact.completes", "task_fact.person_decision", "task_fact.cause_kind", "task_fact.cause_at", "task_fact.at",
+    "wakeup.due_at", "wakeup.status", "wakeup.repeat", "wakeup.repeat_anchor",
+  ];
+  const personal = Object.entries(durable).flatMap(([table, groups]: [string, Classification]) =>
+    [groups.chat, groups.saved].flatMap((columns) => columns?.split(" ").map((c) => `${table}.${c}`) ?? []),
+  );
+  const handled = [
+    ...Object.entries(WORD_COLUMNS).flatMap(([table, columns]) => Object.keys(columns).map((c) => `${table}.${c}`)),
+    ...Object.entries(DELETED_ON_CORRECTION).flatMap(([table, columns]) => columns.map((c) => `${table}.${c}`)),
+  ];
+  expect([...handled, ...notWords].sort()).toEqual(personal.sort());
 });
 
 test("ledger erase covers every person table and removes indirect enrollment and billing links", async () => {

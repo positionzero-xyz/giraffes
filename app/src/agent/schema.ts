@@ -635,6 +635,9 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE outbox ADD COLUMN privacy TEXT CHECK (privacy IN ('page', 'notice', 'receipt'));
   ALTER TABLE outbox ADD COLUMN epoch INTEGER CHECK ((privacy IS NULL) = (epoch IS NULL));
   `,
+  `
+  ALTER TABLE turn ADD COLUMN transient INTEGER NOT NULL DEFAULT 0 CHECK (transient IN (0, 1));
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

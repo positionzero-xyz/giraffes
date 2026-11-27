@@ -98,6 +98,7 @@ import {
 } from "./tasks";
 import type { AdmissionChange, AdmissionCommit } from "./admission";
 import { coveredByForget, laterCutoff, newForgetCode, providerOrder, type Claim, type ForgetCommand, type ForgetState, type ProviderOrder } from "./forget";
+import { correctSlug, correctText, jsonStrings, WORD_COLUMNS, type Correction, type Fix } from "./correct";
 import { ROUTINE_OUTBOX } from "./schema";
 import { TURN, type Asked, type Batch, type BoxReplyBackfill, type BoxSession, type BoxSessionSeen, type InboxItem, type Outbound, type SeqTurn, type TurnCommit, type TurnRow } from "./turn";
 
@@ -971,7 +972,9 @@ export class AgentStore {
       const previous = seen ? this.boxSession() : null;
       const replyBackfill: BoxReplyBackfill[] = previous && previous.id === seen?.id ? previous.replyBackfill.filter((r) => r.seq > seenSeq) : [];
       for (const t of commit.turns) {
-        const { seq } = this.sql.exec<{ seq: number }>("INSERT INTO turn (role, text, at, event_key) VALUES (?, ?, ?, ?) RETURNING seq", t.role, t.text, t.at, t.eventKey).one();
+        const { seq } = this.sql
+          .exec<{ seq: number }>("INSERT INTO turn (role, text, at, event_key, transient) VALUES (?, ?, ?, ?, ?) RETURNING seq", t.role, t.text, t.at, t.eventKey, commit.transient ? 1 : 0)
+          .one();
         if (!seen) continue;
         const view = t.boxView;
         gap ||= !view || (view.kind === "reply" && view.notice !== null);
@@ -1027,9 +1030,50 @@ export class AgentStore {
         commit.waitForAccess ? 1 : 0,
         JSON.stringify(commit.batchKeys),
       );
+      for (const c of commit.corrections) this.correct(c);
       this.insertLogs(logs, now);
       return true;
     });
+  }
+
+  /**
+   * Rewrites every column that keeps the person's words, keys and refs included. The box session goes, so the next box
+   * turn starts a new session from the corrected chat and the box deletes the old transcript.
+   */
+  private correct(c: Correction): void {
+    const keys = this.slugRenames("SELECT DISTINCT key AS v FROM wakeup", "SELECT DISTINCT key AS v FROM wakeup WHERE kind = 'reminder'", c, "reminder");
+    const refs = this.slugRenames("SELECT DISTINCT ref AS v FROM task", "SELECT DISTINCT ref AS v FROM task", c, "task");
+    const fix: Fix = { text: (s) => correctText(s, c), key: (k) => keys.get(k) ?? k, ref: (r) => refs.get(r) ?? r };
+    for (const [table, columns] of Object.entries(WORD_COLUMNS)) {
+      for (const [column, rewrite] of Object.entries(columns)) {
+        for (const row of this.sql.exec<{ id: number; v: string }>(`SELECT rowid AS id, ${column} AS v FROM ${table}`).toArray()) {
+          const next = rewrite(row.v, fix);
+          if (next !== row.v) this.sql.exec(`UPDATE ${table} SET ${column} = ? WHERE rowid = ?`, next, row.id);
+        }
+      }
+    }
+    const writes = this.sql.exec<{ id: string; args: string; receipt: string | null }>("SELECT id, args, receipt FROM outside_write").toArray();
+    for (const w of writes.filter((w) => [...jsonStrings(w.args), ...jsonStrings(w.receipt)].some((s) => fix.text(s) !== s))) {
+      this.sql.exec("DELETE FROM outside_approval WHERE write_id = ?", w.id);
+      this.sql.exec("DELETE FROM outside_write WHERE id = ?", w.id);
+    }
+    this.sql.exec("DELETE FROM box_session");
+  }
+
+  /** Each key or ref among `renamable` the correction changes, mapped to a new one no row in `used` has, so the unique indexes hold. */
+  private slugRenames(used: string, renamable: string, c: Correction, fallback: string): ReadonlyMap<string, string> {
+    const values = (query: string) => this.sql.exec<{ v: string }>(query).toArray().map((r) => r.v);
+    const taken = new Set(values(used));
+    const renames = new Map<string, string>();
+    for (const old of values(renamable)) {
+      const base = correctSlug(old, c) || fallback;
+      if (base === old) continue;
+      let next = base;
+      for (let n = 2; taken.has(next); n++) next = `${base.slice(0, 39 - String(n).length)}-${n}`;
+      taken.add(next);
+      renames.set(old, next);
+    }
+    return renames;
   }
 
   private stillClaimed(keys: readonly EventKey[]): boolean {
@@ -2041,8 +2085,11 @@ export class AgentStore {
       throughSeq: through,
       turnCount: this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM turn WHERE seq > ?", through).one().n,
       oldestTurns: this.sql
-        .exec<{ seq: number; role: TurnRow["role"]; text: string; at: EpochMs }>("SELECT seq, role, text, at FROM turn ORDER BY seq LIMIT ?", kept + COMPACTION.foldTurns)
-        .toArray(),
+        .exec<{ seq: number; role: TurnRow["role"]; text: string; at: EpochMs; transient: number }>(
+          "SELECT seq, role, text, at, transient FROM turn ORDER BY seq LIMIT ?", kept + COMPACTION.foldTurns,
+        )
+        .toArray()
+        .map((t) => ({ ...t, transient: t.transient === 1 })),
       noteCount: this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM memory_note").one().n,
       oldestNotes: this.sql
         .exec<{ id: number; text: string }>("SELECT id, text FROM memory_note ORDER BY id LIMIT ?", COMPACTION.foldNotes)
@@ -2062,7 +2109,11 @@ export class AgentStore {
         c.expectThroughSeq,
       ).rowsWritten;
       if (swapped === 0) return false;
-      if (c.deleteSeqs.length > 0) this.sql.exec(`DELETE FROM turn WHERE seq IN (${placeholders(c.deleteSeqs.length)})`, ...c.deleteSeqs);
+      if (c.deleteSeqs.length > 0) {
+        const transient = this.sql.exec(`SELECT 1 FROM turn WHERE transient = 1 AND seq IN (${placeholders(c.deleteSeqs.length)})`, ...c.deleteSeqs).toArray();
+        if (transient.length > 0) this.sql.exec("DELETE FROM box_session");
+        this.sql.exec(`DELETE FROM turn WHERE seq IN (${placeholders(c.deleteSeqs.length)})`, ...c.deleteSeqs);
+      }
       if (c.deleteNoteIds.length > 0) {
         this.sql.exec(`DELETE FROM memory_note WHERE id IN (${placeholders(c.deleteNoteIds.length)})`, ...c.deleteNoteIds);
       }

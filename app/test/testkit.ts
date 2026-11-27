@@ -369,6 +369,24 @@ export async function devChat(
   return chat;
 }
 
+/** Every table and column of the person's Durable Object whose stored value contains `marker`, ignoring case. */
+export async function holding(agent: AgentKey, marker: string): Promise<string[]> {
+  const needle = marker.toLowerCase();
+  return runInDurableObject<Agent, string[]>(env.AGENT.get(env.AGENT.idFromName(agent)), (_a, state) => {
+    const s = state.storage.sql;
+    const tables = s.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_cf%' ESCAPE '\\' AND name NOT LIKE 'sqlite%'").toArray();
+    const hits = new Set<string>();
+    for (const { name } of tables) {
+      for (const row of s.exec(`SELECT * FROM "${name}"`).toArray()) {
+        for (const [col, v] of Object.entries(row)) {
+          if (typeof v === "string" && v.toLowerCase().includes(needle)) hits.add(`${name}.${col}`);
+        }
+      }
+    }
+    return [...hits].sort();
+  });
+}
+
 export function turn(o: {
   readonly actions: unknown[];
   readonly lateNotice?: string;
@@ -774,6 +792,7 @@ export function stripeChange(kit: BillingKit, o: StripeSubscriptionOpts & { read
 /** Takes the forget command's columns back out, so a test can run the migrations again from an older schema version. */
 export function rewindForgetCommandSchema(sql: SqlStorage): void {
   sql.exec(`
+    ALTER TABLE turn DROP COLUMN transient;
     ALTER TABLE outbox DROP COLUMN epoch;
     ALTER TABLE outbox DROP COLUMN privacy;
     DROP TABLE forget;

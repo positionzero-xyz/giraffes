@@ -63,6 +63,8 @@ export function memoryLedger(): MemoryLedger {
     async lineQuota() {
       return this.lineQuotaReading as QuotaReading | null;
     },
+    recordLineReply: (month) => seats.recordLineReply(month),
+    lineReplyCount: (month) => seats.lineReplyCount(month),
     async lineQuotaAlerts() {
       return [];
     },

@@ -13,8 +13,8 @@ import { devIdentity } from "./channels/dev";
 import { lineQuota } from "./channels/line";
 import { loadConfig, type Config, type Env } from "./config";
 import { CHANNEL_IDS, parseWakeupKey, personAgentKey, type AgentKey, type ChannelId, type EpochMs } from "./domain";
-import { d1Ledger } from "./ledger/ledger";
-import { alertsDue, quotaAlert } from "./policy/quota";
+import { d1Ledger, type Ledger } from "./ledger/ledger";
+import { LINE_QUOTA, alertsDue, quotaAlert, type LineQuotaKind, type QuotaReading } from "./policy/quota";
 import { utcMonth } from "./policy/time";
 
 export { Agent } from "./agent/agent";
@@ -89,13 +89,24 @@ async function routeRequest(req: Request, env: Env): Promise<Response> {
 
 async function checkLineQuota(config: Config, accessToken: string, env: Env, now: EpochMs): Promise<void> {
   const ledger = d1Ledger(env.LEDGER);
-  const reading = { at: now, month: utcMonth(now), ...(await lineQuota(accessToken)) };
-  await ledger.recordLineQuota(reading);
-  for (const percent of alertsDue(reading, await ledger.lineQuotaAlerts(reading.month))) {
-    const text = quotaAlert(reading, percent);
-    const via = config.operatorChat === null ? "log" : await tellOperator(makeChannels(config), config.operatorChat, text, now);
-    if (via === "log") diagnostic("line_quota", percent);
-    if (via !== null) await ledger.lineQuotaAlerted(reading.month, percent, via, now);
+  const month = utcMonth(now);
+  const checks = await Promise.allSettled([
+    lineQuota(accessToken).then(async (quota) => {
+      const reading = { at: now, month, ...quota };
+      await ledger.recordLineQuota(reading);
+      await alertLineQuota(config, ledger, "push", reading);
+    }),
+    ledger.lineReplyCount(month).then((used) => alertLineQuota(config, ledger, "reply", { at: now, month, limit: LINE_QUOTA.freeReplies, used })),
+  ]);
+  if (checks.some((check) => check.status === "rejected")) throw new Error("LINE quota check failed");
+}
+
+async function alertLineQuota(config: Config, ledger: Ledger, kind: LineQuotaKind, reading: QuotaReading): Promise<void> {
+  for (const percent of alertsDue(reading, await ledger.lineQuotaAlerts(kind, reading.month))) {
+    const text = quotaAlert(kind, reading, percent);
+    const via = config.operatorChat === null ? "log" : await tellOperator(makeChannels(config), config.operatorChat, text, reading.at);
+    if (via === "log") diagnostic(kind === "reply" ? "line_reply_quota" : "line_quota", percent);
+    if (via !== null) await ledger.lineQuotaAlerted(kind, reading.month, percent, via, reading.at);
   }
 }
 

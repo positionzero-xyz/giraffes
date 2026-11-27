@@ -4,7 +4,7 @@ import { planAllowsBox, type Plan } from "../billing/plan";
 import type { BoxAgentRequest, SessionUsed } from "../box/client";
 import type { BoxState } from "../box/machine";
 import { AGENT_TOOLS, BoxTurnOutputSchema, oneOffBoxTurn, turnFromAgent, type BoxTurnPrompt } from "../agent/turn";
-import { assertNever, eventKey, mayspend, type AgentKey, type EpochMs, type MicroUsd } from "../domain";
+import { assertNever, eventKey, mayspend, type AgentKey, type EpochMs, type MicroUsd, type TimeZone } from "../domain";
 import { modelCallRow, type Backend, type ModelCallStatus } from "../ledger/ledger";
 import { NOTICES, type KeyPageError } from "../notices";
 import { OUTPUTS, outputOf, type Output } from "../agent/purposes";
@@ -29,7 +29,7 @@ import { bytesOf, fitSections, type PromptParts } from "../model/prompt";
 import { PROVIDERS, type ModelRef } from "../model/providers";
 import { routeFor, type CallPurpose, type Purpose, type Route, type Source } from "../model/routes";
 import { costOf, estimate, fits, type SpendScope } from "../policy/spend";
-import { DEFAULT_TIME_ZONE, localDate, toLocal, utcMonth } from "../policy/time";
+import { DEFAULT_TIME_ZONE, fromLocal, localDate, toLocal, utcMonth } from "../policy/time";
 import { endpointOf, open, secretsFingerprint, sessionOf, type KeyDraft, type KeySecrets, type StoredKey } from "./key";
 
 export type KeysConfig =
@@ -199,6 +199,13 @@ function userBudget(route: Route, mode: SchemaMode, purpose: Purpose, system: st
 
 const HOUR_MS = 60 * 60_000;
 const MIN_MS = 60_000;
+
+/** The first whole local minute at or after `until` that no earlier moment shares, so no reading of it comes before the deadline. */
+function retryShownAt(until: EpochMs, tz: TimeZone): string {
+  let at = (Math.ceil(until / MIN_MS) * MIN_MS) as EpochMs;
+  while (fromLocal(toLocal(at, tz), tz) < at) at = (at + MIN_MS) as EpochMs;
+  return toLocal(at, tz).replace("T", " ");
+}
 
 /** How long a fault rests the key. An unreadable key rests until it is replaced or the configured secrets change. */
 type Rest = { readonly kind: "until_replaced" } | { readonly kind: "for"; readonly ms: number };
@@ -478,14 +485,12 @@ export class ModelAccess {
     switch (fault) {
       case "credential":
         return t.keyRefused(label);
-      case "payment": {
-        const retryMinute = until === null ? null : ((Math.ceil(until / MIN_MS) * MIN_MS) as EpochMs);
-        return t.keyNoCredit(label, retryMinute === null ? null : toLocal(retryMinute, a?.tz ?? DEFAULT_TIME_ZONE).replace("T", " "));
-      }
+      case "payment":
+        return t.keyNoCredit(label, until === null ? null : retryShownAt(until, a?.tz ?? DEFAULT_TIME_ZONE));
       case "model":
         return t.keyNoModel(label, k.model);
       case "rate":
-        return t.keyRateLimited(label, until === null || !a ? "" : toLocal(until, a.tz).slice(11));
+        return t.keyRateLimited(label, until === null || !a ? "" : retryShownAt(until, a.tz));
       case "unreadable":
         return t.keyUnreadable;
       default:

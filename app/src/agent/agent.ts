@@ -1,4 +1,4 @@
-import { diagnostic, operatorAlertChatMigrated, type DrainPhase } from "../diagnostics";
+import { diagnostic, operatorAlertChatMigrated, type Diagnostic, type DrainPhase } from "../diagnostics";
 import { DurableObject } from "cloudflare:workers";
 import { draftKey, issueTicket, redactSecrets, seal, type KeyFields } from "../access/key";
 import {
@@ -15,10 +15,10 @@ import {
 import { NO_STANDING, planAllowsBox, planOf, trialEnd, type PaidPlan, type Plan, type Standing, type SubscriptionId } from "../billing/plan";
 import { INVITE_FOR_MS, MANAGE_NOTE, planChanged, planChoices, planStatus, type Links } from "../billing/say";
 import { d1Billing, type BillingStore } from "../billing/store";
-import { offeredPlans, parseSubscription, stripeApi, type BillingEvent, type StripeApi } from "../billing/stripe";
+import { offeredPlans, parseSubscription, stripeApi, type BillingEvent, type StripeApi, type StripeErasure } from "../billing/stripe";
 import { boxClient, type BoxAt, type BoxClient, type BoxReply } from "../box/client";
 import { flyHost } from "../box/fly";
-import { staticHost, type BoxHost, type BoxHostKind, type Fetch } from "../box/host";
+import { staticHost, type BoxHost, type BoxHostKind, type Fetch, type FlyBoxRetirement } from "../box/host";
 import {
   afterEnsure,
   afterProbe,
@@ -42,12 +42,13 @@ import {
   type ProbeStep,
   type Step,
 } from "../box/machine";
-import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
+import { boxToken, signinTicket, signinUrl, type BoxName, type BoxToken } from "../box/names";
 import { CHANNEL_RETRY_MS, makeChannels, whileWorking, type ChannelRegistry } from "../channels/channel";
 import { commandOf, type Command } from "./commands";
 import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env, type OperatorChat } from "../config";
 import {
   assertNever,
+  buttonData,
   CHANNEL_LANGUAGE,
   choiceToken,
   eventKey,
@@ -63,11 +64,14 @@ import {
   type InviteCode,
   type Language,
   type MicroUsd,
+  type OutboundMessage,
+  type OutboxId,
   type PersonStatus,
   type Seat,
   type TimeZone,
   type WakeupKey,
 } from "../domain";
+import { erasePersonLedger, prepareLedgerErasure } from "../ledger/erase";
 import { d1Ledger, modelCallRow, type Ledger, type LogRow, type UnaskedStatus } from "../ledger/ledger";
 import { NOTICES, type KeyPageError } from "../notices";
 import { scripted, scriptedConnect, type ScriptedModel, type ScriptStep } from "../model/scripted";
@@ -80,10 +84,15 @@ import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach"
 import { inLineReserve, type QuotaReading } from "../policy/quota";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
 import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../policy/time";
-import { ADMISSION, planAdmission, type AdmissionAnswer, type AdmissionMode, type AdmissionStep } from "./admission";
+import { ADMISSION, inviteIn, planAdmission, type AdmissionAnswer, type AdmissionMode, type AdmissionStep } from "./admission";
 import { COMPACTION, compactionCommit, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
-import type { Claim, ProviderOrder } from "./forget";
+import {
+  ACCOUNT_COPY, ACCOUNT_RECEIPT_MS, ACCOUNT_RETRY_MS, ERASE_CHALLENGE, ERASE_DIAGNOSTIC_MS, ERASE_JOB, START_CHALLENGE,
+  digestChallenge, newAccountChallenge, type AccountChallenge, type EraseBilling, type EraseBox,
+  type EraseBoxReference, type EraseBoxTarget, type Erasure, type StartChallenge,
+} from "./account";
+import { coveredByForget, providerOrder, type Claim, type ProviderOrder } from "./forget";
 import { migrate } from "./schema";
 import {
   AgentStore,
@@ -150,12 +159,13 @@ export type AgentDeps = {
   readonly billing: BillingDeps;
   readonly operatorChat: OperatorChat | null;
   readonly admission: AdmissionMode;
+  readonly firstContactConsent: boolean;
 };
 
 export type BillingDeps = {
   readonly config: BillingConfig;
   readonly store: BillingStore;
-  readonly stripe: StripeApi | null;
+  readonly stripe: (StripeApi & Partial<StripeErasure>) | null;
 };
 
 const STAFF: Seat = { cohort: "staff", half: null, code: null, inviter: null };
@@ -202,6 +212,7 @@ export type AgentSnapshot = {
   readonly tasks: readonly TaskSnapshot[];
   readonly admission: Admission;
   readonly access: AccessView;
+  readonly accountNotice?: { readonly texts: readonly string[]; readonly button?: OutboundMessage["button"] };
 };
 
 export class Agent extends DurableObject<Env> {
@@ -215,11 +226,15 @@ export class Agent extends DurableObject<Env> {
   #billing: Promise<unknown> = Promise.resolve();
   #billingAlertSettlement: BillingAlertSettlement | null = null;
   #billingAlertStorageRetryAt = 0;
+  #eraseRun: Promise<void> | null = null;
+  #accountVersion = 0;
+  readonly #accountRpcWork = new Set<Promise<unknown>>();
   /** In memory on purpose: losing it on a restart costs one more try of a box that may still be wedged. */
   #skipBoxUntil = 0;
   readonly #instance = crypto.randomUUID();
   readonly #devSavedPages = new Map<string, string>();
   #devModel: ScriptedModel | null = null;
+  #devAccountNotice: Pick<OutboundMessage, "texts" | "button"> | undefined;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -235,7 +250,14 @@ export class Agent extends DurableObject<Env> {
   /** "stale": the person's last forget already covers this event, so nothing of it was stored. */
   async enqueue(given: InboundEnvelope): Promise<"queued" | "duplicate" | "stale"> {
     const now = this.#deps.clock.now();
-    const envelope = withoutSecrets(given);
+    const control = await this.#accountControl(given, now);
+    if (control === "handled") return "stale";
+    if (this.#erasure()) return "stale";
+    const e = given.event;
+    const starting = typeof control === "object";
+    const envelope = starting
+      ? { ...given, event: { kind: "lifecycle", change: "follow", at: now, reply: e.reply, code: control.invite } as const }
+      : withoutSecrets(given);
     const first = {
       tz: DEFAULT_TIME_ZONE,
       language: envelope.initialLanguage ?? CHANNEL_LANGUAGE[envelope.identity.channel],
@@ -243,6 +265,7 @@ export class Agent extends DurableObject<Env> {
       checkin: checkinWakeup(now, DEFAULT_TIME_ZONE, SCHEDULE.defaultCheckinLocal),
       trialEndsAt: this.#deps.billing.config.on ? trialEnd(now, this.#deps.billing.config.rules) : null,
       admit: this.#deps.admission === "open" || envelope.identity.channel === "dev" ? STAFF : null,
+      startBoundary: starting ? now : undefined,
     };
     const stored = this.#store.enqueue(envelope, first, now);
     if (stored !== "inserted") return stored;
@@ -267,10 +290,22 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #billingEvent(e: BillingEvent): Promise<"applied" | "duplicate" | "ignored"> {
+    if (this.#erasure()) return "ignored";
     if (this.#store.billingEventSeen(e.id)) return "duplicate";
+    if (this.#deps.firstContactConsent) {
+      if (!this.#store.agent()) return "ignored";
+      const checkout = e.checkout && this.#store.openCheckouts().some(({ id }) => id === e.checkout);
+      if (!checkout) {
+        const known = await this.env.LEDGER.prepare(
+          "SELECT 1 FROM billing_subscription WHERE id = ? AND owner_key = ?",
+        ).bind(e.subscription, e.owner).first();
+        if (!known || this.#erasure()) return "ignored";
+      }
+    }
     const { config, store, stripe } = this.#deps.billing;
     if (!config.on || !stripe) throw new Error("a Stripe event reached a DO with billing off");
     const fetched = await stripe.subscription(e.subscription);
+    if (this.#erasure()) return "ignored";
     if (!fetched.ok) throw new Error("subscription read failed");
     const read = parseSubscription(fetched.value, config.rules);
     if (read.kind === "invalid") throw new Error("subscription unreadable");
@@ -281,11 +316,16 @@ export class Agent extends DurableObject<Env> {
     }
     const sub = read.subscription;
     await store.applySubscription(sub, this.#deps.clock.now());
+    if (this.#erasure()) return "ignored";
+    if (e.checkout) this.#store.checkoutClosed(e.checkout);
     if (!(await this.refreshPlan(sub.owner))) throw new Error("owner refresh failed");
     for (const member of await store.members(sub.id)) {
+      if (this.#erasure()) return "ignored";
       if (!(await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member))) throw new Error("member refresh failed");
     }
+    if (this.#erasure()) return "ignored";
     await this.#flagDuplicate(sub.owner);
+    if (this.#erasure()) return "ignored";
     this.#store.billingEventDone(e.id, this.#deps.clock.now());
     return "applied";
   }
@@ -294,11 +334,12 @@ export class Agent extends DurableObject<Env> {
     const { store } = this.#deps.billing;
     const now = this.#deps.clock.now();
     const owned = await store.owned(owner, now);
-    if (owned.length < 2) return;
+    if (this.#erasure() || owned.length < 2) return;
     const ids = owned.join(" ");
     diagnostic("stripe_duplicate_subscription");
     await store.recordDuplicate(owner, owned, now);
     await this.#armNoLaterThan(now);
+    if (this.#erasure()) return;
     this.#store.queueBillingAlert(ids, now);
     await this.#deliverBillingAlert();
     this.ctx.waitUntil(this.alarm());
@@ -381,10 +422,13 @@ export class Agent extends DurableObject<Env> {
   }
 
   async refreshPlan(agent: AgentKey): Promise<boolean> {
+    if (this.#erasure()) return true;
+    const version = this.#accountVersion;
     try {
       const { config, store } = this.#deps.billing;
       const now = this.#deps.clock.now();
       const standing = await store.standing(agent, now);
+      if (version !== this.#accountVersion) return true;
       const before = this.#plan(now);
       const after = planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, config.on, config.rules);
       const a = this.#store.agent();
@@ -407,6 +451,392 @@ export class Agent extends DurableObject<Env> {
     return planOf(this.#store.plan(), now, config.on, config.rules);
   }
 
+  #erasure(): Erasure | undefined {
+    return this.ctx.storage.kv.get<Erasure>(ERASE_JOB);
+  }
+
+  async #accountControl(envelope: InboundEnvelope, now: EpochMs): Promise<"continue" | "handled" | { readonly invite?: InviteCode }> {
+    const { event, identity } = envelope;
+    const remove = event.kind === "message" && event.text.trim().toLowerCase() === "/erase";
+    const erasing = this.#erasure();
+    if (erasing) {
+      if (remove) await this.#deliverAccountNotice({
+        id: crypto.randomUUID() as OutboxId, to: identity, texts: [ACCOUNT_COPY[erasing.language].pending],
+        intent: "reply", reply: event.reply, replyOnly: identity.channel === "line",
+      }, now);
+      return "handled";
+    }
+    const current = this.#store.agent();
+    const language = current?.language ?? envelope.initialLanguage ?? CHANNEL_LANGUAGE[identity.channel];
+    const copy = ACCOUNT_COPY[language];
+    const state = this.#store.forget();
+    const choice = event.kind === "choice" ? event.choice : null;
+    const firstContact = this.#deps.firstContactConsent && !current;
+
+    if (choice?.kind === "start" || choice?.kind === "erase") {
+      const key = choice.kind === "erase" ? ERASE_CHALLENGE : START_CHALLENGE;
+      const digest = await digestChallenge(choice.challenge);
+      const challenge = this.ctx.storage.kv.get<StartChallenge>(key);
+      if (this.#erasure() || !challenge || challenge.digest !== digest || challenge.expiresAt <= now ||
+          challenge.epoch !== this.#store.forget().epoch || coveredByForget(envelope, this.#store.forget())) return "handled";
+      this.ctx.storage.kv.delete(key);
+      if (choice.kind === "start") {
+        return firstContact && this.#store.agent() === null ? { invite: challenge.invite } : "handled";
+      }
+      const trigger = providerOrder(envelope) ?? { at: now, seq: null };
+      this.ctx.storage.transactionSync(() => {
+        const { epoch } = this.#store.beginForget(trigger, now);
+        const job: Erasure = {
+          kind: "starting", id: crypto.randomUUID() as OutboxId, person: envelope.agent, to: identity,
+          language, epoch, reply: event.reply,
+        };
+        this.ctx.storage.kv.delete(START_CHALLENGE);
+        this.ctx.storage.kv.put(ERASE_JOB, job);
+      });
+      this.#accountVersion++;
+      await this.ctx.storage.setAlarm(now);
+      this.ctx.waitUntil(this.alarm());
+      return "handled";
+    }
+
+    if (!remove && !firstContact) return "continue";
+    if (event.kind === "choice" || (event.kind === "lifecycle" && event.change === "block") || coveredByForget(envelope, state)) return "handled";
+    const order = providerOrder(envelope);
+    if (order && now - order.at > ACCOUNT_RECEIPT_MS) return "handled";
+    const { raw, record } = await newAccountChallenge(state.epoch, now);
+    if (this.#erasure() || state.epoch !== this.#store.forget().epoch) return "handled";
+    const action = remove ? "erase" : "start";
+    const invite = !remove && this.#deps.admission === "beta" ? inviteIn(event) : null;
+    this.ctx.storage.kv.put(remove ? ERASE_CHALLENGE : START_CHALLENGE, invite ? { ...record, invite } : record);
+    await this.#armNoLaterThan(record.expiresAt);
+    if (this.#erasure() || state.epoch !== this.#store.forget().epoch) return "handled";
+    await this.#deliverAccountNotice({
+      id: crypto.randomUUID() as OutboxId,
+      to: identity,
+      texts: [remove ? copy.confirm : copy.start],
+      intent: "reply",
+      reply: event.reply,
+      replyOnly: identity.channel === "line" && !mayspend(this.#store.admission()),
+      button: {
+        data: buttonData(choiceToken({ kind: action, challenge: raw }), state.epoch),
+        label: remove ? copy.confirmButton : copy.startButton,
+      },
+    }, now);
+    return "handled";
+  }
+
+  async #runErasure(started: Erasure): Promise<void> {
+    try {
+      if (started.kind === "receipt") return await this.#sendErasureReceipt(started);
+      await this.#drain;
+      await this.#billing;
+      await Promise.allSettled(this.#accountRpcWork);
+      let current = this.#erasure();
+      if (current?.kind === "starting") {
+        const stored = this.#store.box();
+        const box = stored && { name: stored.name, host: stored.host, url: stored.url, incarnation: this.#store.boxVolume() };
+        current = {
+          ...current, kind: "preparing", box, checkouts: this.#store.checkoutIds(),
+          startedAt: this.#deps.clock.now(), diagnosedAt: this.#deps.clock.now(),
+        };
+        this.#store.clearForErasure(current);
+        this.#billingAlertSettlement = null;
+        this.#billingAlertStorageRetryAt = 0;
+        this.#devSavedPages.clear();
+        this.#devModel = null;
+      }
+      if (current?.kind === "preparing") {
+        const { box: stored, checkouts, ...identity } = current;
+        const registered = await this.env.LEDGER.prepare("SELECT name, host, deleted_at FROM boxes WHERE agent_key = ?")
+          .bind(identity.person).first<{ name: BoxName; host: EraseBoxReference["host"]; deleted_at: EpochMs | null }>();
+        const boxLedgerKey = registered?.deleted_at === null ? `erasure:${crypto.randomUUID()}` : null;
+        const box = this.#accountBoxTarget(identity.person, stored, registered);
+        const { invitees, members, subscriptions } = await prepareLedgerErasure(this.env.LEDGER, identity.person);
+        current = {
+          ...identity, kind: "cleaning", box, boxLedgerKey,
+          ledger: { kind: "sweep", invitees, members },
+          billing: { kind: "pending", checkouts, subscriptions, endedSubscription: false, stripeRetained: false },
+        };
+        this.ctx.storage.kv.put(ERASE_JOB, current);
+      }
+      if (current?.kind !== "cleaning") return;
+      if (current.ledger.kind === "sweep") {
+        await erasePersonLedger(this.env.LEDGER, current.person, current.boxLedgerKey);
+        current = { ...current, ledger: { ...current.ledger, kind: "detach" } };
+        this.ctx.storage.kv.put(ERASE_JOB, current);
+      }
+      if (current.ledger.kind === "detach") {
+        for (const invitee of current.ledger.invitees) {
+          await this.env.AGENT.get(this.env.AGENT.idFromName(invitee)).eraseInviterReference(current.person);
+        }
+        for (const member of current.ledger.members) {
+          await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member).catch(() => undefined);
+        }
+        current = { ...current, ledger: { kind: "done" } };
+        this.ctx.storage.kv.put(ERASE_JOB, current);
+      }
+      while (current.billing.kind === "pending") {
+        const billing: EraseBilling | null = await this.#eraseBillingStep(current.person, current.billing).catch(() => null);
+        if (billing === null) {
+          current = this.#noteEraseHold(current, "erase_billing_hold");
+          this.ctx.storage.kv.put(ERASE_JOB, current);
+          break;
+        }
+        current = { ...current, billing };
+        this.ctx.storage.kv.put(ERASE_JOB, current);
+      }
+      while (current.box.kind !== "none" && current.box.kind !== "wiped" && current.box.kind !== "reclaimed") {
+        const box = await this.#eraseAccountBox(current);
+        if (box.kind === "relocate") {
+          current = this.#noteEraseHold({ ...current, box }, this.#eraseBoxHoldCode({ ...current, box }));
+          this.ctx.storage.kv.put(ERASE_JOB, current);
+          await this.#retryErasure(ACCOUNT_RETRY_MS);
+          return;
+        }
+        if (box === current.box) {
+          current = this.#noteEraseHold(current, this.#eraseBoxHoldCode(current));
+          this.ctx.storage.kv.put(ERASE_JOB, current);
+          await this.#retryErasure(box.kind === "unverified" && current.billing.kind === "done" ? ACCOUNT_RECEIPT_MS : ACCOUNT_RETRY_MS);
+          return;
+        }
+        current = { ...current, box };
+        this.ctx.storage.kv.put(ERASE_JOB, current);
+      }
+      const { box, boxLedgerKey, billing, id, person, to, language, epoch, reply } = current;
+      if (billing.kind === "pending") {
+        current = this.#noteEraseHold(current, "erase_billing_hold");
+        this.ctx.storage.kv.put(ERASE_JOB, current);
+        await this.#retryErasure();
+        return;
+      }
+      if (boxLedgerKey !== null) {
+        await this.env.LEDGER.prepare("DELETE FROM boxes WHERE agent_key = ?").bind(boxLedgerKey).run();
+      }
+      const receipt: Erasure = {
+        kind: "receipt", id, person, to, language, epoch, reply,
+        expiresAt: (this.#deps.clock.now() + ACCOUNT_RECEIPT_MS) as EpochMs,
+        attempted: false, endedSubscription: billing.endedSubscription, stripeRetained: billing.stripeRetained,
+        box: box.kind === "none" ? null : box,
+      };
+      this.ctx.storage.kv.put(ERASE_JOB, receipt);
+      await this.#sendErasureReceipt(receipt);
+    } catch {
+      const held = this.#erasure();
+      if (held?.kind === "cleaning") this.ctx.storage.kv.put(ERASE_JOB, this.#noteEraseHold(held, "erase_failed"));
+      await this.#retryErasure();
+    }
+  }
+
+  /** At most one operator diagnostic a day per stuck erasure; the value is its age in hours. */
+  #noteEraseHold(job: Extract<Erasure, { kind: "cleaning" }>, code: Diagnostic): Extract<Erasure, { kind: "cleaning" }> {
+    const now = this.#deps.clock.now();
+    // A job persisted before timestamps existed is at least one interval old; report that lower bound.
+    const startedAt = job.startedAt ?? ((now - ERASE_DIAGNOSTIC_MS) as EpochMs);
+    const last = job.diagnosedAt ?? startedAt;
+    if (now - last < ERASE_DIAGNOSTIC_MS) return job;
+    diagnostic(code, Math.floor((now - startedAt) / (60 * 60_000)));
+    return { ...job, startedAt, diagnosedAt: now };
+  }
+
+  #eraseBoxHoldCode(job: Extract<Erasure, { kind: "cleaning" }>): Diagnostic {
+    const step = job.box;
+    const deps = this.#deps.box;
+    if (!("box" in step)) return "erase_box_hold";
+    if (!deps || !boxServes(deps, job.person)) return "erase_box_unverified";
+    if (deps.host.kind !== step.box.host) return "erase_box_host_mismatch";
+    return step.kind === "unverified" ? "erase_box_unverified" : "erase_box_hold";
+  }
+
+  async eraseInviterReference(inviter: AgentKey): Promise<void> {
+    await this.#drain;
+    this.#store.detachInviter(inviter);
+  }
+
+  async #eraseBillingStep(person: AgentKey, billing: Extract<EraseBilling, { kind: "pending" }>): Promise<EraseBilling | null> {
+    const [checkout, ...checkouts] = billing.checkouts;
+    const [subscription, ...subscriptions] = billing.subscriptions;
+    const stripe = this.#deps.billing.stripe;
+    if (checkout) {
+      const closed = await stripe?.closeCheckout?.(checkout, person);
+      if (!closed?.ok) return null;
+      return {
+        ...billing, checkouts, stripeRetained: billing.stripeRetained || closed.value.retained,
+        subscriptions: closed.value.subscription && !billing.subscriptions.includes(closed.value.subscription)
+          ? [...billing.subscriptions, closed.value.subscription] : billing.subscriptions,
+      };
+    }
+    if (subscription) {
+      const closed = await stripe?.closeSubscription?.(subscription, person);
+      return closed?.ok
+        ? { ...billing, subscriptions, endedSubscription: true, stripeRetained: billing.stripeRetained || closed.value.retained }
+        : null;
+    }
+    return { kind: "done", endedSubscription: billing.endedSubscription, stripeRetained: billing.stripeRetained };
+  }
+
+  #resolveAccountBox(person: AgentKey, box: EraseBoxReference): EraseBox {
+    const deps = this.#deps.box;
+    if (!boxServes(deps, person) || box.host !== deps.host.kind || (box.host === "static" && deps.onlyFor !== person)) {
+      return { kind: "unverified", box };
+    }
+    const target: EraseBoxTarget = { ...box, url: box.url ?? deps.host.urlOf(box.name) };
+    return { kind: box.host === "fly" ? "locate" : "wipe-static", box: target };
+  }
+
+  #accountBoxTarget(
+    person: AgentKey,
+    stored: EraseBoxTarget | null,
+    registered: { readonly name: BoxName; readonly host: EraseBoxReference["host"]; readonly deleted_at: EpochMs | null } | null,
+  ): EraseBox {
+    if (registered && registered.deleted_at !== null && (!stored || stored.name === registered.name)) {
+      return { kind: "reclaimed", host: registered.host };
+    }
+    const reference: EraseBoxReference | null = stored ?? (registered && registered.deleted_at === null
+      ? { name: registered.name, host: registered.host, url: null, incarnation: null }
+      : null);
+    if (!reference) return { kind: "none" };
+    return this.#resolveAccountBox(person, reference);
+  }
+
+  async #eraseAccountBox(job: Extract<Erasure, { kind: "cleaning" }>): Promise<EraseBox> {
+    const step = job.box;
+    const deps = this.#deps.box;
+    if (!("box" in step)) return step;
+    if (step.kind === "unverified") {
+      const resolved = this.#resolveAccountBox(job.person, step.box);
+      return resolved.kind === "unverified" ? step : resolved;
+    }
+    if (!deps || !boxServes(deps, job.person) || deps.host.kind !== step.box.host) return step;
+    const fly = "retirementTarget" in deps.host ? deps.host as BoxHost & FlyBoxRetirement : null;
+    const { box } = step;
+    switch (step.kind) {
+      case "locate": {
+        const found = await fly?.retirementTarget(box.name);
+        if (found && !found.ok && found.missing) return { kind: "reclaimed", host: "fly" };
+        if (!found?.ok) return step;
+        return found.target.disk === null
+          ? { kind: "remove-volume", box, target: found.target }
+          : { kind: "wipe-fly", box, target: found.target, verify: false };
+      }
+      case "relocate": {
+        // A job persisted by the earlier relocate shape has no saved target. Hold rather than
+        // re-select a volume that was never part of the original proof.
+        if (!("target" in step) || !step.target || !step.resume) return step;
+        const check = await fly?.retirementRecheck(box.name, step.target);
+        if (check && !check.ok && check.missing) return { kind: "reclaimed", host: "fly" };
+        if (!check?.ok) return step;
+        if (check.state === "gone") {
+          // A disk that disappears before the box acknowledged a wipe never becomes a wiped box.
+          return step.resume === "wipe-fly"
+            ? { kind: "reclaimed", host: "fly" }
+            : { kind: "remove-app", box, target: step.target };
+        }
+        return step.resume === "wipe-fly"
+          ? { kind: "wipe-fly", box, target: step.target, verify: true }
+          : { kind: step.resume, box, target: step.target };
+      }
+      case "wipe-static":
+      case "wipe-fly": {
+        const token = await boxToken(deps.secret, box.name);
+        const fallback = step.kind === "wipe-fly"
+          ? { kind: "relocate" as const, box, target: step.target, resume: "wipe-fly" as const }
+          : step;
+        if (!box.incarnation) {
+          const health = await deps.client.health(box.url, token);
+          if (health.kind !== "up" || !health.box) return fallback;
+          return { ...step, box: { ...box, incarnation: health.box } };
+        }
+        if (step.kind === "wipe-fly" && step.verify !== false) {
+          // Identity must still be the saved disk and machine at the point of the destructive call.
+          // A job persisted before this flag existed is verified; only a fresh locate skips it.
+          const check = await fly?.retirementRecheck(box.name, step.target);
+          if (check && !check.ok && check.missing) return { kind: "reclaimed", host: "fly" };
+          if (!check?.ok || check.state !== "present") return fallback;
+        }
+        const incarnation = box.incarnation;
+        const wipe = await deps.client.erase(box.url, token, { scope: "account", box: incarnation, epoch: job.epoch });
+        if (wipe.kind !== "erased" || wipe.scope !== "account" || wipe.box !== incarnation || wipe.floor < job.epoch) return fallback;
+        return step.kind === "wipe-fly" ? { kind: "remove-volume", box, target: step.target } : { kind: "wiped", host: "static" };
+      }
+      case "remove-volume": {
+        const retired = await fly?.retireWipedDisk(box.name, step.target);
+        if (retired?.ok) return { ...step, kind: "remove-app" };
+        return retired && !retired.ok && retired.missing
+          ? { kind: "relocate", box, target: step.target, resume: "remove-volume" }
+          : step;
+      }
+      case "remove-app": {
+        const removed = await fly?.removeRetiredApp(box.name);
+        if (removed?.ok) {
+          // No disk ever acknowledged a wipe, so deletion is not a wiped outcome.
+          return step.target.disk === null
+            ? { kind: "reclaimed", host: "fly" }
+            : { kind: "wiped", host: "fly" };
+        }
+        return removed && !removed.ok && removed.missing
+          ? { kind: "relocate", box, target: step.target, resume: "remove-app" }
+          : step;
+      }
+    }
+  }
+
+  async #sendErasureReceipt(job: Extract<Erasure, { kind: "receipt" }>): Promise<void> {
+    const now = this.#deps.clock.now();
+    if (now >= job.expiresAt || (job.attempted && job.to.channel === "telegram")) return this.#finishErasure();
+    const copy = ACCOUNT_COPY[job.language];
+    this.ctx.storage.kv.put(ERASE_JOB, { ...job, attempted: true });
+    const delivery = await this.#deliverAccountNotice({
+      id: job.id, to: job.to, intent: "requested", reply: job.reply,
+      texts: [[
+        copy.receipt,
+        ...(job.box?.kind === "reclaimed" ? [copy.reclaimedBox] : []),
+        ...(job.box?.host === "fly" ? [copy.flyCopies] : []),
+        ...(job.endedSubscription ? [copy.subscriptionEnded] : []),
+        copy.stripeRecords,
+        ...(job.stripeRetained ? [copy.stripeRetained] : []),
+        copy.return,
+      ].join("\n\n")],
+    }, now);
+    if (delivery.kind === "retry" || delivery.kind === "in_doubt") {
+      if (delivery.kind === "retry") this.ctx.storage.kv.put(ERASE_JOB, { ...job, attempted: false });
+      await this.#retryErasure(delivery.afterMs);
+    } else {
+      await this.#finishErasure();
+    }
+  }
+
+  async #deliverAccountNotice(message: OutboundMessage, now: EpochMs) {
+    const delivery = await this.#deps.channels[message.to.channel].deliver(message, now);
+    if (message.to.channel === "dev" && delivery.kind === "sent") {
+      this.#devAccountNotice = { texts: message.texts, button: message.button };
+    }
+    return delivery;
+  }
+
+  async #finishErasure(): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+      migrate(this.ctx.storage);
+    });
+  }
+
+  async #retryErasure(delay = ACCOUNT_RETRY_MS): Promise<void> {
+    const now = this.#deps.clock.now();
+    const job = this.#erasure();
+    if (job) this.ctx.storage.kv.put(ERASE_JOB, { ...job, nextAt: (now + delay) as EpochMs });
+    await this.ctx.storage.setAlarm(now + delay);
+  }
+
+  async #trackAccountRpc<T>(work: Promise<T>): Promise<T> {
+    this.#accountRpcWork.add(work);
+    try {
+      return await work;
+    } finally {
+      this.#accountRpcWork.delete(work);
+    }
+  }
+
   /** D1 is the truth; the projection a refresh keeps stands in only while D1 can't be read. */
   async #planNow(agent: AgentKey, now: EpochMs): Promise<Plan> {
     const { config, store } = this.#deps.billing;
@@ -423,6 +853,18 @@ export class Agent extends DurableObject<Env> {
 
   /** Cloudflare may invoke it more than once; joining the in-flight drain makes that harmless. */
   override async alarm(): Promise<void> {
+    const erase = this.#erasure();
+    if (erase) {
+      const now = this.#deps.clock.now();
+      if (erase.nextAt !== undefined && now < erase.nextAt) {
+        await this.ctx.storage.setAlarm(erase.nextAt);
+        return;
+      }
+      if (!this.#eraseRun) {
+        this.#eraseRun = this.#runErasure(erase).finally(() => { this.#eraseRun = null; });
+      }
+      return this.#eraseRun;
+    }
     if (this.#drain) return this.#drain;
     this.#drain = this.#runDrain().finally(() => {
       this.#drain = null;
@@ -437,6 +879,7 @@ export class Agent extends DurableObject<Env> {
     const month = utcMonth(now);
     const spent = { byok: this.#store.spend("byok", month).spent, included: this.#store.spend("included", month).spent };
     return {
+      ...(this.#devAccountNotice ? { accountNotice: this.#devAccountNotice } : {}),
       agent: a ? { key: a.key, status: a.status, tz: a.tz, language: a.language } : null,
       turns: this.#store.recentTurns(50),
       outbox: this.#store.recentOutbox(50).map((row) => {
@@ -483,6 +926,11 @@ export class Agent extends DurableObject<Env> {
   }
 
   async serve(req: ServeRequest): Promise<Served<Purpose> | { readonly kind: "not_owner" }> {
+    return this.#trackAccountRpc(this.#serve(req));
+  }
+
+  async #serve(req: ServeRequest): Promise<Served<Purpose> | { readonly kind: "not_owner" }> {
+    if (this.#erasure()) return { kind: "not_owner" };
     if (!this.#store.ownsGroup(req.group, req.ownershipVersion)) return { kind: "not_owner" };
     const refused = { kind: "no_access", why: "nothing", told: false, notice: null, waitForConnection: false } as const;
     const claim = this.#store.claim();
@@ -497,6 +945,12 @@ export class Agent extends DurableObject<Env> {
    * stored outcome instead of a second probe, and the save is refused if the access revision moved since the link went out.
    */
   async connectKey(nonceHash: string, fields: KeyFields): Promise<ConnectResult> {
+    return this.#trackAccountRpc(this.#connectKey(nonceHash, fields));
+  }
+
+  async #connectKey(nonceHash: string, fields: KeyFields): Promise<ConnectResult> {
+    if (this.#erasure()) return { ok: false, error: "expired" };
+    const version = this.#accountVersion;
     const now = this.#deps.clock.now();
     const keys = this.#deps.keys;
     const t = this.#store.ticket(nonceHash);
@@ -510,6 +964,7 @@ export class Agent extends DurableObject<Env> {
     const existing = this.#store.key();
     const capMicro = existing?.capMicro ?? keys.defaultCapMicro;
     const probe = await this.#access().probe(draft.value, capMicro);
+    if (version !== this.#accountVersion) return { ok: false, error: "superseded" };
     const after = this.#deps.clock.now();
     if (!probe.ok) {
       this.#store.finishTicket(nonceHash, "failed", probe.error);
@@ -519,6 +974,7 @@ export class Agent extends DurableObject<Env> {
     const label = PROVIDERS[d.provider].label;
     const text = NOTICES[a.language].keyConnected(label, d.model);
     const sealed = await seal(keys.secrets.current, a.key, d);
+    if (version !== this.#accountVersion) return { ok: false, error: "superseded" };
     const saved = this.#store.saveKey(
       { provider: d.provider, baseUrl: d.baseUrl, model: d.model, auth: d.auth, mode: probe.mode, sealed, hint: d.key.hint, capMicro, connectedAt: after },
       t.revision,
@@ -564,11 +1020,13 @@ export class Agent extends DurableObject<Env> {
   }
 
   async recordGroup(group: AgentKey, version: number): Promise<void> {
+    if (this.#erasure()) return;
     this.#store.recordGroup(group, version);
   }
 
   /** The operator takes this person out of the beta: their wake-ups are skipped and every message gets a fixed reply. */
   async remove(): Promise<void> {
+    if (this.#erasure()) return;
     const now = this.#deps.clock.now();
     this.#store.remove(now);
     await this.#armNoLaterThan(now);
@@ -579,10 +1037,12 @@ export class Agent extends DurableObject<Env> {
    * `endForget` with the same `op`, nothing ordinary runs, and nothing begun before it may send, save or call out.
    */
   async beginForget(trigger: ProviderOrder): Promise<{ readonly op: string; readonly epoch: ForgetEpoch }> {
+    if (this.#erasure()) throw new Error("account erasure is in progress");
     return this.#store.beginForget(trigger, this.#deps.clock.now());
   }
 
   async endForget(op: string): Promise<boolean> {
+    if (this.#erasure()) return false;
     const now = this.#deps.clock.now();
     if (!this.#store.endForget(op)) return false;
     await this.#armNoLaterThan(now);
@@ -592,6 +1052,7 @@ export class Agent extends DurableObject<Env> {
 
   /** Dev only: the pending wake-up `key` falls due now and fires through the alarm, as it would at its time. */
   async fireNow(key: WakeupKey): Promise<boolean> {
+    if (this.#erasure()) return false;
     const now = this.#deps.clock.now();
     if (!this.#store.makeDue(key, now)) return false;
     await this.#armNoLaterThan(now);
@@ -609,6 +1070,7 @@ export class Agent extends DurableObject<Env> {
    * entry `{"hold": output}` stays in flight until `releaseScript`.
    */
   script(turns: readonly unknown[], compaction: readonly unknown[]): void {
+    if (this.#erasure()) return;
     const output = (value: unknown): ScriptStep => ({ kind: "output", value });
     const step = (value: unknown): ScriptStep =>
       typeof value === "object" && value !== null && "hold" in value ? { kind: "hold", then: output(value.hold) } : output(value);
@@ -648,6 +1110,10 @@ export class Agent extends DurableObject<Env> {
       await this.#phase("drain_log_flush_failed", () => this.#flushLogs());
       await this.#phase("drain_compaction_failed", () => this.#compactIfDue());
       await this.#phase("drain_prune_failed", async () => {
+        for (const key of [ERASE_CHALLENGE, START_CHALLENGE]) {
+          const challenge = this.ctx.storage.kv.get<AccountChallenge>(key);
+          if (challenge && challenge.expiresAt <= clock.now()) this.ctx.storage.kv.delete(key);
+        }
         if (!this.#store.held()) this.#store.prune(clock.now());
       });
     } finally {
@@ -1084,13 +1550,14 @@ export class Agent extends DurableObject<Env> {
     const expiries = await Promise.all(stale.map(async (c) => ({ id: c.id, result: await stripe.expireCheckout(c.id) })));
     let expired = true;
     for (const { id, result } of expiries) {
-      if (result.ok) this.#store.checkoutClosed(id);
-      else {
+      if (!result.ok) {
         diagnostic("stripe_checkout_expiry_failed");
         expired = false;
+      } else if (result.value === "expired" || !this.#deps.firstContactConsent) {
+        this.#store.checkoutClosed(id);
       }
     }
-    if (!expired) return null;
+    if (!expired || this.#erasure()) return null;
 
     const plans = this.#deps.billing.config.on ? offeredPlans(this.#deps.billing.config.stripe) : [];
     const results = await Promise.all(
@@ -1170,6 +1637,7 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #advanceBox(): Promise<void> {
+    if (this.#erasure()) return;
     const deps = this.#deps.box;
     const box = this.#store.box();
     if (!deps || !box || !mayspend(this.#store.admission())) return;
@@ -1178,6 +1646,7 @@ export class Agent extends DurableObject<Env> {
     const current = deps.host.image !== null && planned.box.image !== deps.host.image ? needsEnsure(planned.box, now) : planned.box;
     if (current !== box) this.#store.applyBox(current, await this.#outboxMessage(deps, current, planned.say), [], now);
     for (let i = 0; i < BOX_STEPS_PER_DRAIN; i++) {
+      if (this.#erasure()) return;
       const stored = this.#store.box();
       const step = stored && beginStep(stored, this.#deps.clock.now());
       if (!step) return;
@@ -1442,6 +1911,7 @@ export class Agent extends DurableObject<Env> {
 
   async #flushLogs(): Promise<void> {
     for (let i = 0; i < LOG_BATCHES_PER_DRAIN; i++) {
+      if (this.#erasure()) return;
       const rows = this.#store.pendingLogs(this.#deps.clock.now(), LOG_BATCH);
       if (rows.length === 0) return;
       try {
@@ -1456,8 +1926,10 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #rearm(): Promise<void> {
+    if (this.#erasure()) return;
     const now = this.#deps.clock.now();
     const catchUp = await this.#catchUpAccess(now);
+    if (this.#erasure()) return;
     const r = this.#store.readiness(now);
     const a = this.#store.agent();
     const held = this.#store.held();
@@ -1472,8 +1944,11 @@ export class Agent extends DurableObject<Env> {
       compactionRetryAt: held ? null : r.compactionRetryAt,
       boxAt: this.#deps.box && mayspend(this.#store.admission()) ? r.boxAt : null,
     });
-    if (t === null) await this.ctx.storage.deleteAlarm();
-    else await this.ctx.storage.setAlarm(t);
+    const challengeTimes = [ERASE_CHALLENGE, START_CHALLENGE]
+      .map((key) => this.ctx.storage.kv.get<AccountChallenge>(key)?.expiresAt ?? Infinity);
+    const next = Math.min(t ?? Infinity, ...challengeTimes);
+    if (next === Infinity) await this.ctx.storage.deleteAlarm();
+    else await this.ctx.storage.setAlarm(next);
   }
 
   async #armNoLaterThan(t: EpochMs): Promise<void> {
@@ -1549,5 +2024,6 @@ function defaultDeps(env: Env): AgentDeps {
       stripe: config.billing.on ? stripeApi(config.billing.stripe, config.billing.rules, (input, init) => fetch(input, init)) : null,
     },
     admission: config.admission,
+    firstContactConsent: !config.devMode,
   };
 }

@@ -6,7 +6,7 @@ import type { Agent } from "../src/agent/agent";
 import { AgentStore } from "../src/agent/store";
 import { TURN_SYSTEM } from "../src/agent/prompt";
 import { loadConfig, type Env } from "../src/config";
-import type { AgentKey, MicroUsd, UtcMonth } from "../src/domain";
+import type { AgentKey, EpochMs, MicroUsd, UtcMonth } from "../src/domain";
 import { bytesOf } from "../src/model/prompt";
 import { modelOf, PROVIDERS } from "../src/model/providers";
 import { routeFor } from "../src/model/routes";
@@ -196,8 +196,63 @@ describe("a person's own key", () => {
     await c.say("hello");
     await c.advanceTo("2099-11-04T10:05");
 
-    expect(await c.received()).toEqual([NOTICE.keyRateLimited("OpenCode Go", "11:00"), NOTICE.failed]);
+    expect(await c.received()).toEqual([NOTICE.keyRateLimited("OpenCode Go", "2099-11-04 11:00"), NOTICE.failed]);
     expect(provider.seen).toHaveLength(1);
+  });
+
+  const rateLimitNotice = async (user: string, deadlineOffsetMs: number, channel?: "line" | "telegram"): Promise<string> => {
+    const provider = fakeProvider([{ kind: "status", status: 429, retryAfter: "14400" }]);
+    const c = await devChat(user, { model: null, provider, at: "2099-11-04T19:58", ...(channel === undefined ? {} : { channel }) });
+    await giveKey(c.agent);
+    c.clock.set((local("2099-11-05T00:00") - 14_400_000 + deadlineOffsetMs) as EpochMs);
+
+    await c.say("hello");
+
+    return (await c.received())[0];
+  };
+
+  test.each([
+    { offsetMs: -1, display: "2099-11-05 00:00" },
+    { offsetMs: 0, display: "2099-11-05 00:00" },
+    { offsetMs: 1, display: "2099-11-05 00:01" },
+  ])("the English retry notice rounds a midnight deadline at millisecond offset $offsetMs up to a dated minute", async ({ offsetMs, display }) => {
+    expect(await rateLimitNotice(`rate-en-${offsetMs}`, offsetMs)).toBe(NOTICE.keyRateLimited("OpenCode Go", display));
+  });
+
+  test("the Thai retry notice shows the next day's date and a minute no earlier than the deadline", async () => {
+    expect(await rateLimitNotice("U00000000000000000000000000000a05", 1, "line")).toBe(NOTICES.th.keyRateLimited("OpenCode Go", "2099-11-05 00:01"));
+  });
+
+  test("the retry notice shows the date and minute in the person's own time zone", async () => {
+    const provider = fakeProvider([reply("Hi."), { kind: "status", status: 429, retryAfter: "90" }]);
+    const c = await devChat("rate-london", { model: null, provider, at: "2099-11-05T06:30" });
+    await giveKey(c.agent);
+    await c.say("hello");
+    await c.received();
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_a, state) => {
+      state.storage.sql.exec("UPDATE agent SET tz = 'Europe/London'");
+    });
+    c.clock.set((local("2099-11-05T06:59") + 30_000) as EpochMs);
+
+    await c.say("one more thing");
+
+    expect((await c.received())[0]).toBe(NOTICE.keyRateLimited("OpenCode Go", "2099-11-05 00:01"));
+  });
+
+  test("when the clocks go back, the retry notice skips the repeated hour so no reading of it is before the deadline", async () => {
+    const provider = fakeProvider([reply("Hi."), { kind: "status", status: 429, retryAfter: "4500" }]);
+    const c = await devChat("rate-london-fall-back", { model: null, provider, at: "2099-10-25T06:00" });
+    await giveKey(c.agent);
+    await c.say("hello");
+    await c.received();
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_a, state) => {
+      state.storage.sql.exec("UPDATE agent SET tz = 'Europe/London'");
+    });
+    c.clock.set(local("2099-10-25T07:15"));
+
+    await c.say("one more thing");
+
+    expect((await c.received())[0]).toBe(NOTICE.keyRateLimited("OpenCode Go", "2099-10-25 02:00"));
   });
 
   test("a requested reminder still arrives, written by code, while the person's key is refused", async () => {

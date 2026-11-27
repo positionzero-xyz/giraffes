@@ -49,8 +49,7 @@ async function call(base: string, path: string, body?: object, auth = `Bearer ${
   return { status: res.status, body: await res.json() };
 }
 
-const legacy = (text: string) => ({ model: "claude-haiku-5-5", append: APPEND, turn: `New\nPerson: ${text}`, tools: [REMEMBER] });
-const turn = (text: string, at: object) => ({ ...legacy(text), session: null, fresh: `New\nPerson: ${text}`, ...at });
+const turn = (text: string, at: object = {}) => ({ model: "claude-haiku-5-5", append: APPEND, session: null, turn: `New\nPerson: ${text}`, fresh: `New\nPerson: ${text}`, tools: [REMEMBER], ...at });
 const parse = (text: string, at: object = {}) => ({ model: "claude-haiku-5-5", system: "be brief", user: text, jsonSchema: { type: "object" }, ...at });
 
 // A running CLI renames its temp files, so a file listed a moment ago may be gone.
@@ -119,7 +118,7 @@ describe("erasing the person's words from the box", { skip: existsSync(CLI) ? fa
   });
 
   it("keeps the person's words from a turn in Claude Code's files (the control)", async () => {
-    const r = await call(base, "/agent", legacy("my locker code is MARKER-ONE-4417"));
+    const r = await call(base, "/agent", turn("my locker code is MARKER-ONE-4417"));
     assert.equal(r.status, 200);
     assert.ok(holding("MARKER-ONE-4417").some((path) => path.startsWith("config")), `no copy under the config dir: ${listing().join(", ")}`);
     assert.ok(existsSync(sessionFile));
@@ -164,7 +163,7 @@ describe("erasing the person's words from the box", { skip: existsSync(CLI) ? fa
 
   it("refuses, once the box has been erased, a request with no epoch, an older epoch or another volume's name, and writes nothing for it", async () => {
     const before = listing();
-    assert.deepEqual(await call(base, "/agent", legacy("MARKER-FOUR-3008")), STALE);
+    assert.deepEqual(await call(base, "/agent", turn("MARKER-FOUR-3008")), STALE);
     assert.deepEqual(await call(base, "/agent", turn("MARKER-FOUR-3008", at(0))), STALE);
     assert.deepEqual(await call(base, "/agent", turn("MARKER-FOUR-3008", { box: "11111111-2222-3333-4444-555555555555", epoch: 1 })), STALE);
     assert.deepEqual(await call(base, "/parse", parse("MARKER-FOUR-3008")), STALE);

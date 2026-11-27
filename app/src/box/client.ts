@@ -99,8 +99,9 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
         return reply && { reply };
       }),
 
+    // A box image without the one-off route answers it 404, so a one-off never runs in the person's session there.
     agent: (url, token, { at, ...req }) =>
-      post(url, token, "agent", JSON.stringify({ ...req, ...atFields(at) }), (raw) => {
+      post(url, token, req.ephemeral === true ? "agent/once" : "agent", JSON.stringify({ ...req, ...atFields(at) }), (raw) => {
         const body = AgentBody.safeParse(raw);
         if (!body.success) return null;
         const { usage, stop, session, ...structured } = body.data;
@@ -138,7 +139,7 @@ export function boxClient(fetch: Fetch, timeouts: { readonly parseMs: number; re
   async function post(
     url: string,
     token: BoxToken,
-    path: "parse" | "agent",
+    path: "parse" | "agent" | "agent/once",
     body: string,
     read: (raw: unknown) => { readonly reply: Extract<WireResult, { kind: "reply" }>; readonly session?: SessionUsed } | null,
   ): Promise<BoxReply> {

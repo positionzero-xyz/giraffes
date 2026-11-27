@@ -421,12 +421,35 @@ describe("the Durable Object is the one record of the chat for the box session",
     box.replies.push({ kind: "reply", step: chat("For the group.") });
     const prompt = { sections: [{ title: "New", keep: ["Person: hi from the group"], trim: [], dropRank: 0 }] };
     expect(await owner.serve({ group, ownershipVersion: 1, purpose: "turn", system: "s", prompt })).toMatchObject({ kind: "ok", call: { lane: "box" } });
-    expect(lastBox(box)).toMatchObject({ session: null, resumed: false, ephemeral: true, append: AGENT_SYSTEM, user: "## New\nPerson: hi from the group" });
+    expect(lastBox(box)).toMatchObject({ session: null, resumed: false, ephemeral: true, once: true, append: AGENT_SYSTEM, user: "## New\nPerson: hi from the group" });
 
     box.replies.push({ kind: "reply", step: chat("Hi again.") });
     await c.say("me again");
     expect(lastBox(box)).toMatchObject({ session: mine, resumed: true });
     expect(lastBox(box).ephemeral).toBeUndefined();
+    expect(lastBox(box).once).toBeUndefined();
+    expect(lastBox(box).user).not.toContain("hi from the group");
+  });
+
+  test("a group turn its owner's box can't keep out of the owner's session, on an old image, is refused, not answered from that session", async () => {
+    const { box, c } = await boxChat("own-old");
+    box.ignoresSession = true;
+    box.replies.push({ kind: "reply", step: chat("Hi.") });
+    await c.say("hello");
+    const owner = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    const group = "g:telegram:-100456" as AgentKey;
+    await owner.recordGroup(group, 1);
+    const turns = box.parses.length;
+
+    box.replies.push({ kind: "reply", step: chat("For the group.") });
+    const prompt = { sections: [{ title: "New", keep: ["Person: hi from the group"], trim: [], dropRank: 0 }] };
+    expect(await owner.serve({ group, ownershipVersion: 1, purpose: "turn", system: "s", prompt })).toEqual({ kind: "unavailable" });
+    expect(box.parses).toHaveLength(turns);
+    expect(box.replies.splice(0)).toHaveLength(1);
+
+    box.replies.push({ kind: "reply", step: chat("Hi again.") });
+    await c.say("me again");
+    expect((await c.received()).at(-1)).toBe("Hi again.");
     expect(lastBox(box).user).not.toContain("hi from the group");
   });
 

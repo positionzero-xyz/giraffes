@@ -534,6 +534,9 @@ export function fakeBox(
 export const STRIPE_VARS = {
   ADMISSION: "open",
   BILLING: "on",
+  OPERATOR_CHAT: "telegram:4242",
+  TELEGRAM_BOT_TOKEN: "123:abc",
+  TELEGRAM_WEBHOOK_SECRET: "tg-test-secret-0123456789abcdefghi",
   STRIPE_SECRET_KEY: "sk_test_fake",
   STRIPE_WEBHOOK_SECRET: "whsec_test_fake",
   STRIPE_PRICE_STANDARD: "price_standard",

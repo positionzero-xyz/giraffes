@@ -23,7 +23,7 @@ import type {
 import type { BoxHostKind } from "../box/host";
 import { dueAt, type Box, type BoxState, type ReclaimReason } from "../box/machine";
 import { commandOf } from "./commands";
-import { renderSavedPage, snapshotSavedItems, savedPageNotice, type SavedCursor, type SavedPage } from "./saved-items";
+import { REMINDER_ITEM, renderSavedPage, snapshotSavedItems, savedPageNotice, type SavedCursor, type SavedPage } from "./saved-items";
 import { FORGET_TEXT, type Backups, type Deleted, type Receipt } from "./forget-text";
 import type { BoxName } from "../box/names";
 import {
@@ -2356,7 +2356,9 @@ export class AgentStore {
     if (items.some((i) => i === undefined)) return false;
     for (const { kind, id } of items) {
       if (kind === "note") this.sql.exec("DELETE FROM memory_note WHERE id = ?", id);
-      if (kind === "reminder") this.sql.exec("DELETE FROM wakeup WHERE id = ?", id);
+      if (kind === "reminder") {
+        this.sql.exec(`DELETE FROM wakeup WHERE origin = 'person' AND ${REMINDER_ITEM} = (SELECT ${REMINDER_ITEM} FROM wakeup WHERE id = ?)`, id);
+      }
       if (kind === "task") {
         this.sql.exec("DELETE FROM task_fact WHERE task_id = ?", id);
         this.sql.exec("DELETE FROM task WHERE id = ?", id);

@@ -25,6 +25,10 @@ export async function boxName(secret: string, prefix: string, agent: AgentKey): 
   return `${prefix}${hex(await hmac(secret, `name:${agent}`)).slice(0, 16)}` as BoxName;
 }
 
+export async function boxSessionOwner(secret: string, agent: AgentKey): Promise<string> {
+  return hex(await hmac(secret, `session-owner:${agent}`)).slice(0, 32);
+}
+
 export async function boxToken(secret: string, name: BoxName): Promise<BoxToken> {
   return base64url(await hmac(secret, `box:${name}`)) as BoxToken;
 }

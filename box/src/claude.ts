@@ -189,6 +189,7 @@ export type AgentRequest = {
   readonly model: string;
   readonly append: string;
   readonly session: string | null | undefined;
+  readonly sessionOwner: string | undefined;
   readonly turn: string;
   readonly fresh: string | null;
   readonly tools: readonly AgentTool[];
@@ -205,6 +206,7 @@ export type AgentReply =
   | { readonly status: 502; readonly body: { error: "claude_failed" } };
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const SESSION_OWNER = /^[0-9a-f]{32}$/;
 
 export const isSessionId = (v: string): boolean => SESSION_ID.test(v);
 
@@ -236,6 +238,8 @@ export function readAgentRequest(body: unknown): AgentRequest | null {
   if (typeof model !== "string" || typeof append !== "string" || typeof turn !== "string" || !turn.trim()) return null;
   const session = body.session;
   if (session !== undefined && session !== null && (typeof session !== "string" || !SESSION_ID.test(session))) return null;
+  const sessionOwner = body.sessionOwner;
+  if (sessionOwner !== undefined && (typeof sessionOwner !== "string" || !SESSION_OWNER.test(sessionOwner))) return null;
   const fresh = body.fresh ?? null;
   if (fresh !== null && (typeof fresh !== "string" || !fresh.trim())) return null;
   const at = readAt(body);
@@ -246,7 +250,7 @@ export function readAgentRequest(body: unknown): AgentRequest | null {
     if (!isObject(t) || typeof t.name !== "string" || !/^[a-z_]{1,40}$/.test(t.name) || typeof t.description !== "string" || !isObject(t.inputSchema)) return null;
     tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema });
   }
-  return { model, append, session, turn, fresh, tools, at, ...(body.ephemeral === true ? { ephemeral: true } : {}) };
+  return { model, append, session, sessionOwner, turn, fresh, tools, at, ...(body.ephemeral === true ? { ephemeral: true } : {}) };
 }
 
 function toolProblems(content: unknown): string[] {

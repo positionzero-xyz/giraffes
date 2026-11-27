@@ -75,12 +75,24 @@ const GONE = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 } a
 
 const entries = (dir: string): string[] => (existsSync(dir) ? readdirSync(dir) : []);
 
+export function sessionFileFor(sessionFile: string, owner: string | undefined): string {
+  return owner === undefined ? sessionFile : `${sessionFile}.${owner}`;
+}
+
+function sessionFiles(sessionFile: string): string[] {
+  const base = basename(sessionFile);
+  const keyed = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.[0-9a-f]{32}(?:\\.next)?$`);
+  return entries(dirname(sessionFile))
+    .filter((name) => name === base || name === `${base}.next` || keyed.test(name))
+    .map((name) => join(dirname(sessionFile), name));
+}
+
 function emptyDir(dir: string, keep: (name: string) => boolean = () => false): void {
   for (const name of entries(dir)) if (!keep(name)) rmSync(join(dir, name), GONE);
 }
 
 export function sweep(files: PersonFiles, retired: boolean): void {
-  rmSync(files.sessionFile, GONE);
+  for (const file of sessionFiles(files.sessionFile)) rmSync(file, GONE);
   emptyDir(files.configDir, (name) => !retired && isSignIn(files.configDir, name));
   const file = accountFile(files);
   if (existsSync(file)) {
@@ -94,7 +106,7 @@ export function sweep(files: PersonFiles, retired: boolean): void {
 }
 
 export function leftovers(files: PersonFiles, retired: boolean): string[] {
-  const left = existsSync(files.sessionFile) ? [files.sessionFile] : [];
+  const left = sessionFiles(files.sessionFile).filter(existsSync);
   left.push(...entries(files.configDir).filter((name) => retired || !isSignIn(files.configDir, name)).map((name) => join(files.configDir, name)));
   const file = accountFile(files);
   const account = existsSync(file) ? readObject(file) : {};

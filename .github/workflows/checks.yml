@@ -68,6 +68,7 @@ jobs:
           docker run --rm \
             -v "$PWD/box/test:/opt/box/test:ro" \
             -v "$PWD/box/mock-api.mjs:/opt/box/mock-api.mjs:ro" \
+            -v "$PWD/box/up.sh:/opt/box/up.sh:ro" \
             giraffes-box:check sh -c 'cd /opt/box && node --test --test-reporter=tap test/*.test.ts' 2>&1 | tee box-image.log
           grep -Eq '^# pass [1-9]' box-image.log || { echo "::error::no box test passed in the image"; exit 1; }
           grep -Eq '^# skipped 0$' box-image.log || { echo "::error::a box test was skipped in the image"; exit 1; }

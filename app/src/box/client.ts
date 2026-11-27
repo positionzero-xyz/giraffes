@@ -16,6 +16,8 @@ export type BoxAgentRequest = {
   readonly model: string;
   readonly append: string;
   readonly session: string | null;
+  /** Opaque per-person key for the box's rollback session file on a shared static box. */
+  readonly sessionOwner?: string;
   readonly turn: string;
   readonly fresh: string;
   readonly tools: readonly unknown[];

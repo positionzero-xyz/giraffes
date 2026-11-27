@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { diagnostic, errorCode } from "./diagnostics.ts";
+import { diagnostic, errorCode, type EraseArea } from "./diagnostics.ts";
 
 export type PersonFiles = { readonly home: string; readonly configDir: string; readonly scratchDirs: readonly string[]; readonly sessionFile: string; readonly stateFile: string };
 
@@ -78,7 +78,7 @@ const RETRIES = 10;
 const RETRY_DELAY = 100;
 const retrySleep = new Int32Array(new SharedArrayBuffer(4));
 
-function remove(path: string): void {
+function remove(path: string, area: EraseArea): void {
   for (let attempt = 0; ; attempt++) {
     try {
       rmSync(path, GONE);
@@ -86,7 +86,7 @@ function remove(path: string): void {
     } catch (err) {
       const error = errorCode(err);
       if (!RETRYABLE.has(error) || attempt === RETRIES) {
-        diagnostic({ code: "erase_delete_failed", path, error });
+        diagnostic({ code: "erase_delete_failed", area, error });
         throw err;
       }
       Atomics.wait(retrySleep, 0, 0, (attempt + 1) * RETRY_DELAY);
@@ -108,22 +108,22 @@ function sessionFiles(sessionFile: string): string[] {
     .map((name) => join(dirname(sessionFile), name));
 }
 
-function emptyDir(dir: string, keep: (name: string) => boolean = () => false): void {
-  for (const name of entries(dir)) if (!keep(name)) remove(join(dir, name));
+function emptyDir(dir: string, area: EraseArea, keep: (name: string) => boolean = () => false): void {
+  for (const name of entries(dir)) if (!keep(name)) remove(join(dir, name), area);
 }
 
 export function sweep(files: PersonFiles, retired: boolean): void {
-  for (const file of sessionFiles(files.sessionFile)) remove(file);
-  emptyDir(files.configDir, (name) => !retired && isSignIn(files.configDir, name));
+  for (const file of sessionFiles(files.sessionFile)) remove(file, "session");
+  emptyDir(files.configDir, "config", (name) => !retired && isSignIn(files.configDir, name));
   const file = accountFile(files);
   if (existsSync(file)) {
     const account = readObject(file);
-    if (account === null) remove(file);
+    if (account === null) remove(file, "config");
     else if (extraFields(account).length > 0) writeDurably(file, JSON.stringify(Object.fromEntries(Object.entries(account).filter(([key]) => SIGN_IN_FIELDS.has(key)))));
   }
-  emptyDir(files.home);
-  for (const dir of files.scratchDirs) emptyDir(dir);
-  emptyDir(dirname(files.stateFile), (name) => isRecord(files, name));
+  emptyDir(files.home, "home");
+  for (const dir of files.scratchDirs) emptyDir(dir, "scratch");
+  emptyDir(dirname(files.stateFile), "state", (name) => isRecord(files, name));
 }
 
 export function leftovers(files: PersonFiles, retired: boolean): string[] {

@@ -113,7 +113,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
         sweep(files, state.retired === true);
         const left = leftovers(files, state.retired === true);
         if (left.length > 0) {
-          diagnostic({ code: "erase_leftovers", paths: left });
+          diagnostic({ code: "erase_leftovers", count: left.length });
           return false;
         }
         const done = { ...state, erasing: false };
@@ -122,7 +122,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
         unrecordedSessions.clear();
         return true;
       } catch (err) {
-        console.error(`erase failed: ${errorCode(err)}`, err);
+        console.error(`erase failed: ${errorCode(err)}`);
         return false;
       }
     })();

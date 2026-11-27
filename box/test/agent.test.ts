@@ -318,13 +318,19 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     }
   });
 
-  it("answers a good turn when the rollback pointer can't be written", async () => {
+  it("answers a good turn when the rollback pointer can't be written", async (t) => {
+    const info = t.mock.method(console, "info", () => {});
     writeFileSync(script, JSON.stringify({ calls: [], text: "Still good." }));
     rmSync(join(dir, ".giraffe-session"), { recursive: true, force: true });
     mkdirSync(join(dir, ".giraffe-session"));
     try {
       const r = await agent({ session: GONE, turn: "New\nPerson: write failure", fresh: "New\nPerson: write failure" });
       assert.equal(r.status, 200);
+      const writeErrors = info.mock.calls
+        .map(({ arguments: [event] }) => event)
+        .filter((event) => event?.code === "legacy_session_write_failed");
+      assert.equal(writeErrors.length, 1);
+      assert.ok(["EISDIR", "EPERM"].includes(writeErrors[0].error), `unexpected error ${writeErrors[0].error}`);
     } finally {
       rmSync(join(dir, ".giraffe-session"), { recursive: true, force: true });
     }

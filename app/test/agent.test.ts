@@ -1,8 +1,12 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { AGENT_SYSTEM } from "../src/agent/prompt";
+import { AgentStore } from "../src/agent/store";
 import { TURN } from "../src/agent/turn";
-import type { EpochMs, LocalDateTime, TimeZone } from "../src/domain";
+import type { ChannelAdapter, ChannelRegistry } from "../src/channels/channel";
+import { lineChannel } from "../src/channels/line";
+import { telegramChannel } from "../src/channels/telegram";
+import { eventKey, type EpochMs, type LocalDateTime, type TimeZone } from "../src/domain";
 import { DEV_CAP_MICRO } from "../src/access/access";
 import { HAIKU_5_5 } from "../src/model/providers";
 import { routeFor } from "../src/model/routes";
@@ -861,6 +865,72 @@ describe("delivery", () => {
 
     expect(c.channel.delivered.map((d) => [d.text, d.via])).toEqual([["Hi!", "push"]]);
   });
+
+  test.each([
+    { channel: "line", user: "U00000000000000000000000000000003", key: (n: number) => eventKey.line(`timeout-${n}`) },
+    { channel: "telegram", user: "777000111", key: (n: number) => eventKey.telegram(900000 + n) },
+  ] as const)("a hung $channel send ends within its time limit and the next queued message goes out", async ({ channel, user, key }) => {
+    const model = scripted([chat("Hi!")]);
+    const c = await devChat(user, { model, at: "2099-11-04T10:00", channel });
+    await c.say("hello");
+    expect(await c.received()).toEqual(["Hi!"]);
+
+    const timeoutMs = 30;
+    const real = channel === "line"
+      ? lineChannel({ channelSecret: "line-channel-secret-for-tests", accessToken: "line-access-token" }, undefined, timeoutMs)
+      : telegramChannel({ botToken: "123:abc", webhookSecret: "tg-webhook-secret" }, timeoutMs);
+    const kinds: string[] = [];
+    const sent: string[] = [];
+    const adapter: ChannelAdapter = {
+      receive: (req) => real.receive(req),
+      async deliver(msg, now, live) {
+        const delivery = await real.deliver(msg, now, live);
+        kinds.push(delivery.kind);
+        if (delivery.kind === "sent") sent.push(msg.texts.join("\n"));
+        return delivery;
+      },
+    };
+    const channels: ChannelRegistry = channel === "line"
+      ? { line: adapter, telegram: c.channel, dev: c.channel }
+      : { line: c.channel, telegram: adapter, dev: c.channel };
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (agent) => agent.withDeps({ channels }));
+
+    const first = `${channel} first`;
+    const second = `${channel} second`;
+    await runInDurableObject(stub, (_agent, state) => {
+      const store = new AgentStore(state.storage);
+      const at = c.clock.now();
+      store.notifyOnce(`${channel}-timeout-one`, key(1), { texts: [first], note: first }, at);
+      store.notifyOnce(`${channel}-timeout-two`, key(2), { texts: [second], note: second }, at);
+    });
+
+    const requests: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      requests.push(String(input));
+      if (requests.length > 1) return Promise.resolve(Response.json({}));
+      return new Promise<Response>((_, reject) => {
+        const signal = init?.signal;
+        if (!signal) return;
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    });
+    try {
+      await c.settle();
+
+      expect(kinds).toEqual(["retry", "sent"]);
+      expect(sent).toEqual([second]);
+      expect(requests).toHaveLength(2);
+      const rows = (await c.snapshot()).outbox.filter((row) => row.texts[0] === first || row.texts[0] === second);
+      expect(rows.map((row) => [row.texts[0], row.status])).toEqual([
+        [first, "pending"],
+        [second, "sent"],
+      ]);
+      model.assertDone();
+    } finally {
+      fetchMock.mockRestore();
+    }
+  }, 2_000);
 });
 
 describe("spend", () => {

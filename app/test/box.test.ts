@@ -770,6 +770,21 @@ describe("a turn on the person's own Claude Code session", () => {
     expect(box.replies).toEqual([]);
   });
 
+  test("a late box reminder gets the standard notice without asking the session for lateNotice", async () => {
+    const { box, c } = await signedIn("late-box", "2099-11-04T21:30");
+    box.replies.push({ kind: "reply", step: turn({ actions: [schedule("bins", "2099-11-04T23:00", "Ask about the bins", false), send("OK.")] }) });
+    await c.say("I need to take the bins out later");
+    await c.received();
+    box.replies.push({ kind: "reply", step: chat("Did the bins go out?") });
+
+    await c.advanceTo("2099-11-05T08:00");
+
+    expect(await c.received()).toEqual([`${NOTICE.lateFallback("2099-11-04 23:00")}\nDid the bins go out?`]);
+    const reminder = box.parses.at(-1)?.user;
+    expect(reminder).toContain('Your wake-up "bins" fired');
+    expect(reminder).not.toContain("lateNotice");
+  });
+
   test("a person with only their Claude plan gets their daily check-in from the box", async () => {
     const { box, c } = await signedIn("checkin", "2099-11-04T08:00");
     box.replies.push({ kind: "reply", step: chat("Morning! Want me to plan the long weekend?") });

@@ -84,6 +84,27 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     mock?.proc.kill();
   });
 
+  it("keeps only the live transcript when the Worker rolls a chat session", async () => {
+    const pendingPointer = join(dir, ".giraffe-session.next");
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Before the roll." }));
+    mkdirSync(pendingPointer);
+    const first = await agent({ turn: "New\nPerson: before the roll" }).finally(() => rmSync(pendingPointer, { recursive: true, force: true }));
+    assert.equal(first.status, 200);
+    assert.equal(transcriptExists(first.body.session.id), true);
+
+    writeFileSync(script, JSON.stringify({ calls: [], text: "After the roll." }));
+    const fresh = "Conversation\nPerson: before the roll\n\nNew\nPerson: after the roll";
+    const rolled = await agent({ session: null, turn: "New\nPerson: after the roll", fresh });
+    assert.equal(rolled.status, 200);
+    assert.equal(rolled.body.session.resumed, false);
+    assert.notEqual(rolled.body.session.id, first.body.session.id);
+    assert.deepEqual(userTexts(sent().at(-1)!), [fresh]);
+    const transcripts = readdirSync(join(dir, "config", "projects"), { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+      .map((entry) => entry.name);
+    assert.deepEqual(transcripts, [`${rolled.body.session.id}.jsonl`]);
+  });
+
   it("returns the reply text, the tool calls Giraffe's server accepted, in order, and the new session it started", async () => {
     writeFileSync(script, JSON.stringify({
       calls: [
@@ -318,13 +339,19 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     }
   });
 
-  it("answers a good turn when the rollback pointer can't be written", async () => {
+  it("answers a good turn when the rollback pointer can't be written", async (t) => {
+    const info = t.mock.method(console, "info", () => {});
     writeFileSync(script, JSON.stringify({ calls: [], text: "Still good." }));
     rmSync(join(dir, ".giraffe-session"), { recursive: true, force: true });
     mkdirSync(join(dir, ".giraffe-session"));
     try {
       const r = await agent({ session: GONE, turn: "New\nPerson: write failure", fresh: "New\nPerson: write failure" });
       assert.equal(r.status, 200);
+      const writeErrors = info.mock.calls
+        .map(({ arguments: [event] }) => event)
+        .filter((event) => event?.code === "legacy_session_write_failed");
+      assert.equal(writeErrors.length, 1);
+      assert.ok(["EISDIR", "EPERM"].includes(writeErrors[0].error), `unexpected error ${writeErrors[0].error}`);
     } finally {
       rmSync(join(dir, ".giraffe-session"), { recursive: true, force: true });
     }

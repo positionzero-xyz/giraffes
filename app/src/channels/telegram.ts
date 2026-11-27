@@ -1,6 +1,6 @@
 import { diagnostic } from "../diagnostics";
 import { z } from "zod";
-import { LANGUAGES, eventKey, parseButton, parseInviteCode, personAgentKey, type ChannelEvent, type EpochMs, type Language, type OutboundMessage } from "../domain";
+import { eventKey, LANGUAGES, parseButton, parseInviteCode, personAgentKey, type ChannelEvent, type EpochMs, type Identity, type Language, type OutboundMessage } from "../domain";
 import { CHANNEL_RETRY_MS, disabledChannel, plainText, sameSecret, type ChannelAdapter, type Delivery, type OperatorAlertDelivery, type Received } from "./channel";
 
 const Chat = z.object({ id: z.number().int(), type: z.string() });
@@ -84,6 +84,20 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
     }
   }
 
+  /** Telegram shows typing for 5 seconds, or until the bot's next message. */
+  async function typing(to: Identity): Promise<void> {
+    try {
+      const res = await fetch(`${api}/sendChatAction`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: to.channelUserId, action: "typing" }),
+      });
+      if (!res.ok) diagnostic("telegram_typing_failed", res.status);
+    } catch {
+      diagnostic("telegram_typing_failed");
+    }
+  }
+
   /**
    * Telegram's sendMessage has no idempotency key, so a crash after a send succeeds but before the row is
    * marked sent re-sends it on recovery.
@@ -157,5 +171,7 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
     },
 
     deliverOperatorAlert: send,
+
+    working: { everyMs: 4000, show: typing },
   };
 }

@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
 import { draftKey, KEY_REMOVED, redactSecrets } from "../src/access/key";
 import { AgentStore } from "../src/agent/store";
-import { eventKey, type AgentKey, type LocalDate, type MicroUsd } from "../src/domain";
+import { eventKey, type AgentKey, type EpochMs, type LocalDate, type MicroUsd } from "../src/domain";
 import { NOTICES } from "../src/notices";
 import worker from "../src/worker";
 import { chat, devChat, fakeBox, fakeProvider, giveKey, local, schedule, scripted, send, type DevChat, type ProviderStep } from "./testkit";
@@ -69,21 +69,43 @@ describe("entering a key on the page", () => {
   });
 
   test("a key out of credit says when the key can be tried again without promising to replay requests", async () => {
-    const provider = fakeProvider([PROBE_OK, { kind: "status", status: 402 }, PROBE_OK]);
-    const c = await devChat("catch-up-key-out-of-credit", { model: null, provider, at: "2099-11-04T10:00" });
+    const provider = fakeProvider([PROBE_OK, { kind: "status", status: 402 }, { kind: "status", status: 402 }, PROBE_OK]);
+    const c = await devChat("catch-up-key-out-of-credit", { model: null, provider, at: "2099-11-04T22:59" });
     expect((await submit(await keyLink(c))).status).toBe(200);
     await c.settle();
     await c.received();
+    c.clock.set((local("2099-11-04T23:00") - 500) as EpochMs);
     await c.say("Help me plan dinner.");
     const [refused] = await c.received();
-    expect(refused).toContain("try the key again");
+    expect(refused).toContain("try the key again after 2099-11-05 00:00");
     expect(refused).not.toContain("answer requests");
+    c.clock.set((local("2099-11-05T00:00") - 1000) as EpochMs);
     await c.say("Can we use pumpkin?");
     expect(await c.received()).toEqual([refused]);
+    expect(provider.seen).toHaveLength(2);
+    c.clock.set(local("2099-11-05T00:00"));
+    await c.say("How should I cook the pumpkin?");
+    expect((await c.received())[0]).toContain("try the key again after 2099-11-05 02:00");
+    c.clock.set(local("2099-11-05T01:59"));
+    await c.say("Could we roast it?");
+    expect((await c.received())[0]).toContain("2099-11-05 02:00");
+    expect(provider.seen).toHaveLength(3);
     expect((await submit(await keyLink(c))).status).toBe(200);
     await c.settle();
     expect(await c.received()).toEqual([NOTICE.keyConnected("OpenCode Go", "claude-haiku-5-5")]);
-    expect(provider.seen).toHaveLength(3);
+    expect(provider.seen).toHaveLength(4);
+  });
+
+  test("the Thai credit notice shows the date and time the key can be tried again", async () => {
+    const provider = fakeProvider([PROBE_OK, { kind: "status", status: 402 }]);
+    const c = await devChat("U00000000000000000000000000000a04", {
+      model: null, provider, at: "2099-11-04T23:00", channel: "line",
+    });
+    expect((await submit(await keyLink(c))).status).toBe(200);
+    await c.settle();
+    await c.received();
+    await c.say("ช่วยคิดเมนูมื้อเย็นหน่อยค่ะ");
+    expect((await c.received())[0]).toContain("ลองใช้ key นี้อีกครั้งได้หลัง 2099-11-05 00:00");
   });
 
   test.each(["pending", "processing"] as const)("catch-up expiry applies to %s batches after backoff", async (status) => {
@@ -274,6 +296,12 @@ describe("entering a key on the page", () => {
     expect(html).not.toMatch(/<script[^>]+src=/);
     expect(html).toContain("OpenCode Go");
     expect(html).toContain(NOTICES.th.keyPage.connect);
+  });
+
+  test("the key page says checking can use more than one small request in both languages", async () => {
+    const html = await (await SELF.fetch("https://giraffes.test/key")).text();
+    expect(html).toContain("Checking your key. This may use a few small requests on your provider account…");
+    expect(html).toContain("กำลังตรวจ key ค่ะ อาจส่งคำขอสั้น ๆ สองสามครั้งผ่านบัญชีของคุณกับผู้ให้บริการ…");
   });
 
   test.each([true, false])("rejects an oversized form early, declared length %s", async (declared) => {

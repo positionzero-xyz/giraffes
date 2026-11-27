@@ -13,6 +13,7 @@ export interface BillingStore {
   owned(owner: AgentKey, now: EpochMs): Promise<readonly SubscriptionId[]>;
   customer(id: SubscriptionId): Promise<CustomerId | null>;
   recordDuplicate(owner: AgentKey, ids: readonly SubscriptionId[], now: EpochMs): Promise<void>;
+  duplicateDetectedAt(ownerKey: string, subscriptionIds: string): Promise<EpochMs | null>;
   members(id: SubscriptionId): Promise<readonly AgentKey[]>;
   places(owner: AgentKey, now: EpochMs): Promise<Places | null>;
   invite(owner: AgentKey, code: string, now: EpochMs, expiresAt: EpochMs): Promise<InviteResult>;
@@ -106,6 +107,12 @@ export function d1Billing(db: D1Database): BillingStore {
         .prepare("INSERT OR IGNORE INTO billing_duplicate (owner_key, subscription_ids, found_at) VALUES (?, ?, ?)")
         .bind(owner, ids.join(" "), now)
         .run();
+    },
+
+    async duplicateDetectedAt(ownerKey, subscriptionIds) {
+      return db.prepare("SELECT found_at FROM billing_duplicate WHERE owner_key = ? AND subscription_ids = ?")
+        .bind(ownerKey, subscriptionIds)
+        .first<EpochMs>("found_at");
     },
 
     async members(id) {

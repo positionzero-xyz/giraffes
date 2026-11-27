@@ -273,7 +273,7 @@ export class ModelAccess {
   }
 
   /**
-   * One tiny call that decides whether a key works and which schema mode its endpoint honours: strict first, then loose
+   * Checks whether a key works and which schema mode its endpoint honours: strict first, then loose
    * when the provider leaves that to the probe. It reserves and is charged to the person's own spend like any call.
    */
   async probe(draft: KeyDraft, capMicro: MicroUsd): Promise<ProbeResult> {
@@ -478,8 +478,10 @@ export class ModelAccess {
     switch (fault) {
       case "credential":
         return t.keyRefused(label);
-      case "payment":
-        return t.keyNoCredit(label);
+      case "payment": {
+        const retryMinute = until === null ? null : ((Math.ceil(until / MIN_MS) * MIN_MS) as EpochMs);
+        return t.keyNoCredit(label, retryMinute === null ? null : toLocal(retryMinute, a?.tz ?? DEFAULT_TIME_ZONE).replace("T", " "));
+      }
       case "model":
         return t.keyNoModel(label, k.model);
       case "rate":

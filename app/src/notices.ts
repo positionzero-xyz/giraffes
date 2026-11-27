@@ -42,7 +42,9 @@ export type Notices = {
   readonly noLinks: string;
   readonly manage: (link: string) => string;
   readonly noPortal: string;
-  readonly duplicate: string;
+  readonly duplicateAlerted: string;
+  readonly duplicateRetrying: (outcome: "retry" | "in_doubt" | "refused", retrySeconds: number) => string;
+  readonly duplicateAlertDelayed: string;
   readonly invite: (code: string) => string;
   readonly inviteNotOwner: string;
   readonly inviteFull: (seats: number) => string;
@@ -76,7 +78,7 @@ export type Notices = {
   readonly ownCapReached: (capUsd: string) => string;
   readonly includedCapReached: string;
   readonly keyRefused: (provider: string) => string;
-  readonly keyNoCredit: (provider: string) => string;
+  readonly keyNoCredit: (provider: string, untilLocal: string | null) => string;
   readonly keyNoModel: (provider: string, model: string) => string;
   readonly keyRateLimited: (provider: string, untilLocal: string) => string;
   readonly keyUnreadable: string;
@@ -190,7 +192,16 @@ const en: Notices = {
   noLinks: "I couldn't make the payment links just now. Send /plan again in a minute.",
   manage: (link) => `To change or cancel your plan: ${link}`,
   noPortal: "I couldn't make the link to manage your plan just now. Send /plan again in a minute.",
-  duplicate: "It looks like you're paying for more than one plan at once. We'll sort out the duplicate for you.",
+  duplicateAlerted: "I detected overlapping paid plans. I've alerted our billing team. They can review it now and check whether a billing change or refund is needed. Check your payment statement for extra charges in the meantime.",
+  duplicateRetrying: (outcome, retrySeconds) => {
+    const delivery = {
+      retry: "I tried to alert our billing team, but delivery hasn't been confirmed.",
+      in_doubt: "The billing team may already have received the alert.",
+      refused: "The billing alert couldn't be delivered.",
+    }[outcome];
+    return `I detected overlapping paid plans. ${delivery} I've scheduled another attempt in ${retrySeconds} seconds. I'll keep trying. Check your payment statement for extra charges.`;
+  },
+  duplicateAlertDelayed: "I detected overlapping paid plans. The billing alert is delayed because I couldn't reach our billing chat. I'll try again in 24 hours, or sooner if I receive updated billing chat settings. Check your payment statement for extra charges.",
   invite: (code) => `Ask the person you want to add to send me this within 7 days. It works once.\n/join ${code}`,
   inviteNotOwner: "Only the owner of a Plus plan can invite people. Send /plan to see the plans.",
   inviteFull: (seats) => `All ${seats} places on your Plus plan are taken.`,
@@ -213,8 +224,8 @@ const en: Notices = {
     unavailable: () => "Connecting your own Claude plan isn't available yet.",
     full: () => "I can't connect another Claude plan right now. Please try again later.",
     busy: () => "I can't start setting up your Claude connection right now. Please try again in a few minutes.",
-    setting_up: () => "Setting up your Claude connection. I'll send you a sign-in link in a few minutes.",
-    still_setting_up: () => "Your Claude connection is still being set up. I'll send the sign-in link when it's ready.",
+    setting_up: () => "Setting up your Claude connection.",
+    still_setting_up: () => "Your Claude connection is still being set up.",
     link: (link) => `Sign in to Claude here to connect your plan. The link works for 30 minutes.\n${link}`,
     signed_out_link: (link) =>
       `Your Claude plan is signed out. Once you sign in, I'll answer requests from the last 24 hours. The link works for 30 minutes.\n${link}`,
@@ -239,12 +250,12 @@ const en: Notices = {
   consentButton: "I'm 18+ and agree",
   privacy:
     "Before we start: I keep our chat and the notes I make about you so I can help you over time. Nobody else reads them, and you can ask me to forget something at any time. You need to be 18 or over. Tap the button to agree.",
-  welcome: "You're in. Tell me what you'd like a hand with, and I'll check in with you each morning.",
+  welcome: "You're in. Tell me what you'd like a hand with. I may send a morning check-in when I have AI access and something useful to share.",
   waitlist: {
     no_code: "Hi! I'm in a small invite-only beta for now. If you have an invite code, send it here.",
     bad_code: "That code doesn't work. Check it and send it again.",
     used: "That code has already been used. Ask the person who gave it to you for a new one.",
-    full: "The beta is full right now, so I've put you on the waiting list.",
+    full: "The beta is full right now. There's no date for new places yet. To check again, send your invite code here.",
   },
   alreadyIn: "You're already in the beta.",
   removed: "You're no longer in the beta, so I can't answer messages.",
@@ -270,7 +281,8 @@ const en: Notices = {
   ownCapReached: (cap) => `You've used the $${cap} monthly limit you set for your key. Send /key cap <dollars> to change it. It resets on the 1st.`,
   includedCapReached: "Your plan's AI allowance for this month is used up. It resets on the 1st.",
   keyRefused: (p) => `Your ${p} key was refused. Send /key to enter it again.`,
-  keyNoCredit: (p) => `Your ${p} account is out of credit. I can try the key again in an hour, or you can send /key to use another key.`,
+  keyNoCredit: (p, until) =>
+    `Your ${p} account is out of credit. ${until === null ? "" : `I can try the key again after ${until} your time. `}You can send /key to use another key.`,
   keyNoModel: (p, m) => `${p} no longer serves ${m}. Send /key to pick another model.`,
   keyRateLimited: (p, until) => (until ? `You've hit your ${p} usage limit. I'll use it again after ${until}.` : `You've hit your ${p} usage limit. I'll try it again later.`),
   keyUnreadable: "I lost access to your saved key on our side, sorry. Send /key to enter it again.",
@@ -308,7 +320,7 @@ const en: Notices = {
     baseUrl: "Base URL (https)",
     key: "API key",
     connect: "Connect",
-    checking: "Checking your key with one tiny request…",
+    checking: "Checking your key. This may use a few small requests on your provider account…",
     connected: "Connected. You can go back to the chat.",
     getKey: "Get a key",
     errors: {
@@ -375,7 +387,16 @@ const th: Notices = {
   noLinks: "ตอนนี้สร้างลิงก์ชำระเงินไม่ได้ค่ะ ส่ง /plan อีกครั้งในอีกสักครู่นะคะ",
   manage: (link) => `เปลี่ยนหรือยกเลิกแพ็กเกจได้ที่: ${link}`,
   noPortal: "ตอนนี้สร้างลิงก์จัดการแพ็กเกจไม่ได้ค่ะ ส่ง /plan อีกครั้งในอีกสักครู่นะคะ",
-  duplicate: "ดูเหมือนตอนนี้จ่ายอยู่มากกว่าหนึ่งแพ็กเกจ เดี๋ยวทางเราจะจัดการรายการที่ซ้ำให้ค่ะ",
+  duplicateAlerted: "ตรวจพบช่วงที่แพ็กเกจแบบชำระเงินของคุณซ้อนกันค่ะ แจ้งทีมดูแลการชำระเงินแล้วค่ะ ทีมตรวจสอบได้เลยว่าต้องแก้ไขการเรียกเก็บเงินหรือคืนเงินหรือไม่ ระหว่างนี้คุณตรวจสอบรายการเดินบัญชีได้ว่ามียอดเรียกเก็บเกินหรือไม่ค่ะ",
+  duplicateRetrying: (outcome, retrySeconds) => {
+    const delivery = {
+      retry: "พยายามแจ้งทีมแล้ว แต่ยังยืนยันไม่ได้ว่าทีมได้รับค่ะ",
+      in_doubt: "ทีมอาจได้รับการแจ้งเตือนแล้วค่ะ",
+      refused: "ส่งการแจ้งเตือนให้ทีมดูแลการชำระเงินไม่สำเร็จค่ะ",
+    }[outcome];
+    return `ตรวจพบช่วงที่แพ็กเกจแบบชำระเงินของคุณซ้อนกันค่ะ ${delivery} ระบบจะลองอีกครั้งในอีก ${retrySeconds} วินาที และจะพยายามส่งต่อไปค่ะ คุณตรวจสอบรายการเดินบัญชีได้ว่ามียอดเรียกเก็บเกินหรือไม่ค่ะ`;
+  },
+  duplicateAlertDelayed: "ตรวจพบช่วงที่แพ็กเกจแบบชำระเงินของคุณซ้อนกันค่ะ การแจ้งเตือนล่าช้าเพราะตอนนี้ติดต่อแชตของทีมดูแลการชำระเงินไม่ได้ ระบบจะลองอีกครั้งในอีก 24 ชั่วโมง หรือเร็วกว่านั้นหากได้รับการตั้งค่าแชตใหม่ค่ะ คุณตรวจสอบรายการเดินบัญชีได้ว่ามียอดเรียกเก็บเกินหรือไม่ค่ะ",
   invite: (code) => `ให้คนที่อยากเพิ่มส่งข้อความนี้มาภายใน 7 วัน ใช้ได้ครั้งเดียวค่ะ\n/join ${code}`,
   inviteNotOwner: "เฉพาะเจ้าของแพ็กเกจ Plus เท่านั้นที่เชิญคนได้ค่ะ ส่ง /plan เพื่อดูแพ็กเกจ",
   inviteFull: (seats) => `ที่ในแพ็กเกจ Plus เต็มครบ ${seats} ที่แล้วค่ะ`,
@@ -398,8 +419,8 @@ const th: Notices = {
     unavailable: () => "ตอนนี้ยังเชื่อมแพ็กเกจ Claude ของตัวเองไม่ได้ค่ะ",
     full: () => "ตอนนี้เชื่อมแพ็กเกจ Claude เพิ่มไม่ได้แล้วค่ะ ลองใหม่ภายหลังนะคะ",
     busy: () => "ตอนนี้ยังเริ่มตั้งค่าการเชื่อม Claude ไม่ได้ค่ะ ลองใหม่ในอีกไม่กี่นาทีนะคะ",
-    setting_up: () => "กำลังตั้งค่าการเชื่อม Claude อยู่ค่ะ อีกไม่กี่นาทีจะส่งลิงก์เข้าสู่ระบบให้",
-    still_setting_up: () => "ยังตั้งค่าการเชื่อม Claude อยู่ค่ะ พร้อมเมื่อไหร่จะส่งลิงก์เข้าสู่ระบบให้",
+    setting_up: () => "กำลังตั้งค่าการเชื่อม Claude อยู่ค่ะ",
+    still_setting_up: () => "ยังตั้งค่าการเชื่อม Claude อยู่ค่ะ",
     link: (link) => `เข้าสู่ระบบ Claude ที่ลิงก์นี้เพื่อเชื่อมแพ็กเกจได้เลยค่ะ ลิงก์ใช้ได้ 30 นาที\n${link}`,
     signed_out_link: (link) =>
       `แพ็กเกจ Claude ออกจากระบบอยู่ค่ะ เมื่อเข้าสู่ระบบแล้ว จะตอบคำขอที่คุณส่งมาในช่วง 24 ชั่วโมงที่ผ่านมานะคะ ลิงก์ใช้ได้ 30 นาที\n${link}`,
@@ -424,12 +445,12 @@ const th: Notices = {
   consentButton: "อายุ 18+ และยอมรับ",
   privacy:
     "ก่อนเริ่มนะคะ: เราจะเก็บแชตและโน้ตเกี่ยวกับคุณไว้เพื่อช่วยคุณได้ต่อเนื่อง ไม่มีใครอื่นอ่าน และขอให้ลืมเรื่องไหนก็ได้ทุกเมื่อ ต้องมีอายุ 18 ปีขึ้นไป กดปุ่มด้านล่างเพื่อยอมรับค่ะ",
-  welcome: "เรียบร้อยค่ะ อยากให้ช่วยเรื่องไหนบอกได้เลย แล้วทุกเช้าจะทักมาถามนะคะ",
+  welcome: "เข้าร่วมรุ่นทดลองแล้วค่ะ อยากให้ช่วยเรื่องไหนบอกได้เลย ถ้าใช้ AI ได้และมีเรื่องที่น่าบอก อาจทักไปตอนเช้านะคะ",
   waitlist: {
     no_code: "สวัสดีค่ะ ตอนนี้เปิดให้ใช้เฉพาะคนที่ได้รับเชิญก่อน ถ้ามีรหัสเชิญ ส่งมาที่นี่ได้เลยค่ะ",
     bad_code: "รหัสนี้ใช้ไม่ได้ค่ะ ลองตรวจดูแล้วส่งมาใหม่อีกครั้งนะคะ",
     used: "รหัสนี้ถูกใช้ไปแล้วค่ะ ขอรหัสใหม่จากคนที่ให้มาได้เลยนะคะ",
-    full: "ตอนนี้ที่เต็มแล้วค่ะ เลยใส่ชื่อไว้ในรายชื่อรอให้แล้วนะคะ",
+    full: "ตอนนี้รุ่นทดลองเต็มแล้วค่ะ ยังไม่มีกำหนดเปิดรับเพิ่ม ถ้าอยากเช็กอีกครั้ง ส่งรหัสเชิญในแชตนี้ได้เลยค่ะ",
   },
   alreadyIn: "ตอนนี้ใช้งานอยู่แล้วค่ะ",
   removed: "ตอนนี้ไม่ได้อยู่ในรุ่นทดลองแล้ว เลยตอบข้อความไม่ได้ค่ะ",
@@ -455,7 +476,8 @@ const th: Notices = {
   ownCapReached: (cap) => `ใช้ key ของคุณครบวงเงิน $${cap} ต่อเดือนที่ตั้งไว้แล้วค่ะ ส่ง /key cap <จำนวนดอลลาร์> เพื่อเปลี่ยน วงเงินจะเริ่มใหม่วันที่ 1 ค่ะ`,
   includedCapReached: "โควตา AI ในแพ็กเกจของคุณเดือนนี้หมดแล้วค่ะ จะเริ่มใหม่วันที่ 1",
   keyRefused: (p) => `${p} ไม่รับ key ของคุณค่ะ ส่ง /key เพื่อใส่ใหม่นะคะ`,
-  keyNoCredit: (p) => `บัญชี ${p} ของคุณเครดิตหมดแล้วค่ะ จะลองใช้ key นี้ได้อีกครั้งในอีกหนึ่งชั่วโมง หรือส่ง /key เพื่อใช้ key อื่นก็ได้ค่ะ`,
+  keyNoCredit: (p, until) =>
+    `บัญชี ${p} ของคุณเครดิตหมดแล้วค่ะ ${until === null ? "" : `ลองใช้ key นี้อีกครั้งได้หลัง ${until} ตามเวลาของคุณค่ะ `}ส่ง /key เพื่อใช้ key อื่นได้ค่ะ`,
   keyNoModel: (p, m) => `${p} ไม่มีโมเดล ${m} ให้ใช้แล้วค่ะ ส่ง /key เพื่อเลือกโมเดลอื่นนะคะ`,
   keyRateLimited: (p, until) => (until ? `ใช้ ${p} ครบโควตาช่วงนี้แล้วค่ะ จะกลับมาใช้อีกครั้งหลัง ${until} นะคะ` : `ใช้ ${p} ครบโควตาช่วงนี้แล้วค่ะ จะลองใหม่ภายหลังนะคะ`),
   keyUnreadable: "ขอโทษค่ะ ฝั่งเราเปิด key ที่บันทึกไว้ไม่ได้แล้ว ส่ง /key เพื่อใส่ใหม่นะคะ",
@@ -493,7 +515,7 @@ const th: Notices = {
     baseUrl: "Base URL (https)",
     key: "API key",
     connect: "เชื่อมต่อ",
-    checking: "กำลังตรวจ key ด้วยคำขอเล็กๆ หนึ่งครั้งค่ะ…",
+    checking: "กำลังตรวจ key ค่ะ อาจส่งคำขอสั้น ๆ สองสามครั้งผ่านบัญชีของคุณกับผู้ให้บริการ…",
     connected: "เชื่อมต่อแล้วค่ะ กลับไปที่แชตได้เลย",
     getKey: "สมัครรับ key",
     errors: {

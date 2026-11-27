@@ -6,6 +6,7 @@ import { PAID_PLANS, SUBSCRIPTION_STATUSES, type CustomerId, type PaidPlan, type
 import { formBody, LEGACY_PRICE_KEYS, PRICE_NAMES, priceKey, STRIPE_API, STRIPE_EVENT_TYPES, type Form, type PriceName } from "./wire";
 
 export const DONE_PATH = "/billing/done";
+export const CANCEL_PATH = "/billing/cancel";
 const SIGNATURE_TOLERANCE_MS = 5 * 60_000;
 
 export type CheckoutRequest = { readonly agent: AgentKey; readonly plan: PaidPlan; readonly idempotencyKey: string };
@@ -33,12 +34,11 @@ function priceOf(cfg: StripeConfig, plan: PaidPlan): string {
 export const offeredPlans = (cfg: StripeConfig): readonly PaidPlan[] => PAID_PLANS.filter((p) => cfg.prices[p] !== null);
 
 export function checkoutForm(cfg: StripeConfig, rules: PlanRules, req: CheckoutRequest): Form {
-  const done = `${cfg.publicUrl}${DONE_PATH}`;
   const form: Form = {
     mode: "subscription",
     client_reference_id: req.agent,
-    success_url: done,
-    cancel_url: done,
+    success_url: `${cfg.publicUrl}${DONE_PATH}`,
+    cancel_url: `${cfg.publicUrl}${CANCEL_PATH}`,
     "metadata[agent_key]": req.agent,
     "metadata[plan]": req.plan,
     "subscription_data[metadata][agent_key]": req.agent,

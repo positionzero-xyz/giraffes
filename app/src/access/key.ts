@@ -259,6 +259,9 @@ const VALUE_WRAPPERS = new Map([
 ]);
 const QUOTES = new Set(['"', "'", "“", "‘", "`"]);
 
+const credentialShaped = (w: string) =>
+  (/\p{L}/u.test(w) && /\d/.test(w)) || /^\d{4,}$/.test(w) || (/[a-z]/.test(w) && /[A-Z]/.test(w) && SYMBOL.test(w));
+
 /** Letters and digits interleaved at least three times, as in `7f3a9c2e1b`, not a word and a number like `summer2026`. */
 const interleaved = (t: string) => (t.match(/[A-Za-z](?=\d)|\d(?=[A-Za-z])/g)?.length ?? 0) >= 3;
 
@@ -284,7 +287,8 @@ function labelledValue(before: string, separator: string, raw: string, after: st
   // Quotes mark the value's edges, so a quoted phrase may hold spaces; quoted or bracketed, it still needs a credential's shape (`password: "none"` stays).
   const quoted = wrapped && QUOTES.has(raw[0]);
   if (core.length < (quoted ? 1 : 4)) return null;
-  const appPassword = APP_PASSWORD_SHAPE.test(core);
+  const prose = wrapped && core.split(/[- \t ]+/).filter((w) => COMMON_FOUR_LETTER_WORDS.has(w)).length >= 2;
+  const appPassword = APP_PASSWORD_SHAPE.test(core) && !prose;
   if (/\s/.test(core) && !appPassword && !(explicit && quoted)) return null;
 
   const endsStatement = onLine.trim() === "";
@@ -293,7 +297,8 @@ function labelledValue(before: string, separator: string, raw: string, after: st
 
   const upperAndLower = /[a-z]/.test(core) && /[A-Z]/.test(core);
   const mixedSymbol = upperAndLower && SYMBOL.test(core);
-  const shaped = appPassword || (/\p{L}/u.test(core) && /\d/.test(core)) || /^\d{4,}$/.test(core) || mixedSymbol;
+  // A quoted phrase counts by its words, so `"ask me after 7 tonight"` stays and `"quokka zephyr47 plinth"` doesn't.
+  const shaped = appPassword || core.split(/\s+/).some(credentialShaped);
   // A copula can introduce ordinary prose, so mid-sentence it needs a value no word looks like.
   const strong = mixedSymbol || (upperAndLower && /\d/.test(core));
   let counts = quoted || explicit ? shaped : strong || (endsStatement && shaped);

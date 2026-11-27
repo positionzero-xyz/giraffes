@@ -64,8 +64,8 @@ const stateDir = join(dir, "state");
 mkdirSync(stateDir, { recursive: true });
 const server = createBox({ token: TOKEN, cli: [CLI], sessionFile: join(dir, ".giraffe-session"), home: join(dir, "home"), configDir: join(dir, "config"), scratchDirs: [join(dir, "tmp")], stateFile: join(stateDir, "erase.json") });
 
-async function postAgent(body: object, auth = `Bearer ${TOKEN}`): Promise<{ status: number; body: any }> {
-  const res = await fetch(`${base}/agent`, { method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: JSON.stringify(body) });
+async function postAgent(body: object, auth = `Bearer ${TOKEN}`, path = "agent"): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${base}/${path}`, { method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: JSON.stringify(body) });
   return { status: res.status, body: await res.json() };
 }
 
@@ -200,11 +200,10 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
 
   it("keeps each person's rollback session on a shared box", async () => {
     for (const name of readdirSync(dir).filter((n) => n.startsWith(".giraffe-session"))) rmSync(join(dir, name), { force: true });
-    const ownedTurn = (owner: string, text: string) => {
-      const body: Record<string, unknown> = { ...turnBody({ turn: `New\nPerson: ${text}`, fresh: `New\nPerson: ${text}` }) };
-      delete body.session;
-      return { ...body, sessionOwner: owner };
-    };
+    const ownedTurn = (owner: string, text: string, session: string | null = null) => ({
+      ...turnBody({ session, turn: `New\nPerson: ${text}`, fresh: `New\nPerson: ${text}` }),
+      sessionOwner: owner,
+    });
 
     writeFileSync(script, JSON.stringify({ calls: [], text: "First person." }));
     const firstA = await postAgent(ownedTurn(OWNER_A, "alpha one"));
@@ -218,38 +217,32 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.notEqual(firstB.body.session.id, firstA.body.session.id);
     assert.equal(transcriptExists(firstA.body.session.id), true);
     assert.equal(transcriptExists(firstB.body.session.id), true);
+    assert.equal(readFileSync(join(dir, `.giraffe-session.${OWNER_A}`), "utf8"), firstA.body.session.id);
+    assert.equal(readFileSync(join(dir, `.giraffe-session.${OWNER_B}`), "utf8"), firstB.body.session.id);
 
     writeFileSync(script, JSON.stringify({ calls: [], text: "First person again." }));
-    const resumedA = await postAgent(ownedTurn(OWNER_A, "alpha two"));
+    const resumedA = await postAgent(ownedTurn(OWNER_A, "alpha two", firstA.body.session.id));
     assert.equal(resumedA.status, 200);
     assert.deepEqual(resumedA.body.session, { id: firstA.body.session.id, resumed: true });
     assert.deepEqual(userTexts(sent().at(-1)!), ["New\nPerson: alpha one", "New\nPerson: alpha two"]);
   });
 
-  it("resumes the same session when an old Worker omits session and fresh", async () => {
-    rmSync(join(dir, ".giraffe-session"), { force: true });
-    writeFileSync(script, JSON.stringify({ calls: [], text: "Legacy reply." }));
-    const legacyTurn = { model: "claude-haiku-5-5", append: APPEND, tools: [SCHEDULE, REMEMBER] };
-    const first = await postAgent({ ...legacyTurn, turn: "New\nPerson: first legacy message" });
-    const second = await postAgent({ ...legacyTurn, turn: "New\nPerson: second legacy message" });
-
-    assert.equal(first.status, 200);
-    assert.equal(second.status, 200);
-    assert.match(first.body.session.id, UUID);
-    assert.equal(first.body.session.resumed, false);
-    assert.deepEqual(second.body.session, { id: first.body.session.id, resumed: true });
-    assert.deepEqual(userTexts(sent().at(-1)!), ["New\nPerson: first legacy message", "New\nPerson: second legacy message"]);
-  });
-
-  it("keeps the session the new Worker named for an old Worker after a rollback", async () => {
+  it("refuses a turn from an old Worker, which names no session, so a group's turn can't land in the person's session", async () => {
     writeFileSync(script, JSON.stringify({ calls: [], text: "Named reply." }));
     const started = await agent({ session: null, turn: "New\nPerson: NAMED-ONE", fresh: "New\nPerson: NAMED-ONE" });
     const resumed = await agent({ session: started.body.session.id, turn: "New\nPerson: NAMED-TWO" });
-    const legacy = await postAgent({ model: "claude-haiku-5-5", append: APPEND, tools: [SCHEDULE, REMEMBER], turn: "New\nPerson: AFTER-ROLLBACK" });
-
     assert.equal(resumed.status, 200);
-    assert.deepEqual(legacy.body.session, { id: started.body.session.id, resumed: true });
-    assert.deepEqual(userTexts(sent().at(-1)!), ["New\nPerson: NAMED-ONE", "New\nPerson: NAMED-TWO", "New\nPerson: AFTER-ROLLBACK"]);
+    const requests = sent().length;
+
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Group reply." }));
+    const oldWorker = await postAgent({ model: "claude-haiku-5-5", append: APPEND, tools: [SCHEDULE, REMEMBER], turn: "New\nPerson: GROUP-MESSAGE" });
+
+    assert.deepEqual(oldWorker, { status: 400, body: { error: "bad_request" } });
+    assert.equal(sent().length, requests);
+    assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), started.body.session.id);
+    const next = await agent({ session: started.body.session.id, turn: "New\nPerson: NAMED-THREE" });
+    assert.deepEqual(next.body.session, { id: started.body.session.id, resumed: true });
+    assert.deepEqual(userTexts(sent().at(-1)!), ["New\nPerson: NAMED-ONE", "New\nPerson: NAMED-TWO", "New\nPerson: NAMED-THREE"]);
   });
 
   it("writes the rollback pointer on a fresh start and deletes the chat session it replaced", async () => {
@@ -289,12 +282,34 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), personal.body.session.id);
     assert.equal(transcriptExists(personal.body.session.id), true);
     assert.equal(transcriptExists(once.body.session.id), false);
+  });
 
-    writeFileSync(script, JSON.stringify({ calls: [], text: "After group." }));
-    const legacyTurn = { model: "claude-haiku-5-5", append: APPEND, tools: [SCHEDULE, REMEMBER] };
-    const afterGroup = await postAgent({ ...legacyTurn, turn: "New\nPerson: after group" });
-    assert.equal(afterGroup.status, 200);
-    assert.deepEqual(afterGroup.body.session, { id: personal.body.session.id, resumed: true });
+  it("runs a turn on the one-off route in a session nothing keeps, even when the body doesn't say so", async () => {
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Personal." }));
+    const personal = await agent({ session: null, turn: "New\nPerson: PERSONAL-ONE", fresh: "New\nPerson: PERSONAL-ONE" });
+    assert.equal(personal.status, 200);
+
+    writeFileSync(script, JSON.stringify({ calls: [], text: "For the group." }));
+    const once = await postAgent(turnBody({ session: null, turn: "New\nPerson: GROUP-ONE", fresh: "New\nPerson: GROUP-ONE" }), `Bearer ${TOKEN}`, "agent/once");
+    assert.equal(once.status, 200);
+    assert.equal(once.body.text, "For the group.");
+    assert.equal(once.body.session.resumed, false);
+    assert.notEqual(once.body.session.id, personal.body.session.id);
+    assert.equal(transcriptExists(once.body.session.id), false);
+    assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), personal.body.session.id);
+    assert.deepEqual(userTexts(sent().at(-1)!), ["New\nPerson: GROUP-ONE"]);
+
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Personal again." }));
+    const next = await agent({ session: personal.body.session.id, turn: "New\nPerson: PERSONAL-TWO" });
+    assert.deepEqual(next.body.session, { id: personal.body.session.id, resumed: true });
+    assert.deepEqual(userTexts(sent().at(-1)!), ["New\nPerson: PERSONAL-ONE", "New\nPerson: PERSONAL-TWO"]);
+  });
+
+  it("refuses a one-off route turn that names a session or names none", async () => {
+    const named = await postAgent(turnBody({ session: GONE, turn: "New\nPerson: hi" }), `Bearer ${TOKEN}`, "agent/once");
+    assert.deepEqual(named, { status: 400, body: { error: "bad_request" } });
+    const unnamed = await postAgent({ model: "claude-haiku-5-5", append: APPEND, tools: [SCHEDULE, REMEMBER], turn: "New\nPerson: hi" }, `Bearer ${TOKEN}`, "agent/once");
+    assert.deepEqual(unnamed, { status: 400, body: { error: "bad_request" } });
   });
 
   it("repairs a failed rollback pointer write on a later named turn", async () => {
@@ -336,13 +351,6 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
       assert.equal(replacement.status, 200);
       assert.notEqual(replacement.body.session.id, first.body.session.id);
       assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), first.body.session.id);
-
-      writeFileSync(script, JSON.stringify({ calls: [], text: "Rollback answer." }));
-      const legacyTurn = { model: "claude-haiku-5-5", append: APPEND, tools: [SCHEDULE, REMEMBER], turn: "New\nPerson: omitted rollback" };
-      const rollback = await postAgent(legacyTurn);
-      assert.equal(rollback.status, 200);
-      assert.notEqual(rollback.body.session.id, first.body.session.id);
-      assert.equal(rollback.body.session.resumed, false);
       assert.equal(transcriptExists(first.body.session.id), false);
     } finally {
       rmSync(join(dir, ".giraffe-session.next"), { recursive: true, force: true });

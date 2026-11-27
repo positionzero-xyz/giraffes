@@ -208,9 +208,9 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
     }
   }
 
-  async function agent(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function agent(req: IncomingMessage, res: ServerResponse, once = false): Promise<void> {
     const arrivedAfter = erasesStarted;
-    const parsed = readAgentRequest(await readJson(req));
+    const parsed = readAgentRequest(await readJson(req), once);
     if (!parsed) return sendJson(res, 400, { error: "bad_request" });
     const abandoned = new AbortController();
     res.on("close", () => {
@@ -220,11 +220,10 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
       const owner = parsed.sessionOwner;
       const ownerKey = owner ?? "";
       const before = parsed.ephemeral === true ? null : legacySession(owner);
-      const named = parsed.session !== undefined;
-      const result = await agentTurn(cli, named ? parsed : { ...parsed, session: before }, abandoned.signal, configDir);
+      const result = await agentTurn(cli, parsed, abandoned.signal, configDir);
       if (result.status === 200 && parsed.ephemeral !== true) {
-        const { id, resumed } = result.body.session;
-        const written = (!named && resumed) || writeLegacySession(owner, id);
+        const { id } = result.body.session;
+        const written = writeLegacySession(owner, id);
         const replaced = [before, unrecordedSessions.get(ownerKey) ?? null].filter((prior): prior is string => prior !== null && prior !== id);
         const deleted = deleteSessionTranscripts(configDir, replaced);
         if (!written && !deleted) return { status: 502, body: { error: "claude_failed" } };
@@ -329,6 +328,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
     ["GET /health", withBearer((_, res) => health(res))],
     ["POST /parse", withBearer(parse)],
     ["POST /agent", withBearer(agent)],
+    ["POST /agent/once", withBearer((req, res) => agent(req, res, true))],
     ["POST /erase", withBearer(erase)],
     ["GET /signin", (_, res) => void res.writeHead(200, PAGE_HEADERS).end(PAGE)],
     ["POST /signin/start", withTicket((ticket, _, res) => signinStart(ticket, res))],

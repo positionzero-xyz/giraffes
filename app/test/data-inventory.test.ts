@@ -46,6 +46,7 @@ const durable = {
   owned_group: { identity: "group_key", operational: "version" },
   plan: { identity: "own_subscription seat_subscription seat_owner", operational: "one trial_ends_at own_plan updated_at" },
   proposal: { chat: "text", identity: "id task_id outbox_id", operational: "version kind status created_at decided_at" },
+  rate_event: { identity: "id", operational: "kind at" },
   reservation: { privateConfig: "model", identity: "id instance", operational: "month scope purpose backend estimate_micro created_at" },
   saved_item: { identity: "source_id", operational: "ordinal kind" },
   saved_items: { identity: "snapshot", operational: "one revision snapshot_revision cursor_item cursor_offset" },

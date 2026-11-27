@@ -597,6 +597,14 @@ export const MIGRATIONS: readonly string[] = [
     SELECT RAISE (ABORT, 'outside approval binding is immutable');
   END;
   `,
+  `
+  CREATE TABLE rate_event (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind  TEXT NOT NULL CHECK (kind IN ('feedback', 'invite')),
+    at    INTEGER NOT NULL
+  );
+  CREATE INDEX rate_event_kind_at ON rate_event (kind, at);
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

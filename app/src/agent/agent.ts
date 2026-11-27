@@ -1321,6 +1321,10 @@ export class Agent extends DurableObject<Env> {
     let step: AdmissionStep = planAdmission(view, null);
     if (step.kind !== "commit") {
       const now = this.#deps.clock.now();
+      if (step.kind === "check" && this.#store.rateLimited("invite", now, 60 * 60_000, ADMISSION.inviteChecksPerHour)) {
+        const unchanged = { next: view.admission, change: null, ensureCheckin: null };
+        return this.#commit(planWithoutModel(view, { kind: "admission", commit: unchanged, text: null, consent: false }), view, a.key, { kind: "none" });
+      }
       let answer: AdmissionAnswer;
       try {
         answer =
@@ -1389,7 +1393,9 @@ export class Agent extends DurableObject<Env> {
   #feedback(submitted: boolean, view: TurnView, a: AgentRow): void {
     const t = NOTICES[view.language];
     const item = view.batch.items[0];
-    const logs: LogRow[] = submitted ? [
+    const dayStart = startOfLocalDay(view.now, view.tz);
+    const capped = submitted && this.#store.rateLimited("feedback", view.now, view.now - dayStart + 1, ADMISSION.feedbackPerDay);
+    const logs: LogRow[] = submitted && !capped ? [
       {
         stream: "feedback",
         id: `${a.key}|${item.key}`,

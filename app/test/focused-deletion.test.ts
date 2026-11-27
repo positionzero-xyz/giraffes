@@ -279,6 +279,42 @@ test.each(["other-incarnation", "low-floor"] as const)(
   },
 );
 
+test("an app Fly still lists after its delete holds the erasure on every retry, then completes once the list drops it", async () => {
+  let name: BoxName;
+  let appExists = true;
+  let listed = true;
+  let volumes = [vol("known", "old-machine")];
+  const person = await draft("focused-still-listed-after-delete", async (url, init) => {
+    const { pathname } = new URL(url);
+    if (init?.method === "DELETE") {
+      if (pathname === appPath(name) + "/machines/old-machine") return empty(204);
+      if (pathname === volumePath(name) + "/known") volumes = [];
+      else if (pathname === appPath(name) && volumes.length === 0) appExists = false;
+      else return empty(409);
+      return empty(204);
+    }
+    if (pathname === appPath(name)) return appExists ? owned() : empty(404);
+    if (pathname === volumePath(name)) return appExists ? Response.json(volumes) : empty(404);
+    if (pathname === "/v1/apps") return Response.json({ apps: listed ? [{ name }] : [] });
+    throw Error(pathname);
+  });
+  name = person.name;
+  await person.chat.tap(await register(person));
+  expect(person.erase).toHaveBeenCalledTimes(1);
+  for (let retry = 0; retry < 3; retry++) {
+    expect(appExists).toBe(false);
+    expect(completion(person)).toEqual([]);
+    expect(await reservations(name)).toBe(1);
+    expect(await jobOf(person)).toMatchObject({ job: { kind: "cleaning", box: { kind: "remove-app" } } });
+    await advance(person);
+  }
+  listed = false;
+  await advance(person);
+  expect(completion(person)).toHaveLength(1);
+  expect(completion(person)[0]).not.toContain("could not verify a disk wipe");
+  expect(await reservations(name)).toBe(0);
+});
+
 test("detached-volume cleanup must distinguish deletion from an acknowledged wipe", async () => {
   let name: BoxName;
   let appExists = true;

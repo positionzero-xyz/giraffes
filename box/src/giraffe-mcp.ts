@@ -18,8 +18,8 @@ function typeOk(type: unknown, value: unknown): boolean {
   return true;
 }
 
-/** Shallow: required keys, each property's type and enum, and no unknown keys. Deeper rules are the Worker's. */
-function problems(schema: Json, args: Json): string[] {
+/** Required keys, types, enums and the task ref pattern. Deeper rules are the Worker's. */
+function problems({ name, inputSchema: schema }: Tool, args: Json): string[] {
   const props = isObject(schema.properties) ? schema.properties : {};
   const required = Array.isArray(schema.required) ? (schema.required as string[]) : [];
   const out = required.filter((k) => !(k in args)).map((k) => `missing ${k}`);
@@ -30,7 +30,10 @@ function problems(schema: Json, args: Json): string[] {
       continue;
     }
     const branches = Array.isArray(p.anyOf) ? p.anyOf.filter(isObject) : [p];
-    const fits = branches.some((b) => typeOk(b.type, v) && (!Array.isArray(b.enum) || b.enum.includes(v)));
+    const fits = branches.some((b) =>
+      typeOk(b.type, v) &&
+      (!Array.isArray(b.enum) || b.enum.includes(v)) &&
+      (name !== "task" || k !== "ref" || typeof b.pattern !== "string" || (typeof v === "string" && new RegExp(b.pattern).test(v))));
     if (!fits) out.push(`${k} has the wrong type or value`);
   }
   return out;
@@ -50,7 +53,7 @@ function answer(method: string, params: Json): Json {
     case "tools/call": {
       const tool = tools.find((t) => t.name === params.name);
       if (!tool) return refused([`No tool named ${String(params.name)}.`]);
-      const wrong = problems(tool.inputSchema, isObject(params.arguments) ? params.arguments : {});
+      const wrong = problems(tool, isObject(params.arguments) ? params.arguments : {});
       if (wrong.length > 0) return refused(wrong);
       return { content: [{ type: "text", text: "Noted. Giraffe applies it when your reply is sent, and tells the person if code refuses it." }] };
     }

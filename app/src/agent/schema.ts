@@ -531,6 +531,24 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE box ADD COLUMN volume TEXT;
   `,
   `
+  CREATE TABLE billing_alert (
+    subscription_ids TEXT PRIMARY KEY,
+    delivery_id      TEXT NOT NULL,
+    ready_at         INTEGER,
+    notified        INTEGER NOT NULL DEFAULT 0
+  );
+  `,
+  `
+  ALTER TABLE billing_alert ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE billing_alert ADD COLUMN closed_as TEXT CHECK (closed_as IN ('sent', 'gone'));
+  `,
+  `
+  ALTER TABLE billing_alert ADD COLUMN operator_route TEXT;
+  ALTER TABLE billing_alert ADD COLUMN telegram_redirect TEXT;
+  ALTER TABLE billing_alert ADD COLUMN destination_wait INTEGER NOT NULL DEFAULT 0;
+  UPDATE billing_alert SET ready_at = unixepoch() * 1000, notified = 0, closed_as = NULL WHERE closed_as = 'gone';
+  `,
+  `
   ALTER TABLE forget ADD COLUMN phase TEXT CHECK (phase IN ('review', 'erase'));
   ALTER TABLE forget ADD COLUMN code TEXT;
   ALTER TABLE forget ADD COLUMN listed INTEGER NOT NULL DEFAULT 0;

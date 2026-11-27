@@ -401,7 +401,7 @@ export type FakeBox = {
   readonly parses: {
     readonly authorization: string | null;
     readonly user: string;
-    readonly agent: { readonly append: string; readonly tools: readonly string[]; readonly session: string | null; readonly resumed: boolean; readonly fresh: string | null } | null;
+    readonly agent: { readonly append: string; readonly tools: readonly string[]; readonly session: string | null; readonly resumed: boolean; readonly fresh: string | null; readonly ephemeral?: boolean } | null;
     /** The volume and forget epoch the request named, or null when it named none. */
     readonly at?: { readonly box: unknown; readonly epoch: unknown } | null;
   }[];
@@ -506,7 +506,7 @@ export function fakeBox(
     }
     if (url.pathname === "/parse" || url.pathname === "/agent") {
       const agent = url.pathname === "/agent";
-      const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; fresh?: string | null; session?: string | null; append?: string; tools?: { name: string }[]; box?: unknown; epoch?: unknown };
+      const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; fresh?: string | null; session?: string | null; append?: string; tools?: { name: string }[]; ephemeral?: boolean; box?: unknown; epoch?: unknown };
       const named = box.ignoresSession ? null : (body.session ?? null);
       const resumed = box.ignoresSession || (named !== null && box.sessions.has(named));
       const session = resumed ? named : crypto.randomUUID();
@@ -514,7 +514,7 @@ export function fakeBox(
       box.parses.push({
         authorization,
         user: read,
-        agent: agent ? { append: body.append ?? "", tools: (body.tools ?? []).map((t) => t.name), session: body.session ?? null, resumed, fresh: body.fresh ?? null } : null,
+        agent: agent ? { append: body.append ?? "", tools: (body.tools ?? []).map((t) => t.name), session: body.session ?? null, resumed, fresh: body.fresh ?? null, ...(body.ephemeral === true ? { ephemeral: true } : {}) } : null,
         at: body.box === undefined && body.epoch === undefined ? null : { box: body.box, epoch: body.epoch },
       });
       const step = box.replies.shift();
@@ -561,6 +561,9 @@ export function fakeBox(
 export const STRIPE_VARS = {
   ADMISSION: "open",
   BILLING: "on",
+  OPERATOR_CHAT: "telegram:4242",
+  TELEGRAM_BOT_TOKEN: "123:abc",
+  TELEGRAM_WEBHOOK_SECRET: "tg-test-secret-0123456789abcdefghi",
   STRIPE_SECRET_KEY: "sk_test_fake",
   STRIPE_WEBHOOK_SECRET: "whsec_test_fake",
   STRIPE_PRICE_STANDARD: "price_standard",

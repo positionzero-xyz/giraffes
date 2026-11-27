@@ -286,19 +286,22 @@ function renderTask(t: TurnView["openTasks"][number]): string {
 }
 
 /** The newest event whole; earlier ones cut so they share `batchBytes`. A batch too long for a route is never sent. */
-function renderBatch(view: TurnView): string[] {
+function batchLines(view: TurnView): { readonly text: string; readonly whole: boolean }[] {
   const items = view.batch.items;
   let left: number = TURN.batchBytes;
   return items.map((i, at) => {
     const line = renderEvent(i.event, view.tz);
     const sent = i.catchUp ? `[Sent ${human(i.receivedAt, view.tz)}] ` : "";
-    if (at === items.length - 1) return sent + line;
+    if (at === items.length - 1) return { text: sent + line, whole: true };
     const share = i.catchUp ? Math.floor(left / (items.length - at - 1)) : left;
     const cut = clipBytes(line, Math.max(4, Math.min(TURN.messageBytes, share)));
     left = Math.max(0, left - bytesOf(cut));
-    return sent + cut;
+    return { text: sent + cut, whole: cut === line };
   });
 }
+
+const renderBatch = (view: TurnView): string[] => batchLines(view).map((line) => line.text);
+const batchWhole = (view: TurnView): readonly boolean[] => batchLines(view).map((line) => line.whole);
 
 const keep = (title: string, lines: readonly string[]): PromptSection => ({ title, keep: lines, trim: [], dropRank: 0 });
 const newSection = (view: TurnView) => {
@@ -496,9 +499,11 @@ function acceptNotice(t: Notices, r: AcceptReply): string {
 
 function personTurns(view: TurnView, boxView?: NewTurn["boxView"]): NewTurn[] {
   const turns: NewTurn[] = [];
-  for (const item of view.batch.items) {
+  const whole = batchWhole(view);
+  for (const [at, item] of view.batch.items.entries()) {
+    const seenWhole = boxView !== undefined && whole[at] === true ? boxView : undefined;
     const e = item.event;
-    if (e.kind === "message") turns.push({ role: "person", text: e.text, at: item.receivedAt, eventKey: item.key, boxView });
+    if (e.kind === "message") turns.push({ role: "person", text: e.text, at: item.receivedAt, eventKey: item.key, boxView: seenWhole });
     if (e.kind === "choice") {
       const text =
         e.choice.kind === "accept"
@@ -506,7 +511,7 @@ function personTurns(view: TurnView, boxView?: NewTurn["boxView"]): NewTurn[] {
           : e.choice.kind === "consent"
             ? "[agreed to the privacy notice]"
             : "[chose to use their key as a backup]";
-      turns.push({ role: "person", text, at: item.receivedAt, eventKey: item.key, boxView });
+      turns.push({ role: "person", text, at: item.receivedAt, eventKey: item.key, boxView: seenWhole });
     }
   }
   return turns;
@@ -698,7 +703,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   const input = { kind: "input" } as const;
   const turns = personTurns(view, input);
   const note = said.length > 0 ? triggerNote(first, view.tz) : null;
-  if (note !== null) turns.push({ role: "note", text: note, at: view.now, eventKey: view.batch.items[0].key, boxView: input });
+  if (note !== null) turns.push({ role: "note", text: note, at: view.now, eventKey: view.batch.items[0].key, boxView: batchWhole(view)[0] === true ? input : undefined });
   for (const [i, text] of agentTexts.entries()) {
     turns.push({ role: "agent", text, at: view.now, eventKey: view.batch.items[0].key, boxView: { kind: "reply", notice: i === 0 ? lateNotice : null } });
   }

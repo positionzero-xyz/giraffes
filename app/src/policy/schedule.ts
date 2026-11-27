@@ -180,15 +180,17 @@ export function nextAlarm(input: {
   readonly inboxReadyAt: EpochMs | null;
   readonly wakeupFireAt: EpochMs | null;
   readonly outboxReadyAt: EpochMs | null;
+  readonly billingAlertAt: EpochMs | null;
   readonly logsReadyAt: EpochMs | null;
   readonly compactionRetryAt: EpochMs | null;
   readonly boxAt: EpochMs | null;
   /** The open forget's next box erase or reminder. */
   readonly forgetAt?: EpochMs | null;
 }): EpochMs | null {
-  const times = [input.inboxReadyAt, input.wakeupFireAt, input.outboxReadyAt, input.logsReadyAt, input.compactionRetryAt, input.boxAt, input.forgetAt ?? null].filter(
-    (t): t is EpochMs => t !== null,
-  );
+  const times = [
+    input.inboxReadyAt, input.wakeupFireAt, input.outboxReadyAt, input.billingAlertAt,
+    input.logsReadyAt, input.compactionRetryAt, input.boxAt, input.forgetAt ?? null,
+  ].filter((t): t is EpochMs => t !== null);
   if (times.length === 0) return null;
   return Math.max(input.now, Math.min(...times)) as EpochMs;
 }

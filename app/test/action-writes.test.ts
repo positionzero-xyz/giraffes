@@ -339,12 +339,13 @@ test("canonical JSON preserves an own __proto__ field", () => {
 test("schema v26 upgrades to the action-safety migration", async () => {
   const stub = env.AGENT.get(env.AGENT.idFromName("action-migration-v26"));
   await runInDurableObject(stub, (_agent, state) => {
-    expect(MIGRATIONS.length).toBe(27);
+    const before = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE outside_write"));
+    expect(before).toBe(MIGRATIONS.length - 1);
     state.storage.sql.exec("DROP TRIGGER IF EXISTS outside_approval_immutable");
     state.storage.sql.exec("DROP TRIGGER IF EXISTS outside_write_immutable");
     state.storage.sql.exec("DROP TABLE IF EXISTS outside_approval");
     state.storage.sql.exec("DROP TABLE IF EXISTS outside_write");
-    state.storage.sql.exec("UPDATE meta SET v = '26' WHERE k = 'schema_version'");
+    state.storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(before));
     migrate(state.storage);
     const version = state.storage.sql.exec<{ v: string }>("SELECT v FROM meta WHERE k = 'schema_version'").one().v;
     const tables = state.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('outside_write', 'outside_approval') ORDER BY name").toArray().map((r) => r.name);

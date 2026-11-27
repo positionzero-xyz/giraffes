@@ -8,6 +8,8 @@ import { checkoutForm, offeredPlans, parseEvent, parseSubscription, stripeApi, v
 import { DEFAULT_AMOUNTS, stripeSetup } from "../src/billing/setup";
 import { formBody, STRIPE_EVENT_TYPES } from "../src/billing/wire";
 import { boxMessage } from "../src/box/machine";
+import { lineChannel } from "../src/channels/line";
+import { telegramChannel } from "../src/channels/telegram";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs, MicroUsd } from "../src/domain";
 import { HAIKU_5_5 } from "../src/model/providers";
@@ -448,6 +450,42 @@ describe("checkout and the portal", () => {
   });
 
   test.each([
+    { problem: "an invalid detection date", user: "invalid-alert-date", readFails: false },
+    { problem: "a failed date lookup", user: "failed-alert-date", readFails: true },
+  ])("sends the operator alert despite $problem", async ({ user, readFails }) => {
+    const store = d1Billing(env.LEDGER);
+    if (readFails) {
+      vi.spyOn(store, "duplicateDetectedAt").mockRejectedValue(new Error("lookup failed for a private record"));
+    }
+    const kit = billingOn({}, store);
+    const c = await devChat(user, { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel();
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, user, "standard");
+    await c.received();
+    const extra = `sub_${user}_extra`;
+    if (!readFails) {
+      await env.LEDGER.prepare("INSERT INTO billing_duplicate (owner_key, subscription_ids, found_at) VALUES (?, ?, ?)")
+        .bind(c.agent, `sub_${user} ${extra}`, 9e15).run();
+    }
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect((await stripeChange(kit, { user, sub: extra, plan: "included", status: "active" })).status).toBe(200);
+      await c.settle();
+      await c.advanceTo("2099-11-05T10:00");
+      expect(operator.delivered.map(({ text }) => text)).toEqual([expect.stringContaining("Detection date unavailable.")]);
+      expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+      const lookupWarnings = warnings.mock.calls.filter(([warning]) => warning?.code === "operator_alert_date_lookup_failed");
+      expect(lookupWarnings).toEqual(readFails ? [[{ code: "operator_alert_date_lookup_failed" }]] : []);
+    } finally {
+      warnings.mockRestore();
+    }
+  });
+
+  test.each([
     { kind: "retry", language: "en", delivery: "delivery hasn't been confirmed", timing: "another attempt in 30 seconds", billing: "payment statement" },
     { kind: "in_doubt", language: "th", delivery: "ทีมอาจได้รับการแจ้งเตือนแล้ว", timing: "ลองอีกครั้งในอีก 30 วินาที", billing: "รายการเดินบัญชี" },
     { kind: "throw", language: "en", delivery: "may already have received the alert", timing: "another attempt in 30 seconds", billing: "payment statement" },
@@ -506,7 +544,7 @@ describe("checkout and the portal", () => {
     expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
   });
 
-  test.each([false, true])("closes a permanently gone chat, including after a prior retry (%s)", async (priorRetry) => {
+  test.each([false, true])("keeps an unavailable operator chat queued, including after a prior retry (%s)", async (priorRetry) => {
     const kit = billingOn();
     const c = await devChat("gone", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
     const operator = scriptedChannel(priorRetry ? [{ kind: "retry", afterMs: 30_000 }, { kind: "gone" }] : [{ kind: "gone" }]);
@@ -524,7 +562,7 @@ describe("checkout and the portal", () => {
       expect(await c.received()).toEqual([expect.stringContaining("scheduled another attempt")]);
       await c.advanceTo("2099-11-04T10:01");
     }
-    expect(await c.received()).toEqual([expect.stringContaining("The billing chat is no longer reachable, so automatic attempts have stopped.")]);
+    expect(await c.received()).toEqual([expect.stringContaining("The billing alert is delayed")]);
     await c.advanceTo("2099-11-04T11:00");
     await stripeChange(kit, extra);
     await c.settle();
@@ -562,6 +600,173 @@ describe("checkout and the portal", () => {
     expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
   });
 
+  test.each([
+    { channel: "line", channelUserId: "U" + "a".repeat(32), url: "https://api.line.me/v2/bot/message/push",
+      body: { message: "The property, 'to', in the request body is invalid (line: -, column: -)" } },
+    { channel: "telegram", channelUserId: "4242", url: "https://api.telegram.org/bot123:abc/sendMessage",
+      body: { ok: false, error_code: 400, description: "Bad Request: chat not found" } },
+  ] as const)("retries an unavailable $channel operator chat once a day and tells the customer once", async ({ channel, channelUserId, url, body }) => {
+    const kit = billingOn();
+    const c = await devChat("missing-operator", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = channel === "line" ? lineChannel({ channelSecret: "fake", accessToken: "fake" })
+      : telegramChannel({ botToken: "123:abc", webhookSecret: "fake" });
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: c.channel, dev: c.channel, [channel]: operator },
+        operatorChat: { channel, channelUserId } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, "missing-operator", "standard");
+    await c.received();
+    let available = false;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      expect(String(input)).toBe(url);
+      return available ? Response.json({ ok: true }) : Response.json(body, { status: 400 });
+    });
+    try {
+      const extra = { user: "missing-operator", sub: "sub_missing_operator_extra", plan: "included", status: "active" } as const;
+      expect((await stripeChange(kit, extra)).status).toBe(200);
+      await c.settle();
+      expect(await c.received()).toEqual([expect.stringContaining("The billing alert is delayed")]);
+      await c.advanceTo("2099-11-05T09:59");
+      await stripeChange(kit, extra);
+      await c.settle();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(await c.received()).toEqual([]);
+      await c.advanceTo("2099-11-05T10:00");
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(await c.received()).toEqual([]);
+      available = true;
+      await c.advanceTo("2099-11-06T10:00");
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(fetch.mock.calls[2][1]?.body).toContain("Detected at: 2099-11-04T03:00:00.000Z");
+      expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  test("a new operator configuration retries a delayed alert as soon as the object runs", async () => {
+    const kit = billingOn();
+    const c = await devChat("new-operator", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    const operator = scriptedChannel([{ kind: "gone" }]);
+    const deliver = vi.spyOn(operator, "deliver");
+    await runInDurableObject(stub, (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, "new-operator", "standard");
+    await c.received();
+    await stripeChange(kit, { user: "new-operator", sub: "sub_new_operator_extra", plan: "included", status: "active" });
+    await c.settle();
+    expect(await c.received()).toEqual([expect.stringContaining("The billing alert is delayed")]);
+
+    c.clock.set(local("2099-11-04T10:05"));
+    await runInDurableObject(stub, async (_, state) => {
+      const restarted = new Agent(state, { ...env, ...STRIPE_VARS, OPERATOR_CHAT: "telegram:5252" });
+      restarted.withDeps({ billing: kit.deps, clock: c.clock, channels: { line: c.channel, telegram: operator, dev: c.channel } });
+      await restarted.alarm();
+    });
+    expect(deliver.mock.calls.map(([message, at]) => [message.to.channelUserId, at])).toEqual([
+      ["4242", local("2099-11-04T10:00")], ["5252", local("2099-11-04T10:05")],
+    ]);
+    expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+  });
+
+  test("a Telegram migration retries at the replacement chat and asks the operator to update OPERATOR_CHAT", async () => {
+    const kit = billingOn();
+    const c = await devChat("migrated-operator", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = telegramChannel({ botToken: "123:abc", webhookSecret: "fake" });
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "-4242" } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, "migrated-operator", "standard");
+    await c.received();
+    const calls: unknown[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      expect(String(input)).toBe("https://api.telegram.org/bot123:abc/sendMessage");
+      calls.push(await new Request(input, init).json());
+      if (calls.length === 1) {
+        return Response.json({ ok: false, error_code: 400, parameters: { migrate_to_chat_id: -1001234567890 } }, { status: 400 });
+      }
+      return calls.length === 2 ? Response.json({ ok: false }, { status: 503 }) : Response.json({ ok: true });
+    });
+    try {
+      await stripeChange(kit, { user: "migrated-operator", sub: "sub_migrated_operator_extra", plan: "included", status: "active" });
+      await c.settle();
+      expect(calls).toEqual([
+        expect.objectContaining({ chat_id: "-4242" }),
+        expect.objectContaining({ chat_id: "-1001234567890", text: expect.stringContaining("OPERATOR_CHAT to telegram:-1001234567890") }),
+      ]);
+      expect(warn).toHaveBeenCalledWith({ code: "operator_alert_chat_migrated", oldChatId: "-4242", newChatId: "-1001234567890" });
+      expect(await c.received()).toEqual([expect.stringContaining("scheduled another attempt")]);
+      await c.advanceTo("2099-11-04T10:01");
+      expect(calls[2]).toMatchObject({ chat_id: "-1001234567890" });
+      expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+    } finally {
+      fetch.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  test.each([
+    { channel: "line", user: "U" + "b".repeat(32), url: "https://api.line.me/v2/bot/message/push",
+      body: { message: "The property, 'to', in the request body is invalid (line: -, column: -)" } },
+    { channel: "telegram", user: "77001", url: "https://api.telegram.org/bot123:abc/sendMessage",
+      body: { ok: false, error_code: 400, description: "Bad Request: chat not found" } },
+  ] as const)("a customer's own $channel reply fails without blocking them", async ({ channel, user, url, body }) => {
+    const c = await devChat(user, { channel, model: scripted([]), at: "2099-11-04T10:00" });
+    const customer = channel === "line" ? lineChannel({ channelSecret: "fake", accessToken: "fake" })
+      : telegramChannel({ botToken: "123:abc", webhookSecret: "fake" });
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: c.channel, dev: c.channel, [channel]: customer } });
+    });
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      expect(String(input)).toBe(url);
+      return Response.json(body, { status: 400 });
+    });
+    try {
+      await c.say("/plan");
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect((await c.snapshot()).agent?.status).toBe("active");
+      expect((await c.snapshot()).outbox).toEqual([expect.objectContaining({ status: "dropped" })]);
+      expect(c.logs("lifecycle").map((event) => event.change)).not.toContain("block");
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  test.each([
+    { outcome: "sent", confirmation: "I've alerted our billing team" },
+    { outcome: "gone", confirmation: "The billing alert is delayed" },
+  ] as const)("updates the person after a $outcome alert without claiming their canceled duplicate is still active", async ({ outcome, confirmation }) => {
+    const kit = billingOn();
+    const c = await devChat("resolved-overlap", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    const operator = scriptedChannel([{ kind: "retry", afterMs: 30_000 }, { kind: outcome }]);
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+    });
+    await c.say("/plan");
+    await pay(kit, c, "resolved-overlap", "standard");
+    await c.received();
+    const extra = { user: "resolved-overlap", sub: "sub_resolved_overlap_extra", plan: "included", status: "active" } as const;
+    await stripeChange(kit, extra);
+    await c.settle();
+    expect(await c.received()).toEqual([expect.stringContaining("scheduled another attempt")]);
+
+    await stripeChange(kit, { ...extra, status: "canceled" });
+    await c.advanceTo("2099-11-04T10:01");
+    expect(await row(extra.sub)).toMatchObject({ status: "canceled" });
+    const messages = await c.received();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("I detected overlapping paid plans.");
+    expect(messages[0]).toContain(confirmation);
+    expect(messages[0]).not.toContain("you have more than one paid plan");
+    expect(operator.delivered).toHaveLength(outcome === "sent" ? 1 : 0);
+  });
+
   test("continues after three failures and caps the application backoff at an hour", async () => {
     const kit = billingOn();
     const c = await devChat("long-outage", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
@@ -575,7 +780,7 @@ describe("checkout and the portal", () => {
     await c.received();
     await stripeChange(kit, { user: "long-outage", sub: "sub_long_outage_extra", plan: "included", status: "active" });
     await c.settle();
-    expect(await c.received()).toEqual([expect.stringContaining("I'll keep trying unless the billing chat is permanently unavailable")]);
+    expect(await c.received()).toEqual([expect.stringContaining("I'll keep trying.")]);
     await c.advanceTo("2099-11-04T14:00");
     expect(deliver.mock.calls.map(([, at]) => (at - local("2099-11-04T10:00")) / 1000)).toEqual([
       0, 30, 90, 210, 450, 930, 1890, 3810, 7410, 11010,
@@ -670,6 +875,64 @@ describe("checkout and the portal", () => {
         { delivery_id: "existing-id", ready_at: 9000, attempts: 0 },
       ]);
     });
+  });
+
+  test.each([
+    { state: "closed as gone", user: "billing-alert-closed", recorded: true },
+    { state: "already reopened at epoch zero", user: "billing-alert-epoch-zero", recorded: true },
+    { state: "missing its detection record", user: "billing-alert-undated", recorded: false },
+  ])("startup delivers an old alert $state", async ({ state: previous, user, recorded }) => {
+    const kit = billingOn();
+    const c = await devChat(user, { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await c.say("/plan");
+    await c.received();
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    const operator = scriptedChannel();
+    const deliver = vi.spyOn(operator, "deliver");
+    const foundAt = local("2099-11-01T10:00");
+    if (recorded) {
+      await env.LEDGER.prepare("INSERT INTO billing_duplicate (owner_key, subscription_ids, found_at) VALUES (?, ?, ?)")
+        .bind(c.agent, "sub_a sub_b", foundAt).run();
+    }
+
+    await runInDurableObject(stub, async (_, state) => {
+      const { storage } = state;
+      if (previous === "closed as gone") {
+        const beforeDestinationRecovery = MIGRATIONS.findIndex((migration) => migration.includes("ADD COLUMN operator_route"));
+        storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN operator_route");
+        storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN telegram_redirect");
+        storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN destination_wait");
+        storage.sql.exec("DROP TRIGGER IF EXISTS outside_approval_immutable");
+        storage.sql.exec("DROP TRIGGER IF EXISTS outside_write_immutable");
+        storage.sql.exec("DROP TABLE IF EXISTS outside_approval");
+        storage.sql.exec("DROP TABLE IF EXISTS outside_write");
+        storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeDestinationRecovery));
+        storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, notified, closed_as) VALUES ('sub_a sub_b', 'old-id', 1, 'gone')");
+      } else {
+        storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, ready_at) VALUES ('sub_a sub_b', 'old-id', 0)");
+      }
+      storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, notified, closed_as) VALUES ('sub_a sub_c', 'sent-id', 1, 'sent')");
+      await storage.deleteAlarm();
+
+      const beforeStartup = Date.now();
+      const restarted = new Agent(state, { ...env, ...STRIPE_VARS });
+      await state.blockConcurrencyWhile(async () => {});
+      const scheduled = await storage.getAlarm();
+      expect(scheduled).toBeGreaterThanOrEqual(beforeStartup);
+      expect(scheduled).toBeLessThanOrEqual(Date.now());
+      if (previous === "closed as gone") {
+        const [row] = storage.sql.exec<{ ready_at: number }>("SELECT ready_at FROM billing_alert WHERE delivery_id = 'old-id'").toArray();
+        expect(row.ready_at).toBeGreaterThan(0);
+      }
+      restarted.withDeps({ billing: kit.deps, clock: c.clock, channels: { line: c.channel, telegram: operator, dev: c.channel } });
+      await restarted.alarm();
+      await restarted.alarm();
+    });
+
+    expect(deliver).toHaveBeenCalledTimes(1);
+    const dateLine = recorded ? `Detected at: ${new Date(foundAt).toISOString()}` : "Detection date unavailable.";
+    expect(deliver.mock.calls[0][0]).toMatchObject({ id: "old-id", texts: [expect.stringContaining(dateLine)] });
+    expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
   });
 
   test("backs off a failed receipt write without re-sending a confirmed operator alert", async () => {

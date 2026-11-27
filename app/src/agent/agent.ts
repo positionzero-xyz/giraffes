@@ -92,7 +92,9 @@ import {
   digestChallenge, newAccountChallenge, type AccountChallenge, type EraseBilling, type EraseBox,
   type EraseBoxReference, type EraseBoxTarget, type Erasure, type StartChallenge,
 } from "./account";
-import { coveredByForget, providerOrder, type Claim, type ProviderOrder } from "./forget";
+import { coveredByForget, forgetCommandOf, providerOrder, type Claim, type ProviderOrder } from "./forget";
+import { backupsWithin, HOST_BACKUP_DAYS } from "./backups";
+import type { Backups } from "./forget-text";
 import { migrate } from "./schema";
 import {
   AgentStore,
@@ -269,8 +271,11 @@ export class Agent extends DurableObject<Env> {
       admit: this.#deps.admission === "open" || envelope.identity.channel === "dev" ? STAFF : null,
       startBoundary: starting ? now : undefined,
     };
-    const stored = this.#store.enqueue(envelope, first, now);
+    const m = envelope.event;
+    const privacy = m.kind === "message" ? forgetCommandOf(m.text) : null;
+    const stored = this.#store.enqueue(privacy && m.kind === "message" ? { ...envelope, event: { ...m, text: "/forget" } } : envelope, first, now, privacy);
     if (stored !== "inserted") return stored;
+    if (privacy?.kind === "start" || privacy?.kind === "all") this.#devSavedPages.clear();
     await this.#armNoLaterThan(now);
     this.ctx.waitUntil(this.alarm());
     return "queued";
@@ -1114,8 +1119,8 @@ export class Agent extends DurableObject<Env> {
         await this.#phase("drain_billing_alert_failed", () => this.#runBilling(() => this.#deliverBillingAlert()));
       }
       await this.#phase("drain_turns_failed", async () => {
-        if (this.#store.held()) return;
         const poisoned = this.#store.recover(started, this.#instance);
+        if (this.#store.held()) return;
         if (poisoned) this.#commitPoison(poisoned);
         this.#fireDueWakeups();
         while (clock.now() - started < DRAIN_BUDGET_MS) {
@@ -1129,6 +1134,7 @@ export class Agent extends DurableObject<Env> {
         }
       });
       await this.#phase("drain_box_failed", () => this.#stepBox());
+      await this.#phase("drain_forget_failed", () => this.#stepForget());
       await this.#phase("drain_delivery_failed", () => this.#deliverReady());
       await this.#phase("drain_log_flush_failed", () => this.#flushLogs());
       await this.#phase("drain_compaction_failed", () => this.#compactIfDue());
@@ -1847,10 +1853,14 @@ export class Agent extends DurableObject<Env> {
     this.#store.releaseBatch(keys, (now + MODEL_RETRY_BASE_MS * 2 ** (attempts - 1)) as EpochMs, [], now);
   }
 
+  /** While a forget is open, only its own messages go out, each under the epoch it was written in. */
   async #deliverReady(): Promise<void> {
     const claim = this.#store.claim();
-    if (!claim) return;
-    for (const row of this.#store.readyOutbox(this.#deps.clock.now(), DELIVERY_BATCH)) await this.#deliver(row, claim);
+    for (const row of this.#store.readyOutbox(this.#deps.clock.now(), DELIVERY_BATCH)) {
+      const epoch = row.epoch;
+      const gate = epoch !== null ? { epoch, live: () => this.#store.forget().epoch === epoch } : claim;
+      if (gate) await this.#deliver(row, gate);
+    }
   }
 
   async #deliver(row: OutboxRow, claim: Claim): Promise<void> {
@@ -1873,9 +1883,10 @@ export class Agent extends DurableObject<Env> {
           ]
         : [];
 
-    if (row.saved === null && !row.replyOnly && !mayspend(this.#store.admission())) return this.#store.drop(row.id, "removed", now, unaskedLog("dropped_removed", null), "pending");
+    if (row.privacy === null && row.saved === null && !row.replyOnly && !mayspend(this.#store.admission())) return this.#store.drop(row.id, "removed", now, unaskedLog("dropped_removed", null), "pending");
     if (row.attempts >= MAX_DELIVERY_ATTEMPTS) return this.#store.drop(row.id, "failed", now, unaskedLog("failed", row.admittedDay), "pending");
     if (a.status === "blocked") return this.#store.drop(row.id, "blocked", now, unaskedLog("dropped_blocked", null), "pending");
+    if (row.privacy === "receipt" && row.inDoubt && row.to.channel === "telegram") return this.#store.drop(row.id, "failed", now, [], "pending");
 
     let day = row.admittedDay;
     if (row.intent === "unasked") {
@@ -1901,7 +1912,7 @@ export class Agent extends DurableObject<Env> {
       }
     }
 
-    const page = row.saved === null ? null : this.#store.savedPage(row.saved, a);
+    const page = row.saved === null ? null : this.#store.savedPage(row.saved, a, row.privacy === "page");
     const texts: readonly [string, ...string[]] | null = page ? [page.text] : row.saved === null ? row.texts : null;
     if (texts === null) return this.#store.drop(row.id, "failed", now, [], "pending");
     const routineAt = row.routine ? this.#deps.clock.now() : null;
@@ -1909,7 +1920,7 @@ export class Agent extends DurableObject<Env> {
       diagnostic("routine_delivery_budget");
       return this.#store.drop(row.id, "budget", routineAt, unaskedLog("dropped_budget", day), "pending");
     }
-    if (!this.#store.markSending(row.id, day, claim.epoch, routineAt)) return;
+    if (!this.#store.markSending(row.id, day, claim.epoch, routineAt, row.privacy !== null)) return;
     const delivery = await this.#deps.channels[row.to.channel].deliver({ ...row, texts }, now, claim.live);
     const after = this.#deps.clock.now();
     if (row.routine) this.#store.finishRoutineDelivery(row.id, delivery.kind === "sent" || delivery.kind === "in_doubt" ? after : null);
@@ -1926,6 +1937,10 @@ export class Agent extends DurableObject<Env> {
       case "retry":
       case "in_doubt": {
         const at = (after + delivery.afterMs) as EpochMs;
+        // A receipt that may have gone out isn't sent twice, since Telegram has no idempotency key; /forget status offers it.
+        if (row.privacy === "receipt" && (delivery.kind === "in_doubt" || row.to.channel === "telegram")) {
+          return this.#store.drop(row.id, "failed", after, [], "sending");
+        }
         if (row.attempts + 1 < MAX_DELIVERY_ATTEMPTS) {
           return delivery.kind === "in_doubt" ? this.#store.rescheduleInDoubt(row.id, at) : this.#store.reschedule(row.id, at, "sending");
         }
@@ -1945,6 +1960,64 @@ export class Agent extends DurableObject<Env> {
       default:
         return assertNever(delivery);
     }
+  }
+
+  /**
+   * The open forget's last step: erase the person's box, then complete with its receipt. A box that can't be erased
+   * now leaves the forget open, retried with backoff; the person is told it is pending and reminded a few times.
+   */
+  async #stepForget(): Promise<void> {
+    if (this.#erasure()) return;
+    const now = this.#deps.clock.now();
+    const f = this.#store.forgetOp();
+    if (f?.phase === "erase" && f.retryAt !== null && f.retryAt <= now) {
+      const erased = await this.#eraseBox(f.epoch);
+      if (this.#erasure()) return;
+      const after = this.#deps.clock.now();
+      if (erased === null) this.#store.erasePending(f.op, after);
+      else {
+        const a = this.#agent();
+        if (this.#store.completeForget(f.op, erased.volume, this.#backups(), checkinWakeup(after, a.tz, a.checkinLocal), after)) this.#devSavedPages.clear();
+      }
+    }
+    this.#store.remindIfDue(this.#deps.clock.now());
+  }
+
+  /**
+   * Erases the person's box under `epoch`; null while it can't be done yet. A box that isn't up, has no erase, or
+   * answers for another volume stays pending: only an erase of the volume this Worker knows can complete a forget.
+   */
+  async #eraseBox(epoch: ForgetEpoch): Promise<{ readonly volume: string | null } | null> {
+    const deps = this.#deps.box;
+    const box = this.#store.box();
+    if (!box) return { volume: null };
+    if (!boxServes(deps, this.#agent().key)) return null;
+    if (box.state === "provisioning" || box.state === "reclaiming") return null;
+    const token = await boxToken(deps.secret, box.name);
+    let volume = this.#store.boxVolume();
+    if (volume === null) {
+      const health = await deps.client.health(box.url, token);
+      if (health.kind !== "up") return null;
+      this.#store.setBoxVolume(box.name, (volume = health.box ?? ""));
+    }
+    if (volume === "") return null;
+    const erased = await deps.client.erase(box.url, token, epoch);
+    if (erased.kind !== "erased") {
+      diagnostic("box_erase_pending");
+      return null;
+    }
+    if (erased.box !== volume) {
+      this.#store.setBoxVolume(box.name, null);
+      return null;
+    }
+    return { volume };
+  }
+
+  /** Whether every backup copy at our hosts has a documented expiry within the receipt's window. */
+  #backups(): Backups {
+    const host = this.#deps.box?.host.kind ?? null;
+    const box = this.#store.claudePlan() || this.#store.box() !== null;
+    return backupsWithin([HOST_BACKUP_DAYS.durableObject, ...(box && host !== null ? HOST_BACKUP_DAYS[host] : [])]);
   }
 
   async #lineQuota(): Promise<QuotaReading | null> {
@@ -2020,8 +2093,9 @@ export class Agent extends DurableObject<Env> {
       now,
       inboxReadyAt: held ? null : (r.inboxReadyAt ?? (catchUp ? now : null)),
       wakeupFireAt: fireTimes.length > 0 ? (Math.min(...fireTimes) as EpochMs) : null,
-      outboxReadyAt: held ? null : r.outboxReadyAt,
+      outboxReadyAt: held ? r.privacyReadyAt : r.outboxReadyAt,
       billingAlertAt: this.#billingAlertAt(),
+      forgetAt: r.forgetAt,
       logsReadyAt: r.logsReadyAt,
       compactionRetryAt: held ? null : r.compactionRetryAt,
       boxAt: retiring || (this.#deps.box && mayspend(this.#store.admission())) ? r.boxAt : null,

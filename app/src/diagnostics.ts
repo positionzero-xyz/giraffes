@@ -1,11 +1,12 @@
 export type DrainPhase = "drain_turns_failed" | "drain_box_failed" | "drain_delivery_failed" | "drain_billing_alert_failed"
-  | "drain_log_flush_failed" | "drain_compaction_failed" | "drain_prune_failed";
+  | "drain_log_flush_failed" | "drain_compaction_failed" | "drain_prune_failed" | "drain_forget_failed";
 
 export type Diagnostic = DrainPhase
   | "admission_failed"
   | "billing_command_failed"
   | "box_claim_failed"
   | "box_ensure_failed"
+  | "box_erase_pending"
   | "box_reclaim_failed"
   | "box_unavailable"
   | "delivery_exhausted"

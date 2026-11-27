@@ -17,7 +17,7 @@ import { costOf } from "../src/policy/spend";
 import { fromLocal, toLocal } from "../src/policy/time";
 import type { Env } from "../src/config";
 import worker from "../src/worker";
-import { cancel, chat, devChat, hold, local, memoryLedger, postTelegramUpdate, quiet, routine, schedule, scripted, send, throws, turn, wall } from "./testkit";
+import { cancel, chat, devChat, hold, local, memoryLedger, postTelegramUpdate, quiet, rewindForgetCommandSchema, routine, schedule, scripted, send, throws, turn, wall } from "./testkit";
 
 const NOTICE = NOTICES.en;
 const inputThatSpendsTheCap = (DEV_CAP_MICRO * 1_000_000) / HAIKU_5_5.inputPerM;
@@ -530,7 +530,9 @@ describe("routines", () => {
     const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
     await runInDurableObject(stub, (_agent, { storage }) => {
       storage.sql.exec("DROP TABLE routine_delivery");
-      storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(MIGRATIONS.length - 1));
+      rewindForgetCommandSchema(storage.sql);
+      const routineCap = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE routine_delivery"));
+      storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(routineCap));
       migrate(storage);
     });
     for (let i = 0; i < 4; i++) await fireEarly(c, user, "stretch");

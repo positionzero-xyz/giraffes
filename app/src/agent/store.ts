@@ -23,11 +23,14 @@ import type {
 import type { BoxHostKind } from "../box/host";
 import { dueAt, type Box, type BoxState, type ReclaimReason } from "../box/machine";
 import { commandOf } from "./commands";
-import { renderSavedPage, snapshotSavedItems, savedPageNotice, type SavedCursor, type SavedPage } from "./saved-items";
+import { REMINDER_ITEM, renderSavedPage, snapshotSavedItems, savedPageNotice, type SavedCursor, type SavedPage } from "./saved-items";
+import { FORGET_TEXT, type Backups, type Deleted, type Receipt } from "./forget-text";
 import type { BoxName } from "../box/names";
 import {
   assertNever,
   buttonData,
+  CHANNEL_LANGUAGE,
+  mayspend,
   choiceToken,
   type Admission,
   type Cohort,
@@ -79,6 +82,7 @@ import type { KeyFault, SchemaMode } from "../model/client";
 import type { Auth, ModelRef, ProviderId } from "../model/providers";
 import type { CallPurpose } from "../model/routes";
 import { SCHEDULE, type Firing, type NewWakeup, type PendingWakeup } from "../policy/schedule";
+import { DEFAULT_TIME_ZONE, fromLocal, toLocal } from "../policy/time";
 import type { MonthSpend, SpendScope } from "../policy/spend";
 import type { Sealed, StoredKey } from "../access/key";
 import { COMPACTION, compactionDue, type CompactionCommit, type CompactionInput } from "./compaction";
@@ -93,7 +97,7 @@ import {
   type UnaskedPurpose,
 } from "./tasks";
 import type { AdmissionChange, AdmissionCommit } from "./admission";
-import { coveredByForget, laterCutoff, type Claim, type ForgetState, type ProviderOrder } from "./forget";
+import { coveredByForget, laterCutoff, newForgetCode, providerOrder, type Claim, type ForgetCommand, type ForgetState, type ProviderOrder } from "./forget";
 import { ROUTINE_OUTBOX } from "./schema";
 import { TURN, type Asked, type Batch, type BoxReplyBackfill, type BoxSession, type BoxSessionSeen, type InboxItem, type Outbound, type SeqTurn, type TurnCommit, type TurnRow } from "./turn";
 
@@ -113,6 +117,10 @@ type SavedReference = SavedCursor & { readonly snapshot: string | null };
 
 export type OutboxRow = Omit<OutboundMessage, "texts"> & {
   readonly eventKey: EventKey;
+  /** Set on the forget's own messages: its pages, notices and receipt, which may go out during its hold. */
+  readonly privacy: Privacy | null;
+  readonly epoch: ForgetEpoch | null;
+  readonly inDoubt: boolean;
   readonly triggerKind: AgentEventKind;
   readonly admittedDay: LocalDate | null;
   readonly routine: boolean;
@@ -123,6 +131,18 @@ export type OutboxRow = Omit<OutboundMessage, "texts"> & {
   | { readonly saved: null; readonly texts: OutboundMessage["texts"] }
   | { readonly saved: SavedReference }
 );
+
+export type Privacy = "page" | "notice" | "receipt";
+
+/** The person's open forget: where it is, and when it next retries its box erase. */
+export type ForgetOp = {
+  readonly op: string;
+  readonly epoch: ForgetEpoch;
+  readonly phase: "review" | "erase" | null;
+  readonly code: string | null;
+  readonly listed: boolean;
+  readonly retryAt: EpochMs | null;
+};
 
 export type Reservation = {
   readonly id: string;
@@ -223,6 +243,8 @@ type OutboxCols = {
   saved_snapshot: string | null;
   saved_item: number | null;
   saved_offset: number | null;
+  privacy: Privacy | null;
+  epoch: ForgetEpoch | null;
 };
 type SavedState = { snapshot: string | null; snapshot_revision: number | null; revision: number; cursor_item: number; cursor_offset: number };
 type ReservationCols = {
@@ -363,6 +385,13 @@ const COMPACTION_RETRY_BASE_MS = 5 * 60 * 1000;
 const COMPACTION_RETRY_MAX_MS = DAY_MS;
 const TASK_IDLE_MS = 30 * DAY_MS;
 const KEY_MAX_FAILURES = 20;
+const ERASE_RETRY_BASE_MS = 30_000;
+const ERASE_RETRY_MAX_MS = 60 * 60 * 1000;
+/** A forget still erasing after this long tells the person it's pending. */
+const ERASE_NOTICE_MS = 2 * 60 * 1000;
+const FORGET_REMINDER_MS = DAY_MS;
+const FORGET_REMINDERS = 3;
+const HELD_NOTICE_MS = 60 * 60 * 1000;
 
 const toReservation = (r: ReservationCols): Reservation => ({
   id: r.id,
@@ -526,6 +555,7 @@ export class AgentStore {
       readonly startBoundary?: EpochMs;
     },
     now: EpochMs,
+    privacy: ForgetCommand | null = null,
   ): "inserted" | "duplicate" | "stale" {
     return this.tx(() => {
       if (coveredByForget(envelope, this.forget())) return "stale";
@@ -560,20 +590,24 @@ export class AgentStore {
           this.writeAdmission({ next: { state: "admitted", seat: first.admit, at: now }, change: "consented", ensureCheckin: first.checkin }, now);
         }
       }
-      return this.insertInbox(envelope.key, envelope.event, envelope.receivedAt, now);
+      if (privacy) return this.privacy(envelope, privacy, now);
+      const stored = this.insertInbox(envelope.key, envelope.event, envelope.receivedAt, now);
+      if (stored === "inserted" && envelope.event.kind === "message") this.tellHeld(envelope.event.reply, now);
+      return stored;
     });
   }
 
   private insertInbox(key: EventKey, event: AgentEvent, receivedAt: EpochMs, readyAt: EpochMs): "inserted" | "duplicate" {
-    const written = this.sql.exec(
-      "INSERT OR IGNORE INTO inbox (event_key, kind, payload, received_at, ready_at) VALUES (?, ?, ?, ?, ?)",
+    // An ignored insert still reports rows written here, so only a returned row proves the insert.
+    const inserted = this.sql.exec(
+      "INSERT OR IGNORE INTO inbox (event_key, kind, payload, received_at, ready_at) VALUES (?, ?, ?, ?, ?) RETURNING seq",
       key,
       event.kind,
       JSON.stringify(event),
       receivedAt,
       readyAt,
-    ).rowsWritten;
-    return written > 0 ? "inserted" : "duplicate";
+    ).toArray();
+    return inserted.length > 0 ? "inserted" : "duplicate";
   }
 
   recover(now: EpochMs, instance: string): Batch | null {
@@ -777,7 +811,7 @@ export class AgentStore {
           "SELECT id, trigger_kind, task_id, purpose FROM outbox WHERE status = 'pending' AND intent = 'unasked'",
         )
         .toArray();
-      this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'removed', closed_at = ? WHERE status = 'pending'", now);
+      this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'removed', closed_at = ? WHERE status = 'pending' AND privacy IS NULL", now);
       if (!agent) return;
       this.insertLogs(
         unasked.map(
@@ -1419,24 +1453,31 @@ export class AgentStore {
     });
   }
 
-  savedPage(ref: SavedReference, agent: AgentRow): SavedPage | null {
+  savedPage(ref: SavedReference, agent: AgentRow, privacy: boolean = false): SavedPage | null {
     const state = this.savedState();
     if (ref.snapshot === null) return savedPageNotice(agent.language, false);
     if (ref.snapshot !== state.snapshot || ref.item !== state.cursor_item || ref.offset !== state.cursor_offset) return null;
     if (state.snapshot_revision !== state.revision) return savedPageNotice(agent.language, true);
-    return renderSavedPage({ sql: this.sql, cursor: ref, agent });
+    if (!privacy) return renderSavedPage({ sql: this.sql, cursor: ref, agent });
+    const f = this.forgetOp();
+    if (f?.phase !== "review" || f.code === null) return null;
+    const t = FORGET_TEXT[agent.language];
+    return renderSavedPage({ sql: this.sql, cursor: ref, agent, footer: { more: t.listMore, done: t.listDone(f.code) } });
   }
 
+  /** While a forget is open, only its own messages are ready. */
   readyOutbox(now: EpochMs, limit: number): readonly OutboxRow[] {
     const agent = this.agent();
     if (!agent) return [];
-    const { epoch } = this.forget();
+    const { epoch, op } = this.forget();
     return this.sql
       .exec<OutboxCols>(
         `SELECT id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, admitted_day, in_doubt, attempts, task_id, purpose, choice, reply_only,
-                saved_snapshot, saved_item, saved_offset, (${ROUTINE_OUTBOX}) AS routine
-         FROM outbox o WHERE status = 'pending' AND ready_at <= ? ORDER BY created_at, rowid LIMIT ?`,
+                saved_snapshot, saved_item, saved_offset, privacy, epoch, (${ROUTINE_OUTBOX}) AS routine
+         FROM outbox o WHERE status = 'pending' AND ready_at <= ? AND (? = 0 OR epoch = ?) ORDER BY created_at, rowid LIMIT ?`,
         now,
+        op === null ? 0 : 1,
+        epoch,
         limit,
       )
       .toArray()
@@ -1453,6 +1494,9 @@ export class AgentStore {
           taskId: r.task_id,
           purpose: r.purpose,
           replyOnly: r.reply_only === 1,
+          privacy: r.privacy,
+          epoch: r.epoch,
+          inDoubt: r.in_doubt === 1,
           ...button(r.choice, agent.language, epoch),
           ...(r.in_doubt === 0 && r.reply_token !== null && r.reply_expires !== null
             ? { reply: { token: r.reply_token, expiresAt: r.reply_expires } } : {}),
@@ -1473,10 +1517,13 @@ export class AgentStore {
     return this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM routine_delivery WHERE at > ?", now - DAY_MS).one().n;
   }
 
-  /** False when the row is no longer waiting or a forget began since `epoch`; nothing may then be sent for it. */
-  markSending(id: OutboxId, admittedDay: LocalDate | null, epoch: ForgetEpoch, routineAt: EpochMs | null): boolean {
+  /**
+   * False when the row is no longer waiting or a forget began since `epoch`; nothing may then be sent for it. The
+   * forget's own messages need only their epoch to be current, since they go out during its hold.
+   */
+  markSending(id: OutboxId, admittedDay: LocalDate | null, epoch: ForgetEpoch, routineAt: EpochMs | null, privacy: boolean = false): boolean {
     return this.tx(() => {
-      if (!this.live(epoch)) return false;
+      if (privacy ? this.forget().epoch !== epoch : !this.live(epoch)) return false;
       const started = this.sql.exec(
         "UPDATE outbox SET status = 'sending', admitted_day = ?, attempts = attempts + 1 WHERE id = ? AND status = 'pending'",
         admittedDay,
@@ -1503,6 +1550,8 @@ export class AgentStore {
                AND saved_item = cursor_item AND saved_offset = cursor_offset)`,
           next.item, next.offset, id,
         );
+      } else if (this.sql.exec("SELECT 1 FROM outbox WHERE id = ? AND privacy = 'page'", id).toArray().length > 0) {
+        this.sql.exec("UPDATE forget SET listed = 1 WHERE phase = 'review' AND epoch = (SELECT epoch FROM outbox WHERE id = ? AND status = 'sending')", id);
       } else {
         const done = this.sql.exec(
           `UPDATE saved_items SET snapshot = NULL WHERE snapshot_revision = revision AND EXISTS (
@@ -2082,6 +2131,8 @@ export class AgentStore {
     readonly logsReadyAt: EpochMs | null;
     readonly compactionRetryAt: EpochMs | null;
     readonly boxAt: EpochMs | null;
+    readonly privacyReadyAt: EpochMs | null;
+    readonly forgetAt: EpochMs | null;
   } {
     const min = (query: string) => this.sql.exec<{ t: EpochMs | null }>(query).one().t;
     const compaction = this.sql
@@ -2104,6 +2155,10 @@ export class AgentStore {
       logsReadyAt: min("SELECT CASE WHEN EXISTS (SELECT 1 FROM log_outbox) THEN retry_at END AS t FROM log_flush"),
       compactionRetryAt: compaction.retry_at > now && compactionDue(compaction.turns, compaction.notes) ? compaction.retry_at : null,
       boxAt: min("SELECT MIN(next_at) AS t FROM box"),
+      privacyReadyAt: min("SELECT MIN(ready_at) AS t FROM outbox WHERE status IN ('pending', 'sending') AND epoch = (SELECT epoch FROM forget)"),
+      forgetAt: min(
+        "SELECT MIN(t) AS t FROM (SELECT CASE WHEN phase = 'erase' THEN retry_at END AS t FROM forget WHERE op IS NOT NULL UNION ALL SELECT notice_at FROM forget WHERE op IS NOT NULL)",
+      ),
     };
   }
 
@@ -2160,48 +2215,287 @@ export class AgentStore {
    * wait out the hold. A second forget while one is open supersedes it.
    */
   beginForget(trigger: ProviderOrder, now: EpochMs): { readonly op: string; readonly epoch: ForgetEpoch } {
+    return this.tx(() => this.begin(trigger, now));
+  }
+
+  private begin(trigger: ProviderOrder, now: EpochMs): { readonly op: string; readonly epoch: ForgetEpoch } {
+    const f = this.forget();
+    const op = crypto.randomUUID();
+    const epoch = (f.epoch + 1) as ForgetEpoch;
+    const cutoff = laterCutoff(f.cutoff, trigger);
+    this.sql.exec("UPDATE forget SET epoch = ?, op = ?, opened_at = ?, cutoff_at = ?, cutoff_seq = ?", epoch, op, now, cutoff.at, cutoff.seq);
+    const agent = this.agent();
+    const next: ForgetState = { epoch, op, cutoff };
+    const covered = this.sql
+      .exec<{ event_key: EventKey; payload: string; received_at: EpochMs }>("SELECT event_key, payload, received_at FROM inbox WHERE status = 'pending'")
+      .toArray()
+      .filter((r) => {
+        const event = fromJson<AgentEvent>(r.payload);
+        if (!agent || event.kind === "wakeup" || event.kind === "checkin") return true;
+        return coveredByForget({ agent: agent.key, identity: agent.identity, key: r.event_key, receivedAt: r.received_at, event }, next);
+      })
+      .map((r) => r.event_key);
+    this.sql.exec(
+      `UPDATE inbox SET status = 'failed', outcome = 'forgotten', finished_at = ?, catch_up = NULL, catch_up_budget = NULL
+       WHERE status = 'processing' OR event_key IN (SELECT value FROM json_each(?))`,
+      now,
+      JSON.stringify(covered),
+    );
+    this.sql.exec("UPDATE inbox SET catch_up = NULL, catch_up_budget = NULL WHERE catch_up IS NOT NULL");
+    this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'forgotten', closed_at = ? WHERE status IN ('pending', 'sending')", now);
+    this.sql.exec(
+      `UPDATE outside_write SET status = 'dropped', lease_until = NULL,
+         in_doubt = CASE WHEN status IN ('verifying', 'uncertain') THEN 1 ELSE in_doubt END, updated_at = ?
+       WHERE status IN ('approval_pending', 'ready', 'verifying', 'uncertain')`,
+      now,
+    );
+    this.sql.exec(
+      `UPDATE outside_approval SET status = 'expired'
+       WHERE status IN ('pending', 'approved') AND write_id IN (SELECT id FROM outside_write WHERE status = 'dropped')`,
+    );
+    return { op, epoch };
+  }
+
+  forgetOp(): ForgetOp | null {
+    const r = this.sql
+      .exec<{ op: string | null; epoch: ForgetEpoch; phase: ForgetOp["phase"]; code: string | null; listed: number; retry_at: EpochMs | null }>(
+        "SELECT op, epoch, phase, code, listed, retry_at FROM forget",
+      )
+      .one();
+    return r.op === null ? null : { op: r.op, epoch: r.epoch, phase: r.phase, code: r.code, listed: r.listed === 1, retryAt: r.retry_at };
+  }
+
+  /**
+   * A `/forget` message, handled when it arrives, before any admission, access or spend check and whatever the hold. Its
+   * inbox row keeps only its key, for dedupe. Every forget clears the chat whole in the same transaction; the person's
+   * choice then settles which saved items go.
+   */
+  private privacy(e: InboundEnvelope, cmd: ForgetCommand, now: EpochMs): "inserted" | "duplicate" {
+    if (this.insertInbox(e.key, { kind: "message", text: "/forget" }, e.receivedAt, now) === "duplicate") return "duplicate";
+    this.sql.exec("UPDATE inbox SET status = 'done', outcome = 'privacy', finished_at = ? WHERE event_key = ?", now, e.key);
+    const reply = e.event.kind === "message" ? e.event.reply : undefined;
+    const order = providerOrder(e);
+    const f = this.forgetOp();
+    switch (cmd.kind) {
+      case "start":
+      case "all":
+        if (order === null) throw new Error("a /forget message has no place in its provider's order");
+        this.begin(order, now);
+        this.clearChat();
+        this.keepReply(reply);
+        if (cmd.kind === "all") {
+          this.deleteAll();
+          this.toErase("all", now);
+        } else {
+          this.startReview(now);
+          this.queuePage(reply, now);
+        }
+        break;
+      case "next":
+        if (f?.phase === "review" && !f.listed) this.queuePage(reply, now);
+        else this.notice(this.statusText(), reply, now);
+        break;
+      case "status":
+        this.notice(this.statusText(), reply, now);
+        break;
+      case "choose": {
+        const t = FORGET_TEXT[this.language()];
+        if (f?.phase !== "review" || f.code !== cmd.code) this.notice(t.help, reply, now);
+        else if (!f.listed) this.notice(t.reviewOpen(null), reply, now);
+        else if (!this.deleteChosen(cmd.numbers)) this.notice(t.help, reply, now);
+        else {
+          this.keepReply(reply);
+          this.toErase(cmd.numbers, now);
+        }
+        break;
+      }
+      case "help":
+        this.notice(FORGET_TEXT[this.language()].help, reply, now);
+        break;
+      default:
+        assertNever(cmd);
+    }
+    return "inserted";
+  }
+
+  private language(): Language {
+    return this.agent()?.language ?? "en";
+  }
+
+  /**
+   * The chat and everything written from it, whole: turns, the summary, message bodies and handles, wake-ups the
+   * assistant set, offered plans, outside writes and their approvals, the box session.
+   */
+  private clearChat(): void {
+    this.sql.exec("DELETE FROM outside_approval");
+    this.sql.exec("DELETE FROM outside_write");
+    this.sql.exec("DELETE FROM turn");
+    this.sql.exec("UPDATE memory SET summary = '', through_turn_seq = 0, compaction_failures = 0, compaction_retry_at = 0");
+    this.sql.exec("DELETE FROM inbox WHERE kind IN ('wakeup', 'checkin')");
+    this.sql.exec("UPDATE inbox SET payload = '{}' WHERE status IN ('done', 'failed')");
+    this.sql.exec("UPDATE outbox SET texts = '[]', choice = NULL, reply_token = NULL, reply_expires = NULL, event_key = 'forgotten' WHERE status IN ('sent', 'dropped')");
+    this.sql.exec("DELETE FROM wakeup WHERE origin != 'person'");
+    this.sql.exec("DELETE FROM proposal");
+    this.sql.exec("DELETE FROM box_session");
+    this.sql.exec("DELETE FROM saved_item");
+    this.sql.exec("UPDATE saved_items SET snapshot = NULL");
+  }
+
+  private deleteAll(): void {
+    this.sql.exec("DELETE FROM memory_note");
+    this.sql.exec("DELETE FROM wakeup");
+    this.sql.exec("DELETE FROM task_fact");
+    this.sql.exec("DELETE FROM task");
+    this.sql.exec("UPDATE outbox SET task_id = NULL");
+    for (const setting of [1, 2, 3]) this.resetSetting(setting);
+  }
+
+  /** Deletes exactly the numbered items of the current list, each with every copy that exists because of it. False when a number isn't on it. */
+  private deleteChosen(numbers: readonly number[]): boolean {
+    const items = numbers.map((n) => this.sql.exec<{ kind: string; id: number }>("SELECT kind, source_id AS id FROM saved_item WHERE ordinal = ?", n - 1).toArray()[0]);
+    if (items.some((i) => i === undefined)) return false;
+    for (const { kind, id } of items) {
+      if (kind === "note") this.sql.exec("DELETE FROM memory_note WHERE id = ?", id);
+      if (kind === "reminder") {
+        this.sql.exec(`DELETE FROM wakeup WHERE origin = 'person' AND ${REMINDER_ITEM} = (SELECT ${REMINDER_ITEM} FROM wakeup WHERE id = ?)`, id);
+      }
+      if (kind === "task") {
+        this.sql.exec("DELETE FROM task_fact WHERE task_id = ?", id);
+        this.sql.exec("DELETE FROM task WHERE id = ?", id);
+        this.sql.exec("UPDATE wakeup SET task_id = NULL WHERE task_id = ?", id);
+        this.sql.exec("UPDATE outbox SET task_id = NULL WHERE task_id = ?", id);
+      }
+      if (kind === "setting") this.resetSetting(id);
+    }
+    return true;
+  }
+
+  /** A setting goes back to its default. A new time zone keeps each kept reminder at its wall time, as moving zones does. */
+  private resetSetting(setting: number): void {
+    const a = this.agent();
+    if (!a) return;
+    if (setting === 1) this.sql.exec("UPDATE agent SET language = ?", CHANNEL_LANGUAGE[a.identity.channel]);
+    if (setting === 3) this.sql.exec("UPDATE agent SET checkin_local = ?", SCHEDULE.defaultCheckinLocal);
+    if (setting !== 2 || a.tz === DEFAULT_TIME_ZONE) return;
+    for (const w of this.sql.exec<{ id: number; due_at: EpochMs }>("SELECT id, due_at FROM wakeup WHERE status = 'pending' AND kind = 'reminder'").toArray()) {
+      this.sql.exec("UPDATE wakeup SET due_at = ? WHERE id = ?", fromLocal(toLocal(w.due_at, a.tz), DEFAULT_TIME_ZONE), w.id);
+    }
+    this.sql.exec("UPDATE agent SET tz = ?", DEFAULT_TIME_ZONE);
+  }
+
+  /** The latest command's reply handle, so the receipt can use it while it is fresh. */
+  private keepReply(reply: ReplyHandle | undefined): void {
+    this.sql.exec("UPDATE forget SET reply_token = ?, reply_expires = ?", reply?.token ?? null, reply?.expiresAt ?? null);
+  }
+
+  private startReview(now: EpochMs): void {
+    snapshotSavedItems(this.sql);
+    this.sql.exec("UPDATE saved_items SET snapshot = ?, snapshot_revision = revision, cursor_item = 0, cursor_offset = 0", crypto.randomUUID());
+    this.sql.exec(
+      "UPDATE forget SET phase = 'review', code = ?, listed = 0, retry_at = NULL, attempts = 0, notice_at = ?, notices = 0",
+      newForgetCode(),
+      now + FORGET_REMINDER_MS,
+    );
+  }
+
+  /** The person settled what goes; what is left is the box erase. Deletions from earlier forgets still open stay for the one receipt. */
+  private toErase(deleted: Deleted, now: EpochMs): void {
+    this.sql.exec(
+      `UPDATE forget SET phase = 'erase', code = NULL, listed = 0, deleted = json_insert(deleted, '$[#]', json(?)), retry_at = ?, attempts = 0,
+         notice_at = ?, notices = 0`,
+      JSON.stringify(deleted),
+      now,
+      now + ERASE_NOTICE_MS,
+    );
+    this.sql.exec("DELETE FROM saved_item");
+    this.sql.exec("UPDATE saved_items SET snapshot = NULL");
+  }
+
+  private replyOnly(): boolean {
+    return this.agent()?.identity.channel === "line" && !mayspend(this.admission());
+  }
+
+  private insertPrivacy(privacy: Privacy, texts: readonly string[], reply: ReplyHandle | undefined, now: EpochMs, saved: SavedCursor & { readonly snapshot: string | null } | null = null): void {
+    this.sql.exec(
+      `INSERT INTO outbox (id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, ready_at, created_at, reply_only,
+                           saved_snapshot, saved_item, saved_offset, privacy, epoch)
+       VALUES (?, 'forget', 'message', 'reply', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT epoch FROM forget))`,
+      crypto.randomUUID(), JSON.stringify(texts), reply?.token ?? null, reply?.expiresAt ?? null, now, now, this.replyOnly() ? 1 : 0,
+      saved?.snapshot ?? null, saved?.item ?? null, saved?.offset ?? null, privacy,
+    );
+  }
+
+  private queuePage(reply: ReplyHandle | undefined, now: EpochMs): void {
+    const state = this.savedState();
+    this.insertPrivacy("page", [], reply, now, { snapshot: state.snapshot, item: state.cursor_item, offset: state.cursor_offset });
+  }
+
+  private notice(text: string, reply: ReplyHandle | undefined, now: EpochMs): void {
+    this.insertPrivacy("notice", [text], reply, now);
+  }
+
+  private statusText(): string {
+    const t = FORGET_TEXT[this.language()];
+    const f = this.forgetOp();
+    if (f?.phase === "review") return t.reviewOpen(f.listed ? f.code : null);
+    if (f?.phase === "erase") return t.erasing;
+    if (f) return t.held;
+    const receipt = this.sql.exec<{ receipt: string | null }>("SELECT receipt FROM forget").one().receipt;
+    return receipt === null ? t.none : t.lastReceipt(fromJson<Receipt>(receipt));
+  }
+
+  /** A message that waits out a forget's hold is told why, at most once an hour. */
+  private tellHeld(reply: ReplyHandle | undefined, now: EpochMs): void {
+    const told = this.sql.exec("UPDATE forget SET held_told_at = ? WHERE phase IS NOT NULL AND (held_told_at IS NULL OR held_told_at <= ?)", now, now - HELD_NOTICE_MS);
+    if (told.rowsWritten > 0) this.notice(FORGET_TEXT[this.language()].held, reply, now);
+  }
+
+  /** The open forget's next reminder, if one is due: a few, a day apart, then none. */
+  remindIfDue(now: EpochMs): void {
+    this.tx(() => {
+      const due = this.sql.exec<{ notices: number }>("SELECT notices FROM forget WHERE phase IS NOT NULL AND notice_at <= ?", now).toArray()[0];
+      if (!due) return;
+      this.notice(this.statusText(), undefined, now);
+      const notices = due.notices + 1;
+      this.sql.exec("UPDATE forget SET notices = ?, notice_at = ?", notices, notices < FORGET_REMINDERS ? now + FORGET_REMINDER_MS : null);
+    });
+  }
+
+  erasePending(op: string, now: EpochMs): void {
+    const { attempts } = this.sql.exec<{ attempts: number }>("SELECT attempts FROM forget").one();
+    this.sql.exec(
+      "UPDATE forget SET attempts = attempts + 1, retry_at = ? WHERE op = ? AND phase = 'erase'",
+      now + Math.min(ERASE_RETRY_BASE_MS * 2 ** attempts, ERASE_RETRY_MAX_MS),
+      op,
+    );
+  }
+
+  /**
+   * Completes the forget `op` once its box erase is acknowledged: the hold ends and the receipt is queued, in one
+   * transaction. False when `op` is no longer the open forget, or the box's volume changed since the erase was sent.
+   */
+  completeForget(op: string, volume: string | null, backups: Backups, checkin: NewWakeup | null, now: EpochMs): boolean {
     return this.tx(() => {
-      const f = this.forget();
-      const op = crypto.randomUUID();
-      const epoch = (f.epoch + 1) as ForgetEpoch;
-      const cutoff = laterCutoff(f.cutoff, trigger);
-      this.sql.exec("UPDATE forget SET epoch = ?, op = ?, opened_at = ?, cutoff_at = ?, cutoff_seq = ?", epoch, op, now, cutoff.at, cutoff.seq);
-      const agent = this.agent();
-      const next: ForgetState = { epoch, op, cutoff };
-      const covered = this.sql
-        .exec<{ event_key: EventKey; payload: string; received_at: EpochMs }>("SELECT event_key, payload, received_at FROM inbox WHERE status = 'pending'")
-        .toArray()
-        .filter((r) => {
-          const event = fromJson<AgentEvent>(r.payload);
-          if (!agent || event.kind === "wakeup" || event.kind === "checkin") return true;
-          return coveredByForget({ agent: agent.key, identity: agent.identity, key: r.event_key, receivedAt: r.received_at, event }, next);
-        })
-        .map((r) => r.event_key);
+      const f = this.forgetOp();
+      if (f?.op !== op || f.phase !== "erase" || (volume !== null && this.boxVolume() !== volume)) return false;
+      const r = this.sql.exec<{ deleted: string; reply_token: string | null; reply_expires: EpochMs | null }>("SELECT deleted, reply_token, reply_expires FROM forget").one();
+      const receipt: Receipt = { deleted: fromJson<Deleted[]>(r.deleted), backups };
       this.sql.exec(
-        `UPDATE inbox SET status = 'failed', outcome = 'forgotten', finished_at = ?, catch_up = NULL, catch_up_budget = NULL
-         WHERE status = 'processing' OR event_key IN (SELECT value FROM json_each(?))`,
-        now,
-        JSON.stringify(covered),
+        `UPDATE forget SET op = NULL, opened_at = NULL, phase = NULL, code = NULL, listed = 0, deleted = '[]', retry_at = NULL, attempts = 0,
+           notice_at = NULL, notices = 0, held_told_at = NULL, reply_token = NULL, reply_expires = NULL, receipt = ?`,
+        JSON.stringify(receipt),
       );
-      this.sql.exec("UPDATE inbox SET catch_up = NULL, catch_up_budget = NULL WHERE catch_up IS NOT NULL");
-      this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'forgotten', closed_at = ? WHERE status IN ('pending', 'sending')", now);
-      this.sql.exec(
-        `UPDATE outside_write SET status = 'dropped', lease_until = NULL,
-           in_doubt = CASE WHEN status IN ('verifying', 'uncertain') THEN 1 ELSE in_doubt END, updated_at = ?
-         WHERE status IN ('approval_pending', 'ready', 'verifying', 'uncertain')`,
-        now,
-      );
-      this.sql.exec(
-        `UPDATE outside_approval SET status = 'expired'
-         WHERE status IN ('pending', 'approved') AND write_id IN (SELECT id FROM outside_write WHERE status = 'dropped')`,
-      );
-      return { op, epoch };
+      this.sql.exec("DELETE FROM box_session");
+      if (checkin && mayspend(this.admission())) this.insertWakeup(checkin, "system", now);
+      const reply = r.reply_token !== null && r.reply_expires !== null && r.reply_expires > now ? { token: r.reply_token, expiresAt: r.reply_expires } : undefined;
+      this.insertPrivacy("receipt", [FORGET_TEXT[this.language()].receipt(receipt)], reply, now);
+      return true;
     });
   }
 
   /** Ends the hold only for the forget that is open; an older one's end changes nothing. */
   endForget(op: string): boolean {
-    return this.sql.exec("UPDATE forget SET op = NULL, opened_at = NULL WHERE op = ?", op).rowsWritten > 0;
+    return this.sql.exec("UPDATE forget SET op = NULL, opened_at = NULL, phase = NULL, code = NULL, listed = 0, retry_at = NULL, notice_at = NULL WHERE op = ?", op).rowsWritten > 0;
   }
 
   prune(now: EpochMs): void {

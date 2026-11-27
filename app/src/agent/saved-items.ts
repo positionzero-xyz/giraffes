@@ -26,13 +26,22 @@ const labels = {
   },
 };
 
+/**
+ * The saved item a person's reminder row belongs to. Each firing of a routine closes its row and adds the next with the
+ * same key and note, so a routine's rows are one item. A one-off reminder is its own.
+ */
+export const REMINDER_ITEM = "json_array(CASE WHEN repeat IS NULL THEN id END, key, note)";
+
 export function snapshotSavedItems(sql: SqlStorage): void {
   sql.exec("DELETE FROM saved_item");
   sql.exec(
     `INSERT INTO saved_item (ordinal, kind, source_id)
      SELECT row_number() OVER (ORDER BY kind, id) - 1, kind, id FROM (
        SELECT 'note' AS kind, id FROM memory_note
-       UNION ALL SELECT 'reminder', id FROM wakeup WHERE origin = 'person'
+       UNION ALL SELECT 'reminder', id FROM (
+         SELECT id, row_number() OVER (PARTITION BY ${REMINDER_ITEM} ORDER BY status = 'pending' DESC, id DESC) AS nth
+         FROM wakeup WHERE origin = 'person'
+       ) WHERE nth = 1
        UNION ALL SELECT 'task', id FROM task
      )`,
   );
@@ -90,10 +99,13 @@ function itemText(sql: SqlStorage, item: SavedItem, a: AgentRow): string {
   }
 }
 
+/** What ends a page: how to ask for the next one, and what to do after the last. */
+export type SavedFooter = { readonly more: string; readonly done: string };
+
 export function renderSavedPage(
-  { sql, cursor, agent }: { sql: SqlStorage; cursor: SavedCursor; agent: AgentRow },
+  { sql, cursor, agent, footer }: { sql: SqlStorage; cursor: SavedCursor; agent: AgentRow; footer?: SavedFooter },
 ): SavedPage {
-  const t = labels[agent.language];
+  const t = { ...labels[agent.language], ...footer };
   let text = t.heading;
   let { item, offset } = cursor;
   let next: SavedCursor | null = null;

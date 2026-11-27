@@ -5,7 +5,7 @@ import { canonicalJsonObject, parseJsonObject, type JsonObject } from "../src/ac
 import { AgentStore } from "../src/agent/store";
 import { MIGRATIONS, migrate } from "../src/agent/schema";
 import type { AgentKey, EpochMs, ForgetEpoch } from "../src/domain";
-import { fakeClock, local } from "./testkit";
+import { fakeClock, local, rewindForgetCommandSchema } from "./testkit";
 
 const owner = "p:telegram:owner" as AgentKey;
 const other = "p:telegram:other" as AgentKey;
@@ -347,6 +347,7 @@ test("schema v26 upgrades to the action-safety migration", async () => {
     state.storage.sql.exec("DROP TRIGGER IF EXISTS outside_write_immutable");
     state.storage.sql.exec("DROP TABLE IF EXISTS outside_approval");
     state.storage.sql.exec("DROP TABLE IF EXISTS outside_write");
+    rewindForgetCommandSchema(state.storage.sql);
     state.storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(before));
     migrate(state.storage);
     const version = state.storage.sql.exec<{ v: string }>("SELECT v FROM meta WHERE k = 'schema_version'").one().v;

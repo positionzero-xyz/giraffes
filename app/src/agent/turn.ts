@@ -61,6 +61,7 @@ import {
   type UnaskedPurpose,
 } from "./tasks";
 import type { AdmissionCommit } from "./admission";
+import { FORGET_TEXT } from "./forget-text";
 
 export const TURN = {
   recentNotes: 50,
@@ -107,6 +108,7 @@ const ActionSchema = z.discriminatedUnion("type", [
     timeZone: z.string().describe("The person's IANA time zone, such as Asia/Bangkok or Europe/London"),
     language: z.enum(LANGUAGES).describe("The language of code-written notices"),
   }),
+  z.object({ type: z.literal("forget") }),
 ]);
 
 const TaskOpSchema = z.object({
@@ -122,6 +124,7 @@ const AGENT_ACTIONS: Readonly<Partial<Record<z.infer<typeof ActionSchema>["type"
   cancel_wakeup: "Cancel a pending wake-up by its key. Cancelling a routine's key ends the routine.",
   remember: "Keep a durable note about the person that will matter in a week.",
   set_locale: "Set the person's IANA time zone and the language of code-written notices.",
+  forget: "The person asked you to forget, delete or stop remembering something. Code then tells them how to choose what goes; nothing else you do this turn is kept.",
 };
 
 export type AgentTool = { readonly name: string; readonly description: string; readonly inputSchema: JsonSchema };
@@ -578,6 +581,7 @@ function triggerNote(e: AgentEvent, tz: TimeZone): string | null {
 }
 
 export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
+  if (out.actions.some((a) => a.type === "forget")) return planWithoutModel(given, { kind: "forget_offer" });
   const actions = out.actions.slice(0, TURN.maxActions);
   const setLocale = actions.findLast((a) => a.type === "set_locale");
   const language = setLocale?.language ?? given.language;
@@ -666,6 +670,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
         break;
       case "quiet":
       case "set_locale":
+      case "forget":
         break;
       default:
         assertNever(a);
@@ -760,6 +765,8 @@ export type NoModelReason =
   | { readonly kind: "poison" }
   | { readonly kind: "command"; readonly text: string; readonly note: string }
   | { readonly kind: "feedback"; readonly text: string }
+  /** The model flagged a forget: only the fixed offer goes out, and nothing else the turn did is kept. */
+  | { readonly kind: "forget_offer" }
   | { readonly kind: "admission"; readonly commit: AdmissionCommit; readonly text: string | null; readonly consent: boolean };
 
 export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "block" | "stale_lifecycle" }> | null {
@@ -796,7 +803,7 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     why.kind === "no_access" && why.waitForConnection ? { kind: "connection" }
     : why.kind === "over_cap" && why.catchUpBudget != null ? { kind: "budget", budget: why.catchUpBudget }
     : undefined;
-  const fx = keepInHistory ? taskEffects(view) : { commit: NO_TASKS, replies: [] };
+  const fx = keepInHistory && why.kind !== "forget_offer" ? taskEffects(view) : { commit: NO_TASKS, replies: [] };
   let outcome: TurnOutcome;
   let text: string | null = null;
   let note: string | null = null;
@@ -839,6 +846,10 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     case "feedback":
       outcome = "no_model";
       text = why.text;
+      break;
+    case "forget_offer":
+      outcome = "no_model";
+      text = FORGET_TEXT[view.language].offer;
       break;
     case "admission":
       return planAdmissionTurn(view, why);

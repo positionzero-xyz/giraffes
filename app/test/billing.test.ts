@@ -26,6 +26,7 @@ import {
   local,
   postStripe,
   quiet,
+  rewindForgetCommandSchema,
   schedule,
   scripted,
   scriptedChannel,
@@ -1020,6 +1021,7 @@ describe("checkout and the portal", () => {
       storage.sql.exec("DROP TABLE IF EXISTS outside_approval");
       storage.sql.exec("DROP TABLE IF EXISTS outside_write");
       storage.sql.exec("ALTER TABLE checkout_session DROP COLUMN closed");
+      rewindForgetCommandSchema(storage.sql);
       storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeAttempts));
       migrate(storage);
       expect(storage.sql.exec("SELECT delivery_id, ready_at, attempts FROM billing_alert").toArray()).toEqual([
@@ -1060,6 +1062,7 @@ describe("checkout and the portal", () => {
         storage.sql.exec("DROP TABLE IF EXISTS outside_approval");
         storage.sql.exec("DROP TABLE IF EXISTS outside_write");
         storage.sql.exec("ALTER TABLE checkout_session DROP COLUMN closed");
+        rewindForgetCommandSchema(storage.sql);
         storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeDestinationRecovery));
         storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, notified, closed_as) VALUES ('sub_a sub_b', 'old-id', 1, 'gone')");
       } else {

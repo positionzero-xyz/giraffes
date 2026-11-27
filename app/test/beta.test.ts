@@ -6,7 +6,7 @@ import { MIGRATIONS, migrate } from "../src/agent/schema";
 import { AgentStore } from "../src/agent/store";
 import { eventKey, type AgentKey, type InviteCode } from "../src/domain";
 import { NOTICES } from "../src/notices";
-import { chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, postTelegramUpdate, type DevChat, type MemoryLedger, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
+import { chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, postTelegramUpdate, rewindForgetCommandSchema, type DevChat, type MemoryLedger, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
 
 const t = NOTICES.en;
 const FULL_BETA = "The beta is full right now. There's no date for new places yet. To check again, send your invite code here.";
@@ -165,6 +165,7 @@ describe("admission to the beta", () => {
       expect(version).toBeGreaterThan(0);
       storage.sql.exec("DROP TABLE routine_delivery");
       storage.sql.exec("DROP TABLE rate_event");
+      rewindForgetCommandSchema(storage.sql);
       storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(version - 1));
 
       migrate(storage);

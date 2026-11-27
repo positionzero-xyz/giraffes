@@ -39,3 +39,37 @@ export function coveredByForget(e: InboundEnvelope, state: ForgetState): boolean
 export function laterCutoff(a: ProviderOrder | null, b: ProviderOrder): ProviderOrder {
   return a === null || atOrBefore(a, b) ? b : a;
 }
+
+/** What a `/forget` message asks for. Only the code and the numbers are read; any other words are dropped. */
+export type ForgetCommand =
+  | { readonly kind: "start" }
+  | { readonly kind: "all" }
+  | { readonly kind: "next" }
+  | { readonly kind: "status" }
+  | { readonly kind: "choose"; readonly code: string; readonly numbers: readonly number[] }
+  | { readonly kind: "help" };
+
+const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const CODE = /^#[A-Z0-9]{6}$/;
+
+/** A fresh confirmation code, such as "#K7Q2MX": a `#` no plain word starts with, and six letters and digits. */
+export function newForgetCode(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  return `#${Array.from(bytes, (b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join("")}`;
+}
+
+export function forgetCommandOf(text: string): ForgetCommand | null {
+  const words = text.trim().split(/\s+/);
+  if (words[0]?.toLowerCase() !== "/forget") return null;
+  const rest = words.slice(1);
+  const one = rest.length === 1 ? rest[0].toLowerCase() : null;
+  if (one === "all" || one === "next" || one === "status") return { kind: one };
+  if (!rest[0]?.startsWith("#")) return { kind: "start" };
+  const code = rest[0].toUpperCase();
+  const picks = rest.slice(1).join(" ").toLowerCase();
+  if (!CODE.test(code) || picks === "") return { kind: "help" };
+  if (picks === "done") return { kind: "choose", code, numbers: [] };
+  const numbers = picks.split(/[\s,]+/).filter((n) => n !== "");
+  if (!numbers.every((n) => /^\d{1,4}$/.test(n))) return { kind: "help" };
+  return { kind: "choose", code, numbers: [...new Set(numbers.map(Number))].sort((a, b) => a - b) };
+}

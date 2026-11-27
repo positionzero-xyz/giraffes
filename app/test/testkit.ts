@@ -23,6 +23,7 @@ import { DEFAULT_TIME_ZONE, fromLocal, toLocal } from "../src/policy/time";
 import { devLane, DEV_URL_SCRIPTED, type IncludedConfig, type KeysConfig } from "../src/access/access";
 import { seal } from "../src/access/key";
 import { AgentStore } from "../src/agent/store";
+import { MIGRATIONS } from "../src/agent/schema";
 import { connect, SecretKey, type Fetch, type ProviderTimeouts, type SchemaMode } from "../src/model/client";
 import { defaultModelOf, PROVIDERS, type ProviderId } from "../src/model/providers";
 
@@ -405,6 +406,9 @@ export type BoxReplyStep =
   | { readonly kind: "refusal" }
   | { readonly kind: "status"; readonly status: number };
 
+/** `wrong_box` answers with a volume id other than the one /health named, as a box replaced underneath would. */
+export type EraseStep = "ok" | "fail" | "wrong_box" | "old_image";
+
 export type FakeBox = {
   readonly deps: BoxDeps;
   /** Apps the host has created; a step that died after creating one leaves it here, as a real crash would. */
@@ -424,6 +428,14 @@ export type FakeBox = {
     readonly at?: { readonly box: unknown; readonly epoch: unknown } | null;
   }[];
   readonly replies: BoxReplyStep[];
+  /** The epoch each POST /erase asked for, in order. */
+  readonly erases: number[];
+  /** How the next erases answer; once empty, each succeeds. */
+  readonly eraseSteps: EraseStep[];
+  /** The box's erase floor: the highest epoch an erase reached. */
+  floor: number;
+  /** While set, an erase waits for it before it answers. */
+  eraseHold: Promise<void> | null;
   readonly sessions: Set<string>;
   /** An image from before session names: it ignores them, reports none, and has no one-off route. */
   ignoresSession: boolean;
@@ -456,6 +468,10 @@ export function fakeBox(
     healthCalls: [] as string[],
     parses: [] as FakeBox["parses"][number][],
     replies: [] as BoxReplyStep[],
+    erases: [] as number[],
+    eraseSteps: [] as EraseStep[],
+    floor: 0,
+    eraseHold: null as Promise<void> | null,
     sessions: new Set<string>(),
     ignoresSession: false,
     signedIn: opts.signedIn ?? false,
@@ -521,6 +537,17 @@ export function fakeBox(
     if (url.pathname === "/erase") {
       const request = JSON.parse(String(init?.body));
       if (!Number.isSafeInteger(request.epoch) || request.epoch <= 0) return new Response(null, { status: 400 });
+      if (request.scope === undefined && request.box === undefined) {
+        box.erases.push(request.epoch);
+        if (box.eraseHold) await box.eraseHold;
+        const step = box.eraseSteps.shift() ?? "ok";
+        if (step === "old_image") return new Response("not found", { status: 404 });
+        if (step === "fail") return Response.json({ error: "erase_incomplete" }, { status: 500 });
+        box.floor = Math.max(box.floor, request.epoch);
+        box.sessions.clear();
+        const id = step === "wrong_box" ? "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b" : opts.volume;
+        return Response.json({ box: id, floor: box.floor });
+      }
       if (request.scope !== "account" || request.box !== retiring.get(name)) return new Response(null, { status: 412 });
       wiped.add(name);
       return Response.json({ box: request.box, scope: "account", floor: request.epoch });
@@ -742,4 +769,16 @@ export function checkoutEvent(o: { readonly user: string; readonly sub: string; 
 export function stripeChange(kit: BillingKit, o: StripeSubscriptionOpts & { readonly type?: SubscriptionEventType; readonly id?: string }): Promise<Response> {
   kit.stripe.subscriptions.set(o.sub, stripeSubscription(o));
   return postStripe(subscriptionEvent(o));
+}
+
+/** Takes the forget command's columns back out, so a test can run the migrations again from an older schema version. */
+export function rewindForgetCommandSchema(sql: SqlStorage): void {
+  sql.exec(`
+    ALTER TABLE outbox DROP COLUMN epoch;
+    ALTER TABLE outbox DROP COLUMN privacy;
+    DROP TABLE forget;
+    ALTER TABLE box DROP COLUMN volume;
+  `);
+  const foundation = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE forget ("));
+  sql.exec(MIGRATIONS[foundation]);
 }

@@ -619,6 +619,22 @@ export const MIGRATIONS: readonly string[] = [
     FROM outbox o
     WHERE (o.status IN ('sent', 'sending') OR o.in_doubt = 1) AND ${ROUTINE_OUTBOX};
   `,
+  `
+  ALTER TABLE forget ADD COLUMN phase TEXT CHECK (phase IN ('review', 'erase'));
+  ALTER TABLE forget ADD COLUMN code TEXT;
+  ALTER TABLE forget ADD COLUMN listed INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE forget ADD COLUMN deleted TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE forget ADD COLUMN retry_at INTEGER;
+  ALTER TABLE forget ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE forget ADD COLUMN notice_at INTEGER;
+  ALTER TABLE forget ADD COLUMN notices INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE forget ADD COLUMN held_told_at INTEGER;
+  ALTER TABLE forget ADD COLUMN reply_token TEXT;
+  ALTER TABLE forget ADD COLUMN reply_expires INTEGER;
+  ALTER TABLE forget ADD COLUMN receipt TEXT;
+  ALTER TABLE outbox ADD COLUMN privacy TEXT CHECK (privacy IN ('page', 'notice', 'receipt'));
+  ALTER TABLE outbox ADD COLUMN epoch INTEGER CHECK ((privacy IS NULL) = (epoch IS NULL));
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

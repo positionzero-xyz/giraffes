@@ -24,7 +24,10 @@ const durable = {
   box: { identity: "name url volume", operational: "one host state state_at link_sent_at signin_poll_until attempts next_at poll_at reclaim_at reclaim_reason retire_at image ensure_at" },
   box_session: { chat: "memory reply_backfill", identity: "id", operational: "one seen_seq" },
   checkout_session: { identity: "id event_key", operational: "created_at closed" },
-  forget: { identity: "op", operational: "one epoch opened_at cutoff_at cutoff_seq" },
+  forget: {
+    secret: "code reply_token reply_expires", identity: "op",
+    operational: "one epoch opened_at cutoff_at cutoff_seq phase listed deleted retry_at attempts notice_at notices held_told_at receipt",
+  },
   inbox: { chat: "payload", identity: "event_key", operational: "seq kind received_at ready_at status attempts outcome finished_at catch_up catch_up_budget" },
   key_revision: { operational: "one revision" },
   key_ticket: { secret: "nonce_hash", operational: "expires_at revision status outcome created_at" },
@@ -39,7 +42,7 @@ const durable = {
   },
   outbox: {
     chat: "texts", secret: "reply_token reply_expires", identity: "id event_key task_id saved_snapshot",
-    operational: "trigger_kind intent ready_at status admitted_day in_doubt attempts via drop_reason created_at closed_at purpose choice reply_only saved_item saved_offset",
+    operational: "trigger_kind intent ready_at status admitted_day in_doubt attempts via drop_reason created_at closed_at purpose choice reply_only saved_item saved_offset privacy epoch",
   },
   outside_approval: { identity: "id write_id owner_key decided_by", operational: "status expires_at created_at decided_at consumed_at" },
   outside_write: { saved: "args receipt", identity: "id intent operation_id", operational: "provider action epoch status attempt in_doubt lease_until failure created_at updated_at" },

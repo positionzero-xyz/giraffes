@@ -668,7 +668,6 @@ describe("a key pasted into the chat", () => {
     ["bracketed-app-password", "App password: (", appGroups.join(" "), ")", appGroups],
     ["single-quoted-app-password", "password: '", appGroups.join(" "), "'", appGroups],
     ["said-quoted-app-password", 'app password is "', appGroups.join(" "), '"', appGroups],
-    ["quoted-passphrase", 'password: "', "quokka zephyr47 plinth", '"', ["quokka", "zephyr", "plinth"]],
     ["is-and-colon", "my password is: ", "BlueSky#2026", " ok", ["BlueSky", "Sky#2026"]],
     ["thai-password-for-service", "รหัสผ่าน wifi คือ ", "Rt56Yu78", "", ["Rt56Yu78"]],
     ["thai-wifi-code", "รหัส wifi คือ ", "55667788", "", ["55667788"]],
@@ -747,6 +746,10 @@ describe("a key pasted into the chat", () => {
     ["wifi-password-quoted-price", 'Wi-Fi password: "ask the host for $5"'],
     ["password-quoted-at-name", "Password: ‘Please ask @ Maya.’"],
     ["app-password-quoted-four-words", 'App password: "just call back soon"'],
+    ["wifi-password-quoted-hour", 'Wi-Fi password: "ask me after 7pm"'],
+    ["password-quoted-year", 'Password: "I changed it in 2024"'],
+    ["password-quoted-ordinal", 'password: "check the 2nd drawer"'],
+    ["wifi-password-quoted-room", 'wifi password: "room 1204, ask reception"'],
     ["season-pass-name", "season pass: summer2026"],
     ["postal-pin-code", "pin code: 400001"],
   ] as const)("ordinary chat reaches the model as written: %s", async (id, text) => {

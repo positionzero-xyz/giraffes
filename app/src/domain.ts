@@ -188,7 +188,11 @@ export const proposalId = (task: TaskId, version: number): ProposalId => `${task
  * `backup`: yes to the person's own key backing up their Claude plan. It names the key revision it was asked about;
  * null is a button from before buttons carried one.
  */
-export type Choice = { readonly kind: "accept"; readonly proposal: ProposalId } | { readonly kind: "consent" } | { readonly kind: "backup"; readonly revision: number | null };
+export type Choice =
+  | { readonly kind: "accept"; readonly proposal: ProposalId }
+  | { readonly kind: "consent" }
+  | { readonly kind: "backup"; readonly revision: number | null }
+  | { readonly kind: "erase" | "start"; readonly challenge: string };
 
 /** "a:7.1", "c" or "b:3": short enough for Telegram's 64-byte callback_data and a LINE postback. */
 export function choiceToken(c: Choice): string {
@@ -199,10 +203,15 @@ export function choiceToken(c: Choice): string {
       return "c";
     case "backup":
       return c.revision === null ? "b" : `b:${c.revision}`;
+    case "erase":
+    case "start":
+      return `${c.kind}:${c.challenge}`;
   }
 }
 
 export function parseChoice(token: string): Choice | null {
+  const account = /^(erase|start):([a-f0-9]{32})$/.exec(token);
+  if (account) return { kind: account[1] === "erase" ? "erase" : "start", challenge: account[2] };
   if (token === "c") return { kind: "consent" };
   if (token === "b") return { kind: "backup", revision: null };
   const backup = /^b:(\d{1,9})$/.exec(token);
@@ -215,9 +224,10 @@ export function parseChoice(token: string): Choice | null {
 export const buttonData = (token: string, epoch: ForgetEpoch): string => (epoch === 0 ? token : `${token}@${epoch}`);
 
 export function parseButton(data: string): { readonly choice: Choice; readonly epoch: ForgetEpoch } | null {
-  const m = /^([^@]+)(?:@([1-9]\d{0,8}))?$/.exec(data);
+  const m = /^([^@]+)(?:@([1-9]\d{0,15}))?$/.exec(data);
   const choice = m ? parseChoice(m[1]) : null;
-  return m && choice ? { choice, epoch: Number(m[2] ?? 0) as ForgetEpoch } : null;
+  const epoch = Number(m?.[2] ?? 0);
+  return m && choice && Number.isSafeInteger(epoch) ? { choice, epoch: epoch as ForgetEpoch } : null;
 }
 
 export type InviteCode = Brand<string, "InviteCode">;

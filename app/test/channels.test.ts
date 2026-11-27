@@ -356,6 +356,12 @@ describe("Telegram delivery", () => {
     expect(withPlan + "\n\n".length * TURN.maxSendsPerTurn).toBeLessThanOrEqual(TELEGRAM_MAX_CHARS);
   });
 
+  test("Markdown in a reply reaches Telegram as plain text, with no literal asterisks or link syntax", async () => {
+    const seen = stubFetch(() => Response.json({ ok: true, result: {} }));
+    await telegram().deliver({ ...msg, texts: ["It's **x** today.", "See [t](https://example.com) or [https://example.org](https://example.org)."] }, NOW);
+    expect(seen[0].body).toMatchObject({ text: "It's x today.\n\nSee t (https://example.com) or https://example.org." });
+  });
+
   test("a button goes out as one inline button under the message", async () => {
     const seen = stubFetch(() => Response.json({ ok: true, result: {} }));
     await telegram().deliver({ ...msg, button: { label: "Accept plan", data: "a:7.1" } }, NOW);

@@ -1,7 +1,7 @@
 import { diagnostic } from "../diagnostics";
 import { z } from "zod";
 import { LANGUAGES, eventKey, parseButton, parseInviteCode, personAgentKey, type ChannelEvent, type EpochMs, type Language, type OutboundMessage } from "../domain";
-import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type OperatorAlertDelivery, type Received } from "./channel";
+import { CHANNEL_RETRY_MS, disabledChannel, plainText, sameSecret, type ChannelAdapter, type Delivery, type OperatorAlertDelivery, type Received } from "./channel";
 
 const Chat = z.object({ id: z.number().int(), type: z.string() });
 const Sender = z.object({ language_code: z.string().optional() }).optional().catch(undefined);
@@ -95,7 +95,7 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           chat_id: msg.to.channelUserId,
-          text: msg.texts.join("\n\n"),
+          text: plainText(msg.texts.join("\n\n")),
           link_preview_options: { is_disabled: true },
           ...(msg.button ? { reply_markup: { inline_keyboard: [[{ text: msg.button.label, callback_data: msg.button.data }]] } } : {}),
         }),

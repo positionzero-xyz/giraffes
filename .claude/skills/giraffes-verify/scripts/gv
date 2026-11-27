@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Git Bash rewrites arguments that start with "/" (such as /follow) into Windows paths; this shim turns that off.
+set -euo pipefail
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if command -v cygpath >/dev/null; then
+  here=$(cygpath -m "$here")
+  [[ -n "${RUN_DIR:-}" ]] && RUN_DIR=$(cygpath -m "$RUN_DIR") && export RUN_DIR
+  [[ -n "${APP_DIR:-}" ]] && APP_DIR=$(cygpath -m "$APP_DIR") && export APP_DIR
+fi
+MSYS_NO_PATHCONV=1 exec node "$here/gv.mjs" "$@"

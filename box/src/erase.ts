@@ -4,7 +4,13 @@ import { basename, dirname, join } from "node:path";
 
 export type PersonFiles = { readonly home: string; readonly configDir: string; readonly scratchDirs: readonly string[]; readonly sessionFile: string; readonly stateFile: string };
 
-export type EraseState = { readonly box: string; readonly floor: number; readonly erasing: boolean; readonly epochs: boolean };
+export type EraseState = {
+  readonly box: string;
+  readonly floor: number;
+  readonly erasing: boolean;
+  readonly epochs: boolean;
+  readonly retired?: true;
+};
 
 const SIGN_IN = new Set([".credentials.json", ".claude.json"]);
 const SIGN_IN_FIELDS = new Set(["oauthAccount"]);
@@ -32,7 +38,8 @@ function isState(v: unknown): v is EraseState {
     Number.isSafeInteger(s.floor) &&
     (s.floor as number) >= 0 &&
     typeof s.erasing === "boolean" &&
-    typeof s.epochs === "boolean"
+    typeof s.epochs === "boolean" &&
+    (s.retired === undefined || s.retired === true)
   );
 }
 
@@ -72,9 +79,9 @@ function emptyDir(dir: string, keep: (name: string) => boolean = () => false): v
   for (const name of entries(dir)) if (!keep(name)) rmSync(join(dir, name), GONE);
 }
 
-export function sweep(files: PersonFiles): void {
+export function sweep(files: PersonFiles, retired: boolean): void {
   rmSync(files.sessionFile, GONE);
-  emptyDir(files.configDir, (name) => isSignIn(files.configDir, name));
+  emptyDir(files.configDir, (name) => !retired && isSignIn(files.configDir, name));
   const file = accountFile(files);
   if (existsSync(file)) {
     const account = readObject(file);
@@ -86,9 +93,9 @@ export function sweep(files: PersonFiles): void {
   emptyDir(dirname(files.stateFile), (name) => isRecord(files, name));
 }
 
-export function leftovers(files: PersonFiles): string[] {
+export function leftovers(files: PersonFiles, retired: boolean): string[] {
   const left = existsSync(files.sessionFile) ? [files.sessionFile] : [];
-  left.push(...entries(files.configDir).filter((name) => !isSignIn(files.configDir, name)).map((name) => join(files.configDir, name)));
+  left.push(...entries(files.configDir).filter((name) => retired || !isSignIn(files.configDir, name)).map((name) => join(files.configDir, name)));
   const file = accountFile(files);
   const account = existsSync(file) ? readObject(file) : {};
   if (account === null || extraFields(account).length > 0) left.push(file);

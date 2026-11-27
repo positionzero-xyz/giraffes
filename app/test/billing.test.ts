@@ -1301,6 +1301,24 @@ describe("stripe webhook", () => {
     expect(await c.received()).toEqual(["Thanks. Your AI included plan is active."]);
   });
 
+  test("a failed owner plan refresh fails the event, and the redelivery applies it", async () => {
+    const store = d1Billing(env.LEDGER);
+    const kit = billingOn({ TRIAL_DAYS: "0" }, store);
+    const owner = await devChat("refresh_owner", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await owner.say("/plan");
+    await pay(kit, owner, "refresh_owner", "standard");
+    await owner.received();
+
+    const ended = subscriptionEvent({ user: "refresh_owner", sub: "sub_refresh_owner", plan: "standard", status: "canceled", type: "customer.subscription.deleted" });
+    kit.stripe.subscriptions.set("sub_refresh_owner", ended.data.object);
+    vi.spyOn(store, "standing").mockRejectedValueOnce(new Error("D1 unavailable"));
+
+    expect((await postStripe(ended)).status).toBe(500);
+    expect(await (await postStripe(ended)).text()).toBe("applied");
+    await owner.settle();
+    expect(await owner.received()).toEqual([NOTICE.lapsed]);
+  });
+
   test("events that aren't ours are acknowledged and ignored", async () => {
     const foreign = subscriptionEvent({ user: "joe", sub: "sub_joe", plan: "standard", status: "active" });
     (foreign.data.object.metadata as Record<string, string>) = {};

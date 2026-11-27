@@ -48,6 +48,7 @@ const durable = {
   proposal: { chat: "text", identity: "id task_id outbox_id", operational: "version kind status created_at decided_at" },
   rate_event: { identity: "id", operational: "kind at" },
   reservation: { privateConfig: "model", identity: "id instance", operational: "month scope purpose backend estimate_micro created_at" },
+  routine_delivery: { identity: "sending_id", operational: "at" },
   saved_item: { identity: "source_id", operational: "ordinal kind" },
   saved_items: { identity: "snapshot", operational: "one revision snapshot_revision cursor_item cursor_offset" },
   spend_month: { operational: "scope month spent_micro" },

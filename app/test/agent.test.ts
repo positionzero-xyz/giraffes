@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
 import { AGENT_SYSTEM } from "../src/agent/prompt";
+import { MIGRATIONS, migrate } from "../src/agent/schema";
 import { AgentStore } from "../src/agent/store";
 import { TURN } from "../src/agent/turn";
 import type { ChannelAdapter, ChannelRegistry } from "../src/channels/channel";
@@ -313,6 +314,14 @@ describe("reminders", () => {
 describe("routines", () => {
   const reminders = async (c: Awaited<ReturnType<typeof devChat>>) =>
     (await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder").map((w) => [w.key, wall(w.dueAt), w.kind === "reminder" ? w.repeat : null]);
+  const fireEarly = async (c: Awaited<ReturnType<typeof devChat>>, user: string, key: string) => {
+    const res = await SELF.fetch("https://agent.test/dev/fire", {
+      method: "POST",
+      body: JSON.stringify({ user, key }),
+    });
+    expect(res.status).toBe(200);
+    await c.settle();
+  };
 
   test("a daily routine fires at its time every day, and code schedules each next one", async () => {
     const model = scripted([
@@ -333,6 +342,200 @@ describe("routines", () => {
     await c.advanceTo("2099-11-05T08:00");
     expect(await c.received()).toEqual(["Stretch again."]);
     expect(c.channel.delivered.slice(1).map((d) => wall(d.at))).toEqual(["2099-11-04T08:00", "2099-11-05T08:00"]);
+    model.assertDone();
+  });
+
+  test("an asked routine stops at six for 24 hours, logs the drop, and lets a one-off through", async () => {
+    const model = scripted([
+      turn({ actions: [
+        routine("stretch", "2099-11-04T22:30", "Stretch", "daily"),
+        schedule("pills", "2099-11-04T23:00", "Take your pills"),
+      ] }),
+      ...Array.from({ length: 7 }, () => chat("Stretch time.")),
+      chat("Take your pills."),
+      chat("Stretch time."),
+      chat("Stretch time."),
+      turn({ actions: [quiet()] }),
+      chat("Stretch time."),
+    ]);
+    const user = "routine-limit";
+    const c = await devChat(user, { model, at: "2099-11-04T22:29" });
+
+    await c.say("Remind me to stretch every day, and to take my pills tonight.");
+    await c.advanceTo("2099-11-04T22:30");
+    for (let i = 0; i < 5; i++) await fireEarly(c, user, "stretch");
+    expect(await c.received()).toEqual(Array.from({ length: 6 }, () => "Stretch time."));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await fireEarly(c, user, "stretch");
+      expect(warn).toHaveBeenCalledWith({ code: "routine_delivery_budget" });
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(1);
+    expect((await reminders(c)).find(([key]) => key === "stretch")?.[1]).toBe("2099-11-05T22:30");
+
+    await c.advanceTo("2099-11-04T23:00");
+    expect(await c.received()).toEqual(["Take your pills."]);
+    await c.advanceTo("2099-11-05T00:01");
+    await fireEarly(c, user, "stretch");
+    expect(await c.received()).toEqual([]);
+
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, async (agent) => {
+      const { op } = await agent.beginForget({ at: c.clock.now(), seq: null });
+      await agent.endForget(op);
+    });
+    await c.advanceTo("2099-11-05T00:03");
+    await fireEarly(c, user, "stretch");
+    expect(await c.received()).toEqual([]);
+
+    await c.advanceTo("2099-11-05T22:30");
+    expect(await c.received()).toEqual(["Stretch time."]);
+    model.assertDone();
+  });
+
+  test("unasked and asked routines share the same rolling allowance", async () => {
+    const routines = Array.from({ length: 7 }, (_, i) => ({
+      ...routine(`routine-${i}`, "2099-11-04T11:00", `Routine ${i}`, "daily"), asked: i >= 2 && i < 6,
+    }));
+    const model = scripted([
+      turn({ actions: routines.slice(0, 4) }),
+      turn({ actions: routines.slice(4) }),
+      ...Array.from({ length: 7 }, (_, i) => chat(`Routine ${i}`)),
+    ]);
+    const c = await devChat("routine-mixed", { model, at: "2099-11-04T10:00" });
+
+    await c.say("Set up my first routines.");
+    await c.say("Set up the rest of my routines.");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await c.advanceTo("2099-11-04T11:00");
+      expect(warn).toHaveBeenCalledWith({ code: "routine_delivery_budget" });
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(await c.received()).toEqual(Array.from({ length: 6 }, (_, i) => `Routine ${i}`));
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(1);
+    expect(c.logs("unasked").map((row) => row.status)).toEqual(["sent", "sent", "dropped_budget"]);
+    expect(await reminders(c)).toHaveLength(7);
+    model.assertDone();
+  });
+
+  test.each([
+    { kind: "in_doubt", afterMs: 60_000 },
+    { kind: "throw" },
+  ] as const)("a routine retry after $kind still needs room in the rolling allowance", async (step) => {
+    const model = scripted([
+      turn({ actions: Array.from({ length: 6 }, (_, i) => routine(`routine-${i}`, "2099-11-04T11:00", `Routine ${i}`, "daily")) }),
+      ...Array.from({ length: 6 }, (_, i) => chat(`Routine ${i}`)),
+    ]);
+    const c = await devChat(`routine-${step.kind}`, {
+      model,
+      at: "2099-11-04T10:00",
+      deliveries: [step],
+    });
+
+    await c.say("Set up my routines.");
+    await c.advanceTo("2099-11-04T11:01");
+    expect(await c.received()).toHaveLength(5);
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(1);
+    expect(await reminders(c)).toHaveLength(6);
+    model.assertDone();
+  });
+
+  test.each(["line", "telegram"] as const)("%s routines recover all six sends after six refused requests", async (channel) => {
+    const texts = Array.from({ length: 6 }, (_, i) => `Routine ${i}`);
+    const model = scripted([
+      turn({ actions: texts.map((text, i) => routine(`r-${i}`, i < 2 ? "2099-11-04T10:00" : "2099-11-04T18:00", text, "daily")) }),
+      ...texts.map(chat),
+    ]);
+    const c = await devChat("routine-outage", { model, at: "2099-11-04T09:30", channel });
+    await c.say("Set up my routines.");
+    const adapter = channel === "line"
+      ? lineChannel({ channelSecret: "test", accessToken: "test" })
+      : telegramChannel({ botToken: "123:abc", webhookSecret: "test" });
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (agent) => agent.withDeps({
+      channels: { line: c.channel, telegram: c.channel, dev: c.channel, [channel]: { receive: adapter.receive, deliver: adapter.deliver } },
+    }));
+    let requests = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      requests++;
+      return requests <= 6 ? Response.json({}, { status: requests % 2 === 0 ? 503 : 429 }) : Response.json({});
+    });
+    try {
+      await c.advanceTo("2099-11-04T20:00");
+      const outbox = (await c.snapshot()).outbox;
+      expect(outbox.map((row) => [row.texts[0], row.status])).toEqual(texts.map((text) => [text, "sent"]));
+      expect(requests).toBe(12);
+      model.assertDone();
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  test("westward time-zone changes leave no extra room for routines", async () => {
+    const user = "routine-zone-change";
+    const stretches = (count: number) => Array.from({ length: count }, () => chat("Stretch time."));
+    const model = scripted([
+      turn({ actions: [routine("stretch", "2099-11-04T00:10", "Stretch", "daily")] }),
+      ...stretches(6),
+      turn({ actions: [{ type: "set_locale", timeZone: "Asia/Dhaka", language: "en" }] }),
+      ...stretches(6),
+      turn({ actions: [{ type: "set_locale", timeZone: "Asia/Karachi", language: "en" }] }),
+      ...stretches(6),
+    ]);
+    const c = await devChat(user, { model, at: "2099-11-04T00:05" });
+    await c.say("Remind me to stretch every day.");
+    await c.advanceTo("2099-11-04T00:10");
+    for (let i = 0; i < 5; i++) await fireEarly(c, user, "stretch");
+    expect(await c.received()).toHaveLength(6);
+
+    for (const [at, city] of [["2099-11-04T01:15", "Dhaka"], ["2099-11-04T02:20", "Karachi"]]) {
+      await c.advanceTo(at);
+      await c.say(`I live in ${city} now.`);
+      for (let i = 0; i < 6; i++) await fireEarly(c, user, "stretch");
+    }
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).agent?.tz).toBe("Asia/Karachi");
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(12);
+    model.assertDone();
+  });
+
+  test("the first capped release counts recent sent and uncertain routines from the old outbox", async () => {
+    const user = "routine-upgrade";
+    const model = scripted([
+      turn({ actions: [routine("stretch", "2099-11-04T11:00", "Stretch", "daily"), schedule("once", "2099-11-04T11:30", "One-off")] }),
+      chat("Stretch time."),
+      chat("Stretch time."),
+      chat("Maybe delivered."),
+      chat("One-off."),
+      ...Array.from({ length: 4 }, () => chat("Stretch time.")),
+    ]);
+    const c = await devChat(user, {
+      model,
+      at: "2099-11-04T10:00",
+      deliveries: [{ kind: "sent" }, { kind: "sent" }, { kind: "in_doubt", afterMs: 60 * 60_000 }],
+    });
+    await c.say("Remind me to stretch daily, and once at 11:30.");
+    await c.advanceTo("2099-11-04T11:00");
+    await fireEarly(c, user, "stretch");
+    await fireEarly(c, user, "stretch");
+    await c.advanceTo("2099-11-04T11:30");
+    expect(await c.received()).toEqual(["Stretch time.", "Stretch time.", "One-off."]);
+
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (_agent, { storage }) => {
+      storage.sql.exec("DROP TABLE routine_delivery");
+      storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(MIGRATIONS.length - 1));
+      migrate(storage);
+    });
+    for (let i = 0; i < 4; i++) await fireEarly(c, user, "stretch");
+    expect(await c.received()).toEqual(["Stretch time.", "Stretch time.", "Stretch time."]);
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(1);
     model.assertDone();
   });
 

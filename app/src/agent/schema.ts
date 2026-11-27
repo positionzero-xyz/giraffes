@@ -1,3 +1,7 @@
+export const ROUTINE_OUTBOX = `o.trigger_kind = 'wakeup' AND EXISTS (
+  SELECT 1 FROM wakeup WHERE id = CAST(substr(o.event_key, length('wake:') + 1) AS INTEGER) AND repeat IS NOT NULL
+)`;
+
 export const MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE agent (
@@ -604,6 +608,16 @@ export const MIGRATIONS: readonly string[] = [
     at    INTEGER NOT NULL
   );
   CREATE INDEX rate_event_kind_at ON rate_event (kind, at);
+  `,
+  `
+  CREATE TABLE routine_delivery (
+    at         INTEGER NOT NULL,
+    sending_id TEXT UNIQUE
+  );
+  INSERT INTO routine_delivery (at, sending_id)
+    SELECT COALESCE(o.closed_at, o.ready_at), CASE WHEN o.status = 'sending' THEN o.id END
+    FROM outbox o
+    WHERE (o.status IN ('sent', 'sending') OR o.in_doubt = 1) AND ${ROUTINE_OUTBOX};
   `,
 ];
 

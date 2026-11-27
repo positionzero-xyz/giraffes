@@ -28,6 +28,7 @@ export type Diagnostic = DrainPhase
   | "operator_alert_unconfirmed"
   | "operator_alert_destination_unavailable"
   | "request_failed"
+  | "routine_delivery_budget"
   | "stripe_checkout_expiry_failed"
   | "stripe_checkout_failed"
   | "stripe_duplicate_subscription"

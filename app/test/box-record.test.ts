@@ -137,7 +137,7 @@ describe("the Durable Object is the one record of the chat for the box session",
     expect(await c.received()).toEqual(["Hi."]);
     const [session] = box.sessions;
 
-    box.replies.push({ kind: "status", status: 503 });
+    box.replies.push({ kind: "status", status: 503 }, { kind: "status", status: 503 }, { kind: "status", status: 503 });
     await c.say("lost one");
     await c.advanceTo("2099-11-04T10:04");
     expect(await c.received()).toEqual([NOTICE.failed]);
@@ -154,6 +154,8 @@ describe("the Durable Object is the one record of the chat for the box session",
 
     expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
       ["box", "settled"],
+      ["box", "unavailable"],
+      ["box", "unavailable"],
       ["box", "unavailable"],
       ["box", "settled"],
       ["box", "settled"],

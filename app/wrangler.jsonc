@@ -8,7 +8,7 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Agent"] }],
   "d1_databases": [
-    { "binding": "LEDGER", "database_name": "giraffes-ledger", "database_id": "<set on first deploy>" }
+    { "binding": "LEDGER", "database_name": "giraffes-ledger", "database_id": "<set on first deploy>", "migrations_dir": "src/ledger/migrations" }
   ],
   "triggers": { "crons": ["0 * * * *"] },
   "vars": { "MODEL_BACKEND": "live" }

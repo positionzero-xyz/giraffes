@@ -330,6 +330,57 @@ describe("the Durable Object is the one record of the chat for the box session",
     expect(c.logs("turn").at(-1)?.historyTrimmed).toBe(false);
   });
 
+  test.each([
+    { title: "the box catches up on every backup-key turn when more than 90 rows wait and compaction fails", lostSession: false },
+    { title: "a replacement box session catches up even when the oldest page needs to be trimmed", lostSession: true },
+  ])("$title", async ({ lostSession }) => {
+    const padding = lostSession ? ` ${"ก".repeat(900)}` : "";
+    const messages = Array.from({ length: 50 }, (_, i) => `Backup question ${i}.${padding}`);
+    const replies = messages.map((_, i) => `Backup answer ${i}.`);
+    const key = fakeProvider(replies.map((reply) => keyReply(reply)));
+    const compaction = fakeProvider([{ kind: "output", value: { summary: "" } }]);
+    const provider = async (url: string, init?: RequestInit): Promise<Response> => {
+      const body = JSON.parse(String(init?.body)) as { system: { text: string }[] };
+      return (body.system[0].text === COMPACTION_SYSTEM ? compaction : key)(url, init);
+    };
+    const box = fakeBox({ signedIn: true });
+    const c = await devChat("backfill-overflow", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await giveKey(c.agent, { backup: true });
+    await c.received();
+    box.replies.push({ kind: "reply", step: chat("Hi.") });
+    await c.say("hello");
+
+    box.replies.push({ kind: "status", status: 503 });
+    for (const message of messages) await c.say(message);
+    expect(compaction.seen).toHaveLength(1);
+    expect((await c.received()).slice(-replies.length)).toEqual(replies);
+
+    c.clock.set(local("2099-11-04T10:10"));
+    if (lostSession) box.sessions.clear();
+    compaction.steps.push({ kind: "output", value: { summary: "" } });
+    box.replies.push({ kind: "refusal" }, { kind: "reply", step: chat("Back on your box.") });
+    await c.say("are you back?");
+    expect(await c.received()).toEqual(["Back on your box."]);
+    expect(box.parses.slice(-2).map((p) => (p.agent ? "agent" : "compaction"))).toEqual(["compaction", "agent"]);
+    const first = lastBox(box);
+    expect(first.resumed).toBe(!lostSession);
+    if (lostSession) expect(first.user).toContain("later lines left out");
+    expect(first.user).toContain(`Person: ${messages[0]}`);
+    expect(first.user).not.toContain(`Person: ${messages.at(-1)}`);
+
+    box.replies.push({ kind: "reply", step: chat("All caught up.") });
+    await c.say("keep going");
+    expect(await c.received()).toEqual(["All caught up."]);
+    const second = lastBox(box);
+    expect(second.resumed).toBe(true);
+    for (const line of [...messages.map((text) => `Person: ${text}`), ...replies.map((text) => `You: ${text}`)]) {
+      expect([first.user, second.user].filter((prompt) => prompt.includes(line)), line).toHaveLength(1);
+    }
+    expect(second.user).not.toContain("Person: are you back?");
+    expect(second.user).not.toContain("You: Back on your box.");
+  });
+
   test("a group turn its owner's box serves runs in a session of its own and leaves the owner's session record alone", async () => {
     const { box, c } = await boxChat("own");
     box.replies.push({ kind: "reply", step: chat("Hi.") });

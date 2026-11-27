@@ -449,6 +449,22 @@ describe("trial and lapse", () => {
     expect(c.logs("turn").filter((t) => t.eventKind === "message").map((t) => t.outcome)).toEqual(["acted", "no_model", "lapsed", "lapsed", "lapsed"]);
   });
 
+  test("someone who adds the agent with no active plan gets the lapsed notice then, and not again that day", async () => {
+    const kit = billingOn({ TRIAL_DAYS: "0" });
+    const model = scripted([]);
+    const c = await devChat("fay", { model, at: "2099-11-04T10:00", billing: kit.deps });
+
+    await c.say("/follow");
+    expect(await c.received()).toEqual([NOTICE.lapsed]);
+    await c.say("hi");
+    expect(await c.received()).toEqual([]);
+    expect(model.calls).toHaveLength(0);
+    expect(c.logs("turn").map((l) => [l.eventKind, l.outcome])).toEqual([
+      ["lifecycle", "lapsed"],
+      ["message", "lapsed"],
+    ]);
+  });
+
   test("a reminder the person asked for still arrives after the trial ends, written by code, with no model call", async () => {
     const kit = billingOn({ TRIAL_DAYS: "1" });
     const model = scripted([turn({ actions: [schedule("vet", "2099-11-06T09:30", "Call the vet"), { type: "send", text: "Will do." }] })]);
@@ -993,10 +1009,15 @@ describe("checkout and the portal", () => {
     await runInDurableObject(stub, (_, { storage }) => {
       const beforeAttempts = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE billing_alert")) + 1;
       storage.sql.exec("DROP TABLE billing_alert");
+      storage.sql.exec("DROP TABLE rate_event");
       storage.sql.exec(`CREATE TABLE billing_alert (
         subscription_ids TEXT PRIMARY KEY, delivery_id TEXT NOT NULL, ready_at INTEGER, notified INTEGER NOT NULL DEFAULT 0
       )`);
       storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, ready_at) VALUES ('sub_a sub_b', 'existing-id', 9000)");
+      storage.sql.exec("DROP TRIGGER IF EXISTS outside_approval_immutable");
+      storage.sql.exec("DROP TRIGGER IF EXISTS outside_write_immutable");
+      storage.sql.exec("DROP TABLE IF EXISTS outside_approval");
+      storage.sql.exec("DROP TABLE IF EXISTS outside_write");
       storage.sql.exec("ALTER TABLE checkout_session DROP COLUMN closed");
       storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeAttempts));
       migrate(storage);
@@ -1031,6 +1052,11 @@ describe("checkout and the portal", () => {
         storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN operator_route");
         storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN telegram_redirect");
         storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN destination_wait");
+        storage.sql.exec("DROP TABLE rate_event");
+        storage.sql.exec("DROP TRIGGER IF EXISTS outside_approval_immutable");
+        storage.sql.exec("DROP TRIGGER IF EXISTS outside_write_immutable");
+        storage.sql.exec("DROP TABLE IF EXISTS outside_approval");
+        storage.sql.exec("DROP TABLE IF EXISTS outside_write");
         storage.sql.exec("ALTER TABLE checkout_session DROP COLUMN closed");
         storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeDestinationRecovery));
         storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, notified, closed_as) VALUES ('sub_a sub_b', 'old-id', 1, 'gone')");
@@ -1299,6 +1325,24 @@ describe("stripe webhook", () => {
     expect(await (await postStripe(e)).text()).toBe("applied");
     await c.settle();
     expect(await c.received()).toEqual(["Thanks. Your AI included plan is active."]);
+  });
+
+  test("a failed owner plan refresh fails the event, and the redelivery applies it", async () => {
+    const store = d1Billing(env.LEDGER);
+    const kit = billingOn({ TRIAL_DAYS: "0" }, store);
+    const owner = await devChat("refresh_owner", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });
+    await owner.say("/plan");
+    await pay(kit, owner, "refresh_owner", "standard");
+    await owner.received();
+
+    const ended = subscriptionEvent({ user: "refresh_owner", sub: "sub_refresh_owner", plan: "standard", status: "canceled", type: "customer.subscription.deleted" });
+    kit.stripe.subscriptions.set("sub_refresh_owner", ended.data.object);
+    vi.spyOn(store, "standing").mockRejectedValueOnce(new Error("D1 unavailable"));
+
+    expect((await postStripe(ended)).status).toBe(500);
+    expect(await (await postStripe(ended)).text()).toBe("applied");
+    await owner.settle();
+    expect(await owner.received()).toEqual([NOTICE.lapsed]);
   });
 
   test("events that aren't ours are acknowledged and ignored", async () => {

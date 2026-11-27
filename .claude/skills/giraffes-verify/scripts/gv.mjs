@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
-import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import path from "node:path";
 import { hostname } from "node:os";
@@ -10,7 +10,7 @@ const USAGE = `usage: gv <command> [args]        RUN_DIR=<scratch dir> is requir
 
   prepare [bridge|scripted] [--box]
                                write RUN_DIR config (with KEY_SECRET and PUBLIC_URL for /key),
-                               load the D1 ledger schema (idempotent);
+                               apply the D1 ledger migrations (idempotent);
                                --box also points the Worker at one local box and writes RUN_DIR/box-token
   worker                       wrangler dev in the foreground; start it with run_in_background
   bridge                       claude -p bridge in the foreground; start it with run_in_background
@@ -250,16 +250,23 @@ async function doSql(r, user, sql, params) {
   });
   const body = await res.json();
   if (!body.success) fail(`DO query failed: ${JSON.stringify(body.errors)}`);
-  return body.result[0];
+  const result = body.result[0];
+  if (Array.isArray(result?.columns) && Array.isArray(result?.rows)) {
+    return {
+      ...result,
+      results: result.rows.map((row) => Object.fromEntries(result.columns.map((column, index) => [column, row[index]]))),
+    };
+  }
+  return result;
 }
 
-function d1(r, extra) {
+function d1(r, command, extra = []) {
   const res = spawnSync(
     process.execPath,
-    [wranglerJs(r.appDir), "d1", "execute", "giraffes-ledger", "--local", "--persist-to", STATE, "-c", p("wrangler.jsonc"), ...extra],
+    [wranglerJs(r.appDir), "d1", ...command, "giraffes-ledger", "--local", "--persist-to", STATE, "-c", p("wrangler.jsonc"), ...extra],
     { cwd: RUN, env: wranglerEnv(), encoding: "utf8" },
   );
-  if (res.status !== 0) fail(`wrangler d1 execute failed (exit ${res.status})\n${res.stdout}\n${res.stderr}`);
+  if (res.status !== 0) fail(`wrangler d1 ${command.join(" ")} failed (exit ${res.status})\n${res.stdout}\n${res.stderr}`);
   return res.stdout;
 }
 
@@ -344,7 +351,11 @@ const commands = {
     if (mains !== 1) fail(`expected one "main" in ${appDir}/wrangler.jsonc`);
     writeFileSync(p("wrangler.jsonc"), config);
     writeFileSync(p(".dev.vars"), vars.join("\n") + "\n");
-    d1(r, ["--file", path.join(appDir, "src", "ledger", "d1-schema.sql")]);
+    const migrations = path.join(appDir, "src", "ledger", "migrations");
+    rmSync(p("src", "ledger", "migrations"), { recursive: true, force: true });
+    mkdirSync(p("src", "ledger"), { recursive: true });
+    cpSync(migrations, p("src", "ledger", "migrations"), { recursive: true });
+    d1(r, ["migrations", "apply"]);
     console.log(`prepared ${RUN}\n${JSON.stringify(r, null, 2)}`);
     if (box) {
       console.log(`start the box with Docker before the worker:
@@ -490,7 +501,7 @@ const commands = {
 
   async ledger(sql) {
     if (!sql) fail("usage: gv ledger <sql>");
-    printRows(d1(run(), ["--json", "--command", sql]));
+    printRows(d1(run(), ["execute"], ["--json", "--command", sql]));
   },
 
   async footprint(container, workload, name) {

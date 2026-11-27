@@ -96,7 +96,12 @@ export function accessOf(f: AccessFacts): Access {
   return { lanes, whenEmpty: f.claudePlan ? "box_not_ready" : "nothing" };
 }
 
-export type CallRecord = { readonly lane: Lane["kind"]; readonly model: ModelRef; readonly costMicro: MicroUsd; readonly box?: { readonly session: string | null } };
+export type CallRecord = {
+  readonly lane: Lane["kind"];
+  readonly model: ModelRef;
+  readonly costMicro: MicroUsd;
+  readonly box?: { readonly session: string | null; readonly sentThrough: number };
+};
 
 export type OverCap = SpendScope | "included_ceiling";
 
@@ -343,10 +348,10 @@ export class ModelAccess {
   }
 
   /** Null: even with every trimmable line dropped, the prompt doesn't fit the route. */
-  #fit(route: Route, mode: SchemaMode, req: CallRequest<Purpose>): { readonly user: string; readonly trimmed: boolean } | null {
+  #fit(route: Route, mode: SchemaMode, req: CallRequest<Purpose>): { readonly user: string; readonly historyCut: number } | null {
     const budget = userBudget(route, mode, req.purpose, req.system);
     const fitted = fitSections(req.prompt, budget);
-    return bytesOf(fitted.text) <= budget ? { user: fitted.text, trimmed: fitted.historyCut > 0 } : null;
+    return bytesOf(fitted.text) <= budget ? { user: fitted.text, historyCut: fitted.historyCut } : null;
   }
 
   #agent(): AgentKey {
@@ -379,8 +384,13 @@ export class ModelAccess {
     const output = turnFromAgent(jsonOrNull(answer.reply.text));
     const attempt = readAttempt(output === null ? answer.reply : { ...answer.reply, text: JSON.stringify(output) }, BoxTurnOutputSchema);
     this.#log(route, "box", "settled", 0 as MicroUsd, 0 as MicroUsd, attempt);
-    const call: CallRecord = { lane: "box", model: route.ref, costMicro: 0 as MicroUsd, box: { session: answer.session?.id ?? null } };
-    const trimmed = answer.session?.resumed === false ? fresh.trimmed : turn.trimmed;
+    const startedFresh = answer.session?.resumed === false;
+    const prompt = startedFresh ? box.fresh : box.turn;
+    const historyCut = (startedFresh ? fresh : turn).historyCut;
+    const firstOmitted = historyCut > 0 ? prompt.historySeqs?.at(-historyCut) : undefined;
+    const sentThrough = firstOmitted === undefined ? prompt.sentThrough : firstOmitted - 1;
+    const call: CallRecord = { lane: "box", model: route.ref, costMicro: 0 as MicroUsd, box: { session: answer.session?.id ?? null, sentThrough } };
+    const trimmed = historyCut > 0;
     return { kind: "served", served: attempt.kind === "ok" ? { kind: "ok", value: attempt.value, call, trimmed } : { kind: "failed", call, trimmed } };
   }
 
@@ -395,7 +405,7 @@ export class ModelAccess {
     const attempt = readAttempt(answer.reply, outputOf(req.purpose));
     this.#log(route, "box", "settled", 0 as MicroUsd, 0 as MicroUsd, attempt);
     const call: CallRecord = { lane: "box", model: route.ref, costMicro: 0 as MicroUsd };
-    const trimmed = fitted.trimmed;
+    const trimmed = fitted.historyCut > 0;
     return { kind: "served", served: attempt.kind === "ok" ? { kind: "ok", value: attempt.value, call, trimmed } : { kind: "failed", call, trimmed } };
   }
 
@@ -421,7 +431,7 @@ export class ModelAccess {
     const last = out.last;
     if (last?.kind === "fault") return this.#rested(k, last.fault, last.retryAfterMs, last.fault === "rate", req.claim);
     if (last?.kind === "ok" || last?.kind === "invalid" || last?.kind === "refused_by_model") store.keyHealthy(k.revision);
-    return this.#outcome(out, route, "key", "byok", meter.spent, fitted.trimmed);
+    return this.#outcome(out, route, "key", "byok", meter.spent, fitted.historyCut > 0);
   }
 
   async #included<P extends Purpose>(inc: IncludedOn, req: CallRequest<P>): Promise<LaneResult<P>> {
@@ -436,7 +446,7 @@ export class ModelAccess {
       diagnostic("included_provider_refused");
       return last.fault === "payment" ? { kind: "next", overCap: "included_ceiling" } : { kind: "next", transient: true };
     }
-    return this.#outcome(out, route, "included", "included", meter.spent, fitted.trimmed);
+    return this.#outcome(out, route, "included", "included", meter.spent, fitted.historyCut > 0);
   }
 
   #outcome<P extends Purpose>(out: Parsed<Output<P>>, route: Route, lane: Lane["kind"], scope: SpendScope, spent: () => MicroUsd, trimmed: boolean): LaneResult<P> {

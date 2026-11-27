@@ -1192,7 +1192,13 @@ export class Agent extends DurableObject<Env> {
     }
 
     const shown = await this.#historyThatFits(batch, a, view, plan, claim);
-    const box = renderBoxTurn(shown, this.#store.boxSession());
+    const held = this.#store.boxSession();
+    let overflow: Parameters<typeof renderBoxTurn>[2];
+    if (shown.historyLeftOut > 0 && this.#boxLane().state() === "signed_in") {
+      const fresh = this.#store.oldestBoxHistory(0);
+      overflow = { fresh, unseen: held ? this.#store.oldestBoxHistory(held.seenSeq) : fresh };
+    }
+    const box = renderBoxTurn(shown, held, overflow);
     const access = this.#access();
     const catchUpBudget = batch.items[0].catchUp ? access.catchUpBudget(plan, this.#deps.clock.now()) ?? "unavailable" : null;
     const call = () => access.call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan, box, claim });
@@ -1202,7 +1208,7 @@ export class Agent extends DurableObject<Env> {
       case "ok": {
         const commit = planTurn(served.value, shown);
         const answered = served.call.box;
-        const seen = answered ? { id: answered.session, sentThrough: box.sentThrough, memory: memoryHeldAfter(shown, commit) } : null;
+        const seen = answered ? { id: answered.session, sentThrough: answered.sentThrough, memory: memoryHeldAfter(shown, commit) } : null;
         return this.#commit(commit, shown, a.key, { kind: "served", costMicro: served.call.costMicro, historyTrimmed }, null, [], seen);
       }
       case "failed":
@@ -1236,7 +1242,7 @@ export class Agent extends DurableObject<Env> {
 
   /**
    * When the history not yet in the summary doesn't fit the smallest budget among the person's lanes, one compaction
-   * step runs first, in this drain. If compaction is backing off or fails, the turn shows the newest history that fits.
+   * step runs first, in this drain. If compaction is backing off or fails, each lane fits history to its own prompt.
    */
   async #historyThatFits(batch: Batch, a: AgentRow, view: TurnView, plan: Plan, claim: Claim): Promise<TurnView> {
     const budget = this.#access().budget("turn", TURN_SYSTEM, plan);
@@ -1306,7 +1312,7 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #admission(view: TurnView, a: AgentRow): Promise<void> {
-    if (this.#deps.admission === "open") {
+    if (this.#deps.admission === "open" && view.admission.state !== "removed") {
       const now = this.#deps.clock.now();
       const admitted = { next: { state: "admitted", seat: STAFF, at: now }, change: "consented", ensureCheckin: checkinWakeup(now, a.tz, a.checkinLocal) } as const;
       this.#commit(planWithoutModel(view, { kind: "admission", commit: admitted, text: null, consent: false }), view, a.key, { kind: "none" });
@@ -1315,6 +1321,10 @@ export class Agent extends DurableObject<Env> {
     let step: AdmissionStep = planAdmission(view, null);
     if (step.kind !== "commit") {
       const now = this.#deps.clock.now();
+      if (step.kind === "check" && this.#store.rateLimited("invite", now, 60 * 60_000, ADMISSION.inviteChecksPerHour)) {
+        const unchanged = { next: view.admission, change: null, ensureCheckin: null };
+        return this.#commit(planWithoutModel(view, { kind: "admission", commit: unchanged, text: null, consent: false }), view, a.key, { kind: "none" });
+      }
       let answer: AdmissionAnswer;
       try {
         answer =
@@ -1383,7 +1393,9 @@ export class Agent extends DurableObject<Env> {
   #feedback(submitted: boolean, view: TurnView, a: AgentRow): void {
     const t = NOTICES[view.language];
     const item = view.batch.items[0];
-    const logs: LogRow[] = submitted ? [
+    const dayStart = startOfLocalDay(view.now, view.tz);
+    const capped = submitted && this.#store.rateLimited("feedback", view.now, view.now - dayStart + 1, ADMISSION.feedbackPerDay);
+    const logs: LogRow[] = submitted && !capped ? [
       {
         stream: "feedback",
         id: `${a.key}|${item.key}`,

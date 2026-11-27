@@ -2,10 +2,11 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { ADMISSION } from "../src/agent/admission";
 import { loadConfig, type Env } from "../src/config";
+import { MIGRATIONS, migrate } from "../src/agent/schema";
 import { AgentStore } from "../src/agent/store";
 import { eventKey, type AgentKey, type InviteCode } from "../src/domain";
 import { NOTICES } from "../src/notices";
-import { chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, type DevChat, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
+import { chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, type DevChat, type MemoryLedger, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
 
 const t = NOTICES.en;
 const FULL_BETA = "The beta is full right now. There's no date for new places yet. To check again, send your invite code here.";
@@ -106,6 +107,49 @@ describe("admission to the beta", () => {
     });
   });
 
+  test("caps invite-code checks per person each hour without calling D1 past the cap", async () => {
+    const base = memoryLedger();
+    const realCheck = base.checkInvite;
+    let checks = 0;
+    const ledger = Object.assign(base, {
+      checkInvite: async (req: Parameters<MemoryLedger["checkInvite"]>[0]) => {
+        checks += 1;
+        return realCheck(req);
+      },
+    });
+    const c = await devChat("5536", { model: scripted([]), at: "2099-11-04T10:00", channel: "telegram", admission: "beta", ledger });
+    const over = ADMISSION.inviteChecksPerHour + 2;
+
+    for (let i = 0; i < over; i++) await c.say("ZZZZZZ");
+
+    expect(await c.received()).toEqual(Array(ADMISSION.inviteChecksPerHour).fill(t.waitlist.bad_code));
+    expect(checks).toBe(ADMISSION.inviteChecksPerHour);
+
+    await c.advanceTo("2099-11-04T11:00");
+    await c.say("ZZZZZZ");
+
+    expect(await c.received()).toEqual([t.waitlist.bad_code]);
+    expect(checks).toBe(ADMISSION.inviteChecksPerHour + 1);
+  });
+
+  test("rate-event storage upgrades from the schema just before it", async () => {
+    const stub = env.AGENT.get(env.AGENT.idFromName("rate-event-upgrade"));
+    await runInDurableObject(stub, (_a, { storage }) => {
+      const version = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE rate_event")) + 1;
+      expect(version).toBe(MIGRATIONS.length);
+      storage.sql.exec("DROP TABLE rate_event");
+      storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(version - 1));
+
+      migrate(storage);
+
+      expect(storage.sql.exec<{ v: string }>("SELECT v FROM meta WHERE k = 'schema_version'").one().v).toBe(String(MIGRATIONS.length));
+      const store = new AgentStore(storage);
+      const now = local("2099-11-04T10:00");
+      expect(store.rateLimited("invite", now, 60_000, 1)).toBe(false);
+      expect(store.rateLimited("invite", now, 60_000, 1)).toBe(true);
+    });
+  });
+
   test("a beta that filled up between the code and consent waitlists the person as full", async () => {
     await mint(CODE);
     const c = await devChat("5532", { model: scripted([]), at: "2099-11-04T10:00", channel: "telegram", admission: "beta" });
@@ -200,6 +244,27 @@ describe("admission to the beta", () => {
     await c.say("hello?");
 
     expect(await c.received()).toEqual([t.removed]);
+    expect(model.calls).toHaveLength(1);
+    expect((await c.snapshot()).admission).toMatchObject({ state: "removed" });
+    expect(c.logs("admission").map((r) => r.change)).toEqual(["consented", "removed"]);
+  });
+
+  test("with open admission, a removed person stays removed, and a message, a consent tap or a code gets the fixed reply without the model or D1", async () => {
+    const refuse = async () => {
+      throw new Error("must not be asked");
+    };
+    const ledger = Object.assign(memoryLedger(), { checkInvite: refuse, claimSeat: refuse });
+    const model = scripted([chat("Hi.")]);
+    const c = await devChat("gone-open", { model, at: "2099-11-04T10:00", admission: "open", ledger });
+    await c.say("hi");
+    await c.received();
+
+    await c.remove();
+    await c.say("hello?");
+    await c.tap("c");
+    await c.say(`/join ${CODE}`);
+
+    expect(await c.received()).toEqual([t.removed, t.removed, t.removed]);
     expect(model.calls).toHaveLength(1);
     expect((await c.snapshot()).admission).toMatchObject({ state: "removed" });
     expect(c.logs("admission").map((r) => r.change)).toEqual(["consented", "removed"]);

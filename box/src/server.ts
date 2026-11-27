@@ -2,7 +2,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readTicket, verifyBearer, type SigninTicket } from "./auth.ts";
-import { agentTurn, authStatus, cliVersion, deleteSessionTranscripts, isSessionId, parseTurn, readAgentRequest, readEraseRequest, readParseRequest, spawnClaude, stopClaude, type At, type Cli } from "./claude.ts";
+import { agentTurn, authStatus, cliVersion, deleteSessionTranscripts, parseTurn, readAgentRequest, readEraseRequest, readParseRequest, spawnClaude, stopClaude, type At, type Cli } from "./claude.ts";
 import { diagnostic } from "./diagnostics.ts";
 import { leftovers, loadOrCreateState, saveState, sweep, writeDurably, type PersonFiles } from "./erase.ts";
 import { readJson, readSigninJson, sendJson } from "./http.ts";
@@ -61,6 +61,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
   let login: Login | null = null;
   const usedTickets = new Map<string, number>();
   let turns: Promise<unknown> = Promise.resolve();
+  let unrecordedSession: string | null = null;
   let version: string | null = null;
   const files: PersonFiles = { home, configDir, scratchDirs, sessionFile, stateFile };
   let state = loadOrCreateState(stateFile);
@@ -120,6 +121,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
         const done = { ...state, erasing: false };
         saveState(stateFile, done);
         state = done;
+        unrecordedSession = null;
         return true;
       } catch (err) {
         console.error(`erase failed: ${errorCode(err)}`);
@@ -219,10 +221,10 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
       if (result.status === 200 && parsed.ephemeral !== true) {
         const { id, resumed } = result.body.session;
         const written = (!named && resumed) || writeLegacySession(id);
-        if (before !== null && before !== id && isSessionId(before)) {
-          const deleted = deleteSessionTranscripts(configDir, [before]);
-          if (!written && !deleted) return { status: 502, body: { error: "claude_failed" } };
-        }
+        const replaced = [before, unrecordedSession].filter((prior): prior is string => prior !== null && prior !== id);
+        const deleted = deleteSessionTranscripts(configDir, replaced);
+        if (!written && !deleted) return { status: 502, body: { error: "claude_failed" } };
+        unrecordedSession = written ? null : id;
       }
       return result;
     });

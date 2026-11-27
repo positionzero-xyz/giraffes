@@ -53,6 +53,13 @@ export async function tellOperator(channels: ChannelRegistry, to: OperatorChat, 
   return to.channel;
 }
 
+/** Chat apps show text as written, so the Markdown a model still writes is turned into plain text. */
+export function plainText(text: string): string {
+  return text
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label: string, url: string) => (label === url ? url : `${label} (${url})`))
+    .replace(/\*\*(?=\S)([^*\n]*?\S)\*\*/g, "$1");
+}
+
 export function disabledChannel(id: ChannelId): ChannelAdapter {
   return {
     receive: async () => ({ kind: "rejected", status: 404 }),

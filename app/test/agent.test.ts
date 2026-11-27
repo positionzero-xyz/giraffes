@@ -17,7 +17,7 @@ import { costOf } from "../src/policy/spend";
 import { fromLocal, toLocal } from "../src/policy/time";
 import type { Env } from "../src/config";
 import worker from "../src/worker";
-import { cancel, chat, devChat, hold, local, memoryLedger, quiet, routine, schedule, scripted, send, throws, turn, wall } from "./testkit";
+import { cancel, chat, devChat, hold, local, memoryLedger, postTelegramUpdate, quiet, routine, schedule, scripted, send, throws, turn, wall } from "./testkit";
 
 const NOTICE = NOTICES.en;
 const inputThatSpendsTheCap = (DEV_CAP_MICRO * 1_000_000) / HAIKU_5_5.inputPerM;
@@ -776,7 +776,6 @@ describe("time zone and language", () => {
   });
 
   async function telegramMessage(chatId: number, updateId: number, text: string, languageCode: unknown) {
-    const secret = "A0_-".repeat(8);
     const body = {
       update_id: updateId,
       message: {
@@ -786,12 +785,7 @@ describe("time zone and language", () => {
         text,
       },
     };
-    const req = new Request("https://agent.test/webhook/telegram", {
-      method: "POST",
-      headers: { "x-telegram-bot-api-secret-token": secret },
-      body: JSON.stringify(body),
-    });
-    const response = await worker.fetch(req, { ...env, TELEGRAM_BOT_TOKEN: "123:abc", TELEGRAM_WEBHOOK_SECRET: secret });
+    const response = await postTelegramUpdate(body);
     expect(response.status).toBe(200);
   }
 
@@ -811,6 +805,54 @@ describe("time zone and language", () => {
 
     expect(await c.received()).toEqual([expect.stringMatching(notice)]);
     expect(c.logs("model_call")).toEqual([]);
+  });
+
+  test.each([
+    { code: "th", notice: /^ต้องมี AI/ },
+    { code: "en", notice: /^I need an AI/ },
+  ])("a new Telegram person's first member update uses their $code language before a model call", async ({ code, notice }) => {
+    const c = await devChat("777000111", { model: null, at: "2099-11-04T10:00", channel: "telegram" });
+
+    const response = await postTelegramUpdate({
+      update_id: 1,
+      my_chat_member: {
+        date: Date.UTC(2099, 10, 4, 3) / 1000,
+        chat: { id: 777000111, type: "private" },
+        from: { id: 777000111, is_bot: false, first_name: "Pim", language_code: code },
+        new_chat_member: { status: "member" },
+      },
+    });
+    expect(response.status).toBe(200);
+    await c.settle();
+
+    expect(await c.received()).toEqual([expect.stringMatching(notice)]);
+    expect(c.logs("model_call")).toEqual([]);
+  });
+
+  test.each([
+    { code: "th", notice: NOTICES.th.noKey },
+    { code: "en", notice: NOTICES.en.noKey },
+  ])("a new Telegram person's first button tap uses their $code language before a model call", async ({ code, notice }) => {
+    const c = await devChat("777000111", { model: null, at: "2099-11-04T10:00", channel: "telegram" });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ ok: true, result: true }));
+    try {
+      const response = await postTelegramUpdate({
+        update_id: 1,
+        callback_query: {
+          id: "cb1",
+          from: { id: 777000111, is_bot: false, first_name: "Pim", language_code: code },
+          message: { message_id: 9, date: Date.UTC(2099, 10, 4, 3) / 1000, chat: { id: 777000111, type: "private" } },
+          data: "b",
+        },
+      });
+      expect(response.status).toBe(200);
+      await c.settle();
+
+      expect(await c.received()).toEqual([notice]);
+      expect(c.logs("model_call")).toEqual([]);
+    } finally {
+      fetchMock.mockRestore();
+    }
   });
 
   test("Telegram's language hint does not replace the language set during a conversation", async () => {

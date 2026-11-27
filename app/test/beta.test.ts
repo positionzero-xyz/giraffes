@@ -6,7 +6,7 @@ import { MIGRATIONS, migrate } from "../src/agent/schema";
 import { AgentStore } from "../src/agent/store";
 import { eventKey, type AgentKey, type InviteCode } from "../src/domain";
 import { NOTICES } from "../src/notices";
-import { chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, type DevChat, type MemoryLedger, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
+import { chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, postTelegramUpdate, type DevChat, type MemoryLedger, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
 
 const t = NOTICES.en;
 const FULL_BETA = "The beta is full right now. There's no date for new places yet. To check again, send your invite code here.";
@@ -52,6 +52,32 @@ describe("admission to the beta", () => {
     expect(s.pendingWakeups).toEqual([]);
     expect(model.calls).toEqual([]);
     expect(c.logs("admission").map((r) => [r.change, r.reason])).toEqual([["waitlisted", "no_code"]]);
+  });
+
+  test.each([
+    { code: "th", notice: NOTICES.th.waitlist.no_code },
+    { code: "en", notice: NOTICES.en.waitlist.no_code },
+  ])("a Telegram stranger's first message gets the beta notice in their $code language before a model call", async ({ code, notice }) => {
+    const model = scripted([]);
+    const c = await devChat("777000111", { model, at: "2099-11-04T10:00", channel: "telegram", admission: "beta" });
+
+    const response = await postTelegramUpdate(
+      {
+        update_id: 1,
+        message: {
+          date: Date.UTC(2099, 10, 4, 3) / 1000,
+          chat: { id: 777000111, type: "private" },
+          from: { id: 777000111, is_bot: false, first_name: "Pim", language_code: code },
+          text: "hello",
+        },
+      },
+      { ADMISSION: "beta" },
+    );
+    expect(response.status).toBe(200);
+    await c.settle();
+
+    expect(await c.received()).toEqual([notice]);
+    expect(model.calls).toEqual([]);
   });
 
   test("a Telegram recruit's start code asks for consent, and consent claims the seat, admits them and starts check-ins", async () => {

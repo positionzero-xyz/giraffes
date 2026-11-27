@@ -1,7 +1,7 @@
 import { diagnostic } from "../diagnostics";
 import { z } from "zod";
 import { eventKey, LANGUAGES, parseButton, parseInviteCode, personAgentKey, type ChannelEvent, type EpochMs, type Identity, type Language, type OutboundMessage } from "../domain";
-import { CHANNEL_RETRY_MS, disabledChannel, plainText, sameSecret, type ChannelAdapter, type Delivery, type OperatorAlertDelivery, type Received } from "./channel";
+import { CHANNEL_API_TIMEOUT_MS, CHANNEL_RETRY_MS, disabledChannel, plainText, sameSecret, type ChannelAdapter, type Delivery, type OperatorAlertDelivery, type Received } from "./channel";
 
 const Chat = z.object({ id: z.number().int(), type: z.string() });
 const Sender = z.object({ language_code: z.string().optional() }).optional().catch(undefined);
@@ -66,7 +66,7 @@ const SendError = z.object({
 
 export const SEND_MESSAGE_MAX_CHARS = 4096;
 
-export function telegramChannel(secrets: { botToken: string; webhookSecret: string } | null): ChannelAdapter {
+export function telegramChannel(secrets: { botToken: string; webhookSecret: string } | null, timeoutMs = CHANNEL_API_TIMEOUT_MS): ChannelAdapter {
   if (!secrets) return disabledChannel("telegram");
   const api = `https://api.telegram.org/bot${secrets.botToken}`;
 
@@ -77,6 +77,7 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ callback_query_id: id }),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (!res.ok) diagnostic("telegram_callback_failed", res.status);
     } catch {
@@ -91,6 +92,7 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ chat_id: to.channelUserId, action: "typing" }),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (!res.ok) diagnostic("telegram_typing_failed", res.status);
     } catch {
@@ -113,6 +115,7 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
           link_preview_options: { is_disabled: true },
           ...(msg.button ? { reply_markup: { inline_keyboard: [[{ text: msg.button.label, callback_data: msg.button.data }]] } } : {}),
         }),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (res.ok) return { kind: "sent", via: "push" };
       const body: unknown = await res.json().catch(() => null);

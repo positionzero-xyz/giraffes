@@ -12,7 +12,7 @@ A person's own Claude plan, run in an unmodified Claude Code inside their box. L
 
 ## Scripting the mock
 
-With `MOCK_DUMPS` set, the mock reads `<dumps>/mock-script.json` again for every request, so a drive can arm, rewrite or delete it while the box runs. Write it atomically (write a temp file, then rename) because a half-written or missing file just means unscripted. The file is:
+With `MOCK_DUMPS` set, or with a script passed as `up.sh ... --mock --script <file>`, the mock reads `<dumps>/mock-script.json` again for every request, so a drive can arm, rewrite or delete it while the box runs. `up.sh` creates that folder when needed and copies the seed there once; rewrite the copy, not the seed. Write it atomically (write a temp file, then rename) because a half-written or missing file just means unscripted. The file is:
 
 ```json
 {

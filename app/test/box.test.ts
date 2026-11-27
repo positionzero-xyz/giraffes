@@ -5,7 +5,7 @@ import { boxClient } from "../src/box/client";
 import { flyHost, machineConfig, type FlyConfig } from "../src/box/fly";
 import type { Fetch } from "../src/box/host";
 import { BOX, boxMessage, type BoxSay } from "../src/box/machine";
-import { boxName, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
+import { boxName, boxSessionOwner, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
 import { MIGRATIONS } from "../src/agent/schema";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs } from "../src/domain";
@@ -1197,6 +1197,7 @@ describe("connecting a Claude plan", () => {
           append: expect.stringContaining("You are Giraffe"),
           tools: ["schedule_wakeup", "cancel_wakeup", "remember", "set_locale", "task"],
           session: null,
+          sessionOwner: await boxSessionOwner(BOX_SECRET, "p:dev:fin" as AgentKey),
           resumed: false,
           fresh: expect.stringContaining("Person: hello"),
         },
@@ -1210,6 +1211,27 @@ describe("connecting a Claude plan", () => {
       ["no_model", 0],
       ["acted", 0],
     ]);
+  });
+
+  test("each person names their own opaque session owner", async () => {
+    const box = fakeBox({ signedIn: true });
+    const first = await devChat("sess-one", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    const second = await devChat("sess-two", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    await first.say("/claude");
+    await second.say("/claude");
+    await first.received();
+    await second.received();
+    box.replies.push({ kind: "reply", step: chat("One.") }, { kind: "reply", step: chat("Two.") });
+
+    await first.say("hello one");
+    await second.say("hello two");
+
+    const owners = box.parses.map((p) => p.agent?.sessionOwner);
+    expect(owners).toHaveLength(2);
+    expect(owners[0]).toMatch(/^[0-9a-f]{32}$/);
+    expect(owners[1]).toMatch(/^[0-9a-f]{32}$/);
+    expect(owners[0]).not.toBe(owners[1]);
+    expect(owners.join(" ")).not.toContain("sess-");
   });
 
   test("a box that answers signed_out mid-turn is marked and the person gets one fresh link, and no other money answers for it", async () => {

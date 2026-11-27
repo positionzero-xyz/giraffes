@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readTicket, verifyBearer, type SigninTicket } from "./auth.ts";
 import { agentTurn, authStatus, cliVersion, deleteSessionTranscripts, parseTurn, readAgentRequest, readEraseRequest, readParseRequest, spawnClaude, stopClaude, type At, type Cli } from "./claude.ts";
 import { diagnostic } from "./diagnostics.ts";
-import { leftovers, loadOrCreateState, saveState, sweep, writeDurably, type PersonFiles } from "./erase.ts";
+import { leftovers, loadOrCreateState, saveState, sessionFileFor, sweep, writeDurably, type PersonFiles } from "./erase.ts";
 import { readJson, readSigninJson, sendJson } from "./http.ts";
 
 export type BoxOptions = {
@@ -61,7 +61,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
   let login: Login | null = null;
   const usedTickets = new Map<string, number>();
   let turns: Promise<unknown> = Promise.resolve();
-  let unrecordedSession: string | null = null;
+  const unrecordedSessions = new Map<string, string>();
   let version: string | null = null;
   const files: PersonFiles = { home, configDir, scratchDirs, sessionFile, stateFile };
   let state = loadOrCreateState(stateFile);
@@ -121,7 +121,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
         const done = { ...state, erasing: false };
         saveState(stateFile, done);
         state = done;
-        unrecordedSession = null;
+        unrecordedSessions.clear();
         return true;
       } catch (err) {
         console.error(`erase failed: ${errorCode(err)}`);
@@ -188,9 +188,9 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
     sendJson(res, reply.status, reply.body);
   }
 
-  function writeLegacySession(id: string): boolean {
+  function writeLegacySession(owner: string | undefined, id: string): boolean {
     try {
-      writeDurably(sessionFile, id);
+      writeDurably(sessionFileFor(sessionFile, owner), id);
       return true;
     } catch (err) {
       diagnostic({ code: "legacy_session_write_failed", error: errorCode(err) });
@@ -198,9 +198,10 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
     }
   }
 
-  function legacySession(): string | null {
+  function legacySession(owner: string | undefined): string | null {
+    const file = sessionFileFor(sessionFile, owner);
     try {
-      return existsSync(sessionFile) ? readFileSync(sessionFile, "utf8").trim() || null : null;
+      return existsSync(file) ? readFileSync(file, "utf8").trim() || null : null;
     } catch (err) {
       diagnostic({ code: "legacy_session_read_failed", error: errorCode(err) });
       return null;
@@ -216,16 +217,19 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
       if (!res.writableFinished) abandoned.abort();
     });
     const reply = await turnAt(parsed.at, arrivedAfter, abandoned, async () => {
-      const before = parsed.ephemeral === true ? null : legacySession();
+      const owner = parsed.sessionOwner;
+      const ownerKey = owner ?? "";
+      const before = parsed.ephemeral === true ? null : legacySession(owner);
       const named = parsed.session !== undefined;
       const result = await agentTurn(cli, named ? parsed : { ...parsed, session: before }, abandoned.signal, configDir);
       if (result.status === 200 && parsed.ephemeral !== true) {
         const { id, resumed } = result.body.session;
-        const written = (!named && resumed) || writeLegacySession(id);
-        const replaced = [before, unrecordedSession].filter((prior): prior is string => prior !== null && prior !== id);
+        const written = (!named && resumed) || writeLegacySession(owner, id);
+        const replaced = [before, unrecordedSessions.get(ownerKey) ?? null].filter((prior): prior is string => prior !== null && prior !== id);
         const deleted = deleteSessionTranscripts(configDir, replaced);
         if (!written && !deleted) return { status: 502, body: { error: "claude_failed" } };
-        unrecordedSession = written ? null : id;
+        if (written) unrecordedSessions.delete(ownerKey);
+        else unrecordedSessions.set(ownerKey, id);
       }
       return result;
     });

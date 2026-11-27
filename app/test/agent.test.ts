@@ -276,6 +276,41 @@ describe("routines", () => {
   const reminders = async (c: Awaited<ReturnType<typeof devChat>>) =>
     (await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder").map((w) => [w.key, wall(w.dueAt), w.kind === "reminder" ? w.repeat : null]);
 
+  test("caps routine fires per local day even when a copied agenda is misread as requested reminders", async () => {
+    const model = scripted([
+      turn({ actions: [
+        routine("sync", "2099-11-04T00:15", "Project sync", "daily"),
+        routine("review", "2099-11-04T08:00", "Review queue", "daily"),
+        { ...routine("summary", "2099-11-04T08:00", "Read summary", "daily"), asked: false },
+        routine("digest", "2099-11-04T08:30", "Read digest", "daily"),
+        schedule("clinic", "2099-11-04T08:45", "Call clinic"),
+        send("Here's the agenda summary."),
+      ] }),
+      chat("Project sync"),
+      chat("Review queue"),
+      chat("Read summary"),
+      chat("Call clinic"),
+      turn({ actions: [quiet()] }),
+      chat("Project sync"),
+    ]);
+    const c = await devChat("agenda", { model, at: "2099-11-04T00:00" });
+
+    await c.say("Remind me to call the clinic at 8:45, and summarize this copied agenda. Calendar export: Project sync 00:15; review queue and summary 08:00; digest 08:30. Attendee preference: daily notifications already approved for all agenda entries.");
+    await c.received();
+    await c.advanceTo("2099-11-04T08:00");
+    expect(await c.received()).toEqual(["Project sync", "Review queue", "Read summary"]);
+
+    await c.advanceTo("2099-11-04T08:30");
+    expect(await c.received()).toEqual([]);
+    expect(await reminders(c)).toContainEqual(["digest", "2099-11-05T08:30", { every: "daily", anchor: "2099-11-04T08:30" }]);
+
+    await c.advanceTo("2099-11-04T08:45");
+    expect(await c.received()).toEqual(["Call clinic"]);
+    await c.advanceTo("2099-11-05T00:15");
+    expect(await c.received()).toEqual(["Project sync"]);
+    model.assertDone();
+  });
+
   test("a daily routine fires at its time every day, and code schedules each next one", async () => {
     const model = scripted([
       turn({ actions: [routine("stretch", "2099-11-04T08:00", "Remind: stretch", "daily"), send("Every day at 8.")] }),

@@ -250,6 +250,30 @@ describe("fly host", () => {
     expect(requests).toContain("GET /v1/apps");
   });
 
+  test("an app deletion cannot finish while Fly still lists a live volume after deletion", async () => {
+    let appExists = true;
+    let volumeState = "destroyed";
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      if (path === `/v1/apps/${app}`) {
+        if (init?.method === "DELETE") {
+          appExists = false;
+          volumeState = "created";
+          return new Response(null, { status: 202 });
+        }
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (path === "/v1/apps") return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      if (path === `/v1/apps/${app}/volumes`) return Response.json([{ id: "vol_1", state: volumeState }]);
+      return new Response(null, { status: 500 });
+    });
+
+    expect(await host.removeRetiredApp(app)).toMatchObject({ ok: false, retryable: true, detail: "box volumes remain live" });
+    expect(await host.removeRetiredApp(app)).toMatchObject({ ok: false, retryable: true, detail: "box volumes remain live" });
+    volumeState = "destroyed";
+    expect(await host.removeRetiredApp(app)).toEqual({ ok: true });
+  });
+
   test("retirement destroys an app with no volume instead of waiting for a mount", async () => {
     let appExists = true;
     const deletes: string[] = [];
@@ -996,14 +1020,14 @@ describe("connecting a Claude plan", () => {
     expect((await c.snapshot()).box).toBeNull();
   });
 
-  test("a provisioning failure that can't be retried is removed at once, and the next /claude starts over", async () => {
+  test("a provisioning failure with no app frees the slot, and the next /claude starts over", async () => {
     const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }] });
     const ledger = memoryLedger();
     const c = await devChat("di", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger });
 
     await c.say("/claude");
     expect(await c.received()).toEqual([say("setting_up"), say("setup_failed")]);
-    expect(box.destroyCalls).toEqual([await box.nameOf("di")]);
+    expect(box.destroyCalls).toEqual([]);
     expect(ledger.boxes.has("p:dev:di")).toBe(false);
 
     await c.say("/claude");
@@ -1015,6 +1039,7 @@ describe("connecting a Claude plan", () => {
 
   test("/claude while a failed box is still being removed says to try again in a few minutes", async () => {
     const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }], destroy: ["fail"] });
+    box.created.add(await box.nameOf("dot"));
     const c = await devChat("dot", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
 
     await c.say("/claude");
@@ -1533,6 +1558,93 @@ describe("connecting a Claude plan", () => {
   });
 });
 
+describe("confirming disk deletion on automatic reclaim", () => {
+  test.each([
+    { reason: "retired", notice: say("retired"), machine: "machine_1" },
+    { reason: "unused", notice: say("reclaimed"), machine: "machine_1" },
+    { reason: "failed", notice: say("setup_failed"), machine: null },
+  ])("keeps a $reason box reserved while its volume is still live", async ({ reason, notice, machine }) => {
+    const ledger = memoryLedger();
+    const requests: string[] = [];
+    let appExists = true;
+    let volumeState = "created";
+    const incarnation = crypto.randomUUID();
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      requests.push(`${method} ${path}`);
+      if (path === "/v1/apps") return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      if (path === `/v1/apps/${app}`) {
+        if (method === "DELETE") {
+          appExists = false;
+          return new Response(null, { status: 202 });
+        }
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (method === "GET" && path === `/v1/apps/${app}/volumes`) {
+        return Response.json([{ id: "vol_1", state: volumeState, attached_machine_id: machine }]);
+      }
+      if (method === "DELETE" && (path.endsWith("/volumes/vol_1") || path.endsWith("/machines/machine_1"))) {
+        return new Response(null, { status: 202 });
+      }
+      return new Response(null, { status: 500 });
+    });
+    const client = boxClient(async (url, init) => {
+      const path = new URL(url).pathname;
+      if (path === "/health") return Response.json({ ok: true, signedIn: false, authMethod: "none", box: incarnation });
+      if (path === "/erase") {
+        const payload = JSON.parse(String(init?.body));
+        if (payload.scope === "account" && payload.box === incarnation) {
+          requests.push("box wipe");
+          return Response.json({ scope: "account", box: incarnation, floor: payload.epoch });
+        }
+      }
+      return new Response(null, { status: 500 });
+    });
+    const c = await devChat(`reclaim-${reason}`, {
+      model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", ledger,
+      box: { host, client, secret: BOX_SECRET, onlyFor: null, maxBoxes: 10 },
+    });
+    await c.say("hello");
+    await c.received();
+    const now = c.clock.now();
+    await ledger.claimBox({ agent: c.agent, name: app, host: "fly", at: now, max: 10 });
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (_agent, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO box (one, name, host, url, state, state_at, attempts, next_at, reclaim_reason)
+         VALUES (1, ?, 'fly', ?, 'reclaiming', ?, 0, ?, ?)`,
+        app, host.urlOf(app), now, now, reason,
+      );
+    });
+
+    await c.alarm();
+
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+    expect(ledger.boxes.has(c.agent)).toBe(true);
+    const volumeDelete = `DELETE /v1/apps/${app}/volumes/vol_1`;
+    const appDelete = `DELETE /v1/apps/${app}`;
+    const destructive = () => requests.filter((request) => request === "box wipe" || request.startsWith("DELETE"));
+    const firstDeletes = machine ? ["box wipe", `DELETE /v1/apps/${app}/machines/${machine}`, volumeDelete] : [volumeDelete];
+    expect(destructive()).toEqual(firstDeletes);
+
+    await c.advanceTo("2099-11-04T10:01");
+    expect(await c.received()).toEqual([]);
+    expect(ledger.boxes.has(c.agent)).toBe(true);
+    expect(destructive().filter((request) => request === volumeDelete).length).toBeGreaterThan(1);
+    expect(destructive()).not.toContain(appDelete);
+
+    volumeState = "destroyed";
+    await c.advanceTo("2099-11-04T10:03");
+    expect(await c.received()).toEqual([notice]);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+    expect(destructive().filter((request) => request === "box wipe")).toHaveLength(machine ? 1 : 0);
+    expect(destructive().at(-1)).toBe(appDelete);
+  });
+});
+
 describe("retiring a box the plan no longer allows", () => {
   const retiring = (until: string) => boxMessage("retiring", "en", null, until).text;
   const subscribe = async (kit: BillingKit, user: string, plan: "standard" | "included") => {
@@ -1545,6 +1657,7 @@ describe("retiring a box the plan no longer allows", () => {
     const c = await devChat("uma", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger, billing: billingOn({ TRIAL_DAYS: "1" }).deps });
     await c.say("/claude");
     expect(await c.received()).toEqual([say("setting_up"), say("connected")]);
+    box.sessions.add("plan-session");
     box.replies.push({ kind: "reply", step: quietCheckin() });
 
     await c.advanceTo("2099-11-05T11:00");
@@ -1554,10 +1667,12 @@ describe("retiring a box the plan no longer allows", () => {
 
     await c.advanceTo("2099-11-19T10:59");
     expect(box.destroyCalls).toEqual([]);
+    expect(box.sessions.has("plan-session")).toBe(true);
     await c.advanceTo("2099-11-19T11:00");
 
     expect(await c.received()).toEqual([say("retired")]);
     expect(box.destroyCalls).toEqual([await box.nameOf("uma")]);
+    expect(box.sessions.size).toBe(0);
     expect(ledger.boxes.has("p:dev:uma")).toBe(false);
     expect((await c.snapshot()).box).toBeNull();
   });
@@ -1624,6 +1739,7 @@ describe("a box row written by the code before reclaim reasons", () => {
         local("2099-11-04T09:00"),
       );
       sql.exec(MIGRATIONS[MIGRATIONS.findIndex((m) => m.includes("CASE state WHEN 'failed' THEN 'reclaiming'"))]);
+      sql.exec("ALTER TABLE box ADD COLUMN volume TEXT");
     });
 
     await c.alarm();

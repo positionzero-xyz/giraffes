@@ -40,7 +40,6 @@ import {
   type EnsureStep,
   type Probe,
   type ProbeStep,
-  type Step,
 } from "../box/machine";
 import { boxSessionOwner, boxToken, signinTicket, signinUrl, type BoxName, type BoxToken } from "../box/names";
 import { CHANNEL_RETRY_MS, makeChannels, whileWorking, type ChannelRegistry } from "../channels/channel";
@@ -1699,17 +1698,13 @@ export class Agent extends DurableObject<Env> {
       const stored = this.#store.box();
       const step = stored && beginStep(stored, this.#deps.clock.now());
       if (!step) return;
-      if (step.kind === "reclaim" && step.box.reason === "removed") {
+      if (step.kind === "reclaim") {
         this.#store.applyBox(step.box, null, [], this.#deps.clock.now());
-        await this.#retireRemovedBox(step.box);
+        await this.#reclaim(step.box);
         return;
       }
       if (!deps) return;
       this.#store.applyBox(step.box, null, [], this.#deps.clock.now());
-      if (step.kind === "reclaim") {
-        await this.#reclaim(deps, step);
-        continue;
-      }
       if (step.kind === "ensure") {
         await this.#ensure(deps, step);
         continue;
@@ -1720,7 +1715,7 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
-  async #retireRemovedBox(box: Extract<Box, { state: "reclaiming" }>): Promise<void> {
+  async #reclaim(box: Extract<Box, { state: "reclaiming" }>): Promise<void> {
     const { key: person, language } = this.#agent();
     const epoch = (this.#store.forget().epoch + 1) as ForgetEpoch;
     let progress = this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) ?? this.#resolveAccountBox(person, {
@@ -1742,18 +1737,7 @@ export class Agent extends DurableObject<Env> {
       this.#store.removeBox(box.name, notice && { texts: [notice.text], note: notice.note }, this.#deps.clock.now());
       this.ctx.storage.kv.delete(BOX_RETIREMENT);
     });
-  }
-
-  async #reclaim(deps: BoxDeps, step: Extract<Step, { kind: "reclaim" }>): Promise<void> {
-    const destroyed = await deps.host.destroy(step.box.name);
-    if (!destroyed.ok) {
-      diagnostic("box_reclaim_failed");
-      return;
-    }
-    await this.#deps.ledger.releaseBox(this.#agent().key, this.#deps.clock.now());
-    const m = goneMessage(step.box, this.#agent().language);
-    this.#store.removeBox(step.box.name, { texts: [m.text], note: m.note }, this.#deps.clock.now());
-    this.#askBackupIfDue(this.#deps.clock.now(), true);
+    if (box.reason !== "removed") this.#askBackupIfDue(this.#deps.clock.now(), true);
   }
 
   async #ensure(deps: BoxDeps, step: EnsureStep): Promise<void> {

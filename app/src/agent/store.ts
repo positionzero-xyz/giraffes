@@ -296,6 +296,14 @@ type PlanCols = {
 };
 
 export type NoteMessage = { readonly texts: readonly [string, ...string[]]; readonly note: string };
+export type BillingAlertSettlement = {
+  readonly subscriptionIds: string;
+  readonly text: string | undefined;
+} & (
+  | { readonly kind: "retry" | "unavailable"; readonly delayMs: number }
+  | { readonly kind: "migrated"; readonly chatId: string }
+  | { readonly kind: "sent" }
+);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEDUPE_WINDOW_MS = 14 * DAY_MS;
@@ -1170,6 +1178,39 @@ export class AgentStore {
 
   billingEventDone(id: string, now: EpochMs): void {
     this.sql.exec("INSERT OR IGNORE INTO billing_event (id, at) VALUES (?, ?)", id, now);
+  }
+
+  queueBillingAlert(ids: string, now: EpochMs): void {
+    this.sql.exec("INSERT OR IGNORE INTO billing_alert (subscription_ids, delivery_id, ready_at) VALUES (?, ?, ?)", ids, crypto.randomUUID(), now);
+  }
+
+  nextBillingAlert(operatorRoute: string, now: EpochMs) {
+    return this.sql.exec<{
+      subscription_ids: string; delivery_id: OutboxId; ready_at: EpochMs; notified: number; attempts: number; telegram_redirect: string | null;
+    }>(`SELECT subscription_ids, delivery_id, notified, attempts,
+          CASE WHEN destination_wait = 1 AND operator_route != ?1 THEN ?2 ELSE ready_at END AS ready_at,
+          CASE WHEN operator_route = ?1 THEN telegram_redirect END AS telegram_redirect
+        FROM billing_alert WHERE ready_at IS NOT NULL ORDER BY ready_at, subscription_ids LIMIT 1`, operatorRoute, now,
+    ).toArray()[0] ?? null;
+  }
+
+  startBillingAlertAttempt(ids: string, readyAt: EpochMs, operatorRoute: string): void {
+    this.sql.exec(`UPDATE billing_alert SET ready_at = ?1, attempts = attempts + 1, destination_wait = 0,
+      telegram_redirect = CASE WHEN operator_route = ?2 THEN telegram_redirect END, operator_route = ?2
+      WHERE subscription_ids = ?3`, readyAt, operatorRoute, ids);
+  }
+
+  finishBillingAlertAttempt(settlement: BillingAlertSettlement, now: EpochMs): void {
+    this.tx(() => {
+      const { text, subscriptionIds, kind } = settlement;
+      if (text && this.agent()) this.insertMessage(eventKey.billing("duplicate"), { texts: [text], note: text }, now);
+      const readyAt = kind === "sent" ? null : kind === "migrated" ? now : now + settlement.delayMs;
+      const notified = text ? (kind === "unavailable" ? 2 : 1) : 0;
+      this.sql.exec(`UPDATE billing_alert SET ready_at = ?, notified = max(notified, ?), closed_as = ?,
+        destination_wait = ?, telegram_redirect = coalesce(?, telegram_redirect) WHERE subscription_ids = ?`,
+        readyAt, notified, kind === "sent" ? kind : null, kind === "unavailable" ? 1 : 0,
+        kind === "migrated" ? settlement.chatId : null, subscriptionIds);
+    });
   }
 
   appendLogs(logs: readonly LogRow[], now: EpochMs): void {

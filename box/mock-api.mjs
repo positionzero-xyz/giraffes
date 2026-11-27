@@ -67,7 +67,14 @@ function reply(body) {
   // Tool results since this turn's message: a resumed session also carries every earlier turn's.
   const turnStart = body.messages.findLastIndex((m) => m.role === "user" && textOf(m.content).trim() && !(Array.isArray(m.content) && m.content.some((c) => c.type === "tool_result")));
   const results = body.messages.slice(turnStart + 1).flatMap((m) => (Array.isArray(m.content) ? m.content.filter((c) => c.type === "tool_result") : [])).length;
-  const SCRIPT = SCRIPT_FILE ? JSON.parse(readFileSync(SCRIPT_FILE, "utf8")) : null;
+  // The file is re-read per request so a test can rewrite it mid-run. A missing or half-written
+  // file means unscripted rather than a crashed mock: recipes arm it by writing, disarm by deleting.
+  let SCRIPT = null;
+  if (SCRIPT_FILE) {
+    try {
+      SCRIPT = JSON.parse(readFileSync(SCRIPT_FILE, "utf8"));
+    } catch {}
+  }
   const scripted = SCRIPT && tools.some((t) => t.name.startsWith("mcp__giraffe__"));
   const usage = { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
   const start = ["message_start", { message: { id: "msg_mock", type: "message", role: "assistant", model: body.model, content: [], stop_reason: null, usage } }];
@@ -96,7 +103,7 @@ function reply(body) {
     ["message_stop", {}]], holdMs };
 }
 
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => (raw += c));
   req.on("end", () => {
@@ -122,4 +129,8 @@ http.createServer((req, res) => {
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ type: "error", error: { type: "not_found_error", message: "mock" } }));
   });
-}).listen(PORT, "127.0.0.1", () => console.log(`mock on ${PORT}`));
+});
+server.listen(PORT, "127.0.0.1", () => {
+  const address = server.address();
+  console.log(`mock on ${typeof address === "object" && address !== null ? address.port : PORT}`);
+});

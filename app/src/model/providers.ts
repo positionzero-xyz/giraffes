@@ -69,9 +69,6 @@ const openaiCard = (input: number, cacheRead: number, output: number, longPrompt
   contextTokens: null,
 });
 
-/** OpenCode's pay-as-you-go card. Go lists half of it off-peak, so this never under-counts. Cache writes bill as input. */
-const GO_DEEPSEEK: RateCard = { inputPerM: usd(0.3), outputPerM: usd(1.2), cacheWritePerM: usd(0.3), cacheReadPerM: usd(0.006), longPrompt: null, contextTokens: null };
-
 const none = () => ({});
 
 /** A Vibe plan key spends the plan's Vibe budget instead of its API credit, on the same API and models. */
@@ -81,10 +78,8 @@ const MISTRAL_STUDIO: Provider = {
   baseUrl: "https://api.mistral.ai/v1",
   auth: "bearer",
   keyShape: null,
-  models: {
-    "deepseek-v4-1-flash-1017": { name: "DeepSeek V4.1 Flash", pick: "recommended", card: openaiCard(0.3, 0.007, 1.2), effort: false },
-    "mistral-small-2603": { name: "Mistral Small 4", pick: "cheaper", card: openaiCard(0.15, 0.015, 0.6), effort: false },
-  },
+  /** Mistral publishes no cached-input price for Small 4, so a cache read is priced as input. */
+  models: { "mistral-small-2603": { name: "Mistral Small 4", pick: null, card: openaiCard(0.15, 0.15, 0.6), effort: false } },
   schema: "probe",
   feeBps: 0,
   headers: none,
@@ -112,11 +107,7 @@ export const PROVIDERS: Readonly<Record<ProviderId, Provider>> = {
     baseUrl: "https://opencode.ai/inference/go/anthropic",
     auth: "bearer",
     keyShape: /^oc_sk_/,
-    /** Go meters each model against its own monthly allowance at list price: $100 for DeepSeek V4.1 Flash, $15 for Haiku. */
-    models: {
-      "deepseek-v4.1-flash": { name: "DeepSeek V4.1 Flash", pick: "recommended", card: GO_DEEPSEEK, effort: false },
-      "claude-haiku-5-5": { name: "Claude Haiku 5.5", pick: null, card: GO_HAIKU, effort: true },
-    },
+    models: { "claude-haiku-5-5": { name: "Claude Haiku 5.5", pick: null, card: GO_HAIKU, effort: true } },
     schema: "probe",
     feeBps: 0,
     headers: ({ session }) => ({ "user-agent": "giraffes/1", "x-opencode-session": session }),

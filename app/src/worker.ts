@@ -7,7 +7,7 @@ import type { KeysConfig } from "./access/access";
 import { boundedRequestBody } from "./body";
 import { PROVIDER_IDS, PROVIDERS } from "./model/providers";
 import { NOTICES } from "./notices";
-import { DONE_PATH, parseEvent, verifySignature } from "./billing/stripe";
+import { CANCEL_PATH, DONE_PATH, parseEvent, verifySignature } from "./billing/stripe";
 import { makeChannels, tellOperator } from "./channels/channel";
 import { devIdentity } from "./channels/dev";
 import { lineQuota } from "./channels/line";
@@ -25,6 +25,10 @@ const isChannelId = (s: string): s is ChannelId => CHANNEL_IDS.some((id) => id =
 const DONE_PAGE = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Giraffes</title><body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem">
 <p>All done. You can go back to the chat.</p></body></html>`;
+
+const CANCEL_PAGE = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Checkout canceled · Giraffes</title><body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem">
+<h1>Checkout canceled</h1><p>You weren't charged for this checkout. You can go back to the chat.</p></body></html>`;
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -68,6 +72,7 @@ async function routeRequest(req: Request, env: Env): Promise<Response> {
   if (config.billing.on) {
     if (req.method === "POST" && url.pathname === "/webhook/stripe") return stripeWebhook(req, env, config.billing);
     if (req.method === "GET" && url.pathname === DONE_PATH) return new Response(DONE_PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
+    if (req.method === "GET" && url.pathname === CANCEL_PATH) return new Response(CANCEL_PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
   }
 
   if (config.devMode && req.method === "GET") {
@@ -164,8 +169,10 @@ async function stripeWebhook(req: Request, env: Env, billing: Extract<Config["bi
       return new Response(parsed.reason, { status: 400 });
     case "ignored":
       return new Response(`ignored: ${parsed.reason}`);
-    case "event":
-      return new Response(await agentStub(env, parsed.event.owner).billingEvent(parsed.event));
+    case "event": {
+      const result = await agentStub(env, parsed.event.owner).billingEvent(parsed.event);
+      return new Response(result, { status: result === "failed" ? 500 : 200 });
+    }
   }
 }
 

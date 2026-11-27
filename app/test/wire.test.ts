@@ -140,7 +140,7 @@ describe("OpenAI-compatible protocol", () => {
     expect(out.last).toMatchObject({ kind: "ok", value: { answer: 42 } });
     expect(f.seen[0].url).toBe("https://api.mistral.ai/v1/chat/completions");
     expect(f.seen[0].headers.get("authorization")).toBe("Bearer sk-test-0123456789");
-    expect(f.seen[0].body).toMatchObject({ model: "deepseek-v4-1-flash-1017", max_tokens: 18_000, response_format: { type: "json_schema", json_schema: { strict: true } } });
+    expect(f.seen[0].body).toMatchObject({ model: "mistral-small-2603", max_tokens: 18_000, response_format: { type: "json_schema", json_schema: { strict: true } } });
     expect(f.seen[0].body).not.toHaveProperty("reasoning_effort");
   });
 

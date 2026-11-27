@@ -198,7 +198,7 @@ With `KEY_SECRET` and `PUBLIC_URL` set, the person sends `/key`.
 
 1. The command runs without the model. The DO issues a ticket, keeps only its nonce's hash and the current access revision in `key_ticket`, and replies with `PUBLIC_URL/key#t=<ticket>&l=<language>`, valid for 15 minutes. The history keeps `<key link>`.
 2. The page (`GET /key`, static, `no-store`, no referrer) reads the ticket from the fragment. The person picks a provider, which fills in the model, pastes the key and taps **Connect**.
-3. `POST /key` checks the ticket's MAC and expiry in the Worker, then calls the person's DO, `connectKey(nonceHash, fields)`. `draftKey` checks the form without using the ticket. The ticket moves to `validating`, `ModelAccess.probe` sends one tiny call charged to the person's own spend, and the key is sealed and saved compare-and-set on the revision, with "Connected: OpenCode Go (claude-haiku-5-5)." in the outbox. A repeat submission gets the stored outcome.
+3. `POST /key` checks the ticket's MAC and expiry in the Worker, then calls the person's DO, `connectKey(nonceHash, fields)`. `draftKey` checks the form without using the ticket. The ticket moves to `validating`. `ModelAccess.probe` can send several small requests charged to the person's own spend. If the check succeeds, the key is sealed and saved compare-and-set on the revision, with "Connected: OpenCode Go (claude-haiku-5-5)." in the outbox. A repeat submission gets the stored outcome.
 4. The next message runs on the key: `opencode-go:claude-haiku-5-5` on Go's Anthropic path, fitted to that route's budget, reserved against the person's `byok` month, logged with `backend = 'key'`.
 
 ```ts
@@ -231,7 +231,7 @@ The owner's key, cap and fault notices stay with the owner's DO.
 
 ## Querying across users
 
-Every log row lands in D1 (`app/src/ledger/d1-schema.sql`). The MVP gates are views over it. Nobody is a participant until the operator sets the beta's start in `beta`:
+Every log row lands in D1 (`app/src/ledger/migrations`). The MVP gates are views over it. Nobody is a participant until the operator sets the beta's start in `beta`:
 
 ```sh
 npx wrangler d1 execute giraffes-ledger --remote --command "SELECT * FROM gate_summary"

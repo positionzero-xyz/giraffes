@@ -23,7 +23,7 @@ accounts.
 
 ```sh
 cp .dev.vars.example .dev.vars        # MODEL_BACKEND=bridge, DEV_MODE=1
-npx wrangler d1 execute giraffes-ledger --local --file src/ledger/d1-schema.sql   # once
+npx wrangler d1 migrations apply giraffes-ledger --local   # once
 
 npm run bridge                        # terminal 1: runs `claude -p` per call on 127.0.0.1:8789
 npm run dev                           # terminal 2: wrangler dev on http://localhost:8787
@@ -62,7 +62,7 @@ price plus the provider's fee from our price cards, not an invoice.
 1. Create the ledger and load its schema:
    ```sh
    npx wrangler d1 create giraffes-ledger          # copy the database_id into wrangler.jsonc
-   npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
+   npx wrangler d1 migrations apply giraffes-ledger --remote
    ```
 2. Set the secrets with `npx wrangler secret put <NAME>`:
    - `KEY_SECRET` (32 or more random characters) and `PUBLIC_URL` (the Worker's https URL), which turn on
@@ -131,8 +131,14 @@ price plus the provider's fee from our price cards, not an invoice.
      the free beta.
    - `BILLING=on` needs `ADMISSION=open`, the secrets `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`, and the vars
      `STRIPE_PRICE_STANDARD`, `STRIPE_PRICE_PLUS`, `STRIPE_PRICE_SEAT`,
-     `STRIPE_PORTAL_CONFIGURATION` and `PUBLIC_URL` (the Worker's https URL; Checkout and the billing
-     portal send people back to `PUBLIC_URL/billing/done`). Optional vars: `TRIAL_DAYS` (default 14,
+     `STRIPE_PORTAL_CONFIGURATION` and `PUBLIC_URL` (the Worker's HTTPS URL). Successful Checkout
+     sessions and the billing portal return to `/billing/done`. Canceled sessions return to
+     `/billing/cancel`. Set `OPERATOR_CHAT` to a configured chat before enabling billing.
+     Giraffe alerts that chat about duplicate paid plans. It retries temporary failures with increasing delays.
+     If the destination is unavailable, it retries after 24 hours or when the alert's Worker object loads a new `OPERATOR_CHAT`.
+     Telegram group upgrades redirect the alert to the replacement chat. Update `OPERATOR_CHAT` when the redirected alert asks you to.
+     It alerts once per set of subscriptions. An additional subscription makes a new set.
+     Optional vars: `TRIAL_DAYS` (default 14,
      counted from a person's first message with billing on, so people from the beta get a full trial
      too), `PLUS_SEATS` (default 3 people, the owner included) and `PLUS_MAX_SEATS` (default 6). `/plan`
      sells the included plan only while `INCLUDED=on`.
@@ -166,6 +172,5 @@ person's latest answer. `tasks_by_type` counts tasks opened and completed per ki
 
 ### Update an existing ledger
 
-Apply `src/ledger/d1-schema.sql` before deploying this Worker. On an existing ledger, the file adds write guards,
-clears the historical message and diagnostic fields, and updates the completion view. Apply it with `--local`
-to upgrade a dev ledger. An older Worker may fail to flush diagnostics until it is replaced.
+Apply the D1 migrations before deploying this Worker: `npx wrangler d1 migrations apply giraffes-ledger --remote`.
+Use `--local` to upgrade a dev ledger. An older Worker may fail to flush diagnostics until it is replaced.

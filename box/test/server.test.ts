@@ -143,6 +143,12 @@ describe("auth", () => {
     assert.doesNotMatch(page.text, /<script[^>]+src=/, "no external scripts");
   });
 
+  it("tells people how to check a sign-in if confirmation does not arrive", async () => {
+    const page = await call("GET", "/signin");
+    assert.ok(page.text.includes("If it doesn't arrive, send /claude in chat to check your sign-in. If Giraffe can't confirm it, you may get a new sign-in link."));
+    assert.ok(page.text.includes("ถ้ายังไม่ได้รับ ให้ส่ง /claude ในแชทเพื่อตรวจสอบการลงชื่อเข้าใช้ หาก Giraffe ยืนยันไม่ได้ อาจส่งลิงก์ลงชื่อเข้าใช้ใหม่"));
+  });
+
   it("refuses to start without BOX_TOKEN", () => {
     const { BOX_TOKEN: _, ...env } = process.env;
     const run = spawnSync(process.execPath, [MAIN], { env: { ...env, BOX_PORT: "0" }, encoding: "utf8", timeout: 10_000 });
@@ -215,9 +221,12 @@ describe("health and parse", () => {
       body: JSON.stringify(turn("hang")),
       signal: hangUp.signal,
     }).catch(() => null);
-    await new Promise((r) => setTimeout(r, 300));
-    hangUp.abort();
-    await abandoned;
+    try {
+      await waitFor(() => events().some((event) => event.startsWith("turn start")));
+    } finally {
+      hangUp.abort();
+      await abandoned;
+    }
 
     const started = Date.now();
     assert.equal((await call("POST", "/parse", { auth: bearer, body: turn("next") })).status, 200);

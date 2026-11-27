@@ -169,8 +169,10 @@ async function stripeWebhook(req: Request, env: Env, billing: Extract<Config["bi
       return new Response(parsed.reason, { status: 400 });
     case "ignored":
       return new Response(`ignored: ${parsed.reason}`);
-    case "event":
-      return new Response(await agentStub(env, parsed.event.owner).billingEvent(parsed.event));
+    case "event": {
+      const result = await agentStub(env, parsed.event.owner).billingEvent(parsed.event);
+      return new Response(result, { status: result === "failed" ? 500 : 200 });
+    }
   }
 }
 

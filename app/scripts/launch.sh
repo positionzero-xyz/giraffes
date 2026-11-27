@@ -64,7 +64,7 @@ if grep -q '<set on first deploy>' wrangler.jsonc; then
     echo "   created $id"
   fi
 fi
-run npx wrangler d1 execute giraffes-ledger --remote --file src/ledger/d1-schema.sql
+run npx wrangler d1 migrations apply giraffes-ledger --remote
 
 say "Box image"
 images="${prefix}images"

@@ -33,7 +33,7 @@ const dumps = join(dir, "dumps");
 
 const REMEMBER = { name: "remember", description: "Remember a fact.", inputSchema: { type: "object", properties: { note: { type: "string" } }, required: ["note"] } };
 
-let mock: RunningMock;
+let mock: RunningMock | undefined;
 const boxes: Server[] = [];
 
 async function listen(opts: { scratchDirs?: readonly string[]; stateFile?: string; requireEpoch?: boolean } = {}): Promise<string> {
@@ -115,7 +115,7 @@ describe("erasing the person's words from the box", { skip: existsSync(CLI) ? fa
   });
   after(() => {
     for (const server of boxes) server.close();
-    mock.proc.kill();
+    mock?.proc.kill();
   });
 
   it("keeps the person's words from a turn in Claude Code's files (the control)", async () => {

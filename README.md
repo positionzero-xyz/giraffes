@@ -35,7 +35,7 @@ To chat on the local dev page without any model account, use the scripted backen
 ```sh
 cd app
 printf 'MODEL_BACKEND=scripted\nDEV_MODE=1\n' > .dev.vars
-npx wrangler d1 execute giraffes-ledger --local --file src/ledger/d1-schema.sql
+npx wrangler d1 migrations apply giraffes-ledger --local
 npx wrangler dev                                   # http://localhost:8787
 curl -X POST http://localhost:8787/dev/script \
   -d '{"user":"alice","turns":[{"actions":[{"type":"send","text":"Hi! I am a scripted reply."}],"tasks":[],"about":""}]}'

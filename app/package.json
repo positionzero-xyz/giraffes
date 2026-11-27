@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "bridge": "node dev/bridge.ts",
+    "pretest": "node test/runtime-guard-probes.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "prepare": "node ../.githooks/install.mjs"

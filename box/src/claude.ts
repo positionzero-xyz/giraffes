@@ -204,13 +204,14 @@ export function deleteSessionTranscripts(configDir: string, sessionIds: readonly
   let deleted = true;
   for (const id of new Set(sessionIds.filter(isSessionId))) {
     try {
-      if (!existsSync(projects)) continue;
       for (const project of readdirSync(projects, { withFileTypes: true })) {
         if (project.isDirectory()) rmSync(join(projects, project.name, `${id}.jsonl`), { force: true });
       }
     } catch (err) {
+      const error = err instanceof Error ? ((err as NodeJS.ErrnoException).code ?? err.name) : "unknown";
+      if (error === "ENOENT") continue;
       deleted = false;
-      diagnostic({ code: "session_cleanup_failed", error: err instanceof Error ? ((err as NodeJS.ErrnoException).code ?? err.name) : "unknown" });
+      diagnostic({ code: "session_cleanup_failed", error });
     }
   }
   return deleted;

@@ -47,7 +47,7 @@ function sent(): Sent[] {
 }
 const userTexts = (s: Sent): string[] => s.messages.filter((m) => m.role === "user").map((m) => textOf(m.content)).filter((t) => t.trim());
 
-let mock: RunningMock;
+let mock: RunningMock | undefined;
 let base = "";
 const stateDir = join(dir, "state");
 mkdirSync(stateDir, { recursive: true });
@@ -72,7 +72,7 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
   });
   after(() => {
     server.close();
-    mock.proc.kill();
+    mock?.proc.kill();
   });
 
   it("returns the reply text, the tool calls Giraffe's server accepted, in order, and the new session it started", async () => {
@@ -224,7 +224,7 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.deepEqual(afterGroup.body.session, { id: personal.body.session.id, resumed: true });
   });
 
-  it("cleans the replaced chat session when a later named turn repairs a failed pointer write", async () => {
+  it("repairs a failed rollback pointer write on a later named turn", async () => {
     writeFileSync(script, JSON.stringify({ calls: [], text: "Old live." }));
     const first = await agent({ session: null, turn: "New\nPerson: old live", fresh: "New\nPerson: old live" });
     assert.equal(first.status, 200);
@@ -273,6 +273,26 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
       assert.equal(transcriptExists(first.body.session.id), false);
     } finally {
       rmSync(join(dir, ".giraffe-session.next"), { recursive: true, force: true });
+    }
+  });
+
+  it("fails a replacement turn when neither the pointer write nor transcript removal succeeds", async () => {
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Original live." }));
+    const first = await agent({ session: null, turn: "New\nPerson: original live" });
+    assert.equal(first.status, 200);
+
+    const pendingPointer = join(dir, ".giraffe-session.next");
+    const blockedProject = join(dir, "config", "projects", "blocked-cleanup");
+    mkdirSync(join(blockedProject, `${first.body.session.id}.jsonl`), { recursive: true });
+    mkdirSync(pendingPointer);
+    try {
+      const replacement = await agent({ session: null, turn: "New\nPerson: replacement live" });
+      assert.deepEqual(replacement, { status: 502, body: { error: "claude_failed" } });
+      assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), first.body.session.id);
+      assert.equal(transcriptExists(first.body.session.id), true);
+    } finally {
+      rmSync(pendingPointer, { recursive: true, force: true });
+      rmSync(blockedProject, { recursive: true, force: true });
     }
   });
 

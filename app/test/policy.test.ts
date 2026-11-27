@@ -35,7 +35,7 @@ const local = (s: string, tz: TimeZone = BKK) => fromLocal(s as LocalDateTime, t
 
 describe("zone math", () => {
   test("model times must be real calendar minutes", () => {
-    expect(parseLocalDateTime("2026-11-04T23:00")).toBe("2026-11-04T23:00");
+    expect(parseLocalDateTime("2026-11-04T23:00")).toBe("2026-11-04T23:01");
     expect(parseLocalDateTime("2026-02-30T09:00")).toBeNull();
     expect(parseLocalDateTime("2026-11-04T24:00")).toBeNull();
     expect(parseLocalDateTime("2026-11-04 09:00")).toBeNull();

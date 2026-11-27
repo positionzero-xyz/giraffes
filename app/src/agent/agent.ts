@@ -129,6 +129,7 @@ const LOG_BATCHES_PER_DRAIN = 10;
 const MODEL_RETRY_BASE_MS = 30_000;
 const NO_COST = 0 as MicroUsd;
 const BOX_STEPS_PER_DRAIN = 3;
+const BOX_RETIREMENT = "box:retirement";
 const KEY_TICKET_MS = 15 * 60_000;
 const KEY_LINK_NOTE = "<key link>";
 const BILLING_ALERT_REFUSED_MS = 300_000;
@@ -503,6 +504,14 @@ export class Agent extends DurableObject<Env> {
     if (event.kind === "choice" || (event.kind === "lifecycle" && event.change === "block") || coveredByForget(envelope, state)) return "handled";
     const order = providerOrder(envelope);
     if (order && now - order.at > ACCOUNT_RECEIPT_MS) return "handled";
+    if (firstContact && commandOf(event)?.kind === "claude_remove") {
+      const { text } = boxMessage("removed", language, null);
+      await this.#deliverAccountNotice({
+        id: crypto.randomUUID() as OutboxId, to: identity, texts: [text],
+        intent: "reply", reply: event.reply, replyOnly: identity.channel === "line",
+      }, now);
+      return "handled";
+    }
     const { raw, record } = await newAccountChallenge(state.epoch, now);
     if (this.#erasure() || state.epoch !== this.#store.forget().epoch) return "handled";
     const action = remove ? "erase" : "start";
@@ -550,14 +559,17 @@ export class Agent extends DurableObject<Env> {
         const registered = await this.env.LEDGER.prepare("SELECT name, host, deleted_at FROM boxes WHERE agent_key = ?")
           .bind(identity.person).first<{ name: BoxName; host: EraseBoxReference["host"]; deleted_at: EpochMs | null }>();
         const boxLedgerKey = registered?.deleted_at === null ? `erasure:${crypto.randomUUID()}` : null;
-        const box = this.#accountBoxTarget(identity.person, stored, registered);
+        const box = this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) ?? this.#accountBoxTarget(identity.person, stored, registered);
         const { invitees, members, subscriptions } = await prepareLedgerErasure(this.env.LEDGER, identity.person);
         current = {
           ...identity, kind: "cleaning", box, boxLedgerKey,
           ledger: { kind: "sweep", invitees, members },
           billing: { kind: "pending", checkouts, subscriptions, endedSubscription: false, stripeRetained: false },
         };
-        this.ctx.storage.kv.put(ERASE_JOB, current);
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.kv.put(ERASE_JOB, current);
+          this.ctx.storage.kv.delete(BOX_RETIREMENT);
+        });
       }
       if (current?.kind !== "cleaning") return;
       if (current.ledger.kind === "sweep") {
@@ -586,7 +598,7 @@ export class Agent extends DurableObject<Env> {
         this.ctx.storage.kv.put(ERASE_JOB, current);
       }
       while (current.box.kind !== "none" && current.box.kind !== "wiped" && current.box.kind !== "reclaimed") {
-        const box = await this.#eraseAccountBox(current);
+        const box = await this.#retireBoxStep(current);
         if (box.kind === "relocate") {
           current = this.#noteEraseHold({ ...current, box }, this.#eraseBoxHoldCode({ ...current, box }));
           this.ctx.storage.kv.put(ERASE_JOB, current);
@@ -698,15 +710,16 @@ export class Agent extends DurableObject<Env> {
     return this.#resolveAccountBox(person, reference);
   }
 
-  async #eraseAccountBox(job: Extract<Erasure, { kind: "cleaning" }>): Promise<EraseBox> {
-    const step = job.box;
+  async #retireBoxStep({ person, epoch, box: step }: {
+    readonly person: AgentKey; readonly epoch: ForgetEpoch; readonly box: EraseBox;
+  }): Promise<EraseBox> {
     const deps = this.#deps.box;
     if (!("box" in step)) return step;
     if (step.kind === "unverified") {
-      const resolved = this.#resolveAccountBox(job.person, step.box);
+      const resolved = this.#resolveAccountBox(person, step.box);
       return resolved.kind === "unverified" ? step : resolved;
     }
-    if (!deps || !boxServes(deps, job.person) || deps.host.kind !== step.box.host) return step;
+    if (!boxServes(deps, person) || deps.host.kind !== step.box.host) return step;
     const fly = "retirementTarget" in deps.host ? deps.host as BoxHost & FlyBoxRetirement : null;
     const { box } = step;
     switch (step.kind) {
@@ -754,8 +767,8 @@ export class Agent extends DurableObject<Env> {
           if (!check?.ok || check.state !== "present") return fallback;
         }
         const incarnation = box.incarnation;
-        const wipe = await deps.client.erase(box.url, token, { scope: "account", box: incarnation, epoch: job.epoch });
-        if (wipe.kind !== "erased" || wipe.scope !== "account" || wipe.box !== incarnation || wipe.floor < job.epoch) return fallback;
+        const wipe = await deps.client.erase(box.url, token, { scope: "account", box: incarnation, epoch });
+        if (wipe.kind !== "erased" || wipe.scope !== "account" || wipe.box !== incarnation || wipe.floor < epoch) return fallback;
         return step.kind === "wipe-fly" ? { kind: "remove-volume", box, target: step.target } : { kind: "wiped", host: "static" };
       }
       case "remove-volume": {
@@ -1024,11 +1037,20 @@ export class Agent extends DurableObject<Env> {
     this.#store.recordGroup(group, version);
   }
 
-  /** The operator takes this person out of the beta: their wake-ups are skipped and every message gets a fixed reply. */
   async remove(): Promise<void> {
     if (this.#erasure()) return;
+    // Let an in-flight provisioning or sign-in step finish before changing the box it would write back.
+    while (this.#drain) await this.#drain;
+    if (this.#erasure()) return;
     const now = this.#deps.clock.now();
-    this.#store.remove(now);
+    this.ctx.storage.transactionSync(() => {
+      this.#store.remove(now);
+      const box = this.#store.box();
+      if (!box) return;
+      this.#store.forgetClaudePlan();
+      const retiring = onRemove(box, now).box;
+      if (retiring !== box) this.#store.applyBox(retiring, null, [], now);
+    });
     await this.#armNoLaterThan(now);
   }
 
@@ -1179,6 +1201,7 @@ export class Agent extends DurableObject<Env> {
     const bypass = bypassModel(view);
     if (bypass) return this.#commit(planWithoutModel(view, bypass), view, a.key, { kind: "none" });
     if (command?.kind === "key_remove") return this.#keyCommand(command, view, a.key);
+    if (command?.kind === "claude_remove") return this.#claudeRemove(view, a.key);
     if (!mayspend(view.admission)) return this.#admission(view, a);
     if (first.kind === "choice" && first.choice.kind === "consent") {
       return this.#commit(planWithoutModel(view, { kind: "ignored" }), view, a.key, { kind: "none" });
@@ -1354,14 +1377,12 @@ export class Agent extends DurableObject<Env> {
     this.#store.releaseBatch(keys, (now + MODEL_RETRY_BASE_MS * 2 ** (attempts - 1)) as EpochMs, [], now);
   }
 
-  async #command(command: Exclude<Command, { kind: "memory" | "memory_next" }>, view: TurnView, a: AgentRow): Promise<void> {
+  async #command(command: Exclude<Command, { kind: "memory" | "memory_next" | "claude_remove" }>, view: TurnView, a: AgentRow): Promise<void> {
     const agent = a.key;
     if (this.#deps.admission === "beta" && (command.kind === "invite" || command.kind === "join")) return this.#betaCommand(command, view, agent);
     switch (command.kind) {
       case "claude":
         return this.#boxCommand(view, agent);
-      case "claude_remove":
-        return this.#claudeRemove(view, agent);
       case "key":
       case "key_remove":
       case "key_cap":
@@ -1652,16 +1673,25 @@ export class Agent extends DurableObject<Env> {
     if (this.#erasure()) return;
     const deps = this.#deps.box;
     const box = this.#store.box();
-    if (!deps || !box || !mayspend(this.#store.admission())) return;
-    const now = this.#deps.clock.now();
-    const planned = onPlan(box, !this.#deps.billing.config.on || planAllowsBox(this.#plan(now).kind), now);
-    const current = deps.host.image !== null && planned.box.image !== deps.host.image ? needsEnsure(planned.box, now) : planned.box;
-    if (current !== box) this.#store.applyBox(current, await this.#outboxMessage(deps, current, planned.say), [], now);
+    if (!box) return;
+    if (box.state !== "reclaiming" || box.reason !== "removed") {
+      if (!deps || !mayspend(this.#store.admission())) return;
+      const now = this.#deps.clock.now();
+      const planned = onPlan(box, !this.#deps.billing.config.on || planAllowsBox(this.#plan(now).kind), now);
+      const current = deps.host.image !== null && planned.box.image !== deps.host.image ? needsEnsure(planned.box, now) : planned.box;
+      if (current !== box) this.#store.applyBox(current, await this.#outboxMessage(deps, current, planned.say), [], now);
+    }
     for (let i = 0; i < BOX_STEPS_PER_DRAIN; i++) {
       if (this.#erasure()) return;
       const stored = this.#store.box();
       const step = stored && beginStep(stored, this.#deps.clock.now());
       if (!step) return;
+      if (step.kind === "reclaim" && step.box.reason === "removed") {
+        this.#store.applyBox(step.box, null, [], this.#deps.clock.now());
+        await this.#retireRemovedBox(step.box);
+        return;
+      }
+      if (!deps) return;
       this.#store.applyBox(step.box, null, [], this.#deps.clock.now());
       if (step.kind === "reclaim") {
         await this.#reclaim(deps, step);
@@ -1677,6 +1707,30 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
+  async #retireRemovedBox(box: Extract<Box, { state: "reclaiming" }>): Promise<void> {
+    const { key: person, language } = this.#agent();
+    const epoch = (this.#store.forget().epoch + 1) as ForgetEpoch;
+    let progress = this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) ?? this.#resolveAccountBox(person, {
+      name: box.name, host: box.host, url: box.url, incarnation: this.#store.boxVolume(),
+    });
+    while ("box" in progress) {
+      this.ctx.storage.kv.put(BOX_RETIREMENT, progress);
+      const next = await this.#retireBoxStep({ person, epoch, box: progress });
+      if (next === progress || next.kind === "relocate") {
+        this.ctx.storage.kv.put(BOX_RETIREMENT, next);
+        return diagnostic("box_reclaim_failed");
+      }
+      progress = next;
+    }
+    this.ctx.storage.kv.put(BOX_RETIREMENT, progress);
+    await this.#deps.ledger.releaseBox(person, this.#deps.clock.now());
+    const notice = mayspend(this.#store.admission()) ? goneMessage(box, language) : null;
+    this.ctx.storage.transactionSync(() => {
+      this.#store.removeBox(box.name, notice && { texts: [notice.text], note: notice.note }, this.#deps.clock.now());
+      this.ctx.storage.kv.delete(BOX_RETIREMENT);
+    });
+  }
+
   async #reclaim(deps: BoxDeps, step: Extract<Step, { kind: "reclaim" }>): Promise<void> {
     const destroyed = await deps.host.destroy(step.box.name);
     if (!destroyed.ok) {
@@ -1686,7 +1740,7 @@ export class Agent extends DurableObject<Env> {
     await this.#deps.ledger.releaseBox(this.#agent().key, this.#deps.clock.now());
     const m = goneMessage(step.box, this.#agent().language);
     this.#store.removeBox(step.box.name, { texts: [m.text], note: m.note }, this.#deps.clock.now());
-    if (step.box.reason !== "removed") this.#askBackupIfDue(this.#deps.clock.now(), true);
+    this.#askBackupIfDue(this.#deps.clock.now(), true);
   }
 
   async #ensure(deps: BoxDeps, step: EnsureStep): Promise<void> {
@@ -1947,6 +2001,8 @@ export class Agent extends DurableObject<Env> {
     const a = this.#store.agent();
     const held = this.#store.held();
     const fireTimes = a && !held && !r.channelEventWaiting ? r.earliestWakeups.map((w) => fireAt(w, a.tz)) : [];
+    const box = this.#store.box();
+    const retiring = box?.state === "reclaiming" && box.reason === "removed";
     const t = nextAlarm({
       now,
       inboxReadyAt: held ? null : (r.inboxReadyAt ?? (catchUp ? now : null)),
@@ -1955,7 +2011,7 @@ export class Agent extends DurableObject<Env> {
       billingAlertAt: this.#billingAlertAt(),
       logsReadyAt: r.logsReadyAt,
       compactionRetryAt: held ? null : r.compactionRetryAt,
-      boxAt: this.#deps.box && mayspend(this.#store.admission()) ? r.boxAt : null,
+      boxAt: retiring || (this.#deps.box && mayspend(this.#store.admission())) ? r.boxAt : null,
     });
     const challengeTimes = [ERASE_CHALLENGE, START_CHALLENGE]
       .map((key) => this.ctx.storage.kv.get<AccountChallenge>(key)?.expiresAt ?? Infinity);

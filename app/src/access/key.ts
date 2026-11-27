@@ -240,7 +240,7 @@ const PRODUCT_PART = String.raw`(?:[A-Z][A-Za-z0-9]*|[a-z]+|\d+[A-Za-z]{0,2}|v\d
 const PRODUCT_NAME = new RegExp(String.raw`^(?:${PRODUCT_PART})(?:-(?:${PRODUCT_PART}))+$`);
 
 /** A Latin service name may sit between a Thai label and its value (`รหัสผ่าน wifi คือ`); after a bare รหัส only wifi does, since รหัส alone also means a promo or tracking code. */
-const PASSWORD_WORD = String.raw`(?<![A-Za-z0-9])(?:(?:app[- _])?(?:password|passcode|passwd|pwd|pw|pass)|pin(?:[ _-]?code)?)\b|(?:รหัสผ่าน(?:แอป)?|พาสเวิร์ด)(?:[ \t]*[A-Za-z][A-Za-z0-9._-]{0,15})?|รหัส(?:แอป)?(?:[ \t]*(?:wi-?fi|ไวไฟ))?(?=[\s:=]|คือ|เป็น)`;
+const PASSWORD_WORD = String.raw`(?<![A-Za-z0-9])(?:(?:app[- _])?(?:password|passcode|passwd|pwd|pw|pass)|pin)\b|(?:รหัสผ่าน(?:แอป)?|พาสเวิร์ด)(?:[ \t]*[A-Za-z][A-Za-z0-9._-]{0,15})?|รหัส(?:แอป)?(?:[ \t]*(?:wi-?fi|ไวไฟ))?(?=[\s:=]|คือ|เป็น)`;
 const WRAPPED_PHRASE = String.raw`(?:"[^"\r\n]+"|“[^”\r\n]+”|'[^'\r\n]+'|‘[^’\r\n]+’|\([^()\r\n]+\)|\[[^\[\]\r\n]+\]|\{[^{}\r\n]+\})(?=[.,!?;:)\]}>]*(?:\s|$))`;
 const LABELLED_VALUE = new RegExp(
   String.raw`((?:${PASSWORD_WORD})(?:[ \t]+for[ \t]+[^\s:=]+)?["']?[ \t]*` +
@@ -258,6 +258,9 @@ const VALUE_WRAPPERS = new Map([
   ["(", ")"], ["[", "]"], ["{", "}"], ["<", ">"], ['"', '"'], ["'", "'"], ["“", "”"], ["‘", "’"], ["`", "`"],
 ]);
 const QUOTES = new Set(['"', "'", "“", "‘", "`"]);
+
+/** Letters and digits interleaved at least three times, as in `7f3a9c2e1b`, not a word and a number like `summer2026`. */
+const interleaved = (t: string) => (t.match(/[A-Za-z](?=\d)|\d(?=[A-Za-z])/g)?.length ?? 0) >= 3;
 
 /**
  * The value after a label is removed only when it looks like a credential itself; otherwise the later passes decide, as
@@ -278,30 +281,29 @@ function labelledValue(before: string, separator: string, raw: string, after: st
   if (!wrapped && /\s/.test(GROUPED_VALUE_START.exec((raw + onLine).replace(/^[("'“‘[{<`]/, ""))?.[0] ?? "")) return null;
 
   const core = wrapped ? value : value.replace(/^[("'“‘[{<`]+/, "").replace(/[.,;:!?…)"'”’\]}>`]+$/, "");
-  if (core.length < (wrapped ? 1 : 4)) return null;
+  // Quotes mark whatever they hold as the value; brackets often hold an aside, `password: (same)`, so they need a credential's shape.
+  const quoted = wrapped && QUOTES.has(raw[0]);
+  if (core.length < (quoted ? 1 : 4)) return null;
   const appPassword = APP_PASSWORD_SHAPE.test(core);
-  // Brackets often hold an aside, `password: (see above)`; quotes around a phrase after a colon mark it as the value.
-  if (/\s/.test(core) && !appPassword && !(explicit && QUOTES.has(raw[0]))) return null;
+  if (/\s/.test(core) && !appPassword && !(explicit && quoted)) return null;
 
   const endsStatement = onLine.trim() === "";
   const removed = wrapped ? before + raw[0] + KEY_REMOVED + raw.slice(wrapperEnd) : before + KEY_REMOVED;
   if (/^pin/i.test(before)) return /^\d{4,8}$/.test(core) && endsStatement ? removed : null;
 
-  const lettersAndDigits = /\p{L}/u.test(core) && /\d/.test(core);
-  const shaped = appPassword || lettersAndDigits || /^\d{4,}$/.test(core) || SYMBOL.test(core);
-  const strong = SYMBOL.test(core) || (/[a-z]/.test(core) && /[A-Z]/.test(core) && /\d/.test(core));
+  const upperAndLower = /[a-z]/.test(core) && /[A-Z]/.test(core);
+  const mixedSymbol = upperAndLower && SYMBOL.test(core);
+  const shaped = appPassword || (/\p{L}/u.test(core) && /\d/.test(core)) || /^\d{4,}$/.test(core) || mixedSymbol;
   // A copula can introduce ordinary prose, so mid-sentence it needs a value no word looks like.
-  let counts = wrapped || (explicit ? shaped : strong || (endsStatement && shaped));
-  // `pass` alone is also a ticket: `boarding pass: TG628`, `day pass: 10am-5pm`.
-  if (/^pass\b/i.test(before)) counts &&= /^\p{L}/u.test(core) && /[a-z]/.test(core) && /\d/.test(core) && core.length >= 7;
+  const strong = mixedSymbol || (upperAndLower && /\d/.test(core));
+  let counts = quoted || (explicit ? shaped : strong || (endsStatement && shaped));
+  // `pass` alone is also a ticket (`boarding pass: TG628`, `season pass: summer2026`), so its value must look generated.
+  if (/^pass\b/i.test(before)) counts &&= /[a-z]/.test(core) && core.length >= 7 && (interleaved(core) || (mixedSymbol && /\d/.test(core)));
   return counts ? removed : null;
 }
 
 const TOKEN_LABELLED =
   /(?<![A-Za-z0-9])((?:(?:access|auth|bearer|api|session|refresh|bot)[ _-]?)?token|(?:client[ _-])?secret(?:[ _-](?:access[ _-])?key)?|api[ _-]?key)((?:[ \t]+(?:is|was))?[ \t]*[:=][ \t]*|[ \t]+(?:is|was)[ \t]+)([A-Za-z0-9_\-+/=]{8,})(?![A-Za-z0-9_\-+/=]|[.(\[][A-Za-z0-9_])/gi;
-
-/** Letters and digits interleaved at least three times, as in `7f3a9c2e1b`, not a word and a number like `1000coins`. */
-const interleaved = (t: string) => (t.match(/[A-Za-z](?=\d)|\d(?=[A-Za-z])/g)?.length ?? 0) >= 3;
 
 /* About 660 words, so a group of a random app password is one by chance about 1 time in 700; two groups that are words means prose. */
 const COMMON_FOUR_LETTER_WORDS = new Set(

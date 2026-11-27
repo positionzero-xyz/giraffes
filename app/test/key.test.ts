@@ -658,7 +658,7 @@ describe("a key pasted into the chat", () => {
     ["long-symbol-password", "password: ", "LongAlpha1234&" + "q".repeat(70), " for the wifi", ["LongAlpha1234", "q".repeat(20)]],
     ["env-name", "DB_PASSWORD=", "hunter2", "", ["hunter2"]],
     ["json-password", '{"password":"', "hunter2", '"}', ["hunter2"]],
-    ["pass-colon", "pass: ", "hunter2", "", ["hunter2"]],
+    ["pass-colon", "gmail pass: ", "Ab12Cd34Ef", "", ["Ab12Cd34Ef"]],
     ["app-password-copy-left", "App password: type ", "copy-qvzf-wpxn-next", " thnx", ["copy", "qvzf", "wpxn", "next"]],
     ["app-password-tail", "App password: plse ", "qvzf-wpxn-kjmg-next", "", ["qvzf", "wpxn", "kjmg", "next"]],
     ["app-password-copy-colon", "App password: copy: (", "qvzfwpxnkjmgrbhy", ")", ["qvzfwpxnkjmgrbhy"]],
@@ -732,6 +732,11 @@ describe("a key pasted into the chat", () => {
     ["password-not-applicable", "password: N/A"],
     ["password-emoji", "wifi password: 👍"],
     ["password-price", "password: $200 for premium"],
+    ["password-percent", "my password is 100% correct"],
+    ["password-company-name", "password: AT&T account"],
+    ["password-bracketed-word", "password: (same)"],
+    ["season-pass-name", "season pass: summer2026"],
+    ["postal-pin-code", "pin code: 400001"],
   ] as const)("ordinary chat reaches the model as written: %s", async (id, text) => {
     const model = scripted([chat("Sure.")]);
     const c = await devChat(`ordinary-${id}`, { model, at: "2099-11-04T10:00" });

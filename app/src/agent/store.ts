@@ -1264,13 +1264,18 @@ export class AgentStore {
       .map(toWakeup);
   }
 
+  routinesFiredSince(start: EpochMs): number {
+    return this.sql
+      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM wakeup WHERE status = 'fired' AND repeat IS NOT NULL AND closed_at >= ?", start)
+      .one().n;
+  }
+
   applyFiring(firing: Firing, now: EpochMs): void {
     this.tx(() => {
       switch (firing.kind) {
         case "fire":
           this.insertInbox(firing.key, firing.event, now, now);
           this.sql.exec("UPDATE wakeup SET status = 'fired', closed_at = ? WHERE id = ? AND status = 'pending'", now, firing.wakeup.id);
-          if (firing.next) this.insertWakeup(firing.next, "system", now);
           break;
         case "skip":
           this.sql.exec("UPDATE wakeup SET status = 'skipped', closed_at = ? WHERE id = ? AND status = 'pending'", now, firing.wakeup.id);
@@ -1278,6 +1283,7 @@ export class AgentStore {
         default:
           assertNever(firing);
       }
+      if (firing.next) this.insertWakeup(firing.next, "system", now);
     });
   }
 

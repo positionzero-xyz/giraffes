@@ -1135,7 +1135,11 @@ export class Agent extends DurableObject<Env> {
     const a = this.#store.agent();
     if (!a || this.#store.held() || this.#store.channelEventWaiting()) return;
     const status = this.#store.admission().state === "removed" ? "blocked" : a.status;
-    for (const firing of planFiring(now, a.tz, status, a.checkinLocal, this.#store.dueWakeups(now))) {
+    const due = this.#store.dueWakeups(now);
+    const routinesFiredToday = due.some((w) => w.kind === "reminder" && w.repeat !== null)
+      ? this.#store.routinesFiredSince(startOfLocalDay(now, a.tz))
+      : 0;
+    for (const firing of planFiring(now, a.tz, status, a.checkinLocal, due, routinesFiredToday)) {
       this.#store.applyFiring(firing, now);
     }
   }

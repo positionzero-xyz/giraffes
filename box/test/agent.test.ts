@@ -13,6 +13,8 @@ const CLI = process.env.BOX_TEST_CLI ?? fileURLToPath(new URL("../node_modules/@
 const TOKEN = "b-agent-test-token-0123456789abcdefghijklmnop";
 const APPEND = "You are Giraffe, a personal assistant.";
 const GONE = "11111111-2222-3333-4444-555555555555";
+const OWNER_A = "a".repeat(32);
+const OWNER_B = "b".repeat(32);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const dir = mkdtempSync(join(tmpdir(), "box-agent-"));
@@ -196,6 +198,34 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.deepEqual(userTexts(sent().at(-1)!), ["Conversation\nPerson: before\n\nNew\nPerson: hi"]);
   });
 
+  it("keeps each person's rollback session on a shared box", async () => {
+    for (const name of readdirSync(dir).filter((n) => n.startsWith(".giraffe-session"))) rmSync(join(dir, name), { force: true });
+    const ownedTurn = (owner: string, text: string) => {
+      const body: Record<string, unknown> = { ...turnBody({ turn: `New\nPerson: ${text}`, fresh: `New\nPerson: ${text}` }) };
+      delete body.session;
+      return { ...body, sessionOwner: owner };
+    };
+
+    writeFileSync(script, JSON.stringify({ calls: [], text: "First person." }));
+    const firstA = await postAgent(ownedTurn(OWNER_A, "alpha one"));
+    assert.equal(firstA.status, 200);
+    assert.equal(firstA.body.session.resumed, false);
+
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Second person." }));
+    const firstB = await postAgent(ownedTurn(OWNER_B, "beta one"));
+    assert.equal(firstB.status, 200);
+    assert.equal(firstB.body.session.resumed, false);
+    assert.notEqual(firstB.body.session.id, firstA.body.session.id);
+    assert.equal(transcriptExists(firstA.body.session.id), true);
+    assert.equal(transcriptExists(firstB.body.session.id), true);
+
+    writeFileSync(script, JSON.stringify({ calls: [], text: "First person again." }));
+    const resumedA = await postAgent(ownedTurn(OWNER_A, "alpha two"));
+    assert.equal(resumedA.status, 200);
+    assert.deepEqual(resumedA.body.session, { id: firstA.body.session.id, resumed: true });
+    assert.deepEqual(userTexts(sent().at(-1)!), ["New\nPerson: alpha one", "New\nPerson: alpha two"]);
+  });
+
   it("resumes the same session when an old Worker omits session and fresh", async () => {
     rmSync(join(dir, ".giraffe-session"), { force: true });
     writeFileSync(script, JSON.stringify({ calls: [], text: "Legacy reply." }));
@@ -373,6 +403,11 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
 
   it("refuses a named session marked as a one-off", async () => {
     const r = await postAgent({ ...turnBody({ session: "123e4567-e89b-42d3-a456-426614174000", turn: "New\nPerson: hi" }), ephemeral: true });
+    assert.equal(r.status, 400);
+  });
+
+  it("refuses a session owner that is not an opaque key", async () => {
+    const r = await postAgent({ ...turnBody({ turn: "New\nPerson: hi" }), sessionOwner: "../shared" });
     assert.equal(r.status, 400);
   });
 

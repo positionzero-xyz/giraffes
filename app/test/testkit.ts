@@ -24,7 +24,7 @@ import { devLane, DEV_URL_SCRIPTED, type IncludedConfig, type KeysConfig } from 
 import { seal } from "../src/access/key";
 import { AgentStore } from "../src/agent/store";
 import { connect, SecretKey, type Fetch, type ProviderTimeouts, type SchemaMode } from "../src/model/client";
-import { PROVIDERS, type ProviderId } from "../src/model/providers";
+import { defaultModelOf, PROVIDERS, type ProviderId } from "../src/model/providers";
 
 export { scripted };
 
@@ -166,7 +166,7 @@ export async function giveKey(
   await runInDurableObject(stub, (_agent, state) => {
     const store = new AgentStore(state.storage);
     const saved = store.saveKey(
-      { provider, baseUrl, model: k.model ?? p.defaultModel ?? "custom-model", auth: p.auth, mode: k.mode ?? "strict", sealed, hint: key.hint, capMicro: (k.capMicro ?? 5_000_000) as MicroUsd, connectedAt: 0 as EpochMs },
+      { provider, baseUrl, model: k.model ?? defaultModelOf(p) ?? "custom-model", auth: p.auth, mode: k.mode ?? "strict", sealed, hint: key.hint, capMicro: (k.capMicro ?? 5_000_000) as MicroUsd, connectedAt: 0 as EpochMs },
       store.keyRevision(),
       null,
       [],
@@ -406,7 +406,7 @@ export type FakeBox = {
   readonly parses: {
     readonly authorization: string | null;
     readonly user: string;
-    readonly agent: { readonly append: string; readonly tools: readonly string[]; readonly session: string | null; readonly resumed: boolean; readonly fresh: string | null; readonly ephemeral?: boolean } | null;
+    readonly agent: { readonly append: string; readonly tools: readonly string[]; readonly session: string | null; readonly sessionOwner?: string; readonly resumed: boolean; readonly fresh: string | null; readonly ephemeral?: boolean } | null;
     /** The volume and forget epoch the request named, or null when it named none. */
     readonly at?: { readonly box: unknown; readonly epoch: unknown } | null;
   }[];
@@ -487,7 +487,7 @@ export function fakeBox(
     }
     if (url.pathname === "/parse" || url.pathname === "/agent") {
       const agent = url.pathname === "/agent";
-      const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; fresh?: string | null; session?: string | null; append?: string; tools?: { name: string }[]; ephemeral?: boolean; box?: unknown; epoch?: unknown };
+      const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; fresh?: string | null; session?: string | null; sessionOwner?: string; append?: string; tools?: { name: string }[]; ephemeral?: boolean; box?: unknown; epoch?: unknown };
       const named = box.ignoresSession ? null : (body.session ?? null);
       const resumed = box.ignoresSession || (named !== null && box.sessions.has(named));
       const session = resumed ? named : crypto.randomUUID();
@@ -495,7 +495,7 @@ export function fakeBox(
       box.parses.push({
         authorization,
         user: read,
-        agent: agent ? { append: body.append ?? "", tools: (body.tools ?? []).map((t) => t.name), session: body.session ?? null, resumed, fresh: body.fresh ?? null, ...(body.ephemeral === true ? { ephemeral: true } : {}) } : null,
+        agent: agent ? { append: body.append ?? "", tools: (body.tools ?? []).map((t) => t.name), session: body.session ?? null, ...(body.sessionOwner === undefined ? {} : { sessionOwner: body.sessionOwner }), resumed, fresh: body.fresh ?? null, ...(body.ephemeral === true ? { ephemeral: true } : {}) } : null,
         at: body.box === undefined && body.epoch === undefined ? null : { box: body.box, epoch: body.epoch },
       });
       const step = box.replies.shift();

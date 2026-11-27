@@ -64,9 +64,17 @@ function reply(body) {
   const tools = body.tools ?? [];
   const structured = tools.find((t) => t.name === "StructuredOutput");
   const hasBash = tools.some((t) => t.name === "Bash");
-  // Tool results since this turn's message: a resumed session also carries every earlier turn's.
-  const turnStart = body.messages.findLastIndex((m) => m.role === "user" && textOf(m.content).trim() && !(Array.isArray(m.content) && m.content.some((c) => c.type === "tool_result")));
-  const results = body.messages.slice(turnStart + 1).flatMap((m) => (Array.isArray(m.content) ? m.content.filter((c) => c.type === "tool_result") : [])).length;
+  // Tool results since this turn's newest text: a resumed session also carries every earlier turn's,
+  // and Claude Code can merge the last one into the new user message before that text.
+  let results = 0;
+  for (const message of body.messages) {
+    if (message.role !== "user") continue;
+    const content = typeof message.content === "string" ? [{ type: "text", text: message.content }] : Array.isArray(message.content) ? message.content : [];
+    for (const block of content) {
+      if (block.type === "text" && typeof block.text === "string" && block.text.trim()) results = 0;
+      else if (block.type === "tool_result") results += 1;
+    }
+  }
   // The file is re-read per request so a test can rewrite it mid-run. A missing or half-written
   // file means unscripted rather than a crashed mock: recipes arm it by writing, disarm by deleting.
   let SCRIPT = null;

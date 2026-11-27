@@ -1009,6 +1009,7 @@ describe("checkout and the portal", () => {
     await runInDurableObject(stub, (_, { storage }) => {
       const beforeAttempts = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE billing_alert")) + 1;
       storage.sql.exec("DROP TABLE billing_alert");
+      storage.sql.exec("DROP TABLE rate_event");
       storage.sql.exec(`CREATE TABLE billing_alert (
         subscription_ids TEXT PRIMARY KEY, delivery_id TEXT NOT NULL, ready_at INTEGER, notified INTEGER NOT NULL DEFAULT 0
       )`);
@@ -1051,6 +1052,7 @@ describe("checkout and the portal", () => {
         storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN operator_route");
         storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN telegram_redirect");
         storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN destination_wait");
+        storage.sql.exec("DROP TABLE rate_event");
         storage.sql.exec("DROP TRIGGER IF EXISTS outside_approval_immutable");
         storage.sql.exec("DROP TRIGGER IF EXISTS outside_write_immutable");
         storage.sql.exec("DROP TABLE IF EXISTS outside_approval");

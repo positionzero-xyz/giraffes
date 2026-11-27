@@ -42,7 +42,7 @@ import {
   type ProbeStep,
   type Step,
 } from "../box/machine";
-import { boxToken, signinTicket, signinUrl, type BoxName, type BoxToken } from "../box/names";
+import { boxSessionOwner, boxToken, signinTicket, signinUrl, type BoxName, type BoxToken } from "../box/names";
 import { CHANNEL_RETRY_MS, makeChannels, whileWorking, type ChannelRegistry } from "../channels/channel";
 import { commandOf, type Command } from "./commands";
 import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env, type OperatorChat } from "../config";
@@ -1300,7 +1300,7 @@ export class Agent extends DurableObject<Env> {
       },
       parse: (req, claim) =>
         this.#onBox(req.purpose, claim, (client, url, token, at) => client.parse(url, token, { model: req.model, system: req.system, user: req.user, jsonSchema: req.jsonSchema, at })),
-      agent: (req, claim) => this.#onBox("turn", claim, (client, url, token, at) => client.agent(url, token, { ...req, at })),
+      agent: (req, claim) => this.#onBox("turn", claim, (client, url, token, at, sessionOwner) => client.agent(url, token, { ...req, sessionOwner, at })),
     };
   }
 
@@ -1328,6 +1328,10 @@ export class Agent extends DurableObject<Env> {
     let step: AdmissionStep = planAdmission(view, null);
     if (step.kind !== "commit") {
       const now = this.#deps.clock.now();
+      if (step.kind === "check" && this.#store.rateLimited("invite", now, 60 * 60_000, ADMISSION.inviteChecksPerHour)) {
+        const unchanged = { next: view.admission, change: null, ensureCheckin: null };
+        return this.#commit(planWithoutModel(view, { kind: "admission", commit: unchanged, text: null, consent: false }), view, a.key, { kind: "none" });
+      }
       let answer: AdmissionAnswer;
       try {
         answer =
@@ -1396,7 +1400,9 @@ export class Agent extends DurableObject<Env> {
   #feedback(submitted: boolean, view: TurnView, a: AgentRow): void {
     const t = NOTICES[view.language];
     const item = view.batch.items[0];
-    const logs: LogRow[] = submitted ? [
+    const dayStart = startOfLocalDay(view.now, view.tz);
+    const capped = submitted && this.#store.rateLimited("feedback", view.now, view.now - dayStart + 1, ADMISSION.feedbackPerDay);
+    const logs: LogRow[] = submitted && !capped ? [
       {
         stream: "feedback",
         id: `${a.key}|${item.key}`,
@@ -1723,7 +1729,7 @@ export class Agent extends DurableObject<Env> {
   async #onBox(
     purpose: CallPurpose,
     claim: Claim,
-    send: (client: BoxClient, url: string, token: BoxToken, at: BoxAt | undefined) => Promise<BoxReply>,
+    send: (client: BoxClient, url: string, token: BoxToken, at: BoxAt | undefined, sessionOwner: string) => Promise<BoxReply>,
   ): Promise<BoxAnswer> {
     const deps = this.#deps.box;
     const box = this.#store.box();
@@ -1732,6 +1738,7 @@ export class Agent extends DurableObject<Env> {
     const startedAt = this.#deps.clock.now();
     if (startedAt < this.#skipBoxUntil && this.#backupKeyCanServe(startedAt, purpose)) return { kind: "moved_on", transient: true, told: false };
     const token = await boxToken(deps.secret, box.name);
+    const sessionOwner = await boxSessionOwner(deps.secret, agent);
     let volume = this.#store.boxVolume();
     if (volume === null) {
       if (!claim.live()) return { kind: "fenced" };
@@ -1739,7 +1746,7 @@ export class Agent extends DurableObject<Env> {
       if (health.kind === "up") this.#store.setBoxVolume(box.name, (volume = health.box ?? ""));
     }
     if (!claim.live()) return { kind: "fenced" };
-    const res = await send(deps.client, box.url, token, volume ? { box: volume, epoch: claim.epoch } : undefined);
+    const res = await send(deps.client, box.url, token, volume ? { box: volume, epoch: claim.epoch } : undefined, sessionOwner);
     const now = this.#deps.clock.now();
     const missed = (status: "rejected" | "unavailable"): LogRow =>
       modelCallRow({ id: crypto.randomUUID(), agent, purpose, backend: "box", status, estimate: NO_COST, cost: NO_COST, usage: null, at: now });

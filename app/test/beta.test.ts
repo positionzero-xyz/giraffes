@@ -381,6 +381,41 @@ describe("admission to the beta", () => {
     expect(await c.received()).toEqual([]);
   });
 
+  test("two overlapping removals retire a connected box only once", async () => {
+    const box = fakeBox({ signedIn: true });
+    const eraseStarted = Promise.withResolvers<void>();
+    const finishErase = Promise.withResolvers<void>();
+    const erase = vi.fn<typeof box.deps.client.erase>(async (url, token, request) => {
+      eraseStarted.resolve();
+      await finishErase.promise;
+      return box.deps.client.erase(url, token, request);
+    });
+    const deps = { ...box.deps, client: { ...box.deps.client, erase } };
+    const c = await devChat("rem-overlap", { model: null, at: "2099-11-04T10:00", admission: "beta", box: deps });
+    await c.say("/claude");
+    await c.received();
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, async (agent) => {
+      await agent.remove();
+      const firstAlarm = agent.alarm();
+      await eraseStarted.promise;
+
+      const secondRemoval = agent.remove();
+      c.clock.set(local("2099-11-04T10:01"));
+      const secondAlarm = agent.alarm();
+      for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 1));
+      finishErase.resolve();
+      await Promise.all([firstAlarm, secondAlarm, secondRemoval]);
+    });
+    await c.settle();
+
+    expect(erase).toHaveBeenCalledTimes(1);
+    expect(box.destroyCalls).toEqual([await box.nameOf("rem-overlap")]);
+    expect((await c.snapshot()).box).toBeNull();
+  });
+
   test("a person removed before box retirement was added can still remove their box in open admission", async () => {
     const box = fakeBox({ signedIn: true });
     const c = await devChat("rem-legacy-box", { model: null, at: "2099-11-04T10:00", admission: "open", box: box.deps });

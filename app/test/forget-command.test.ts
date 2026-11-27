@@ -1,9 +1,11 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { devLane, DEV_URL_SCRIPTED } from "../src/access/access";
+import { prepareOutsideWrite } from "../src/action/writes";
 import { Agent } from "../src/agent/agent";
 import { backupsWithin, HOST_BACKUP_DAYS } from "../src/agent/backups";
 import { FORGET_TEXT, type Receipt } from "../src/agent/forget-text";
+import { AgentStore } from "../src/agent/store";
 import type { ChannelAdapter, Delivery } from "../src/channels/channel";
 import type { Env } from "../src/config";
 import { eventKey, personAgentKey, type AgentKey, type EpochMs, type Identity, type OutboundMessage } from "../src/domain";
@@ -544,5 +546,38 @@ describe("the model flag and recovery on other paths", () => {
     expect(tg.sent).toEqual([]);
     await message("/forget status", false);
     expect(tg.sent).toEqual([en.lastReceipt({ deleted: ["all"], backups: "expire" })]);
+  });
+});
+
+describe("stores added on main", () => {
+  test("every forget deletes outside writes and their approvals, even when the person keeps every saved item", async () => {
+    const c = await devChat("outside-writes", { model: scripted([]), at: "2099-11-04T10:00" });
+    await say(c, "/forget status");
+    await runInDurableObject<Agent, void>(stubOf(c.agent), (_a, state) => {
+      const store = new AgentStore(state.storage);
+      const now = c.clock.now();
+      const draft = (intent: string, approval: boolean) => {
+        const d = prepareOutsideWrite({
+          intent, provider: "mail", action: "send", args: { body: `Meet at the ${MARKER} gate` }, epoch: store.forget().epoch, now,
+          ...(approval ? { approval: { owner: c.agent, expiresAt: (now + 60_000) as EpochMs } } : {}),
+        });
+        if (!d) throw new Error("no draft");
+        expect(store.putOutsideWrite(d.write, d.approval).kind).toBe("created");
+        return d.write.id;
+      };
+      draft("awaiting-approval", true);
+      const done = draft("already-sent", false);
+      const begun = store.beginOutsideWrite(done, now, 30_000, store.forget().epoch);
+      if (!begun) throw new Error("not begun");
+      store.finishOutsideWrite(done, begun.attempt, { kind: "succeeded", receipt: { thread: `${MARKER}-thread` } }, now);
+    });
+    expect(await holding(c, MARKER)).toEqual(["outside_write.args", "outside_write.receipt"]);
+
+    const page = (await say(c, "/forget"))[0];
+    expect(await say(c, `/forget ${codeOf(page)} done`)).toEqual([receipt({ deleted: [[]] })]);
+
+    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await sql(c, "SELECT COUNT(*) AS n FROM outside_approval")).toEqual([{ n: 0 }]);
+    expect(await sql(c, "SELECT COUNT(*) AS n FROM outside_write")).toEqual([{ n: 0 }]);
   });
 });

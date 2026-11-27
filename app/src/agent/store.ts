@@ -2322,8 +2322,13 @@ export class AgentStore {
     return this.agent()?.language ?? "en";
   }
 
-  /** The chat and everything written from it, whole: turns, the summary, message bodies and handles, wake-ups the assistant set, offered plans, the box session. */
+  /**
+   * The chat and everything written from it, whole: turns, the summary, message bodies and handles, wake-ups the
+   * assistant set, offered plans, outside writes and their approvals, the box session.
+   */
   private clearChat(): void {
+    this.sql.exec("DELETE FROM outside_approval");
+    this.sql.exec("DELETE FROM outside_write");
     this.sql.exec("DELETE FROM turn");
     this.sql.exec("UPDATE memory SET summary = '', through_turn_seq = 0, compaction_failures = 0, compaction_retry_at = 0");
     this.sql.exec("DELETE FROM inbox WHERE kind IN ('wakeup', 'checkin')");

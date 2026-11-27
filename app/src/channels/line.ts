@@ -2,7 +2,7 @@ import { z } from "zod";
 import { boundedRequestBody } from "../body";
 import { diagnostic } from "../diagnostics";
 import { eventKey, parseButton, personAgentKey, type ChannelEvent, type EpochMs, type Identity, type InboundEnvelope, type OutboundMessage } from "../domain";
-import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
+import { CHANNEL_API_TIMEOUT_MS, CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
 
 const API = "https://api.line.me/v2/bot/message";
 const Quota = z.discriminatedUnion("type", [
@@ -66,13 +66,22 @@ function toEvent(e: WebhookEvent): ChannelEvent | null {
   }
 }
 
-export function lineChannel(secrets: { channelSecret: string; accessToken: string } | null, recordReply?: (at: EpochMs) => Promise<void>): ChannelAdapter {
+export function lineChannel(
+  secrets: { channelSecret: string; accessToken: string } | null,
+  recordReply?: (at: EpochMs) => Promise<void>,
+  timeoutMs = CHANNEL_API_TIMEOUT_MS,
+): ChannelAdapter {
   if (!secrets) return disabledChannel("line");
   const auth = { authorization: `Bearer ${secrets.accessToken}`, "content-type": "application/json" };
 
   async function reply(token: string, messages: readonly object[]): Promise<Delivery | null> {
     try {
-      const res = await fetch(`${API}/reply`, { method: "POST", headers: auth, body: JSON.stringify({ replyToken: token, messages }) });
+      const res = await fetch(`${API}/reply`, {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({ replyToken: token, messages }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
       if (res.ok) return { kind: "sent", via: "reply" };
       // LINE answers 400 to an invalid or already used reply token.
       if (res.status === 400) return null;
@@ -93,6 +102,7 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
         method: "POST",
         headers: { ...auth, "x-line-retry-key": msg.id },
         body: JSON.stringify({ to: msg.to.channelUserId, messages }),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (res.ok || res.status === 409) return { kind: "sent", via: "push" };
       const body = await res.text();
@@ -109,6 +119,7 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
         method: "POST",
         headers: auth,
         body: JSON.stringify({ chatId: to.channelUserId, loadingSeconds: LOADING_SECONDS }),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (!res.ok) diagnostic("line_loading_failed", res.status);
     } catch {
@@ -214,9 +225,12 @@ function invalidPushRecipient(body: string): boolean {
 }
 
 /** This month's message limit (null when the account has none) and the messages sent so far, which count pushes and not replies. */
-export async function lineQuota(accessToken: string): Promise<{ readonly limit: number | null; readonly used: number }> {
+export async function lineQuota(accessToken: string, timeoutMs = CHANNEL_API_TIMEOUT_MS): Promise<{ readonly limit: number | null; readonly used: number }> {
   const get = async (path: string): Promise<unknown> => {
-    const res = await fetch(`${API}/${path}`, { headers: { authorization: `Bearer ${accessToken}` } });
+    const res = await fetch(`${API}/${path}`, {
+      headers: { authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
     if (!res.ok) throw new Error(`LINE ${path}: ${res.status} ${await res.text()}`);
     return res.json();
   };

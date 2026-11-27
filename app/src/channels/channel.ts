@@ -93,3 +93,4 @@ export function sameSecret(a: string, b: string): boolean {
 }
 
 export const CHANNEL_RETRY_MS = 30_000;
+export const CHANNEL_API_TIMEOUT_MS = 10_000;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request, type RequestOptions } from "node:http";
@@ -412,5 +412,20 @@ describe("erase, with the fake CLI", () => {
     assert.deepEqual([erased.status, erased.body], [200, { box, floor: 2 }]);
     assert.deepEqual((await held).body, { error: "claude_failed" });
     assert.deepEqual(events().map((e) => e.split(" ").slice(0, 2).join(" ")), ["turn start"]);
+  });
+
+  it("finishes the erase when a process is still releasing its working folder", async (t) => {
+    signIn(true);
+    const box = (await call("GET", "/health", { auth: bearer })).body.box;
+    const held = join(dir, "tmp", "claude-cwd-held");
+    mkdirSync(held, { recursive: true });
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 800)"], { cwd: held, stdio: "ignore" });
+    t.after(() => {
+      if (!child.killed) child.kill();
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    const erased = await call("POST", "/erase", { auth: bearer, body: { epoch: 3 } });
+    assert.deepEqual([erased.status, erased.body], [200, { box, floor: 3 }]);
+    assert.equal(existsSync(held), false);
   });
 });

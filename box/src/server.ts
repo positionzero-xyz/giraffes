@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readTicket, verifyBearer, type SigninTicket } from "./auth.ts";
 import { agentTurn, authStatus, cliVersion, deleteSessionTranscripts, parseTurn, readAgentRequest, readEraseRequest, readParseRequest, spawnClaude, stopClaude, type At, type Cli } from "./claude.ts";
-import { diagnostic } from "./diagnostics.ts";
+import { diagnostic, errorCode } from "./diagnostics.ts";
 import { leftovers, loadOrCreateState, saveState, sessionFileFor, sweep, writeDurably, type PersonFiles } from "./erase.ts";
 import { readJson, readSigninJson, sendJson } from "./http.ts";
 
@@ -40,8 +40,6 @@ const PAGE_HEADERS = {
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void;
 type Login = { readonly proc: ChildProcessWithoutNullStreams; readonly ticket: string; readonly expiresAt: number; output: string; exited: boolean; completing: boolean };
-
-const errorCode = (err: unknown) => (err instanceof Error ? ((err as NodeJS.ErrnoException).code ?? err.name) : "unknown");
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -113,9 +111,9 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
       }
       try {
         sweep(files, state.retired === true);
-        const left = leftovers(files, state.retired === true).length;
-        if (left > 0) {
-          console.error(`erase left ${left} entries`);
+        const left = leftovers(files, state.retired === true);
+        if (left.length > 0) {
+          diagnostic({ code: "erase_leftovers", paths: left });
           return false;
         }
         const done = { ...state, erasing: false };
@@ -124,7 +122,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
         unrecordedSessions.clear();
         return true;
       } catch (err) {
-        console.error(`erase failed: ${errorCode(err)}`);
+        console.error(`erase failed: ${errorCode(err)}`, err);
         return false;
       }
     })();

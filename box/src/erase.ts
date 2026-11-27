@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { diagnostic, errorCode } from "./diagnostics.ts";
 
 export type PersonFiles = { readonly home: string; readonly configDir: string; readonly scratchDirs: readonly string[]; readonly sessionFile: string; readonly stateFile: string };
 
@@ -70,8 +71,28 @@ const extraFields = (account: Record<string, unknown>) => Object.keys(account).f
 const isSignIn = (dir: string, name: string) => SIGN_IN.has(name) && lstatSync(join(dir, name)).isFile();
 const isRecord = (files: PersonFiles, name: string) => name === basename(files.stateFile) && lstatSync(files.stateFile).isFile();
 
-// A process the erase just killed can hold a file open for a moment, which makes a delete fail on Windows.
-const GONE = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 } as const;
+// A process the erase just killed can hold a file open for a moment. On Windows Node 24 can return EPERM without waiting, so keep the bounded retry here.
+const GONE = { recursive: true, force: true } as const;
+const RETRYABLE = new Set(["EBUSY", "EMFILE", "ENFILE", "ENOTEMPTY", "EPERM"]);
+const RETRIES = 10;
+const RETRY_DELAY = 100;
+const retrySleep = new Int32Array(new SharedArrayBuffer(4));
+
+function remove(path: string): void {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rmSync(path, GONE);
+      return;
+    } catch (err) {
+      const error = errorCode(err);
+      if (!RETRYABLE.has(error) || attempt === RETRIES) {
+        diagnostic({ code: "erase_delete_failed", path, error });
+        throw err;
+      }
+      Atomics.wait(retrySleep, 0, 0, (attempt + 1) * RETRY_DELAY);
+    }
+  }
+}
 
 const entries = (dir: string): string[] => (existsSync(dir) ? readdirSync(dir) : []);
 
@@ -88,16 +109,16 @@ function sessionFiles(sessionFile: string): string[] {
 }
 
 function emptyDir(dir: string, keep: (name: string) => boolean = () => false): void {
-  for (const name of entries(dir)) if (!keep(name)) rmSync(join(dir, name), GONE);
+  for (const name of entries(dir)) if (!keep(name)) remove(join(dir, name));
 }
 
 export function sweep(files: PersonFiles, retired: boolean): void {
-  for (const file of sessionFiles(files.sessionFile)) rmSync(file, GONE);
+  for (const file of sessionFiles(files.sessionFile)) remove(file);
   emptyDir(files.configDir, (name) => !retired && isSignIn(files.configDir, name));
   const file = accountFile(files);
   if (existsSync(file)) {
     const account = readObject(file);
-    if (account === null) rmSync(file, GONE);
+    if (account === null) remove(file);
     else if (extraFields(account).length > 0) writeDurably(file, JSON.stringify(Object.fromEntries(Object.entries(account).filter(([key]) => SIGN_IN_FIELDS.has(key)))));
   }
   emptyDir(files.home);

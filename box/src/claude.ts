@@ -198,19 +198,23 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 export const isSessionId = (v: string): boolean => SESSION_ID.test(v);
 
-/** Deletes every transcript Claude Code kept for session ids Giraffe will never resume. */
-export function deleteSessionTranscripts(configDir: string, sessionIds: readonly string[]): void {
+/** Deletes every transcript Claude Code kept for session ids Giraffe will never resume. False means one may still be on disk. */
+export function deleteSessionTranscripts(configDir: string, sessionIds: readonly string[]): boolean {
   const projects = join(configDir, "projects");
+  let deleted = true;
   for (const id of new Set(sessionIds.filter(isSessionId))) {
     try {
-      if (!existsSync(projects)) return;
       for (const project of readdirSync(projects, { withFileTypes: true })) {
         if (project.isDirectory()) rmSync(join(projects, project.name, `${id}.jsonl`), { force: true });
       }
     } catch (err) {
-      diagnostic({ code: "session_cleanup_failed", error: err instanceof Error ? ((err as NodeJS.ErrnoException).code ?? err.name) : "unknown" });
+      const error = err instanceof Error ? ((err as NodeJS.ErrnoException).code ?? err.name) : "unknown";
+      if (error === "ENOENT") continue;
+      deleted = false;
+      diagnostic({ code: "session_cleanup_failed", error });
     }
   }
+  return deleted;
 }
 
 const TOOL_PREFIX = "mcp__giraffe__";

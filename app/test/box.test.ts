@@ -756,7 +756,8 @@ describe("connecting a Claude plan", () => {
     expect(box.healthCalls).toHaveLength(1 + BOX.pollForMs / BOX.pollEveryMs);
     expect((await c.snapshot()).box?.state).toBe("signed_out");
     expect(model.calls).toHaveLength(0);
-  });
+  // This drive walks every 30-second sign-in poll for the full half-hour polling window.
+  }, 10_000);
 
   test("a provisioning step that died after creating the app is retried and converges on one app and one link", async () => {
     const box = fakeBox({ host: ["die"] });

@@ -213,20 +213,16 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
       if (!res.writableFinished) abandoned.abort();
     });
     const reply = await turnAt(parsed.at, arrivedAfter, abandoned, async () => {
-      if (parsed.session !== undefined) {
-        const before = parsed.ephemeral !== true ? legacySession() : null;
-        const named = await agentTurn(cli, parsed, abandoned.signal, configDir);
-        if (named.status === 200 && parsed.ephemeral !== true) {
-          const written = writeLegacySession(named.body.session.id);
-          if (written && before !== null && before !== named.body.session.id && isSessionId(before)) deleteSessionTranscripts(configDir, [before]);
-        }
-        return named;
-      }
       const before = parsed.ephemeral === true ? null : legacySession();
-      const result = await agentTurn(cli, { ...parsed, session: before }, abandoned.signal, configDir);
+      const named = parsed.session !== undefined;
+      const result = await agentTurn(cli, named ? parsed : { ...parsed, session: before }, abandoned.signal, configDir);
       if (result.status === 200 && parsed.ephemeral !== true) {
-        const written = result.body.session.resumed ? true : writeLegacySession(result.body.session.id);
-        if (written && before !== null && before !== result.body.session.id && isSessionId(before)) deleteSessionTranscripts(configDir, [before]);
+        const { id, resumed } = result.body.session;
+        const written = (!named && resumed) || writeLegacySession(id);
+        if (before !== null && before !== id && isSessionId(before)) {
+          const deleted = deleteSessionTranscripts(configDir, [before]);
+          if (!written && !deleted) return { status: 502, body: { error: "claude_failed" } };
+        }
       }
       return result;
     });

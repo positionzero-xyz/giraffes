@@ -76,7 +76,7 @@ import { d1Ledger, modelCallRow, type Ledger, type LogRow, type UnaskedStatus } 
 import { NOTICES, type KeyPageError } from "../notices";
 import { scripted, scriptedConnect, type ScriptedModel, type ScriptStep } from "../model/scripted";
 import { connect, type Connect } from "../model/client";
-import { bytesOf, renderPrompt, type PromptParts } from "../model/prompt";
+import type { PromptParts } from "../model/prompt";
 import { PROVIDERS } from "../model/providers";
 import { routeFor, type CallPurpose, type Purpose } from "../model/routes";
 import { estimate, fits } from "../policy/spend";
@@ -115,6 +115,7 @@ import {
   TURN,
   type Batch,
   type BoxSessionSeen,
+  type BoxTurnPrompt,
   type TurnCall,
   type TurnCommit,
   type TurnRow,
@@ -1192,13 +1193,7 @@ export class Agent extends DurableObject<Env> {
     }
 
     const shown = await this.#historyThatFits(batch, a, view, plan, claim);
-    const held = this.#store.boxSession();
-    let overflow: Parameters<typeof renderBoxTurn>[2];
-    if (shown.historyLeftOut > 0 && this.#boxLane().state() === "signed_in") {
-      const fresh = this.#store.oldestBoxHistory(0);
-      overflow = { fresh, unseen: held ? this.#store.oldestBoxHistory(held.seenSeq) : fresh };
-    }
-    const box = renderBoxTurn(shown, held, overflow);
+    const box = this.#boxTurn(shown);
     const access = this.#access();
     const catchUpBudget = batch.items[0].catchUp ? access.catchUpBudget(plan, this.#deps.clock.now()) ?? "unavailable" : null;
     const call = () => access.call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan, box, claim });
@@ -1240,16 +1235,28 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
+  #boxTurn(view: TurnView): BoxTurnPrompt {
+    const held = this.#store.boxSession();
+    let overflow: Parameters<typeof renderBoxTurn>[2];
+    if (view.historyLeftOut > 0 && this.#boxLane().state() === "signed_in") {
+      const fresh = this.#store.oldestBoxHistory(0);
+      overflow = { fresh, unseen: held ? this.#store.oldestBoxHistory(held.seenSeq) : fresh };
+    }
+    return renderBoxTurn(view, held, overflow);
+  }
+
   /**
-   * When the history not yet in the summary doesn't fit the smallest budget among the person's lanes, one compaction
-   * step runs first, in this drain. If compaction is backing off or fails, each lane fits history to its own prompt.
+   * When unsummarized turns are due to compact or don't fit the prompt the first lane would send, one compaction step
+   * runs first, in this drain. If compaction is backing off or fails, each lane fits history to its own prompt.
    */
   async #historyThatFits(batch: Batch, a: AgentRow, view: TurnView, plan: Plan, claim: Claim): Promise<TurnView> {
-    const budget = this.#access().budget("turn", TURN_SYSTEM, plan);
-    const fits = view.historyLeftOut === 0 && bytesOf(renderPrompt(renderUser(view))) <= (budget ?? Infinity);
-    if (fits || view.recent.length === 0) return view;
+    if (view.recent.length === 0) return view;
+    const box = this.#boxTurn(view);
+    const fits = this.#access().turnFitsWhole({ system: TURN_SYSTEM, prompt: renderUser(view), box, plan });
+    const dueTurns = this.#store.compactionInput().turnCount > COMPACTION.triggerTurns;
+    if (fits && !dueTurns) return view;
     try {
-      if (!(await this.#compactStep(plan, true, claim))) return view;
+      if (!(await this.#compactStep(plan, !dueTurns, claim))) return view;
     } catch {
       diagnostic("turn_compaction_failed");
       return view;

@@ -330,6 +330,34 @@ describe("the Durable Object is the one record of the chat for the box session",
     expect(c.logs("turn").at(-1)?.historyTrimmed).toBe(false);
   });
 
+  test("a resumed box turn keeps exact rows that fit its own prompt but not a small backup key's", async () => {
+    const box = fakeBox({ signedIn: true });
+    const provider = fakeProvider();
+    const c = await devChat("boxfit", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    const long = Array.from({ length: 12 }, (_, i) => `${i} ${"ก".repeat(1_200)}`);
+    for (const [i, text] of long.entries()) {
+      box.replies.push({ kind: "reply", step: chat(`Reply ${i}.`) });
+      await c.say(text);
+    }
+    expect(await c.received()).toHaveLength(12);
+    await giveKey(c.agent, { backup: true, provider: "alibaba", key: "sk-alibaba-0123456789", mode: "loose" });
+
+    const compactionOrTurn = { kind: "output" as const, value: { summary: "Kept.", actions: [send("Still here.")], tasks: [], about: "" } };
+    box.replies.push({ kind: "reply", step: compactionOrTurn }, { kind: "reply", step: chat("Still here.") });
+    await c.say("a short question");
+
+    expect(await c.received()).toEqual(["Still here."]);
+    const last = lastBox(box);
+    expect(last.resumed).toBe(true);
+    expect(last.user).toContain("Person: a short question");
+    expect(last.user).not.toContain(`Person: ${long[0]}`);
+    const rows = (await c.snapshot()).turns.map((row) => row.text);
+    for (const text of long) expect(rows).toContain(text);
+  });
+
   test.each([
     { title: "the box catches up on every backup-key turn when more than 90 rows wait and compaction fails", lostSession: false },
     { title: "a replacement box session catches up even when the oldest page needs to be trimmed", lostSession: true },

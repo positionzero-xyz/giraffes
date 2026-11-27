@@ -25,7 +25,7 @@ import {
   type SchemaMode,
   type WireResult,
 } from "../model/client";
-import { bytesOf, fitSections, type PromptParts } from "../model/prompt";
+import { bytesOf, fitSections, renderPrompt, type PromptParts } from "../model/prompt";
 import { PROVIDERS, type ModelRef } from "../model/providers";
 import { routeFor, type CallPurpose, type Purpose, type Route, type Source } from "../model/routes";
 import { costOf, estimate, fits, type SpendScope } from "../policy/spend";
@@ -282,6 +282,19 @@ export class ModelAccess {
     const key = lanes.find((lane) => lane.kind === "key");
     if (!key || !this.deps.keys.on || key.key.health.kind !== "ok") return null;
     return `key:${utcMonth(now)}:${key.key.revision}:${key.key.capMicro}`;
+  }
+
+  /** True when the first lane can take this turn's whole user prompt without trimming history. */
+  turnFitsWhole(req: { readonly system: string; readonly prompt: PromptParts; readonly box: BoxTurnPrompt; readonly plan: Plan }): boolean {
+    const [lane] = this.#access(req.plan).lanes;
+    if (!lane) return true;
+    const { route, mode } = this.#routeOf(lane, "turn");
+    if (lane.kind === "box") {
+      const budget = userBudget(route, mode, "turn", req.box.append);
+      const prompt = req.box.session === null ? req.box.fresh : req.box.turn;
+      return bytesOf(renderPrompt(prompt)) <= budget;
+    }
+    return bytesOf(renderPrompt(req.prompt)) <= userBudget(route, mode, "turn", req.system);
   }
 
   /**

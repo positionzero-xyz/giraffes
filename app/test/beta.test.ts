@@ -1,5 +1,5 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { ADMISSION } from "../src/agent/admission";
 import { loadConfig, type Env } from "../src/config";
 import { MIGRATIONS, migrate } from "../src/agent/schema";
@@ -233,7 +233,7 @@ describe("admission to the beta", () => {
     expect(await c.received()).toEqual([t.inviteNotEnrolled, t.alreadyIn]);
   });
 
-  test("a removed person's wake-ups are skipped and every message gets a fixed reply, without the model", async () => {
+  test("a removed person's wake-ups are skipped and ordinary messages get a fixed reply, without the model", async () => {
     const model = scripted([turn({ actions: [schedule("nudge", "2099-11-04T12:00", "Ask about the trip", false), send("OK.")] })]);
     const c = await devChat("gone", { model, at: "2099-11-04T10:00", admission: "beta" });
     await c.say("remind yourself to ask me later");
@@ -344,7 +344,7 @@ describe("admission to the beta", () => {
     expect((await c.snapshot()).turns).toEqual([]);
   });
 
-  test("a removed person's box is neither provisioned further nor advanced", async () => {
+  test("a removed person's box is retired without provisioning it further", async () => {
     const retry = { retryable: true, detail: "503" };
     const box = fakeBox({ host: [retry, retry, retry, retry, retry] });
     const c = await devChat("rem2", { model: scripted([]), at: "2099-11-04T10:00", admission: "beta", box: box.deps });
@@ -357,6 +357,111 @@ describe("admission to the beta", () => {
 
     expect(box.ensureCalls).toHaveLength(calls);
     expect(box.healthCalls).toEqual([]);
+    expect((await c.snapshot()).box).toBeNull();
+  });
+
+  test("removing a person retires their connected box and frees its place, even on repeat removal", async () => {
+    const box = fakeBox({ signedIn: true, maxBoxes: 1 });
+    const ledger = memoryLedger();
+    const c = await devChat("rem-connected", { model: null, at: "2099-11-04T10:00", admission: "beta", box: box.deps, ledger });
+    const next = await devChat("rem-next", { model: null, at: "2099-11-04T10:00", admission: "beta", box: box.deps, ledger });
+    await c.say("/claude");
+    await c.received();
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+
+    await c.remove();
+    await c.remove();
+    await next.say("/claude");
+
+    expect((await c.snapshot()).box).toBeNull();
+    expect(box.destroyCalls).toEqual([await box.nameOf("rem-connected")]);
+    expect(box.created.has(await box.nameOf("rem-connected"))).toBe(false);
+    expect((await next.snapshot()).box?.state).toBe("signed_in");
+    expect(await c.received()).toEqual([]);
+  });
+
+  test("a person removed before box retirement was added can still remove their box in open admission", async () => {
+    const box = fakeBox({ signedIn: true });
+    const c = await devChat("rem-legacy-box", { model: null, at: "2099-11-04T10:00", admission: "open", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_a, state) =>
+      new AgentStore(state.storage).remove(c.clock.now()),
+    );
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+
+    await c.say("/claude remove");
+    await c.say("/claude remove");
+    await c.say("/claude");
+
+    expect(await c.received()).toEqual([t.box.removing("", ""), t.box.removed("", ""), t.removed]);
+    expect((await c.snapshot()).admission.state).toBe("removed");
+    expect((await c.snapshot()).box).toBeNull();
+    expect(box.created.size).toBe(0);
+    expect(JSON.stringify((await c.snapshot()).turns)).not.toContain("/claude remove");
+  });
+
+  test("a disk retirement that always fails stays pending for the person and is reported on each retry", async () => {
+    const box = fakeBox({ signedIn: true });
+    const deps = {
+      ...box.deps,
+      host: {
+        ...box.deps.host,
+        retireWipedDisk: vi.fn(async () => ({ ok: false as const, retryable: true, detail: "disk stays live" })),
+      },
+    };
+    const ledger = memoryLedger();
+    const c = await devChat("rem-stuck", { model: null, at: "2099-11-04T10:00", admission: "beta", box: deps, ledger });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await c.say("/claude");
+      await c.received();
+      await c.remove();
+      await c.say("/claude remove");
+      await c.remove();
+      expect(deps.host.retireWipedDisk).toHaveBeenCalledTimes(1);
+      await c.advanceTo("2099-11-04T10:01");
+
+      expect(deps.host.retireWipedDisk).toHaveBeenCalledTimes(3);
+      expect(warn.mock.calls).toEqual(Array.from({ length: 3 }, () => [{ code: "box_reclaim_failed" }]));
+      expect(await c.received()).toEqual([t.box.removing("", "")]);
+      expect((await c.snapshot()).box?.state).toBe("reclaiming");
+      expect(ledger.boxes.has(c.agent)).toBe(true);
+      expect(box.created.size).toBe(1);
+      expect(box.destroyCalls).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test.each([
+    ["stranger", "5541"], ["waitlisted", "5542"], ["consenting", "5543"],
+  ] as const)("a person in the %s state can send /claude remove without changing their admission", async (state, user) => {
+    const c = await devChat(user, { model: null, at: "2099-11-04T10:00", channel: "telegram", admission: "beta" });
+    if (state === "waitlisted") await c.say("hello");
+    if (state === "consenting") {
+      await mint(CODE);
+      await c.say(CODE);
+    }
+    await c.received();
+    expect((await c.snapshot()).admission.state).toBe(state);
+
+    await c.say("/claude remove");
+
+    expect(await c.received()).toEqual([t.box.removed("", "")]);
+    expect((await c.snapshot()).admission.state).toBe(state);
+  });
+
+  test("the first message can remove a Claude connection without creating an account", async () => {
+    const c = await devChat("5544", { model: null, at: "2099-11-04T10:00", channel: "telegram", admission: "beta" });
+    await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (agent) =>
+      agent.withDeps({ firstContactConsent: true }),
+    );
+
+    await c.say("/claude remove");
+
+    expect(await c.received()).toEqual([t.box.removed("", "")]);
+    expect((await c.snapshot()).agent).toBeNull();
   });
 
   test("removal drops pending pushes with reason removed, nothing queued later is pushed, and the fixed reply still arrives", async () => {

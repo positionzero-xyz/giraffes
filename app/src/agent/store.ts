@@ -1201,10 +1201,10 @@ export class AgentStore {
     this.sql.exec("UPDATE agent SET claude_plan_at = NULL");
   }
 
-  removeBox(name: BoxName, message: NoteMessage, now: EpochMs): void {
+  removeBox(name: BoxName, message: NoteMessage | null, now: EpochMs): void {
     this.tx(() => {
       this.sql.exec("DELETE FROM box WHERE name = ?", name);
-      this.insertMessage(eventKey.box(name), message, now);
+      if (message) this.insertMessage(eventKey.box(name), message, now);
     });
   }
 

@@ -611,13 +611,13 @@ export const MIGRATIONS: readonly string[] = [
   `,
   `
   CREATE TABLE routine_delivery (
-    at       INTEGER PRIMARY KEY,
-    attempts INTEGER NOT NULL
+    at         INTEGER NOT NULL,
+    sending_id TEXT UNIQUE
   );
-  INSERT INTO routine_delivery (at, attempts)
-    SELECT o.closed_at, COUNT(*) FROM outbox o
-    WHERE o.status = 'sent' AND o.closed_at IS NOT NULL AND ${ROUTINE_OUTBOX}
-    GROUP BY o.closed_at;
+  INSERT INTO routine_delivery (at, sending_id)
+    SELECT COALESCE(o.closed_at, o.ready_at), CASE WHEN o.status = 'sending' THEN o.id END
+    FROM outbox o
+    WHERE (o.status IN ('sent', 'sending') OR o.in_doubt = 1) AND ${ROUTINE_OUTBOX};
   `,
 ];
 

@@ -589,6 +589,8 @@ export class AgentStore {
       const poisoned = batch && Math.max(...batch.items.map((i) => i.attempts)) >= TURN.maxClaimAttempts ? batch : null;
       if (!poisoned) this.sql.exec("UPDATE inbox SET status = 'pending' WHERE status = 'processing'");
       this.sql.exec("UPDATE outbox SET status = 'pending', in_doubt = 1 WHERE status = 'sending'");
+      // An interrupted request might have reached the channel before the result was saved.
+      this.sql.exec("UPDATE routine_delivery SET at = ?, sending_id = NULL WHERE sending_id IS NOT NULL", now);
       const open = this.sql
         .exec<ReservationCols>(
           "SELECT id, month, scope, purpose, model, backend, estimate_micro, instance FROM reservation WHERE instance != ?",
@@ -1467,8 +1469,8 @@ export class AgentStore {
       .one().n;
   }
 
-  routineAttemptsSince(dayStart: EpochMs): number {
-    return this.sql.exec<{ n: number }>("SELECT coalesce(sum(attempts), 0) AS n FROM routine_delivery WHERE at >= ?", dayStart).one().n;
+  routineSendsInLastDay(now: EpochMs): number {
+    return this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM routine_delivery WHERE at > ?", now - DAY_MS).one().n;
   }
 
   /** False when the row is no longer waiting or a forget began since `epoch`; nothing may then be sent for it. */
@@ -1481,13 +1483,15 @@ export class AgentStore {
         id,
       ).rowsWritten > 0;
       if (started && routineAt !== null) {
-        this.sql.exec(
-          "INSERT INTO routine_delivery (at, attempts) VALUES (?, 1) ON CONFLICT (at) DO UPDATE SET attempts = attempts + 1",
-          routineAt,
-        );
+        this.sql.exec("INSERT INTO routine_delivery (at, sending_id) VALUES (?, ?)", routineAt, id);
       }
       return started;
     });
+  }
+
+  finishRoutineDelivery(id: OutboxId, countedAt: EpochMs | null): void {
+    if (countedAt === null) this.sql.exec("DELETE FROM routine_delivery WHERE sending_id = ?", id);
+    else this.sql.exec("UPDATE routine_delivery SET at = ?, sending_id = NULL WHERE sending_id = ?", countedAt, id);
   }
 
   markSent(id: OutboxId, via: "reply" | "push", now: EpochMs, logs: readonly LogRow[], next: SavedCursor | null = null): void {
@@ -2211,7 +2215,7 @@ export class AgentStore {
     });
     this.sql.exec("DELETE FROM inbox WHERE status IN ('done', 'failed') AND finished_at < ?", now - DEDUPE_WINDOW_MS);
     this.sql.exec("DELETE FROM outbox WHERE status IN ('sent', 'dropped') AND closed_at < ?", now - OUTBOX_KEEP_MS);
-    this.sql.exec("DELETE FROM routine_delivery WHERE at < ?", now - OUTBOX_KEEP_MS);
+    this.sql.exec("DELETE FROM routine_delivery WHERE at <= ? AND sending_id IS NULL", now - DAY_MS);
     this.sql.exec("DELETE FROM billing_event WHERE at < ?", now - DEDUPE_WINDOW_MS);
   }
 }

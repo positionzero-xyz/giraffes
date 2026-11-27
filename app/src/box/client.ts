@@ -18,6 +18,8 @@ export type BoxAgentRequest = {
   readonly turn: string;
   readonly fresh: string;
   readonly tools: readonly unknown[];
+  /** True for a one-off session the box must delete after the turn. */
+  readonly ephemeral?: boolean;
   readonly at?: BoxAt;
 };
 

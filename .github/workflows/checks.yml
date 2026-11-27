@@ -28,7 +28,7 @@ jobs:
       - name: typecheck
         run: npx tsc --noEmit
       - name: app tests
-        run: npx vitest run
+        run: npm test
 
   box:
     runs-on: ubuntu-24.04
@@ -47,9 +47,9 @@ jobs:
       - name: box tests
         run: |
           set -o pipefail
-          node --test --test-reporter=tap test/*.test.ts 2>&1 | tee box.log
-          grep -Eq '^# pass [1-9]' box.log || { echo "::error::no box test passed"; exit 1; }
-          grep -Eq '^# skipped 0$' box.log || { echo "::error::a box test was skipped"; exit 1; }
+          npm test 2>&1 | tee box.log
+          grep -Eq '^(# |ℹ )pass [1-9]' box.log || { echo "::error::no box test passed"; exit 1; }
+          grep -Eq '^(# |ℹ )skipped 0$' box.log || { echo "::error::a box test was skipped"; exit 1; }
 
   box-image:
     runs-on: ubuntu-24.04

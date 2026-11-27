@@ -208,7 +208,19 @@ export async function readTicket(secrets: KeySecrets, token: string, now: EpochM
 
 export const KEY_REMOVED = "<a key, removed>";
 
-const PREFIXED = /(?<![A-Za-z0-9_-])(?:sk-ant-|sk-or-|oc_sk_|sk-)[A-Za-z0-9_-]{16,}/g;
+// These formats can be recognized inside URLs and across punctuation, before the token heuristics run.
+const KNOWN_FORMAT = new RegExp(
+  [
+    String.raw`-----BEGIN ([A-Z ]*PRIVATE KEY)-----[\s\S]*?-----END \1-----`,
+    String.raw`(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.(?:[A-Za-z0-9_-]*\.(?:[A-Za-z0-9_-]+\.){2}[A-Za-z0-9_-]+|[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)`,
+    String.raw`(?<=\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:/@?#]+:)[^\s/?#]+(?=@)`,
+    String.raw`(?<![A-Za-z0-9_-])(?:xox[abposre]|xapp)-[A-Za-z0-9-]{10,}`,
+    String.raw`(?<![A-Za-z0-9_-])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9_-])`,
+    String.raw`(?<![A-Za-z0-9_-])(?:sk-ant-|sk-or-|oc_sk_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|gh[pousr]_|github_pat_|glpat-|gsk_|hf_|xai-|AIza)[A-Za-z0-9_-]{16,}`,
+  ].join("|"),
+  "g",
+);
+const AWS_SECRET = /(?<=\baws[_ ]secret(?:[_ ]access[_ ]key)?[ \t]*[:=][ \t]*)[A-Za-z0-9/+=]{40,}/gi;
 /** Not after a slash, dot or @, so a link's path, a host name or an address is left alone; after = or : it counts. */
 const LONG_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-]|[/=:@.][A-Za-z0-9_-])/g;
 /** Apple and Google app passwords are sixteen lowercase letters shown as four groups of four. */
@@ -218,13 +230,52 @@ const CONTEXT_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9][A-Za-z0-9_-]{11,30}(?![
 /** Thai has no word breaks, so its hints go without `\b`; a bare รหัส (code) counts only on its own, not in รหัสพัสดุ (tracking code). */
 const HINT = String.raw`\b(?:app[- ]password|password|passcode|passwd|pwd|pw|api[- ]key|token|secret)\b|รหัสผ่าน|พาสเวิร์ด|รหัส(?=[\s:=]|คือ|$)`;
 const HINT_GLOBAL = new RegExp(HINT, "gi");
-/** `password: x`, `password=x`, `รหัสผ่าน icloud: x`: a label, so the value after it is the secret whatever it looks like. */
+/** Punctuation labels override the ordinary-word exemption for candidates from the token patterns. */
 const LABEL_GAP = /^\s*(?:[^\s:=]{1,16}\s*)?[:=]\s*$/;
 /** `password is x`, `password for gmail is x`, `รหัสผ่านคือ x`. */
 const SAID_GAP = /^\s*(?:(?:\S+\s+){0,3})(?:is|was|คือ|เป็น)\s*$/i;
 /** `Mistral-Small-2603`, `deepseek-v4-1-flash-1017`, `Llama-4-Maverick-17B`: words and versions joined by dashes name a model. */
 const PRODUCT_PART = String.raw`(?:[A-Z][A-Za-z0-9]*|[a-z]+|\d+[A-Za-z]{0,2}|v\d+(?:\.\d+)?)`;
 const PRODUCT_NAME = new RegExp(String.raw`^(?:${PRODUCT_PART})(?:-(?:${PRODUCT_PART}))+$`);
+
+const PASSWORD_WORD = String.raw`(?<![A-Za-z0-9])(?:app[- _])?(?:password|passcode|passwd|pwd|pw|pass)\b|รหัสผ่าน(?:แอป)?|พาสเวิร์ด|รหัส(?:แอป)?(?=[\s:=]|คือ|เป็น)`;
+const LABELLED_VALUE = new RegExp(
+  String.raw`((?:${PASSWORD_WORD})(?:[ \t]+for[ \t]+[^\s:=]+)?["']?[ \t]*` +
+    String.raw`([:=][ \t\r\n]{0,31}|\b(?:is|was)[ \t]+|(?:คือ|เป็น)[ \t]*)` +
+    String.raw`(?:(?:copy|paste|enter|type|please|plse):?[ \t]+)?)((?:${KEY_REMOVED}|\S)+)`,
+  "gi",
+);
+const PASSWORD_ADVICE = /^(?:use|choose|avoid|must|should|can|could)[ \t]|^(?:at[ \t]+least|do[ \t]+not)\b/i;
+const GROUPED_VALUE_START = /^[a-z]{4}(?:[- \t\u00a0]+[a-z]{4}){3}(?![A-Za-z0-9_-])/;
+const REVERSE_TOKEN = /(?<![A-Za-z0-9_\-/.@])[a-z]{16}(?=["'”’)\]}>]?[ \t]+(?:is|was)[ \t]+(?:(?:my|the|your)[ \t]+)?(?:access[ -]token|api[ -]key|token|app[ -]password)\b)/gi;
+const VALUE_WRAPPERS = new Map([
+  ["(", ")"], ["[", "]"], ["{", "}"], ["<", ">"], ['"', '"'], ["'", "'"], ["“", "”"], ["‘", "’"], ["`", "`"],
+]);
+
+function labelledValue(before: string, separator: string, raw: string, after: string): string | null {
+  if (raw === KEY_REMOVED) return null;
+  const closing = VALUE_WRAPPERS.get(raw[0]);
+  const wrapperEnd = closing === undefined ? -1 : raw.indexOf(closing, 1);
+  const wrapped = wrapperEnd > 1 && /^[.,!?;:)\]}>]*$/.test(raw.slice(wrapperEnd + 1));
+  const value = wrapped ? raw.slice(1, wrapperEnd) : raw;
+  if (value === KEY_REMOVED || /^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return null;
+
+  const explicit = separator.startsWith(":") || separator.startsWith("=");
+  const onLine = after.split(/[\r\n]/, 1)[0];
+  if (explicit && PASSWORD_ADVICE.test(raw + onLine)) return null;
+  // Leave a space-grouped app password for the existing four-group matcher.
+  const grouped = GROUPED_VALUE_START.exec(raw + onLine)?.[0];
+  if (grouped !== undefined && /[ \t\u00a0]/.test(grouped)) return null;
+
+  // A copula can introduce ordinary prose. Require a credential-shaped value in that case.
+  if (!explicit) {
+    const endsStatement = onLine.trim() === "";
+    const candidate = endsStatement ? value : value.replace(/[.,;:!?]+$/, "");
+    const strong = /[^\p{L}\p{M}\p{N}_'.-]/u.test(candidate) || (/[a-z]/.test(candidate) && /[A-Z]/.test(candidate) && /\d/.test(candidate));
+    if (!wrapped && !strong && !(endsStatement && (mixed(candidate) || /^\d+$/.test(candidate)))) return null;
+  }
+  return wrapped ? before + raw[0] + KEY_REMOVED + raw.slice(wrapperEnd) : before + KEY_REMOVED;
+}
 
 /* About 660 words, so a group of a random app password is one by chance about 1 time in 700; two groups that are words means prose. */
 const COMMON_FOUR_LETTER_WORDS = new Set(
@@ -340,7 +391,12 @@ export function redactSecrets(text: string): { readonly text: string; readonly f
   let found = false;
   const secret = (replacement: string | null, original: string) => (replacement === null ? original : ((found = true), replacement));
   const out = text
-    .replace(PREFIXED, () => ((found = true), KEY_REMOVED))
+    .replace(KNOWN_FORMAT, (m) => secret(KEY_REMOVED, m))
+    .replace(AWS_SECRET, (m) => secret(KEY_REMOVED, m))
+    .replace(LABELLED_VALUE, (m, before: string, separator: string, raw: string, offset: number, whole: string) =>
+      secret(labelledValue(before, separator, raw, whole.slice(offset + m.length)), m),
+    )
+    .replace(REVERSE_TOKEN, (m) => secret(KEY_REMOVED, m))
     .replace(GROUPED_APP_PASSWORD, (m, offset, whole) => secret(groupedAppPassword(m, offset, whole), m))
     .replace(CONTEXT_TOKEN, (m, offset, whole) => secret(shortSecret(m, offset, whole), m))
     .replace(LONG_TOKEN, (m, offset, whole) => secret(longSecret(m, offset, whole), m));

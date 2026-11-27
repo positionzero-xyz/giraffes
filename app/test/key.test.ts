@@ -624,9 +624,78 @@ describe("a key pasted into the chat", () => {
     expect((await c.received()).join("\n")).not.toContain(NOTICE.pastedKey(null).split("\n")[0]);
   });
 
+  const pemLines = [
+    "-----BEGIN " + "OPENSSH PRIVATE KEY-----",
+    "bm90L2EtcHJpdmF0ZS9rZXk=",
+    "c2Vjb25kLWxpbmU=",
+    "-----END " + "OPENSSH PRIVATE KEY-----",
+  ];
+  const jwtParts = ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJmaWN0aW9uIn0", "TDgYUkFHcXVGRkFuaUNi"];
+  const jweParts = ["eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0", "", "bm9uY2VyYW5kb20", "ZmljdGlvbmFsZW5jcnlwdGVkdGV4dA", "c2lnbmF0dXJl"];
+  const slackToken = "xox" + "b-904709774064-1412892120756-mtbruma0ofnrlgmn05xql7ef";
+  const awsKeyId = "AK" + "IA" + "A1B2C3D4E5F6G7H8";
+  const providerKey = "gh" + "p_" + "a".repeat(36);
+
+  test.each([
+    ["pem", "here is the server key\n", pemLines.join("\n"), "\nplease check", pemLines],
+    ["jwt", "my token ", jwtParts.join("."), " please check", jwtParts],
+    ["encrypted-jwt", "my token ", jweParts.join("."), " please check", jweParts.filter(Boolean)],
+    ["database-url", "connect with postgres://admin:", "pa%40ss:123", "@db.example.test:5432/app", ["pa%40ss", "ss:123"]],
+    ["database-url-at-sign", "connect with postgres://admin:", "pa@ss:123", "@db.example.test:5432/app", ["pa@ss", "ss:123"]],
+    ["slack", "slack bot ", slackToken, " please check", slackToken.split("-")],
+    ["aws-key-id", "AWS access key ", awsKeyId, " please check", [awsKeyId.slice(0, 9), awsKeyId.slice(9)]],
+    ["aws-secret", "aws secret: ", "G8XG6yL4DvV5/3lpvdiQ0pJ+slMP66pRh0vtSh2wr", "", ["G8XG6yL4DvV5", "3lpvdiQ0pJ", "slMP66pRh0vtSh2wr"]],
+    ["provider-key", "GitHub key ", providerKey, " please check", [providerKey.slice(0, 16), providerKey.slice(16)]],
+    ["short-password", "my password is ", "hunter2", "", ["hunter2"]],
+    ["colon-password", "password: ", "hunter2", " for the wifi", ["hunter2"]],
+    ["symbol-password", "password: ", "Tr0ub4dor&3!x", "", ["Tr0ub4dor", "&3!x"]],
+    ["at-password", "password: ", "P@ssw0rd-54mpvX", "", ["P@", "ssw0rd-54mpvX"]],
+    ["thai-password", "รหัสผ่านคือ ", "Xk92mmQp", "", ["Xk92mmQp"]],
+    ["numeric-password", "the wifi password is ", "84302917", "", ["84302917"]],
+    ["single-character", "password: ", "!", " for the wifi", []],
+    ["long-symbol-password", "password: ", "LongAlpha1234&" + "q".repeat(70), " for the wifi", ["LongAlpha1234", "q".repeat(20)]],
+    ["env-name", "DB_PASSWORD=", "hunter2", "", ["hunter2"]],
+    ["json-password", '{"password":"', "hunter2", '"}', ["hunter2"]],
+    ["pass-colon", "pass: ", "hunter2", "", ["hunter2"]],
+    ["app-password-copy-left", "App password: type ", "copy-qvzf-wpxn-next", " thnx", ["copy", "qvzf", "wpxn", "next"]],
+    ["app-password-tail", "App password: plse ", "qvzf-wpxn-kjmg-next", "", ["qvzf", "wpxn", "kjmg", "next"]],
+    ["app-password-copy-colon", "App password: copy: (", "qvzfwpxnkjmgrbhy", ")", ["qvzfwpxnkjmgrbhy"]],
+    ["reverse-access-token", "(", "qvzfwpxnkjmgrbhy", ") is my access token", ["qvzfwpxnkjmgrbhy"]],
+  ] as const)("removes every part of the pasted credential from storage and the next prompt: %s", async (_id, before, value, after, fragments) => {
+    const model = scripted([chat("I can help."), chat("I can help.")]);
+    const c = await devChat("pasted-credential", { model, at: "2099-11-04T10:00" });
+    const redacted = before + KEY_REMOVED + after;
+
+    await c.say(before + value + after);
+    const initialCalls = model.calls.length;
+    await c.say("ok what now");
+
+    const stored = await doDump(c.agent);
+    const prompts = model.calls.map((call) => call.user).join("\n");
+    for (const fragment of fragments) {
+      expect(stored.includes(fragment), `stored credential fragment: ${fragment}`).toBe(false);
+      expect(prompts.includes(fragment), `forwarded credential fragment: ${fragment}`).toBe(false);
+    }
+    expect(initialCalls).toBe(0);
+    expect(model.calls).toHaveLength(1);
+    expect((await c.snapshot()).turns.map((t) => t.text)).toContain(redacted);
+    expect(prompts).toContain(redacted);
+  });
+
   test.each([
     ["memo", "edit memo weds noon"],
     ["model-name", "Can I use my API key with Qwen3-Coder-480B-A35B-Instruct?"],
+    ["password-reset", "I forgot my password, how do I reset it?"],
+    ["thai-password-reset", "ฉันลืมรหัสผ่าน ต้องรีเซ็ตยังไง"],
+    ["password-tip", "password: use something long like correct horse battery staple"],
+    ["password-length", "a good password is 12 characters or more"],
+    ["password-description", "the password is case-sensitive"],
+    ["password-link", "the password reset link is https://accounts.example.test/reset?id=abc123"],
+    ["password-wrong", "my password is wrong, can you remind me to reset it?"],
+    ["thai-password-description", "รหัสผ่านคือวันเกิดของฉัน ช่วยเตือนให้เปลี่ยนด้วย"],
+    ["code-that-reads-a-token", "token = response.headers['x-token']"],
+    ["token-description", "the token is single-use"],
+    ["password-advice", "password: at least 8 chars, one number"],
   ] as const)("ordinary chat reaches the model as written: %s", async (id, text) => {
     const model = scripted([chat("Sure.")]);
     const c = await devChat(`ordinary-${id}`, { model, at: "2099-11-04T10:00" });

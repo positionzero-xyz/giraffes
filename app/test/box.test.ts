@@ -109,6 +109,7 @@ function fakeFly(org = "giraffes") {
   const volumes = new Map<string, { id: string; name: string; state: string; auto_backup_enabled: boolean }[]>();
   const machines = new Map<string, { id: string; config: Record<string, unknown> }[]>();
   const requests: FlyRequest[] = [];
+  const omitOrgs = new Set<string>();
   const failures: { method: string; path: string; status: number; body?: unknown }[] = [];
   let n = 0;
   const fetch: Fetch = async (input, init) => {
@@ -123,13 +124,18 @@ function fakeFly(org = "giraffes") {
       return f.body === undefined ? new Response("boom", { status: f.status }) : Response.json(f.body, { status: f.status });
     }
     const [, app, sub, id] = url.pathname.match(/^\/v1\/apps(?:\/([^/]+))?(?:\/(\w+))?(?:\/([^/]+))?$/) ?? [];
+    if (!app && method === "GET") {
+      const orgSlug = url.searchParams.get("org_slug");
+      const mine = [...apps.entries()].filter(([, owner]) => (orgSlug === "personal" ? owner !== "someone-else" : owner === orgSlug));
+      return Response.json({ apps: mine.map(([name]) => ({ name })) });
+    }
     if (!app && method === "POST") {
       if (apps.has(body.app_name)) return Response.json({ error: "Validation failed: Name has already been taken", status: "name_taken" }, { status: 422 });
       apps.set(body.app_name, body.org_slug);
       return Response.json({ id: `app${++n}`, created_at: 1 }, { status: 201 });
     }
     if (!app || !apps.has(app)) return Response.json({ error: "not found" }, { status: 404 });
-    if (!sub && method === "GET") return Response.json({ name: app, organization: { slug: apps.get(app) } });
+    if (!sub && method === "GET") return Response.json(omitOrgs.has(app) ? { name: app } : { name: app, organization: { slug: apps.get(app) } });
     if (!sub && method === "DELETE") {
       apps.delete(app);
       return new Response(null, { status: 202 });
@@ -167,7 +173,7 @@ function fakeFly(org = "giraffes") {
     }
     return Response.json({ error: "no route" }, { status: 404 });
   };
-  return { fetch, apps, ips, volumes, machines, requests, failures, org };
+  return { fetch, apps, ips, volumes, machines, requests, failures, org, omitOrgs };
 }
 
 const flyConfig: FlyConfig = {
@@ -337,6 +343,39 @@ describe("fly host", () => {
     fly.apps.set(app, "someone-else");
     expect(await host.ensure(app, token)).toMatchObject({ ok: false, retryable: false });
     expect(fly.machines.get(app)).toBeUndefined();
+  });
+
+  test("the personal alias accepts an existing app Fly reports under the personal org's real slug", async () => {
+    const fly = fakeFly();
+    fly.apps.set(app, "beam-personal-abc123");
+    const host = flyHost({ ...flyConfig, org: "personal" }, fly.fetch);
+
+    expect(await host.ensure(app, token)).toEqual({ ok: true });
+    expect(fly.requests.some((r) => r.method === "GET" && r.path === "/apps?org_slug=personal")).toBe(true);
+    expect(fly.machines.get(app)).toHaveLength(1);
+  });
+
+  test("an app reply with no organization fails closed outside the personal alias", async () => {
+    const fly = fakeFly();
+    fly.apps.set(app, "giraffes");
+    fly.omitOrgs.add(app);
+
+    expect(await flyHost(flyConfig, fly.fetch).ensure(app, token)).toMatchObject({ ok: false, retryable: false });
+    expect(fly.machines.get(app)).toBeUndefined();
+  });
+
+  test("the personal-filtered app list decides ownership when the direct app reply omits organization", async () => {
+    const mine = fakeFly();
+    mine.apps.set(app, "beam-personal-abc123");
+    mine.omitOrgs.add(app);
+    expect(await flyHost({ ...flyConfig, org: "personal" }, mine.fetch).ensure(app, token)).toEqual({ ok: true });
+    expect(mine.machines.get(app)).toHaveLength(1);
+
+    const foreign = fakeFly();
+    foreign.apps.set(app, "someone-else");
+    foreign.omitOrgs.add(app);
+    expect(await flyHost({ ...flyConfig, org: "personal" }, foreign.fetch).ensure(app, token)).toMatchObject({ ok: false, retryable: false });
+    expect(foreign.machines.get(app)).toBeUndefined();
   });
 
   test("a name Fly refuses for another reason fails with Fly's words, not as a name owned elsewhere", async () => {

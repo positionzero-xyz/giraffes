@@ -161,13 +161,19 @@ export function turnFromAgent(raw: unknown): unknown {
   const reply = AgentReply.safeParse(raw);
   if (!reply.success) return null;
   const text = reply.data.text.trim();
-  const tasks = reply.data.calls.filter((c) => c.name === TASK_TOOL).map((c) => c.input);
-  const about = tasks.at(-1)?.ref;
+  const tasks: z.infer<typeof TaskOpSchema>[] = [];
+  const refusedCalls = [...(reply.data.refusedCalls ?? [])];
+  for (const call of reply.data.calls) {
+    if (call.name !== TASK_TOOL) continue;
+    const task = TaskOpSchema.safeParse(call.input);
+    if (task.success) tasks.push(task.data);
+    else refusedCalls.push({ ...call, problems: task.error.issues.map((issue) => issue.message) });
+  }
   return {
     actions: [...reply.data.calls.filter((c) => c.name !== TASK_TOOL).map((c) => ({ ...c.input, type: c.name })), text ? { type: "send", text } : { type: "quiet" }],
-    refusedCalls: reply.data.refusedCalls,
+    refusedCalls,
     tasks,
-    about: typeof about === "string" ? about : "",
+    about: tasks.at(-1)?.ref ?? "",
   };
 }
 
@@ -231,12 +237,13 @@ function duration(ms: number): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
-function lateLine(e: { readonly dueAt: EpochMs; readonly firedAt: EpochMs }, tz: TimeZone): string {
+function lateLine(e: { readonly dueAt: EpochMs; readonly firedAt: EpochMs }, tz: TimeZone, askForLateNotice: boolean): string {
   if (!isLate(e)) return "";
-  return `\nLATE by ${duration(e.firedAt - e.dueAt)}: it was due ${human(e.dueAt, tz)}. Put one short line saying so in lateNotice.`;
+  const instruction = askForLateNotice ? " Put one short line saying so in lateNotice." : "";
+  return `\nLATE by ${duration(e.firedAt - e.dueAt)}: it was due ${human(e.dueAt, tz)}.${instruction}`;
 }
 
-function renderEvent(e: AgentEvent, tz: TimeZone): string {
+function renderEvent(e: AgentEvent, tz: TimeZone, askForLateNotice: boolean): string {
   switch (e.kind) {
     case "message":
       return `Person: ${e.text}`;
@@ -253,10 +260,10 @@ function renderEvent(e: AgentEvent, tz: TimeZone): string {
     case "wakeup": {
       const asked = e.origin === "person" ? " The person asked for this reminder." : "";
       const repeats = e.repeat ? ` It repeats ${e.repeat.every} at ${e.repeat.anchor.slice(11)}, and the next one is already scheduled.` : "";
-      return `Your wake-up "${e.key}" fired: ${e.note}. Due ${human(e.dueAt, tz)}.${asked}${repeats}${lateLine(e, tz)}`;
+      return `Your wake-up "${e.key}" fired: ${e.note}. Due ${human(e.dueAt, tz)}.${asked}${repeats}${lateLine(e, tz, askForLateNotice)}`;
     }
     case "checkin":
-      return `Daily check-in.${lateLine(e, tz)}`;
+      return `Daily check-in.${lateLine(e, tz, askForLateNotice)}`;
     default:
       return assertNever(e);
   }
@@ -283,11 +290,11 @@ function renderTask(t: TurnView["openTasks"][number]): string {
 }
 
 /** The newest event whole; earlier ones cut so they share `batchBytes`. A batch too long for a route is never sent. */
-function batchLines(view: TurnView): { readonly text: string; readonly whole: boolean }[] {
+function batchLines(view: TurnView, askForLateNotice: boolean): { readonly text: string; readonly whole: boolean }[] {
   const items = view.batch.items;
   let left: number = TURN.batchBytes;
   return items.map((i, at) => {
-    const line = renderEvent(i.event, view.tz);
+    const line = renderEvent(i.event, view.tz, askForLateNotice);
     const sent = i.catchUp ? `[Sent ${human(i.receivedAt, view.tz)}] ` : "";
     if (at === items.length - 1) return { text: sent + line, whole: true };
     const share = i.catchUp ? Math.floor(left / (items.length - at - 1)) : left;
@@ -297,12 +304,11 @@ function batchLines(view: TurnView): { readonly text: string; readonly whole: bo
   });
 }
 
-const renderBatch = (view: TurnView): string[] => batchLines(view).map((line) => line.text);
-const batchWhole = (view: TurnView): readonly boolean[] => batchLines(view).map((line) => line.whole);
+const batchWhole = (view: TurnView): readonly boolean[] => batchLines(view, false).map((line) => line.whole);
 
 const keep = (title: string, lines: readonly string[]): PromptSection => ({ title, keep: lines, trim: [], dropRank: 0 });
-const newSection = (view: TurnView) => {
-  const lines = renderBatch(view);
+const newSection = (view: TurnView, askForLateNotice: boolean) => {
+  const lines = batchLines(view, askForLateNotice).map((line) => line.text);
   if (view.batch.items[0].catchUp) {
     lines.unshift("The AI connection just became available. Answer these requests together, and answer repeats once. Resolve relative reminder times from when the request was first sent, using the timestamps below. If the requested time has passed, say so and do not schedule it.");
   }
@@ -325,7 +331,7 @@ export function renderUser(view: TurnView): PromptParts {
       { title: "Memory", keep: [view.summary || "(nothing yet)"], trim: view.notes.map((n) => `- ${n}`), dropRank: 2 },
       ...lookAhead(view),
       conversation.length ? { title: "Conversation", keep: [], trim: conversation, dropRank: 1, history: true } : keep("Conversation", ["(no earlier messages)"]),
-      newSection(view),
+      newSection(view, true),
     ],
   };
 }
@@ -363,7 +369,7 @@ export function renderBoxTurn(view: TurnView, held: BoxSession | null): BoxTurnP
   const lines = memoryLines(view.summary, view.notes);
   const update = memory !== (held?.memory ?? "") ? [keep("Memory (replaces the memory you had)", lines.length ? lines : ["(empty)"])] : [];
   const parts = (rows: readonly SeqTurn[], extra: readonly PromptSection[]): PromptParts => ({
-    sections: [nowSection(view), ...extra, ...lookAhead(view), ...conversation(rows), newSection(view)],
+    sections: [nowSection(view), ...extra, ...lookAhead(view), ...conversation(rows), newSection(view, false)],
   });
   return {
     append: memory ? `${AGENT_SYSTEM}\n\n${memory}` : AGENT_SYSTEM,

@@ -1,5 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
+import { AGENT_SYSTEM } from "../src/agent/prompt";
 import { TURN } from "../src/agent/turn";
 import type { EpochMs, LocalDateTime, TimeZone } from "../src/domain";
 import { DEV_CAP_MICRO } from "../src/access/access";
@@ -48,6 +49,40 @@ describe("conversation", () => {
     expect(model.calls[0].user).not.toContain("second question");
     expect(model.calls[1].user).toContain("You: First answer.");
     expect(model.calls[1].user).toContain("## New\nPerson: second question");
+    model.assertDone();
+  });
+});
+
+describe("working on it", () => {
+  test.each(["telegram", "line"] as const)("on %s, the person sees a reply being made until it is sent, refreshed for a long turn", async (channel) => {
+    const model = scripted([hold(chat("Here's your day."))]);
+    const c = await devChat("ida", { model, at: "2099-11-04T10:00", channel });
+
+    await c.post("what's on today?");
+    await until(() => c.channel.shown.length >= 3);
+    expect(await c.received()).toEqual([]);
+    model.release();
+    await c.settle();
+    const shownByReply = c.channel.shown.length;
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(await c.received()).toEqual(["Here's your day."]);
+    expect(c.channel.shown.length).toBe(shownByReply);
+    expect(new Set(c.channel.shown.map((to) => `${to.channel}:${to.channelUserId}`))).toEqual(new Set([`${channel}:ida`]));
+    model.assertDone();
+  });
+
+  test("a check-in nobody asked for shows nothing", async () => {
+    const model = scripted([chat("Hi!"), chat("Morning! Anything on today?")]);
+    const c = await devChat("jon", { model, at: "2099-11-04T10:00", channel: "telegram" });
+    await c.say("hi");
+    const shownByReply = c.channel.shown.length;
+    expect(shownByReply).toBeGreaterThan(0);
+
+    await c.advanceTo("2099-11-05T12:00");
+
+    expect(await c.received()).toEqual(["Hi!", "Morning! Anything on today?"]);
+    expect(c.channel.shown.length).toBe(shownByReply);
     model.assertDone();
   });
 });
@@ -485,6 +520,20 @@ describe("time zone and language", () => {
     ]);
     expect(model.calls.at(-1)?.user).toContain("Europe/London");
     model.assertDone();
+  });
+
+  test("in the turn that changes the zone, the model is told Now still shows the old zone's time and not to state the time", async () => {
+    const model = scripted([turn({ actions: [locale("Europe/London", "en"), send("Welcome to London!")] })]);
+    const c = await devChat("noa", { model, at: "2099-11-04T21:40" });
+
+    await c.say("I just moved to London");
+
+    const call = model.calls.at(-1);
+    expect(call?.user).toContain("2099-11-04 21:40 (Wednesday), Asia/Bangkok");
+    for (const system of [call?.system, AGENT_SYSTEM]) {
+      expect(system).toMatch(/set_locale[^\n]*the time under Now is still in the old zone, so don't tell the person the time in that turn/);
+    }
+    expect((await c.snapshot()).agent?.tz).toBe("Europe/London");
   });
 
   test("a time zone code can't read is rejected, logged and corrected, and the zone stays", async () => {

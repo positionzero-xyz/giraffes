@@ -45,5 +45,6 @@ describe("a check-in on a plan-only person's box that fails every time", () => {
     ]);
     expect(box.replies).toHaveLength(9);
     box.replies.length = 0;
-  });
+  // This drive walks check-in alarms across two mornings while the box keeps failing.
+  }, 10_000);
 });

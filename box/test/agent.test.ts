@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -7,10 +6,10 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createBox } from "../src/server.ts";
-import { mockPort } from "./mock-port.ts";
+import { startMock, type RunningMock } from "./mock.ts";
 
-const CLI = fileURLToPath(new URL("../node_modules/@anthropic-ai/claude-code/bin/claude.exe", import.meta.url));
-const MOCK = fileURLToPath(new URL("../mock-api.mjs", import.meta.url));
+// BOX_TEST_CLI points at the Linux CLI inside the box image; the default is the sibling npm install.
+const CLI = process.env.BOX_TEST_CLI ?? fileURLToPath(new URL("../node_modules/@anthropic-ai/claude-code/bin/claude.exe", import.meta.url));
 const TOKEN = "b-agent-test-token-0123456789abcdefghijklmnop";
 const APPEND = "You are Giraffe, a personal assistant.";
 const GONE = "11111111-2222-3333-4444-555555555555";
@@ -31,6 +30,15 @@ const SCHEDULE = {
   },
 };
 const REMEMBER = { name: "remember", description: "Remember a fact.", inputSchema: { type: "object", properties: { note: { type: "string" } }, required: ["note"] } };
+const TASK = {
+  name: "task",
+  description: "Open a task, propose its plan, or close it.",
+  inputSchema: {
+    type: "object",
+    properties: { op: { enum: ["open", "propose", "close"] }, ref: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }, kind: { type: "string" }, title: { type: "string" }, plan: { type: "string" } },
+    required: ["op", "ref", "kind", "title", "plan"],
+  },
+};
 
 type Turn = { readonly turn: string; readonly session?: string | null; readonly fresh?: string | null; readonly append?: string };
 const turnBody = (t: Turn) => ({ model: "claude-haiku-5-5", append: t.append ?? APPEND, session: t.session ?? null, turn: t.turn, fresh: t.fresh ?? null, tools: [SCHEDULE, REMEMBER] });
@@ -48,12 +56,7 @@ function sent(): Sent[] {
 }
 const userTexts = (s: Sent): string[] => s.messages.filter((m) => m.role === "user").map((m) => textOf(m.content)).filter((t) => t.trim());
 
-const transcriptExists = (id: string): boolean => {
-  const projects = join(dir, "config", "projects");
-  return existsSync(projects) && readdirSync(projects).some((project) => existsSync(join(projects, project, `${id}.jsonl`)));
-};
-
-let mock: ChildProcess;
+let mock: RunningMock | undefined;
 let base = "";
 const stateDir = join(dir, "state");
 mkdirSync(stateDir, { recursive: true });
@@ -71,15 +74,35 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     for (const k of Object.keys(process.env)) if (k.startsWith("CLAUDE") || k.startsWith("ANTHROPIC")) delete process.env[k];
     writeFileSync(script, JSON.stringify({ calls: [], text: "" }));
     mkdirSync(dumps);
-    mock = spawn(process.execPath, [MOCK, mockLog, "0", dumps, script], { stdio: ["ignore", "pipe", "inherit"] });
-    const port = await mockPort(mock);
-    Object.assign(process.env, { CLAUDE_CONFIG_DIR: join(dir, "config"), ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`, ANTHROPIC_API_KEY: "sk-ant-api03-mock-not-a-key" });
+    mock = await startMock(mockLog, dumps, script);
+    Object.assign(process.env, { CLAUDE_CONFIG_DIR: join(dir, "config"), ANTHROPIC_BASE_URL: `http://127.0.0.1:${mock.port}`, ANTHROPIC_API_KEY: "sk-ant-api03-mock-not-a-key" });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
   after(() => {
     server.close();
-    mock.kill();
+    mock?.proc.kill();
+  });
+
+  it("keeps only the live transcript when the Worker rolls a chat session", async () => {
+    const pendingPointer = join(dir, ".giraffe-session.next");
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Before the roll." }));
+    mkdirSync(pendingPointer);
+    const first = await agent({ turn: "New\nPerson: before the roll" }).finally(() => rmSync(pendingPointer, { recursive: true, force: true }));
+    assert.equal(first.status, 200);
+    assert.equal(transcriptExists(first.body.session.id), true);
+
+    writeFileSync(script, JSON.stringify({ calls: [], text: "After the roll." }));
+    const fresh = "Conversation\nPerson: before the roll\n\nNew\nPerson: after the roll";
+    const rolled = await agent({ session: null, turn: "New\nPerson: after the roll", fresh });
+    assert.equal(rolled.status, 200);
+    assert.equal(rolled.body.session.resumed, false);
+    assert.notEqual(rolled.body.session.id, first.body.session.id);
+    assert.deepEqual(userTexts(sent().at(-1)!), [fresh]);
+    const transcripts = readdirSync(join(dir, "config", "projects"), { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+      .map((entry) => entry.name);
+    assert.deepEqual(transcripts, [`${rolled.body.session.id}.jsonl`]);
   });
 
   it("returns the reply text, the tool calls Giraffe's server accepted, in order, and the new session it started", async () => {
@@ -125,6 +148,19 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.equal(r.body.text, "Water at 3.");
     assert.deepEqual(r.body.refusedCalls, [{ name: "schedule_wakeup", input, problems: ["missing note", "at has the wrong type or value"] }]);
     assert.deepEqual(r.body.calls, [{ name: "remember", input: { note: "Prefers morning reminders." } }]);
+  });
+
+  it("refuses a bad task ref so the model can fix it in the same turn", async () => {
+    const input = { op: "open", ref: "Bad ref", kind: "other", title: "Book a train", plan: "" };
+    const corrected = { ...input, ref: "book-train" };
+    writeFileSync(script, JSON.stringify({
+      calls: [{ name: "task", input }, { name: "task", input: corrected }],
+      text: "Noted.",
+    }));
+    const r = await postAgent({ ...turnBody({ turn: "New\nPerson: I need to book a train" }), tools: [TASK] });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.calls, [{ name: "task", input: corrected }]);
+    assert.deepEqual(r.body.refusedCalls, [{ name: "task", input, problems: ["ref has the wrong type or value"] }]);
   });
 
   it("resumes the session the Worker names, which keeps the system prompt it started with, so a memory change has to travel in the message", async () => {
@@ -231,7 +267,7 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.deepEqual(afterGroup.body.session, { id: personal.body.session.id, resumed: true });
   });
 
-  it("cleans the replaced chat session when a later named turn repairs a failed pointer write", async () => {
+  it("repairs a failed rollback pointer write on a later named turn", async () => {
     writeFileSync(script, JSON.stringify({ calls: [], text: "Old live." }));
     const first = await agent({ session: null, turn: "New\nPerson: old live", fresh: "New\nPerson: old live" });
     assert.equal(first.status, 200);
@@ -243,7 +279,7 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.equal(second.status, 200);
     assert.notEqual(second.body.session.id, first.body.session.id);
     assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), first.body.session.id);
-    assert.equal(transcriptExists(first.body.session.id), true);
+    assert.equal(transcriptExists(first.body.session.id), false);
     assert.equal(transcriptExists(second.body.session.id), true);
     rmSync(join(dir, ".giraffe-session.next"), { recursive: true, force: true });
 
@@ -256,13 +292,66 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.equal(transcriptExists(second.body.session.id), true);
   });
 
-  it("answers a good turn when the rollback pointer can't be written", async () => {
+  it("makes a superseded rollback session unavailable when its pointer write fails", async () => {
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Original live." }));
+    const first = await agent({ session: null, turn: "New\nPerson: original live", fresh: "New\nPerson: original live" });
+    assert.equal(first.status, 200);
+    assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), first.body.session.id);
+    assert.equal(transcriptExists(first.body.session.id), true);
+
+    mkdirSync(join(dir, ".giraffe-session.next"));
+    try {
+      writeFileSync(script, JSON.stringify({ calls: [], text: "Replacement live." }));
+      const replacement = await agent({ session: null, turn: "New\nPerson: replacement live", fresh: "New\nPerson: replacement live" });
+      assert.equal(replacement.status, 200);
+      assert.notEqual(replacement.body.session.id, first.body.session.id);
+      assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), first.body.session.id);
+
+      writeFileSync(script, JSON.stringify({ calls: [], text: "Rollback answer." }));
+      const legacyTurn = { model: "claude-haiku-5-5", append: APPEND, tools: [SCHEDULE, REMEMBER], turn: "New\nPerson: omitted rollback" };
+      const rollback = await postAgent(legacyTurn);
+      assert.equal(rollback.status, 200);
+      assert.notEqual(rollback.body.session.id, first.body.session.id);
+      assert.equal(rollback.body.session.resumed, false);
+      assert.equal(transcriptExists(first.body.session.id), false);
+    } finally {
+      rmSync(join(dir, ".giraffe-session.next"), { recursive: true, force: true });
+    }
+  });
+
+  it("fails a replacement turn when neither the pointer write nor transcript removal succeeds", async () => {
+    writeFileSync(script, JSON.stringify({ calls: [], text: "Original live." }));
+    const first = await agent({ session: null, turn: "New\nPerson: original live" });
+    assert.equal(first.status, 200);
+
+    const pendingPointer = join(dir, ".giraffe-session.next");
+    const blockedProject = join(dir, "config", "projects", "blocked-cleanup");
+    mkdirSync(join(blockedProject, `${first.body.session.id}.jsonl`), { recursive: true });
+    mkdirSync(pendingPointer);
+    try {
+      const replacement = await agent({ session: null, turn: "New\nPerson: replacement live" });
+      assert.deepEqual(replacement, { status: 502, body: { error: "claude_failed" } });
+      assert.equal(readFileSync(join(dir, ".giraffe-session"), "utf8"), first.body.session.id);
+      assert.equal(transcriptExists(first.body.session.id), true);
+    } finally {
+      rmSync(pendingPointer, { recursive: true, force: true });
+      rmSync(blockedProject, { recursive: true, force: true });
+    }
+  });
+
+  it("answers a good turn when the rollback pointer can't be written", async (t) => {
+    const info = t.mock.method(console, "info", () => {});
     writeFileSync(script, JSON.stringify({ calls: [], text: "Still good." }));
     rmSync(join(dir, ".giraffe-session"), { recursive: true, force: true });
     mkdirSync(join(dir, ".giraffe-session"));
     try {
       const r = await agent({ session: GONE, turn: "New\nPerson: write failure", fresh: "New\nPerson: write failure" });
       assert.equal(r.status, 200);
+      const writeErrors = info.mock.calls
+        .map(({ arguments: [event] }) => event)
+        .filter((event) => event?.code === "legacy_session_write_failed");
+      assert.equal(writeErrors.length, 1);
+      assert.ok(["EISDIR", "EPERM"].includes(writeErrors[0].error), `unexpected error ${writeErrors[0].error}`);
     } finally {
       rmSync(join(dir, ".giraffe-session"), { recursive: true, force: true });
     }
@@ -291,3 +380,8 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.equal((await agent({ turn: "New\nPerson: hi" }, "Bearer wrong")).status, 401);
   });
 });
+
+function transcriptExists(id: string): boolean {
+  const projects = join(dir, "config", "projects");
+  return existsSync(projects) && readdirSync(projects).some((project) => existsSync(join(projects, project, `${id}.jsonl`)));
+}

@@ -549,6 +549,9 @@ export const MIGRATIONS: readonly string[] = [
   UPDATE billing_alert SET ready_at = unixepoch() * 1000, notified = 0, closed_as = NULL WHERE closed_as = 'gone';
   `,
   `
+  ALTER TABLE checkout_session ADD COLUMN closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1));
+  `,
+  `
   CREATE TABLE outside_write (
     id            TEXT PRIMARY KEY,
     intent        TEXT NOT NULL UNIQUE,

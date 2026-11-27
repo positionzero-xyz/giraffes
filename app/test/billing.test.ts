@@ -117,6 +117,139 @@ describe("stripe boundary", () => {
   const kit = billingOn();
   const { stripe: cfg, rules } = kit.config;
 
+  test("erasure reconciles a checkout that completes while being expired, then clears metadata and cancels", async () => {
+    const owner = agent("erase-billing");
+    const checkout = "cs_erasure" as CheckoutId;
+    const subscription = "sub_erasure" as SubscriptionId;
+    const requests: string[] = [];
+    let checkoutOpen = true;
+    let subscriptionStatus = "active";
+    let checkoutMetadata: { agent_key?: string } = { agent_key: owner };
+    let subscriptionMetadata: { agent_key?: string } = { agent_key: owner };
+    const api = stripeApi(cfg, rules, async (url, init) => {
+      const path = new URL(url).pathname;
+      requests.push(`${init?.method} ${path}`);
+      if (path === "/v1/checkout/sessions") return Response.json({ data: [{ id: checkout }], has_more: false });
+      if (path.endsWith("/expire")) {
+        checkoutOpen = false;
+        return Response.json({ error: { code: "checkout_session_not_open" } }, { status: 400 });
+      }
+      if (init?.method === "POST") {
+        expect(new URLSearchParams(String(init.body)).get("metadata[agent_key]")).toBe("");
+        if (path.endsWith(checkout)) checkoutMetadata = {};
+        else subscriptionMetadata = {};
+      }
+      if (path.endsWith(checkout)) return Response.json({
+        id: checkout, client_reference_id: owner, metadata: checkoutMetadata,
+        status: checkoutOpen ? "open" : "complete", subscription: checkoutOpen ? null : subscription,
+      });
+      if (init?.method === "DELETE") subscriptionStatus = "canceled";
+      return Response.json({ id: subscription, status: subscriptionStatus, metadata: subscriptionMetadata });
+    });
+    expect(await api.closeCheckout(checkout, owner)).toEqual({ ok: true, value: { subscription, retained: false } });
+    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: { retained: false } });
+    expect(requests).toEqual([
+      "GET /v1/checkout/sessions/cs_erasure", "POST /v1/checkout/sessions/cs_erasure/expire",
+      "GET /v1/checkout/sessions/cs_erasure", "POST /v1/checkout/sessions/cs_erasure",
+      "GET /v1/subscriptions/sub_erasure", "POST /v1/subscriptions/sub_erasure", "DELETE /v1/subscriptions/sub_erasure",
+      "GET /v1/checkout/sessions", "GET /v1/checkout/sessions/cs_erasure",
+    ]);
+    requests.length = 0;
+    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: { retained: false } });
+    expect(requests).toEqual([
+      "GET /v1/subscriptions/sub_erasure", "GET /v1/checkout/sessions", "GET /v1/checkout/sessions/cs_erasure",
+    ]);
+  });
+
+  test("erasure finds a historical Checkout Session by its owned subscription and clears its chat metadata", async () => {
+    const owner = agent("erase-historical-checkout");
+    const subscription = "sub_historical" as SubscriptionId;
+    const checkout = "cs_historical";
+    let metadata: { agent_key?: string } = { agent_key: owner };
+    const api = stripeApi(cfg, rules, async (url, init) => {
+      const target = new URL(url);
+      if (target.pathname.endsWith(subscription)) {
+        return Response.json({ id: subscription, status: "canceled", metadata: {} });
+      }
+      if (target.pathname.endsWith("/checkout/sessions")) {
+        expect(target.searchParams.get("subscription")).toBe(subscription);
+        return Response.json({ data: [{ id: checkout }], has_more: false });
+      }
+      expect(target.pathname).toBe(`/v1/checkout/sessions/${checkout}`);
+      if (init?.method === "POST") {
+        expect(new URLSearchParams(String(init.body)).get("metadata[agent_key]")).toBe("");
+        metadata = {};
+      }
+      return Response.json({ id: checkout, status: "complete", client_reference_id: owner, metadata, subscription });
+    });
+
+    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: { retained: false } });
+    expect(metadata).toEqual({});
+  });
+
+  test("erasure holds when a subscription read is 404 instead of claiming it ended", async () => {
+    const owner = agent("erase-subscription-404");
+    const subscription = "sub_404" as SubscriptionId;
+    let calls = 0;
+    const api = stripeApi(cfg, rules, async (url) => {
+      calls++;
+      expect(new URL(url).pathname).toBe(`/v1/subscriptions/${subscription}`);
+      return Response.json({ error: { type: "invalid_request_error", code: "resource_missing" } }, { status: 404 });
+    });
+
+    const closed = await api.closeSubscription(subscription, owner);
+    expect(closed).toMatchObject({ ok: false, status: 404 });
+    expect(calls).toBe(1);
+  });
+
+  test("erasure does not expire a terminal checkout and reports a permanent metadata refusal", async () => {
+    const owner = agent("erase-stripe-refusal");
+    const checkout = "cs_refusal" as CheckoutId;
+    let expires = 0;
+    let clears = 0;
+    const api = stripeApi(cfg, rules, async (url, init) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/expire")) {
+        expires++;
+        return Response.json({ error: { code: "checkout_session_not_open" } }, { status: 400 });
+      }
+      expect(path).toBe(`/v1/checkout/sessions/${checkout}`);
+      if (init?.method === "POST") {
+        clears++;
+        return Response.json({ error: { type: "invalid_request_error", code: "metadata_update_unsupported" } }, { status: 400 });
+      }
+      return Response.json({ id: checkout, status: "expired", client_reference_id: owner, metadata: { agent_key: owner }, subscription: null });
+    });
+
+    expect(await api.closeCheckout(checkout, owner)).toEqual({ ok: true, value: { subscription: null, retained: true } });
+    expect({ expires, clears }).toEqual({ expires: 0, clears: 1 });
+  });
+
+  test("erasure still cancels a subscription when Stripe permanently refuses editable metadata removal", async () => {
+    const owner = agent("erase-subscription-refusal");
+    const subscription = "sub_refusal" as SubscriptionId;
+    let status = "active";
+    let deletes = 0;
+    const api = stripeApi(cfg, rules, async (url, init) => {
+      const target = new URL(url);
+      if (target.pathname.endsWith("/checkout/sessions")) {
+        return Response.json({ data: [], has_more: false });
+      }
+      expect(target.pathname).toBe(`/v1/subscriptions/${subscription}`);
+      if (init?.method === "POST") {
+        return Response.json({ error: { type: "invalid_request_error", code: "metadata_update_unsupported" } }, { status: 400 });
+      }
+      if (init?.method === "DELETE") {
+        deletes++;
+        status = "canceled";
+      }
+      return Response.json({ id: subscription, status, metadata: { agent_key: owner } });
+    });
+
+    expect(await api.closeSubscription(subscription, owner)).toEqual({ ok: true, value: { retained: true } });
+    expect(deletes).toBe(1);
+  });
+
   test("the signature is HMAC-SHA256 over 't.payload'; a wrong secret, a changed body, a stale or missing header fail", async () => {
     const now = (Math.floor(Date.now() / 1000) * 1000) as EpochMs;
     const body = '{"id":"evt_1"}';
@@ -146,7 +279,6 @@ describe("stripe boundary", () => {
     expect(sent[0].headers.get("content-type")).toBe("application/x-www-form-urlencoded");
     expect(Object.fromEntries(new URLSearchParams(sent[0].body))).toEqual({
       mode: "subscription",
-      client_reference_id: "p:dev:ann",
       success_url: "https://giraffes.test/billing/done",
       cancel_url: "https://giraffes.test/billing/cancel",
       "metadata[agent_key]": "p:dev:ann",
@@ -251,7 +383,7 @@ describe("stripe boundary", () => {
   test("an event names the subscription and the owner's agent key, and carries no state", () => {
     expect(parseEvent(checkoutEvent({ user: "ann", sub: "sub_1", plan: "plus", id: "evt_c" }))).toEqual({
       kind: "event",
-      event: { id: "evt_c", subscription: "sub_1", owner: "p:dev:ann" },
+      event: { id: "evt_c", subscription: "sub_1", owner: "p:dev:ann", checkout: "cs_0" },
     });
     expect(parseEvent(subscriptionEvent({ user: "ann", sub: "sub_1", plan: "plus", status: "canceled", id: "evt_s" }))).toEqual({
       kind: "event",
@@ -869,6 +1001,7 @@ describe("checkout and the portal", () => {
       storage.sql.exec("DROP TRIGGER IF EXISTS outside_write_immutable");
       storage.sql.exec("DROP TABLE IF EXISTS outside_approval");
       storage.sql.exec("DROP TABLE IF EXISTS outside_write");
+      storage.sql.exec("ALTER TABLE checkout_session DROP COLUMN closed");
       storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeAttempts));
       migrate(storage);
       expect(storage.sql.exec("SELECT delivery_id, ready_at, attempts FROM billing_alert").toArray()).toEqual([
@@ -906,6 +1039,7 @@ describe("checkout and the portal", () => {
         storage.sql.exec("DROP TRIGGER IF EXISTS outside_write_immutable");
         storage.sql.exec("DROP TABLE IF EXISTS outside_approval");
         storage.sql.exec("DROP TABLE IF EXISTS outside_write");
+        storage.sql.exec("ALTER TABLE checkout_session DROP COLUMN closed");
         storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeDestinationRecovery));
         storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, notified, closed_as) VALUES ('sub_a sub_b', 'old-id', 1, 'gone')");
       } else {
@@ -998,6 +1132,54 @@ describe("checkout and the portal", () => {
     await c.settle();
     expect(operator.delivered).toHaveLength(1);
     expect(await c.received()).toEqual([expect.stringContaining("I've alerted our billing team")]);
+  });
+
+  test("an operator alert receipt awaiting a storage retry cannot reach a fresh account after erase", async () => {
+    const kit = billingOn();
+    const c = await devChat("erase-alert", {
+      model: scripted([]),
+      at: "2099-11-04T10:00",
+      billing: {
+        ...kit.deps,
+        stripe: {
+          ...kit.stripe,
+          closeCheckout: async () => ({ ok: true, value: { subscription: null, retained: false } }),
+          closeSubscription: async () => ({ ok: true, value: { retained: false } }),
+        },
+      },
+    });
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    const operator = scriptedChannel();
+    await runInDurableObject(stub, (agent, { storage }) => {
+      agent.withDeps({ channels: { line: c.channel, telegram: operator, dev: c.channel }, operatorChat: { channel: "telegram", channelUserId: "4242" } });
+      storage.sql.exec(`CREATE TRIGGER fail_billing_receipt BEFORE UPDATE ON billing_alert
+        WHEN NEW.ready_at IS NULL BEGIN SELECT RAISE(ABORT, 'receipt write unavailable'); END`);
+    });
+    await c.say("/plan");
+    await pay(kit, c, "erase-alert", "standard");
+    await stripeChange(kit, { user: "erase-alert", sub: "sub_erase_alert_extra", plan: "included", status: "active" });
+    await c.settle();
+    expect(operator.delivered).toHaveLength(1);
+    expect(await runInDurableObject(stub, (_, { storage }) => storage.getAlarm())).toBe(c.clock.now() + 30_000);
+    await runInDurableObject(stub, (agent) => agent.withDeps({ firstContactConsent: true }));
+
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erase confirmation");
+    await c.tap(confirm.data);
+    expect(c.channel.delivered.at(-1)?.text).toContain("deleted your live Giraffe data");
+    await c.received();
+    c.clock.set(local("2099-11-04T10:02"));
+    await c.post("/start");
+    const start = c.channel.delivered.at(-1)?.button;
+    if (!start) throw new Error("missing start confirmation");
+    await c.tap(start.data);
+
+    const snapshot = await c.snapshot();
+    expect(snapshot.agent).not.toBeNull();
+    expect(snapshot.turns.map(({ text }) => text)).not.toEqual(expect.arrayContaining([expect.stringContaining("I've alerted our billing team")]));
+    expect(await c.received()).not.toEqual(expect.arrayContaining([expect.stringContaining("I've alerted our billing team")]));
+    expect(operator.delivered).toHaveLength(1);
   });
 
   test("does not re-alert or notify for the same subscriptions after Stripe event dedupe expires", async () => {

@@ -136,7 +136,8 @@ describe("admission to the beta", () => {
     const stub = env.AGENT.get(env.AGENT.idFromName("rate-event-upgrade"));
     await runInDurableObject(stub, (_a, { storage }) => {
       const version = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE rate_event")) + 1;
-      expect(version).toBe(MIGRATIONS.length);
+      expect(version).toBeGreaterThan(0);
+      storage.sql.exec("DROP TABLE routine_delivery");
       storage.sql.exec("DROP TABLE rate_event");
       storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(version - 1));
 

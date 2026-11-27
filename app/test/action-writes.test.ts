@@ -341,6 +341,7 @@ test("schema v26 upgrades to the action-safety migration", async () => {
   await runInDurableObject(stub, (_agent, state) => {
     const before = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE outside_write"));
     expect(before).toBeGreaterThanOrEqual(0);
+    state.storage.sql.exec("DROP TABLE routine_delivery");
     state.storage.sql.exec("DROP TABLE IF EXISTS rate_event");
     state.storage.sql.exec("DROP TRIGGER IF EXISTS outside_approval_immutable");
     state.storage.sql.exec("DROP TRIGGER IF EXISTS outside_write_immutable");

@@ -1904,7 +1904,11 @@ export class Agent extends DurableObject<Env> {
     const page = row.saved === null ? null : this.#store.savedPage(row.saved, a);
     const texts: readonly [string, ...string[]] | null = page ? [page.text] : row.saved === null ? row.texts : null;
     if (texts === null) return this.#store.drop(row.id, "failed", now, [], "pending");
-    if (!this.#store.markSending(row.id, day, claim.epoch)) return;
+    const routineAt = row.routine ? this.#deps.clock.now() : null;
+    if (routineAt !== null && this.#store.routineAttemptsSince(startOfLocalDay(routineAt, a.tz)) >= OUTREACH.dailyRoutineBudget) {
+      return this.#store.drop(row.id, "budget", routineAt, unaskedLog("dropped_budget", day), "pending");
+    }
+    if (!this.#store.markSending(row.id, day, claim.epoch, routineAt)) return;
     const delivery = await this.#deps.channels[row.to.channel].deliver({ ...row, texts }, now, claim.live);
     const after = this.#deps.clock.now();
     switch (delivery.kind) {

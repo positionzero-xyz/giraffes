@@ -1,3 +1,7 @@
+export const ROUTINE_OUTBOX = `o.trigger_kind = 'wakeup' AND EXISTS (
+  SELECT 1 FROM wakeup WHERE id = CAST(substr(o.event_key, length('wake:') + 1) AS INTEGER) AND repeat IS NOT NULL
+)`;
+
 export const MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE agent (
@@ -604,6 +608,16 @@ export const MIGRATIONS: readonly string[] = [
     at    INTEGER NOT NULL
   );
   CREATE INDEX rate_event_kind_at ON rate_event (kind, at);
+  `,
+  `
+  CREATE TABLE routine_delivery (
+    at       INTEGER PRIMARY KEY,
+    attempts INTEGER NOT NULL
+  );
+  INSERT INTO routine_delivery (at, attempts)
+    SELECT o.closed_at, COUNT(*) FROM outbox o
+    WHERE o.status = 'sent' AND o.closed_at IS NOT NULL AND ${ROUTINE_OUTBOX}
+    GROUP BY o.closed_at;
   `,
 ];
 

@@ -5,6 +5,7 @@ export const OUTREACH = {
   quietStartHour: 22,
   quietEndHour: 8,
   dailyUnaskedBudget: 3,
+  dailyRoutineBudget: 6,
 } as const;
 
 export function quietUntil(t: EpochMs, tz: TimeZone): EpochMs | null {

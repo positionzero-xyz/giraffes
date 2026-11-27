@@ -332,6 +332,85 @@ describe("routines", () => {
     model.assertDone();
   });
 
+  test("an asked routine can send six times per local day and a one-off reminder still fires", async () => {
+    const model = scripted([
+      turn({ actions: [
+        routine("stretch", "2099-11-04T22:30", "Stretch", "daily"),
+        schedule("pills", "2099-11-04T23:00", "Take your pills"),
+      ] }),
+      ...Array.from({ length: 7 }, () => chat("Stretch time.")),
+      chat("Take your pills."),
+      chat("Stretch time."),
+    ]);
+    const c = await devChat("routine-limit", { model, at: "2099-11-04T22:29" });
+    const fireEarly = async () => {
+      const res = await SELF.fetch("https://agent.test/dev/fire", {
+        method: "POST",
+        body: JSON.stringify({ user: "routine-limit", key: "stretch" }),
+      });
+      expect(res.status).toBe(200);
+      await c.settle();
+    };
+
+    await c.say("Remind me to stretch every day, and to take my pills tonight.");
+    await c.advanceTo("2099-11-04T22:30");
+    for (let i = 0; i < 6; i++) await fireEarly();
+    expect(await c.received()).toEqual(Array.from({ length: 6 }, () => "Stretch time."));
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(1);
+    expect((await reminders(c)).find(([key]) => key === "stretch")?.[1]).toBe("2099-11-05T22:30");
+
+    await c.advanceTo("2099-11-04T23:00");
+    expect(await c.received()).toEqual(["Take your pills."]);
+    await c.advanceTo("2099-11-05T00:01");
+    await fireEarly();
+    expect(await c.received()).toEqual(["Stretch time."]);
+    model.assertDone();
+  });
+
+  test("unasked and asked routines share the same daily allowance", async () => {
+    const routines = Array.from({ length: 7 }, (_, i) => ({
+      ...routine(`routine-${i}`, "2099-11-04T11:00", `Routine ${i}`, "daily"), asked: i >= 2 && i < 6,
+    }));
+    const model = scripted([
+      turn({ actions: routines.slice(0, 4) }),
+      turn({ actions: routines.slice(4) }),
+      ...Array.from({ length: 7 }, (_, i) => chat(`Routine ${i}`)),
+    ]);
+    const c = await devChat("routine-mixed", { model, at: "2099-11-04T10:00" });
+
+    await c.say("Set up my first routines.");
+    await c.say("Set up the rest of my routines.");
+    await c.advanceTo("2099-11-04T11:00");
+
+    expect(await c.received()).toEqual(Array.from({ length: 6 }, (_, i) => `Routine ${i}`));
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(1);
+    expect(c.logs("unasked").map((row) => row.status)).toEqual(["sent", "sent", "dropped_budget"]);
+    expect(await reminders(c)).toHaveLength(7);
+    model.assertDone();
+  });
+
+  test("a routine retry with uncertain delivery still needs room in the daily allowance", async () => {
+    const model = scripted([
+      turn({ actions: Array.from({ length: 6 }, (_, i) => routine(`routine-${i}`, "2099-11-04T11:00", `Routine ${i}`, "daily")) }),
+      ...Array.from({ length: 6 }, (_, i) => chat(`Routine ${i}`)),
+    ]);
+    const c = await devChat("routine-retry", {
+      model,
+      at: "2099-11-04T10:00",
+      deliveries: [{ kind: "in_doubt", afterMs: 60_000 }],
+    });
+
+    await c.say("Set up my routines.");
+    await c.advanceTo("2099-11-04T11:00");
+    expect(await c.received()).toEqual(Array.from({ length: 5 }, (_, i) => `Routine ${i + 1}`));
+
+    await c.advanceTo("2099-11-04T11:01");
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(1);
+    expect(await reminders(c)).toHaveLength(6);
+    model.assertDone();
+  });
+
   test("a weekday routine that fires on Friday comes back on Monday", async () => {
     const model = scripted([turn({ actions: [routine("standup", "2099-11-06T09:00", "Ask for today's top task", "weekdays"), send("Weekdays at 9.")] }), chat("Top task today?")]);
     const c = await devChat("wkd", { model, at: "2099-11-06T08:00" });

@@ -449,6 +449,22 @@ describe("trial and lapse", () => {
     expect(c.logs("turn").filter((t) => t.eventKind === "message").map((t) => t.outcome)).toEqual(["acted", "no_model", "lapsed", "lapsed", "lapsed"]);
   });
 
+  test("someone who adds the agent with no active plan gets the lapsed notice then, and not again that day", async () => {
+    const kit = billingOn({ TRIAL_DAYS: "0" });
+    const model = scripted([]);
+    const c = await devChat("fay", { model, at: "2099-11-04T10:00", billing: kit.deps });
+
+    await c.say("/follow");
+    expect(await c.received()).toEqual([NOTICE.lapsed]);
+    await c.say("hi");
+    expect(await c.received()).toEqual([]);
+    expect(model.calls).toHaveLength(0);
+    expect(c.logs("turn").map((l) => [l.eventKind, l.outcome])).toEqual([
+      ["lifecycle", "lapsed"],
+      ["message", "lapsed"],
+    ]);
+  });
+
   test("a reminder the person asked for still arrives after the trial ends, written by code, with no model call", async () => {
     const kit = billingOn({ TRIAL_DAYS: "1" });
     const model = scripted([turn({ actions: [schedule("vet", "2099-11-06T09:30", "Call the vet"), { type: "send", text: "Will do." }] })]);

@@ -43,7 +43,7 @@ import {
   type Step,
 } from "../box/machine";
 import { boxToken, signinTicket, signinUrl, type BoxToken } from "../box/names";
-import { CHANNEL_RETRY_MS, makeChannels, type ChannelRegistry } from "../channels/channel";
+import { CHANNEL_RETRY_MS, makeChannels, whileWorking, type ChannelRegistry } from "../channels/channel";
 import { commandOf, type Command } from "./commands";
 import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env, type OperatorChat } from "../config";
 import {
@@ -729,7 +729,8 @@ export class Agent extends DurableObject<Env> {
     const box = renderBoxTurn(shown, this.#store.boxSession());
     const access = this.#access();
     const catchUpBudget = batch.items[0].catchUp ? access.catchUpBudget(plan, this.#deps.clock.now()) ?? "unavailable" : null;
-    const served = await access.call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan, box, claim });
+    const call = () => access.call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan, box, claim });
+    const served = intentOf(first) === "reply" ? await whileWorking(this.#deps.channels[a.identity.channel], a.identity, call) : await call();
     const historyTrimmed = shown.historyLeftOut > 0 || ((served.kind === "ok" || served.kind === "failed") && served.trimmed);
     switch (served.kind) {
       case "ok": {

@@ -121,6 +121,25 @@ function outbound(over: Partial<OutboundMessage> = {}): OutboundMessage {
 }
 const fresh = { token: "reply-token-1", expiresAt: (NOW + 50_000) as EpochMs };
 
+describe("LINE loading animation", () => {
+  const to = { channel: "line", channelUserId: USER } as const;
+
+  test("a turn shows the loading animation, which spends no reply token, and asks again before it runs out", async () => {
+    const seen = stubFetch(() => Response.json({}, { status: 202 }));
+    const working = line().working;
+    await working?.show(to);
+    expect(seen.map((s) => [s.url, s.headers.get("authorization"), s.body])).toEqual([
+      ["https://api.line.me/v2/bot/chat/loading/start", "Bearer line-access-token", { chatId: USER, loadingSeconds: 20 }],
+    ]);
+    expect(working?.everyMs).toBeLessThan(20_000);
+  });
+
+  test("a failed loading request doesn't fail the turn", async () => {
+    stubFetch(() => Response.json({ message: "Internal error" }, { status: 500 }));
+    await expect(line().working?.show(to)).resolves.toBeUndefined();
+  });
+});
+
 describe("LINE delivery", () => {
   test.each([
     [{ message: "The property, 'to', in the request body is invalid (line: 1, column: 9)" }, "recipient_gone"],
@@ -304,6 +323,25 @@ describe("Telegram webhook", () => {
     const update = { update_id: 1, message: { message_id: 1, date: DATE, chat: privateChat, from, text: "hello" } };
     expect(await telegram().receive(tgWebhook(update, null))).toEqual({ kind: "rejected", status: 401 });
     expect(await telegram().receive(tgWebhook(update, "tg-webhook-secreT"))).toEqual({ kind: "rejected", status: 401 });
+  });
+});
+
+describe("Telegram typing", () => {
+  const to = { channel: "telegram", channelUserId: "777000111" } as const;
+
+  test("a turn shows typing, which is not a message, and asks again before Telegram's 5 seconds run out", async () => {
+    const seen = stubFetch(() => Response.json({ ok: true, result: true }));
+    const working = telegram().working;
+    await working?.show(to);
+    expect(seen.map((s) => [s.url, s.body])).toEqual([["https://api.telegram.org/bot123:abc/sendChatAction", { chat_id: "777000111", action: "typing" }]]);
+    expect(working?.everyMs).toBeLessThan(5000);
+  });
+
+  test("a failed typing request doesn't fail the turn", async () => {
+    stubFetch(() => {
+      throw new TypeError("fetch failed");
+    });
+    await expect(telegram().working?.show(to)).resolves.toBeUndefined();
   });
 });
 

@@ -1,6 +1,7 @@
 import {
   parseInviteCode,
   type Admission,
+  type AgentEvent,
   type Cohort,
   type EpochMs,
   type Half,
@@ -93,8 +94,14 @@ export function planAdmission(view: AdmissionView, answer: AdmissionAnswer | nul
 function codeIn(batch: Batch): InviteCode | null {
   let code: InviteCode | null = null;
   for (const { event: e } of batch.items) {
-    if (e.kind === "lifecycle" && e.code) code = e.code;
-    if (e.kind === "message") code = parseInviteCode(/^\/join\s+(\S+)$/i.exec(e.text.trim())?.[1] ?? e.text) ?? code;
+    code = inviteIn(e) ?? code;
   }
   return code;
+}
+
+export function inviteIn(event: AgentEvent): InviteCode | null {
+  if (event.kind === "lifecycle") return event.code ?? null;
+  return event.kind === "message"
+    ? parseInviteCode(/^\/join\s+(\S+)$/i.exec(event.text.trim())?.[1] ?? event.text)
+    : null;
 }

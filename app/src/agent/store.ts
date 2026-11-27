@@ -434,6 +434,7 @@ export class AgentStore {
       readonly trialEndsAt: EpochMs | null;
       /** Set when this person is admitted on first contact: a dev identity, or anyone while admission is open. */
       readonly admit: Seat | null;
+      readonly startBoundary?: EpochMs;
     },
     now: EpochMs,
   ): "inserted" | "duplicate" | "stale" {
@@ -459,6 +460,9 @@ export class AgentStore {
         now,
       ).rowsWritten;
       if (created > 0) {
+        if (first.startBoundary !== undefined) {
+          this.sql.exec("UPDATE forget SET epoch = ?, cutoff_at = ?, cutoff_seq = NULL", first.startBoundary, first.startBoundary);
+        }
         this.insertLogs(
           [{ stream: "agent", id: `agent:${envelope.agent}`, agent: envelope.agent, channel: envelope.identity.channel, firstSeenAt: now }],
           now,
@@ -818,6 +822,14 @@ export class AgentStore {
     return r ? { id: r.id, seenSeq: r.seen_seq, memory: r.memory, replyBackfill: fromJson(r.reply_backfill) } : null;
   }
 
+  oldestBoxHistory(after: number): readonly SeqTurn[] {
+    return this.sql.exec<SeqTurn>(
+      "SELECT seq, role, text, at FROM turn WHERE seq > MAX(?, (SELECT through_turn_seq FROM memory)) ORDER BY seq LIMIT ?",
+      after,
+      COMPACTION.promptTurns,
+    ).toArray();
+  }
+
   /**
    * Saves a turn only while its batch is still claimed: a forget that began during the turn closed the batch's rows, so
    * the turn's result is dropped whole. False when it was.
@@ -831,7 +843,8 @@ export class AgentStore {
       const tasks = this.applyTasks(commit.tasks, commit.trigger, commit.outbound ? outboxId : null, now);
       let seenSeq = seen?.sentThrough ?? 0;
       let gap = seen !== null && this.sql.exec("SELECT seq FROM turn WHERE seq > ? LIMIT 1", seenSeq).toArray().length > 0;
-      const replyBackfill: BoxReplyBackfill[] = [];
+      const previous = seen ? this.boxSession() : null;
+      const replyBackfill: BoxReplyBackfill[] = previous && previous.id === seen?.id ? previous.replyBackfill.filter((r) => r.seq > seenSeq) : [];
       for (const t of commit.turns) {
         const { seq } = this.sql.exec<{ seq: number }>("INSERT INTO turn (role, text, at, event_key) VALUES (?, ?, ?, ?) RETURNING seq", t.role, t.text, t.at, t.eventKey).one();
         if (!seen) continue;
@@ -1159,7 +1172,7 @@ export class AgentStore {
 
   openCheckouts(): readonly { readonly id: CheckoutId; readonly eventKey: EventKey }[] {
     return this.sql
-      .exec<{ id: CheckoutId; event_key: EventKey }>("SELECT id, event_key FROM checkout_session ORDER BY created_at, id")
+      .exec<{ id: CheckoutId; event_key: EventKey }>("SELECT id, event_key FROM checkout_session WHERE closed = 0 ORDER BY created_at, id")
       .toArray()
       .map((r) => ({ id: r.id, eventKey: r.event_key }));
   }
@@ -1169,7 +1182,12 @@ export class AgentStore {
   }
 
   checkoutClosed(id: CheckoutId): void {
-    this.sql.exec("DELETE FROM checkout_session WHERE id = ?", id);
+    this.sql.exec("UPDATE checkout_session SET closed = 1 WHERE id = ?", id);
+  }
+
+  checkoutIds(): readonly CheckoutId[] {
+    return this.sql.exec<{ id: CheckoutId }>("SELECT id FROM checkout_session ORDER BY created_at, id")
+      .toArray().map(({ id }) => id);
   }
 
   billingEventSeen(id: string): boolean {
@@ -1816,6 +1834,29 @@ export class AgentStore {
     return this.forget().op !== null;
   }
 
+  clearForErasure(job: Extract<Erasure, { kind: "preparing" }>): void {
+    this.tx(() => {
+      const tables = this.sql.exec<{ name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'table'
+          AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' AND name NOT GLOB '__cf_*'
+          AND name NOT IN ('meta', 'forget')
+          ORDER BY name = 'task'`,
+      ).toArray();
+      for (const { name } of tables) this.sql.exec(`DELETE FROM "${name.replaceAll('"', '""')}"`);
+      this.sql.exec("INSERT INTO memory (one) VALUES (1)");
+      this.sql.exec("INSERT INTO log_flush (one) VALUES (1)");
+      this.sql.exec("INSERT INTO key_revision (one) VALUES (1)");
+      this.sql.exec("INSERT INTO saved_items (one) VALUES (1)");
+      this.storage.kv.delete(ERASE_CHALLENGE);
+      this.storage.kv.delete(START_CHALLENGE);
+      this.storage.kv.put(ERASE_JOB, job);
+    });
+  }
+
+  detachInviter(inviter: AgentKey): void {
+    this.sql.exec("UPDATE admission SET inviter = NULL, code = NULL WHERE state = 'admitted' AND inviter = ?", inviter);
+  }
+
   /**
    * Opens a forget: the epoch moves on, so every result of work begun before now is stale, and the cutoff moves to the
    * trigger's place in its provider's order. Work in flight, waiting events the cutoff covers, waiting wake-ups and every
@@ -1871,3 +1912,4 @@ export class AgentStore {
     this.sql.exec("DELETE FROM billing_event WHERE at < ?", now - DEDUPE_WINDOW_MS);
   }
 }
+import { ERASE_CHALLENGE, ERASE_JOB, START_CHALLENGE, type Erasure } from "./account";

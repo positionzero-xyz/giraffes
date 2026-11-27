@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { boundedRequestBody } from "../body";
-import { eventKey, parseButton, personAgentKey, type ChannelEvent, type EpochMs, type InboundEnvelope, type OutboundMessage } from "../domain";
+import { diagnostic } from "../diagnostics";
+import { eventKey, parseButton, personAgentKey, type ChannelEvent, type EpochMs, type Identity, type InboundEnvelope, type OutboundMessage } from "../domain";
 import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
 
 const API = "https://api.line.me/v2/bot/message";
@@ -20,6 +21,8 @@ const REPLY_TOKEN_SAFETY_MS = 10_000;
 const MAX_MESSAGES = 5;
 const MAX_TEXT = 5000;
 const MAX_WEBHOOK_BYTES = 1024 * 1024;
+/** LINE shows the loading animation for this long, or until the next message to the person. */
+const LOADING_SECONDS = 20;
 
 const WebhookBody = z.object({ events: z.array(z.unknown()) });
 const WebhookEvent = z.object({
@@ -100,6 +103,19 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
     }
   }
 
+  async function loading(to: Identity): Promise<void> {
+    try {
+      const res = await fetch("https://api.line.me/v2/bot/chat/loading/start", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({ chatId: to.channelUserId, loadingSeconds: LOADING_SECONDS }),
+      });
+      if (!res.ok) diagnostic("line_loading_failed", res.status);
+    } catch {
+      diagnostic("line_loading_failed");
+    }
+  }
+
   return {
     async receive(req: Request): Promise<Received> {
       const given = req.headers.get("x-line-signature");
@@ -136,6 +152,8 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
     },
 
     deliverOperatorAlert: (msg) => push(msg, toMessages(msg), true),
+
+    working: { everyMs: (LOADING_SECONDS - 5) * 1000, show: loading },
 
     async deliver(msg: OutboundMessage, now: EpochMs, live: () => boolean = () => true): Promise<Delivery> {
       const messages = toMessages(msg);

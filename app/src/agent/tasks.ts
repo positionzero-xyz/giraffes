@@ -175,6 +175,19 @@ export type TaskOpRejection = { readonly action: string; readonly reason: TaskRe
 /** Checks the model's task ops against the open tasks after `taskEffects`, and returns both merged. */
 export const taskOpLabel = (op: TaskOp["op"], ref: string): string => `task_${op}:${ref}`;
 
+function nearTaskRef(a: TaskRef, b: TaskRef): boolean {
+  let i = 0;
+  while (i < a.length && a[i] === b[i]) i++;
+  if (a.length === b.length) {
+    return i < a.length && (a.slice(i + 1) === b.slice(i + 1) ||
+      (a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2)));
+  }
+  if (a.length === b.length + 1) return a.slice(i + 1) === b.slice(i);
+  return b.length === a.length + 1 && a.slice(i) === b.slice(i + 1);
+}
+
+const nearbyRefs = (ref: TaskRef, open: Iterable<TaskRef>) => [...open].filter((candidate) => nearTaskRef(ref, candidate));
+
 export function planTasks(
   ops: readonly TaskOp[],
   view: TaskView,
@@ -207,8 +220,13 @@ export function planTasks(
 
   ops.forEach((o, i) => {
     if (i >= TASKS.maxOps) return reject(o, "too_many_task_ops");
-    const ref = parseTaskRef(o.ref);
+    let ref = parseTaskRef(o.ref);
     if (ref === null) return reject(o, "task_unknown");
+    if (o.op !== "close" && !open.has(ref) && !done.has(ref) && !opened.some((t) => t.ref === ref)) {
+      const matches = nearbyRefs(ref, open);
+      if (matches.length > 1) return reject(o, "task_unknown");
+      if (matches.length === 1) ref = matches[0];
+    }
     switch (o.op) {
       case "open":
         ensureOpen(o, ref);
@@ -251,8 +269,9 @@ export function linkOf(view: TaskView, tasks: TaskCommit, about: string): TaskTa
   if (ref === null) return null;
   if (tasks.open.some((t) => t.ref === ref)) return { ref };
   const known = view.openTasks.find((t) => t.ref === ref);
-  if (!known) return null;
-  return isFinished(finished, known) ? { id: known.id } : { ref };
+  if (known) return isFinished(finished, known) ? { id: known.id } : { ref };
+  const matches = nearbyRefs(ref, view.openTasks.filter((t) => !isFinished(finished, t)).map((t) => t.ref));
+  return matches.length === 1 ? { ref: matches[0] } : null;
 }
 
 /** The task a ref the model named stands for: one opened this turn, or one still open after it. */

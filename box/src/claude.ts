@@ -101,8 +101,18 @@ function readAt(body: Json): At | undefined {
   return typeof body.box === "string" && SESSION_ID.test(body.box) && isEpoch(body.epoch) ? { box: body.box, epoch: body.epoch } : undefined;
 }
 
-export function readEraseRequest(body: unknown): number | null {
-  return isObject(body) && isEpoch(body.epoch) && body.epoch > 0 ? body.epoch : null;
+type EraseRequest =
+  | { readonly scope: "workspace"; readonly epoch: number; readonly box?: string }
+  | { readonly scope: "account"; readonly epoch: number; readonly box: string };
+
+export function readEraseRequest(body: unknown): EraseRequest | null {
+  if (!isObject(body) || !isEpoch(body.epoch) || body.epoch === 0) return null;
+  const { box, epoch, scope } = body;
+  if (box === undefined) return scope === undefined ? { scope: "workspace", epoch } : null;
+  if (typeof box !== "string" || !SESSION_ID.test(box)) return null;
+  if (scope === undefined) return { scope: "workspace", epoch, box };
+  if (scope === "account") return { scope, epoch, box };
+  return null;
 }
 
 export function readParseRequest(body: unknown): ParseRequest | null {
@@ -281,6 +291,7 @@ export function agentArgs(req: AgentRequest, toolsFile: string, session: { reado
     "--tools", "",
     "--append-system-prompt", req.append,
     "--strict-mcp-config",
+    "--settings", JSON.stringify({ includeGitInstructions: false }),
     "--mcp-config", JSON.stringify(mcp),
     "--allowedTools", req.tools.map((t) => `${TOOL_PREFIX}${t.name}`).join(","),
     "--setting-sources", "",

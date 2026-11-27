@@ -2,7 +2,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readTicket, verifyBearer, type SigninTicket } from "./auth.ts";
-import { agentTurn, authStatus, cliVersion, deleteSessionTranscripts, isSessionId, parseTurn, readAgentRequest, readEraseRequest, readParseRequest, spawnClaude, stopClaude, type At, type Cli } from "./claude.ts";
+import { agentTurn, authStatus, cliVersion, deleteSessionTranscripts, parseTurn, readAgentRequest, readEraseRequest, readParseRequest, spawnClaude, stopClaude, type At, type Cli } from "./claude.ts";
 import { diagnostic } from "./diagnostics.ts";
 import { leftovers, loadOrCreateState, saveState, sweep, writeDurably, type PersonFiles } from "./erase.ts";
 import { readJson, readSigninJson, sendJson } from "./http.ts";
@@ -61,6 +61,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
   let login: Login | null = null;
   const usedTickets = new Map<string, number>();
   let turns: Promise<unknown> = Promise.resolve();
+  let unrecordedSession: string | null = null;
   let version: string | null = null;
   const files: PersonFiles = { home, configDir, scratchDirs, sessionFile, stateFile };
   let state = loadOrCreateState(stateFile);
@@ -91,7 +92,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
     }
   }
 
-  const admits = (at: At): boolean => !state.erasing && (at === null ? !state.epochs : at.box === state.box && at.epoch >= state.floor);
+  const admits = (at: At): boolean => !state.erasing && !state.retired && (at === null ? !state.epochs : at.box === state.box && at.epoch >= state.floor);
 
   function turnAt<R>(at: At, arrivedAfter: number, abort: AbortController, run: () => Promise<R>): Promise<R | typeof STALE> {
     const current = () => admits(at) && erasesStarted === arrivedAfter;
@@ -111,8 +112,8 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
         return false;
       }
       try {
-        sweep(files);
-        const left = leftovers(files).length;
+        sweep(files, state.retired === true);
+        const left = leftovers(files, state.retired === true).length;
         if (left > 0) {
           console.error(`erase left ${left} entries`);
           return false;
@@ -120,6 +121,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
         const done = { ...state, erasing: false };
         saveState(stateFile, done);
         state = done;
+        unrecordedSession = null;
         return true;
       } catch (err) {
         console.error(`erase failed: ${errorCode(err)}`);
@@ -165,12 +167,13 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
   async function health(res: ServerResponse): Promise<void> {
     const abort = new AbortController();
     const status = await withCli(abort, async () => {
+      if (state.retired) return { loggedIn: false };
       const auth = await authStatus(cli, abort.signal);
       if (auth) version ??= await cliVersion(cli, abort.signal);
       return auth;
     });
     if (!status) return sendJson(res, 502, { error: "claude_failed" });
-    sendJson(res, 200, { ok: true, signedIn: status.loggedIn, authMethod: status.authMethod, version: version ?? "unknown", box: state.box });
+    sendJson(res, 200, { ok: true, signedIn: status.loggedIn, authMethod: "authMethod" in status ? status.authMethod : undefined, version: version ?? "unknown", box: state.box });
   }
 
   async function parse(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -219,10 +222,10 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
       if (result.status === 200 && parsed.ephemeral !== true) {
         const { id, resumed } = result.body.session;
         const written = (!named && resumed) || writeLegacySession(id);
-        if (before !== null && before !== id && isSessionId(before)) {
-          const deleted = deleteSessionTranscripts(configDir, [before]);
-          if (!written && !deleted) return { status: 502, body: { error: "claude_failed" } };
-        }
+        const replaced = [before, unrecordedSession].filter((prior): prior is string => prior !== null && prior !== id);
+        const deleted = deleteSessionTranscripts(configDir, replaced);
+        if (!written && !deleted) return { status: 502, body: { error: "claude_failed" } };
+        unrecordedSession = written ? null : id;
       }
       return result;
     });
@@ -230,21 +233,30 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
   }
 
   async function erase(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const epoch = readEraseRequest(await readJson(req));
-    if (epoch === null) return sendJson(res, 400, { error: "bad_request" });
+    const request = readEraseRequest(await readJson(req));
+    if (request === null) return sendJson(res, 400, { error: "bad_request" });
     while (wiping) await wiping;
-    const erasing = { ...state, floor: Math.max(state.floor, epoch), erasing: true, epochs: true };
+    if ((request.box !== undefined && request.box !== state.box) || (request.scope === "workspace" && state.retired)) {
+      return sendJson(res, 412, { error: "stale" });
+    }
+    const erasing = {
+      ...state,
+      floor: Math.max(state.floor, request.epoch),
+      erasing: true,
+      epochs: true,
+      ...(request.scope === "account" ? { retired: true as const } : {}),
+    };
     saveState(stateFile, erasing);
     state = erasing;
     erasesStarted += 1;
     if (!(await wipe())) return sendJson(res, 500, { error: "erase_incomplete" });
     console.log(`erased to epoch ${state.floor}`);
-    sendJson(res, 200, { box: state.box, floor: state.floor });
+    sendJson(res, 200, { box: state.box, floor: state.floor, ...(request.scope === "account" ? { scope: request.scope } : {}) });
   }
 
   async function signinStart(ticket: SigninTicket, res: ServerResponse): Promise<void> {
     while (wiping) await wiping;
-    if (state.erasing) return sendJson(res, 412, { error: "stale" });
+    if (state.erasing || state.retired) return sendJson(res, 412, { error: "stale" });
     if (login?.completing) return sendJson(res, 409, { error: "busy" });
     const at = now();
     for (const [used, expiresAt] of usedTickets) if (expiresAt <= at) usedTickets.delete(used);
@@ -262,6 +274,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
   }
 
   async function signinCode(ticket: SigninTicket, raw: unknown, res: ServerResponse): Promise<void> {
+    if (state.erasing || state.retired) return sendJson(res, 412, { error: "stale" });
     const code = typeof raw === "string" ? raw.trim() : "";
     if (!code || code.length > MAX_CODE_LENGTH || /[\r\n]/.test(code)) return sendJson(res, 400, { error: "bad_code" });
     const pending = login;
@@ -280,7 +293,7 @@ export function createBox({ token, cli, sessionFile, home, configDir, scratchDir
       if (!pending.exited) stopClaude(pending.proc);
       await waitUntil(() => pending.exited, KILL_WAIT_MS);
       const abort = new AbortController();
-      const signedIn = (await withCli(abort, () => authStatus(cli, abort.signal)))?.loggedIn === true;
+      const signedIn = (await withCli(abort, () => state.retired ? Promise.resolve(null) : authStatus(cli, abort.signal)))?.loggedIn === true;
       diagnostic({ code: "signin_complete", signedIn });
       sendJson(res, 200, { signedIn });
     } finally {

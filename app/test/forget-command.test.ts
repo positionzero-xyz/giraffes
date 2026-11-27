@@ -2,6 +2,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { devLane, DEV_URL_SCRIPTED } from "../src/access/access";
 import { prepareOutsideWrite } from "../src/action/writes";
+import { ACCOUNT_COPY } from "../src/agent/account";
 import { Agent } from "../src/agent/agent";
 import { backupsWithin, HOST_BACKUP_DAYS } from "../src/agent/backups";
 import { FORGET_TEXT, type Receipt } from "../src/agent/forget-text";
@@ -238,6 +239,30 @@ describe("the box erase", () => {
     expect(box.erases).toEqual([1, 2]);
     expect(await sql(c, "SELECT epoch, op FROM forget")).toEqual([{ epoch: 2, op: null }]);
     expect(await c.received()).toEqual([en.receipt({ deleted: ["all", "all"], backups: "expire" })]);
+  });
+
+  test("an account erase confirmed while the forget's box erase is in flight sends nothing more of the forget", async () => {
+    const { c, box } = await seeded("erase-account-meanwhile", { box: true });
+    box.eraseSteps.push("fail");
+    expect(await say(c, "/forget all")).toEqual([]);
+    await say(c, "/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("no erase confirmation");
+
+    let open = () => {};
+    box.eraseHold = new Promise<void>((r) => (open = r));
+    c.clock.set((c.clock.now() + 3 * 60_000) as EpochMs);
+    const first = c.settle();
+    for (let i = 0; i < 200 && box.erases.length < 2; i++) await new Promise((r) => setTimeout(r, 1));
+    expect(box.erases).toEqual([1, 1]);
+    await c.post(`/tap ${confirm.data}`);
+    box.eraseHold = null;
+    open();
+    await first;
+    await c.settle();
+
+    expect(await c.received()).toEqual([ACCOUNT_COPY.en.receipt + "\n\n" + ACCOUNT_COPY.en.flyCopies + "\n\n" + ACCOUNT_COPY.en.stripeRecords + "\n\n" + ACCOUNT_COPY.en.return]);
+    expect((await c.snapshot()).agent).toBeNull();
   });
 
   test("a crash between the deletion and the erase is survived, and the receipt goes out once", async () => {

@@ -1967,10 +1967,12 @@ export class Agent extends DurableObject<Env> {
    * now leaves the forget open, retried with backoff; the person is told it is pending and reminded a few times.
    */
   async #stepForget(): Promise<void> {
+    if (this.#erasure()) return;
     const now = this.#deps.clock.now();
     const f = this.#store.forgetOp();
     if (f?.phase === "erase" && f.retryAt !== null && f.retryAt <= now) {
       const erased = await this.#eraseBox(f.epoch);
+      if (this.#erasure()) return;
       const after = this.#deps.clock.now();
       if (erased === null) this.#store.erasePending(f.op, after);
       else {

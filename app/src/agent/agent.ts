@@ -272,7 +272,7 @@ export class Agent extends DurableObject<Env> {
       startBoundary: starting ? now : undefined,
     };
     const m = envelope.event;
-    const privacy = m.kind === "message" ? forgetCommandOf(m.text) : null;
+    const privacy = m.kind === "message" && !m.edited ? forgetCommandOf(m.text) : null;
     const stored = this.#store.enqueue(privacy && m.kind === "message" ? { ...envelope, event: { ...m, text: "/forget" } } : envelope, first, now, privacy);
     if (stored !== "inserted") return stored;
     if (privacy?.kind === "start" || privacy?.kind === "all") this.#devSavedPages.clear();
@@ -464,7 +464,7 @@ export class Agent extends DurableObject<Env> {
 
   async #accountControl(envelope: InboundEnvelope, now: EpochMs): Promise<"continue" | "handled" | { readonly invite?: InviteCode }> {
     const { event, identity } = envelope;
-    const remove = event.kind === "message" && event.text.trim().toLowerCase() === "/erase";
+    const remove = event.kind === "message" && !event.edited && event.text.trim().toLowerCase() === "/erase";
     const erasing = this.#erasure();
     if (erasing) {
       if (remove) await this.#deliverAccountNotice({
@@ -1933,7 +1933,7 @@ export class Agent extends DurableObject<Env> {
             if (!oldest.done) this.#devSavedPages.delete(oldest.value);
           }
         }
-        return this.#store.markSent(row.id, delivery.via, after, unaskedLog("sent", day), page?.next);
+        return this.#store.markSent(row.id, delivery.via, after, unaskedLog("sent", day), page?.next, delivery.providerMessages ?? []);
       case "retry":
       case "in_doubt": {
         const at = (after + delivery.afterMs) as EpochMs;
@@ -2130,7 +2130,11 @@ function withoutSecrets(envelope: InboundEnvelope): InboundEnvelope {
     return { ...envelope, event: { ...e, text: command.submitted ? "/feedback submitted" : "/feedback" } };
   }
   const r = redactSecrets(e.text);
-  return r.found ? { ...envelope, event: { ...e, text: r.text, redacted: true } } : envelope;
+  const quoted = e.quote?.kind === "text" ? redactSecrets(e.quote.text) : null;
+  if (!r.found && quoted?.found !== true) return envelope;
+  const quote = quoted?.found && e.quote?.kind === "text" ? { ...e.quote, text: quoted.text } : e.quote;
+  const event = { ...e, text: r.text, redacted: true as const };
+  return { ...envelope, event: quote ? { ...event, quote } : event };
 }
 
 function longDate(t: EpochMs, tz: TimeZone, lang: Language): string {

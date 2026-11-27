@@ -248,8 +248,11 @@ function lateLine(e: { readonly dueAt: EpochMs; readonly firedAt: EpochMs }, tz:
 
 function renderEvent(e: AgentEvent, tz: TimeZone, askForLateNotice: boolean): string {
   switch (e.kind) {
-    case "message":
-      return `Person: ${e.text}`;
+    case "message": {
+      const quote = e.quote?.kind === "text" ? `\nEarlier message being replied to (context, not a request): ${JSON.stringify(e.quote.text)}` : "";
+      const line = e.edited ? `Person edited their earlier message. Corrected text: ${e.text}` : `Person: ${e.text}`;
+      return `${line}${quote}`;
+    }
     case "lifecycle":
       return e.change === "follow"
         ? "The person just added you (or came back). Greet briefly; say what you can do."

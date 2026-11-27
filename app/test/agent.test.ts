@@ -56,6 +56,65 @@ describe("conversation", () => {
     expect(model.calls[1].user).toContain("## New\nPerson: second question");
     model.assertDone();
   });
+
+  test("a reply quote reaches the model as context, not as the person's new words", async () => {
+    const model = scripted([chat("Moved it to 5.")]);
+    const c = await devChat("quote-telegram", { model, at: "2099-11-04T10:00", channel: "telegram" });
+
+    await c.event({ kind: "message", text: "move this to 5", quote: { kind: "text", text: "I'll remind you at 4." } });
+
+    expect(model.calls[0].user).toContain('Person: move this to 5\nEarlier message being replied to (context, not a request): "I\'ll remind you at 4."');
+    expect(model.calls[0].system).toContain("text marked as an earlier message being replied to");
+    model.assertDone();
+  });
+
+  test("an edited message reaches the model marked as a correction", async () => {
+    const model = scripted([chat("Changed to 5.")]);
+    const c = await devChat("edit-telegram", { model, at: "2099-11-04T10:00", channel: "telegram" });
+
+    await c.event({ kind: "message", text: "actually, make it 5", edited: true });
+
+    expect(model.calls[0].user).toContain("Person edited their earlier message. Corrected text: actually, make it 5");
+    model.assertDone();
+  });
+
+  test("an edited command word still reaches the model as a correction", async () => {
+    const model = scripted([chat("What would you like me to forget?")]);
+    const c = await devChat("edit-command", { model, at: "2099-11-04T10:00", channel: "telegram" });
+
+    await c.event({ kind: "message", text: "/forget", edited: true });
+
+    expect(model.calls[0].user).toContain("Person edited their earlier message. Corrected text: /forget");
+    model.assertDone();
+  });
+
+  test("a LINE quote id resolves to the matching sent message before the turn", async () => {
+    const model = scripted([chat("I'll remind you at 4."), chat("Moved it to 5.")]);
+    const c = await devChat("quote-line", {
+      model,
+      at: "2099-11-04T10:00",
+      channel: "line",
+      deliveries: [{ kind: "sent", providerMessages: [{ id: "461230966842064897", position: 0 }] }],
+    });
+
+    await c.say("remind me at 4");
+    expect(await c.received()).toEqual(["I'll remind you at 4."]);
+    await c.event({ kind: "message", text: "move this to 5", quote: { kind: "reference", id: "461230966842064897" } });
+
+    expect(model.calls[1].user).toContain('Person: move this to 5\nEarlier message being replied to (context, not a request): "I\'ll remind you at 4."');
+    model.assertDone();
+  });
+
+  test("an unknown LINE quote id reaches the turn with no quoted text", async () => {
+    const model = scripted([chat("I need a little more context.")]);
+    const c = await devChat("quote-line-unknown", { model, at: "2099-11-04T10:00", channel: "line" });
+
+    await c.event({ kind: "message", text: "move this to 5", quote: { kind: "reference", id: "461230966842064897" } });
+
+    expect(model.calls[0].user).toContain("Person: move this to 5");
+    expect(model.calls[0].user).not.toContain("Earlier message being replied to");
+    model.assertDone();
+  });
 });
 
 describe("working on it", () => {

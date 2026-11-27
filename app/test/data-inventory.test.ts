@@ -33,6 +33,7 @@ const durable = {
   key_ticket: { secret: "nonce_hash", operational: "expires_at revision status outcome created_at" },
   log_flush: { operational: "one failures retry_at" },
   log_outbox: { identity: "id", operational: "stream row created_at" },
+  line_message: { identity: "id outbox_id", operational: "position created_at" },
   memory: { chat: "summary", operational: "one through_turn_seq updated_at compaction_failures compaction_retry_at" },
   memory_note: { saved: "text", identity: "id event_key", operational: "created_at" },
   meta: { operational: "k v" },
@@ -165,7 +166,7 @@ test("ledger erase covers every person table and removes indirect enrollment and
 
 type Fields<T> = { [K in keyof T]-?: keyof Classification };
 const inbox = {
-  message: { kind: "operational", text: "chat", reply: "secret", redacted: "operational" },
+  message: { kind: "operational", text: "chat", reply: "secret", redacted: "operational", edited: "operational", quote: "chat" },
   lifecycle: { kind: "operational", change: "operational", at: "operational", reply: "secret", code: "secret" },
   choice: { kind: "operational", choice: "identity", at: "operational", reply: "secret", epoch: "operational" },
   wakeup: { kind: "operational", wakeupId: "identity", key: "saved", origin: "operational", note: "saved", dueAt: "saved",

@@ -63,6 +63,7 @@ import {
   type PersonStatus,
   type ReplyHandle,
   type ProposalId,
+  type ProviderMessageReference,
   type Repeat,
   type TaskFact,
   type TaskId,
@@ -618,7 +619,7 @@ export class AgentStore {
       const inFlight = this.sql
         .exec<InboxCols>("SELECT event_key, payload, attempts, received_at, catch_up FROM inbox WHERE status = 'processing' ORDER BY seq")
         .toArray()
-        .map(toInboxItem);
+        .map((r) => this.inboxItem(r));
       const batch = toBatch(inFlight);
       const poisoned = batch && Math.max(...batch.items.map((i) => i.attempts)) >= TURN.maxClaimAttempts ? batch : null;
       if (!poisoned) this.sql.exec("UPDATE inbox SET status = 'pending' WHERE status = 'processing'");
@@ -725,7 +726,25 @@ export class AgentStore {
       catchUp ? 1 : 0,
       JSON.stringify(rows.map((r) => r.event_key)),
     );
-    return toBatch(rows.map((r) => toInboxItem({ ...r, attempts: r.attempts + 1, catch_up: catchUp ? r.catch_up ?? "joined" : null })));
+    return toBatch(rows.map((r) => this.inboxItem({ ...r, attempts: r.attempts + 1, catch_up: catchUp ? r.catch_up ?? "joined" : null })));
+  }
+
+  private inboxItem(r: InboxCols): InboxItem {
+    const item = toInboxItem(r);
+    const e = item.event;
+    if (e.kind !== "message" || e.quote?.kind !== "reference") return item;
+    const text = this.lineMessageText(e.quote.id);
+    return text === null ? item : { ...item, event: { ...e, quote: { kind: "text", text } } };
+  }
+
+  private lineMessageText(id: string): string | null {
+    const r = this.sql
+      .exec<{ texts: string; position: number }>(
+        `SELECT o.texts, l.position FROM line_message l JOIN outbox o ON o.id = l.outbox_id WHERE l.id = ?`,
+        id,
+      )
+      .toArray()[0];
+    return r ? (fromJson<string[]>(r.texts)[r.position] ?? null) : null;
   }
 
   releaseBatch(keys: readonly EventKey[], readyAt: EpochMs, logs: readonly LogRow[], now: EpochMs): void {
@@ -1541,7 +1560,14 @@ export class AgentStore {
     else this.sql.exec("UPDATE routine_delivery SET at = ?, sending_id = NULL WHERE sending_id = ?", countedAt, id);
   }
 
-  markSent(id: OutboxId, via: "reply" | "push", now: EpochMs, logs: readonly LogRow[], next: SavedCursor | null = null): void {
+  markSent(
+    id: OutboxId,
+    via: "reply" | "push",
+    now: EpochMs,
+    logs: readonly LogRow[],
+    next: SavedCursor | null = null,
+    providerMessages: readonly ProviderMessageReference[] = [],
+  ): void {
     this.tx(() => {
       if (next !== null) {
         this.sql.exec(
@@ -1560,7 +1586,12 @@ export class AgentStore {
         ).rowsWritten > 0;
         if (done) this.sql.exec("DELETE FROM saved_item");
       }
-      this.sql.exec("UPDATE outbox SET status = 'sent', via = ?, closed_at = ? WHERE id = ? AND status = 'sending'", via, now, id);
+      const marked = this.sql.exec("UPDATE outbox SET status = 'sent', via = ?, closed_at = ? WHERE id = ? AND status = 'sending'", via, now, id).rowsWritten;
+      if (marked > 0) {
+        for (const m of providerMessages) {
+          this.sql.exec("INSERT OR IGNORE INTO line_message (id, outbox_id, position, created_at) VALUES (?, ?, ?, ?)", m.id, id, m.position, now);
+        }
+      }
       this.sql.exec("UPDATE outbox SET reply_token = NULL, reply_expires = NULL WHERE id = ? AND saved_item IS NOT NULL", id);
       this.insertLogs(logs, now);
     });
@@ -2509,6 +2540,7 @@ export class AgentStore {
     });
     this.sql.exec("DELETE FROM inbox WHERE status IN ('done', 'failed') AND finished_at < ?", now - DEDUPE_WINDOW_MS);
     this.sql.exec("DELETE FROM outbox WHERE status IN ('sent', 'dropped') AND closed_at < ?", now - OUTBOX_KEEP_MS);
+    this.sql.exec("DELETE FROM line_message WHERE NOT EXISTS (SELECT 1 FROM outbox WHERE outbox.id = line_message.outbox_id)");
     this.sql.exec("DELETE FROM routine_delivery WHERE at <= ? AND sending_id IS NULL", now - DAY_MS);
     this.sql.exec("DELETE FROM billing_event WHERE at < ?", now - DEDUPE_WINDOW_MS);
   }

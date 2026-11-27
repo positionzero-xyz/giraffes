@@ -635,6 +635,15 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE outbox ADD COLUMN privacy TEXT CHECK (privacy IN ('page', 'notice', 'receipt'));
   ALTER TABLE outbox ADD COLUMN epoch INTEGER CHECK ((privacy IS NULL) = (epoch IS NULL));
   `,
+  `
+  CREATE TABLE line_message (
+    id          TEXT PRIMARY KEY,
+    outbox_id   TEXT NOT NULL,
+    position    INTEGER NOT NULL CHECK (position >= 0),
+    created_at  INTEGER NOT NULL
+  );
+  CREATE INDEX line_message_outbox ON line_message (outbox_id);
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

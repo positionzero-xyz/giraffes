@@ -32,7 +32,7 @@ const KEY: ReadonlyMap<string, Command> = new Map<string, Command>([
 ]);
 
 export function commandOf(e: AgentEvent): Command | null {
-  if (e.kind !== "message") return null;
+  if (e.kind !== "message" || e.edited) return null;
   const trimmed = e.text.trim();
   const feedback = /^\/feedback(?:\s+([\s\S]+))?$/i.exec(trimmed);
   if (feedback) return { kind: "feedback", submitted: feedback[1] !== undefined };

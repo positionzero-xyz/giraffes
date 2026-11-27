@@ -83,6 +83,7 @@ for rev in "$@"; do
       # Older tests resolve the CLI via ../node_modules relative to the test file.
       docker run --rm -v "$(cygpath -m "$wt/box/test"):/opt/box/test:ro" \
         -v "$(cygpath -m "$wt/box/mock-api.mjs"):/opt/box/mock-api.mjs:ro" \
+        -v "$(cygpath -m "$wt/box/up.sh"):/opt/box/up.sh:ro" \
         -e BOX_TEST_CLI=/opt/box/node_modules/@anthropic-ai/claude-code/bin/claude.exe \
         "$img" sh -c 'cd /opt/box && node --test test/*.test.ts' > "$log.linuxbox.log" 2>&1; lb=$?
       lbp=$(count "$log.linuxbox.log" '^(# |ℹ )pass [0-9]+')

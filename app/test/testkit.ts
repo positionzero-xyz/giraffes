@@ -11,7 +11,7 @@ import { loadConfig, type BillingConfig, type Env } from "../src/config";
 import type { Agent, AgentSnapshot, BillingDeps, BoxDeps } from "../src/agent/agent";
 import type { TurnOutput } from "../src/agent/turn";
 import { boxClient } from "../src/box/client";
-import type { BoxHost, HostResult } from "../src/box/host";
+import type { BoxHost, FlyBoxRetirement, HostResult } from "../src/box/host";
 import { boxName, type BoxName } from "../src/box/names";
 import type { ChannelAdapter } from "../src/channels/channel";
 import type { AdmissionMode } from "../src/agent/admission";
@@ -448,7 +448,9 @@ export function fakeBox(
     reachable: true,
     nameOf: (user: string) => boxName(BOX_SECRET, "gbox-", personAgentKey({ channel: "dev", channelUserId: user })),
   };
-  const host: BoxHost = {
+  const retiring = new Map<string, string>();
+  const wiped = new Set<string>();
+  const host: BoxHost & FlyBoxRetirement = {
     kind: "fly",
     get image() {
       return box.image;
@@ -475,6 +477,23 @@ export function fakeBox(
       if (step === "die") throw new Error("the host step died after destroying the app");
       return { ok: true };
     },
+    async retirementTarget(name) {
+      if (!box.created.has(name)) return { ok: false, retryable: false, missing: true, detail: "no box" };
+      const id = retiring.get(name) ?? opts.volume ?? crypto.randomUUID();
+      retiring.set(name, id);
+      return { ok: true, target: { disk: id, machine: name, disks: [id] } };
+    },
+    async retirementRecheck(name, target) {
+      return target.disk === retiring.get(name)
+        ? { ok: true, state: "present" }
+        : { ok: false, retryable: true, detail: "disk changed" };
+    },
+    async retireWipedDisk(name) {
+      return wiped.has(name) ? { ok: true } : { ok: false, retryable: true, detail: "disk not wiped" };
+    },
+    async removeRetiredApp(name) {
+      return host.destroy(name);
+    },
   };
   const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
     const url = new URL(input);
@@ -483,7 +502,14 @@ export function fakeBox(
     if (!box.created.has(name) || !box.reachable) throw new TypeError("fetch failed: no such host");
     const authorization = new Headers(init?.headers).get("authorization");
     if (url.pathname === "/health") {
-      return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test", ...(opts.volume ? { box: opts.volume } : {}) });
+      return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test", box: retiring.get(name) ?? opts.volume });
+    }
+    if (url.pathname === "/erase") {
+      const request = JSON.parse(String(init?.body));
+      if (!Number.isSafeInteger(request.epoch) || request.epoch <= 0) return new Response(null, { status: 400 });
+      if (request.scope !== "account" || request.box !== retiring.get(name)) return new Response(null, { status: 412 });
+      wiped.add(name);
+      return Response.json({ box: request.box, scope: "account", floor: request.epoch });
     }
     if (url.pathname === "/parse" || url.pathname === "/agent") {
       const agent = url.pathname === "/agent";

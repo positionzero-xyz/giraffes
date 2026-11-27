@@ -76,7 +76,7 @@ import { d1Ledger, modelCallRow, type Ledger, type LogRow, type UnaskedStatus } 
 import { NOTICES, type KeyPageError } from "../notices";
 import { scripted, scriptedConnect, type ScriptedModel, type ScriptStep } from "../model/scripted";
 import { connect, type Connect } from "../model/client";
-import { bytesOf, renderPrompt, type PromptParts } from "../model/prompt";
+import type { PromptParts } from "../model/prompt";
 import { PROVIDERS } from "../model/providers";
 import { routeFor, type CallPurpose, type Purpose } from "../model/routes";
 import { estimate, fits } from "../policy/spend";
@@ -1235,12 +1235,12 @@ export class Agent extends DurableObject<Env> {
   }
 
   /**
-   * When the history not yet in the summary doesn't fit the smallest budget among the person's lanes, one compaction
-   * step runs first, in this drain. If compaction is backing off or fails, the turn shows the newest history that fits.
+   * When the history not yet in the summary doesn't fit the prompt the first lane would send, one compaction step
+   * runs first, in this drain. If compaction is backing off or fails, the turn shows the newest history that fits.
    */
   async #historyThatFits(batch: Batch, a: AgentRow, view: TurnView, plan: Plan, claim: Claim): Promise<TurnView> {
-    const budget = this.#access().budget("turn", TURN_SYSTEM, plan);
-    const fits = view.historyLeftOut === 0 && bytesOf(renderPrompt(renderUser(view))) <= (budget ?? Infinity);
+    const box = renderBoxTurn(view, this.#store.boxSession());
+    const fits = view.historyLeftOut === 0 && this.#access().turnFitsWhole({ system: TURN_SYSTEM, prompt: renderUser(view), box, plan });
     if (fits || view.recent.length === 0) return view;
     try {
       if (!(await this.#compactStep(plan, true, claim))) return view;

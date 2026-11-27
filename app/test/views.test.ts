@@ -70,6 +70,19 @@ async function wrote(agent: string, at: number): Promise<void> {
   );
 }
 
+async function modelCall(agent: string, at: number, backend: "api" | "box" | "key" | "included", costMicro: number): Promise<void> {
+  await run(
+    `INSERT INTO model_call (id, agent_key, purpose, model, backend, status, estimate_micro, cost_micro, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, at)
+     VALUES (?, ?, 'turn', '', ?, 'settled', ?, ?, 0, 0, 0, 0, ?)`,
+    `${agent}|m${next()}`,
+    agent,
+    backend,
+    costMicro,
+    costMicro,
+    at,
+  );
+}
+
 const ana: Person = { agent: "p:line:ana", cohort: "recruit", half: "th_line", consentedAt: START };
 const ben: Person = { agent: "p:telegram:ben", cohort: "recruit", half: "intl_telegram", consentedAt: START + DAY };
 
@@ -92,6 +105,8 @@ describe("gate views", () => {
     for (const week of [0, 1, 2, 4]) await completed(ana.agent, START + week * WEEK + DAY);
     await completed(ben.agent, START - 3 * DAY);
     await completed(ben.agent, START + 2 * DAY, "typed");
+    await modelCall(ana.agent, START + DAY, "key", 1000);
+    await modelCall(ben.agent, START + 2 * DAY, "box", 0);
 
     expect(await rows("SELECT agent_key, week, evidence, via FROM completion ORDER BY agent_key, at")).toEqual([
       ...[0, 1, 2, 4].map((week) => ({ agent_key: ana.agent, week, evidence: "plan_accepted", via: "tap" })),
@@ -104,6 +119,39 @@ describe("gate views", () => {
     expect(await rows("SELECT half, starters, qualified FROM gate_main ORDER BY half")).toEqual([
       { half: "intl_telegram", starters: 1, qualified: 0 },
       { half: "th_line", starters: 1, qualified: 1 },
+    ]);
+  });
+
+  test("the first-week gate counts only recruits whose AI has answered, and keeps the unconnected split visible", async () => {
+    await beta();
+    await enroll(ana);
+    await enroll(ben);
+    await completed(ana.agent, START + DAY);
+    await completed(ben.agent, START + DAY);
+    await modelCall(ana.agent, START + DAY, "key", 1000);
+
+    expect(await rows("SELECT agent_key, connected_ai_at FROM participant ORDER BY agent_key")).toEqual([
+      { agent_key: ana.agent, connected_ai_at: START + DAY },
+      { agent_key: ben.agent, connected_ai_at: null },
+    ]);
+    expect(await rows("SELECT half, starters, not_connected, completed FROM gate_first_week ORDER BY half")).toEqual([
+      { half: "intl_telegram", starters: 0, not_connected: 1, completed: 0 },
+      { half: "th_line", starters: 1, not_connected: 0, completed: 1 },
+    ]);
+  });
+
+  test("gate_cost splits what Giraffe pays from spend on a person's key or plan", async () => {
+    await beta();
+    await enroll(ana);
+    await enroll(ben);
+    await wrote(ana.agent, START + DAY);
+    await wrote(ben.agent, START + DAY);
+    await modelCall(ana.agent, START + DAY, "key", 2_000_000);
+    await modelCall(ben.agent, START + DAY, "included", 1_000_000);
+    await modelCall(ana.agent, START + DAY, "box", 0);
+
+    expect(await rows("SELECT beta_week, wau, usd_per_wau, key_usd_per_wau, plan_usd_per_wau FROM gate_cost")).toEqual([
+      { beta_week: 0, wau: 2, usd_per_wau: 0.5, key_usd_per_wau: 1, plan_usd_per_wau: 0 },
     ]);
   });
 

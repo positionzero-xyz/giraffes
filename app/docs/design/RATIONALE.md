@@ -51,7 +51,7 @@ While a turn awaits the model, the only operations that can interleave are an in
 
 Derived, not stored: how a person's model calls are served (`accessOf` over the box row, the key row and the plan), unasked messages sent today (`COUNT` over `admitted_day`), lateness (`firedAt - dueAt`), reserved spend, whether the person was already told about the monthly limit or the no-access offer today (inbox outcomes), and the alarm time.
 
-D1 (`app/src/ledger/d1-schema.sql`) holds the cross-user facts: append-only `agent`, `turn_log`, `model_call`, `unasked_message`, `lifecycle`, `action_rejection`, `task`, `task_fact`, `admission_log` and `line_quota`, plus `line_quota_alert`, the `boxes` inventory, and the beta's `invite_code` and `enrollment`. The operator writes `beta`, `safety_incident` and `survey_response`. The gates are SQL views.
+D1 (`app/src/ledger/migrations`) holds the cross-user facts: append-only `agent`, `turn_log`, `model_call`, `unasked_message`, `lifecycle`, `action_rejection`, `task`, `task_fact`, `admission_log` and `line_quota`, plus `line_quota_alert`, the `boxes` inventory, and the beta's `invite_code` and `enrollment`. The operator writes `beta`, `safety_incident` and `survey_response`. The gates are SQL views.
 
 ### Types carry the invariants (`app/src/domain.ts`)
 
@@ -94,7 +94,7 @@ app/src/policy/{time,schedule,outreach,spend,quota}.ts   pure rules
 app/src/model/{providers,routes,prompt,client,scripted}.ts  the provider registry, routes and prompt budgets, the wire, the test client
 app/src/box/{names,host,fly,client,machine}.ts     box secrets, Fly and static hosts, box client, box state machine
 app/src/channels/{channel,line,telegram,dev}.ts    port, registry, three adapters
-app/src/ledger/{ledger.ts,d1-schema.sql}           D1 append, seats and box inventory, gate views
+app/src/ledger/{ledger.ts,migrations/}           D1 append, seats and box inventory, gate views
 app/dev/{bridge.ts,chat.html}                      local `claude -p` bridge, dev chat page
 app/scripts/beta-codes.ts                         the operator's invite codes and beta start, as SQL
 app/scripts/eval.ts, app/eval/fixtures/           replays fixtures through any route on the Worker's own code

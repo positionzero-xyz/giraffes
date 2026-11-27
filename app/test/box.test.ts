@@ -216,6 +216,128 @@ describe("the static host shares one Claude login", () => {
 });
 
 describe("fly host", () => {
+  test("account erasure waits for the wiped volume to stop being live before deleting its app", async () => {
+    let volumeLive = true;
+    let appExists = true;
+    const requests: string[] = [];
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      requests.push(`${method} ${path}`);
+      if (method === "GET" && path === `/v1/apps/${app}`) {
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (method === "GET" && path === "/v1/apps") {
+        return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      }
+      if (method === "GET" && path.endsWith("/volumes")) {
+        return Response.json([{ id: "vol_1", state: volumeLive ? "created" : "pending_destroy", attached_machine_id: volumeLive ? "machine_1" : null }]);
+      }
+      if (method === "DELETE" && path === `/v1/apps/${app}`) appExists = false;
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    expect(found).toEqual({ ok: true, target: { disk: "vol_1", machine: "machine_1", disks: ["vol_1"] } });
+    if (!found.ok) throw new Error(found.detail);
+    expect(await host.retireWipedDisk(app, found.target)).toMatchObject({ ok: false, retryable: true });
+    expect(requests).toContain(`DELETE /v1/apps/${app}/volumes/vol_1`);
+    expect(requests).not.toContain(`DELETE /v1/apps/${app}`);
+    volumeLive = false;
+    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true });
+    expect(await host.removeRetiredApp(app)).toEqual({ ok: true });
+    expect(requests).toContain(`DELETE /v1/apps/${app}`);
+    expect(requests).toContain("GET /v1/apps");
+  });
+
+  test("retirement destroys an app with no volume instead of waiting for a mount", async () => {
+    let appExists = true;
+    const deletes: string[] = [];
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      if (method === "GET" && path === `/v1/apps/${app}`) {
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (method === "GET" && path === "/v1/apps") return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      if (method === "GET" && path.endsWith("/volumes")) return Response.json([]);
+      if (method === "DELETE") {
+        deletes.push(path);
+        if (path === `/v1/apps/${app}`) appExists = false;
+      }
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    expect(found).toEqual({ ok: true, target: { disk: null, machine: null, disks: [] } });
+    if (!found.ok) throw new Error(found.detail);
+    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true });
+    expect(await host.removeRetiredApp(app)).toEqual({ ok: true });
+    expect(deletes).toEqual([`/v1/apps/${app}`]);
+  });
+
+  test("retirement destroys every unattached volume the app owns", async () => {
+    let state = "created";
+    const deletes: string[] = [];
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      if (method === "GET" && path === `/v1/apps/${app}`) return Response.json({ organization: { slug: "giraffes" } });
+      if (method === "GET" && path === "/v1/apps") return Response.json({ apps: [{ name: app }] });
+      if (method === "GET" && path.endsWith("/volumes")) {
+        return Response.json([{ id: "vol_old", state, attached_machine_id: null }]);
+      }
+      if (method === "DELETE" && path.endsWith("/volumes/vol_old")) {
+        deletes.push(path);
+        state = "pending_destroy";
+      }
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    expect(found).toEqual({ ok: true, target: { disk: null, machine: null, disks: ["vol_old"] } });
+    if (!found.ok) throw new Error(found.detail);
+    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true });
+    expect(deletes).toEqual([`/v1/apps/${app}/volumes/vol_old`]);
+  });
+
+  test("an app read of 404 is gone only when the org app list confirms it", async () => {
+    let listed = false;
+    const host = flyHost(flyConfig, async (url) => {
+      const path = new URL(url).pathname;
+      if (path === `/v1/apps/${app}`) return new Response(null, { status: 404 });
+      if (path === "/v1/apps") return Response.json({ apps: listed ? [{ name: app }] : [] });
+      return new Response(null, { status: 500 });
+    });
+
+    expect(await host.retirementTarget(app)).toMatchObject({ ok: false, missing: true });
+    listed = true;
+    const held = await host.retirementTarget(app);
+    expect(held).toMatchObject({ ok: false, retryable: true });
+    expect(held).not.toMatchObject({ missing: true });
+  });
+
+  test("an app that disappears after locate reports missing so the caller relocates", async () => {
+    let appExists = true;
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      if (method === "GET" && path === `/v1/apps/${app}`) {
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (method === "GET" && path === "/v1/apps") return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      if (method === "GET" && path.endsWith("/volumes")) {
+        return Response.json([{ id: "vol_1", state: "created", attached_machine_id: "machine_1" }]);
+      }
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    if (!found.ok) throw new Error(found.detail);
+    appExists = false;
+    expect(await host.retireWipedDisk(app, found.target)).toMatchObject({ ok: false, missing: true });
+  });
+
   test("provisioning sends the contract's requests: app, shared v4 and v6, a data volume, one machine", async () => {
     const fly = fakeFly();
     const host = flyHost(flyConfig, fly.fetch);
@@ -492,6 +614,21 @@ describe("box client", () => {
       throw new TypeError("fetch failed");
     };
     expect(await boxClient(down).erase("https://b", token, 3)).toMatchObject({ kind: "pending" });
+  });
+
+  test("account erase requires proof for the requested disk and scope", async () => {
+    const box = "00000000-0000-4000-8000-000000000001";
+    const request = { scope: "account", box, epoch: 3 } as const;
+    expect(await boxClient(answering(200, { box, floor: 4 })).erase("https://b", token, request)).toMatchObject({ kind: "pending" });
+    expect(await boxClient(answering(200, {
+      box: "00000000-0000-4000-8000-000000000002", floor: 4, scope: "account",
+    })).erase("https://b", token, request)).toMatchObject({ kind: "pending" });
+    const receipt = { box, floor: 4, scope: "account" };
+    const accountErase = boxClient(async (_url, init) => {
+      expect(JSON.parse(String(init?.body))).toEqual(request);
+      return new Response(JSON.stringify(receipt), { status: 200 });
+    });
+    expect(await accountErase.erase("https://b", token, request)).toEqual({ kind: "erased", ...receipt });
   });
 
   test("a reply is read as the bridge's, and the default parse timeout is 120 s", async () => {

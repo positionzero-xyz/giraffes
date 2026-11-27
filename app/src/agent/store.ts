@@ -2089,11 +2089,11 @@ export class AgentStore {
 
   clearForErasure(job: Extract<Erasure, { kind: "preparing" }>): void {
     this.tx(() => {
+      this.sql.exec("PRAGMA defer_foreign_keys = ON");
       const tables = this.sql.exec<{ name: string }>(
         `SELECT name FROM sqlite_master WHERE type = 'table'
           AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' AND name NOT GLOB '__cf_*'
-          AND name NOT IN ('meta', 'forget')
-          ORDER BY name = 'task'`,
+          AND name NOT IN ('meta', 'forget')`,
       ).toArray();
       for (const { name } of tables) this.sql.exec(`DELETE FROM "${name.replaceAll('"', '""')}"`);
       this.sql.exec("INSERT INTO memory (one) VALUES (1)");

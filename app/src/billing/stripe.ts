@@ -24,6 +24,12 @@ export interface StripeApi {
   subscription(id: SubscriptionId): Promise<StripeReply<unknown>>;
 }
 
+export interface StripeErasure {
+  /** A checkout can complete between the initial read and expiration. `retained` means Stripe permanently refused editable metadata removal. */
+  closeCheckout(id: CheckoutId, owner: AgentKey): Promise<StripeReply<{ readonly subscription: SubscriptionId | null; readonly retained: boolean }>>;
+  closeSubscription(id: SubscriptionId, owner: AgentKey): Promise<StripeReply<{ readonly retained: boolean }>>;
+}
+
 function priceOf(cfg: StripeConfig, plan: PaidPlan): string {
   const price = cfg.prices[plan];
   if (price === null) throw new Error(`no Stripe price for the ${plan} plan`);
@@ -36,7 +42,6 @@ export const offeredPlans = (cfg: StripeConfig): readonly PaidPlan[] => PAID_PLA
 export function checkoutForm(cfg: StripeConfig, rules: PlanRules, req: CheckoutRequest): Form {
   const form: Form = {
     mode: "subscription",
-    client_reference_id: req.agent,
     success_url: `${cfg.publicUrl}${DONE_PATH}`,
     cancel_url: `${cfg.publicUrl}${CANCEL_PATH}`,
     "metadata[agent_key]": req.agent,
@@ -63,9 +68,25 @@ const CheckoutReply = z.object({ id: z.string().min(1), url: z.string().url() })
 const PortalReply = z.object({ url: z.string().url() });
 /** Stripe's error message can echo part of the key, so only its type and code reach the logs. */
 const ErrorReply = z.object({ error: z.object({ type: z.string().optional(), code: z.string().optional() }) });
+const CheckoutState = z.object({
+  id: z.string(),
+  status: z.enum(["open", "complete", "expired"]),
+  client_reference_id: z.string().nullable(),
+  subscription: z.string().min(1).nullable(),
+  metadata: z.object({ agent_key: z.string().optional() }).nullable(),
+});
+const CheckoutList = z.object({
+  data: z.array(z.object({ id: z.string().min(1) })),
+  has_more: z.boolean(),
+});
+const ErasingSubscription = z.object({
+  id: z.string(),
+  status: z.enum(SUBSCRIPTION_STATUSES),
+  metadata: z.object({ agent_key: z.string().optional() }),
+});
 
-export function stripeApi(cfg: StripeConfig, rules: PlanRules, fetch: Fetch): StripeApi {
-  async function call(what: string, method: "GET" | "POST", path: string, o: { form?: Form; idempotencyKey?: string } = {}): Promise<StripeReply<unknown>> {
+export function stripeApi(cfg: StripeConfig, rules: PlanRules, fetch: Fetch): StripeApi & StripeErasure {
+  async function call(what: string, method: "GET" | "POST" | "DELETE", path: string, o: { form?: Form; idempotencyKey?: string } = {}): Promise<StripeReply<unknown>> {
     let res: Response;
     let body: unknown;
     try {
@@ -86,6 +107,61 @@ export function stripeApi(cfg: StripeConfig, rules: PlanRules, fetch: Fetch): St
     if (res.ok) return { ok: true, value: body };
     const e = ErrorReply.safeParse(body);
     return { ok: false, status: res.status, detail: `${what} ${res.status}${e.success ? ` ${e.data.error.type ?? ""} ${e.data.error.code ?? ""}`.trimEnd() : ""}` };
+  }
+
+  async function checkoutState(path: string, id: string, owner: AgentKey): Promise<StripeReply<z.infer<typeof CheckoutState>>> {
+    const r = await call("checkout read", "GET", path);
+    if (!r.ok) return r;
+    const parsed = CheckoutState.safeParse(r.value);
+    return parsed.success && parsed.data.id === id &&
+      (!parsed.data.client_reference_id || parsed.data.client_reference_id === owner) &&
+      (!parsed.data.metadata?.agent_key || parsed.data.metadata.agent_key === owner)
+      ? { ok: true, value: parsed.data }
+      : { ok: false, status: 200, detail: "checkout identity unverified" };
+  }
+
+  const permanentRefusal = (r: Extract<StripeReply<unknown>, { ok: false }>): boolean =>
+    r.status !== null && r.status !== 429 && r.status >= 400 && r.status < 500;
+
+  async function clearCheckout(path: string, checkout: z.infer<typeof CheckoutState>): Promise<StripeReply<{ readonly retained: boolean }>> {
+    if (!checkout.metadata?.agent_key) return { ok: true, value: { retained: false } };
+    const cleared = await call("clear checkout metadata for erasure", "POST", path, { form: { "metadata[agent_key]": "" } });
+    if (!cleared.ok) {
+      return permanentRefusal(cleared) ? { ok: true, value: { retained: true } } : cleared;
+    }
+    const verified = CheckoutState.safeParse(cleared.value);
+    return verified.success && verified.data.id === checkout.id && !verified.data.metadata?.agent_key
+      ? { ok: true, value: { retained: false } }
+      : { ok: false, status: 200, detail: "checkout metadata removal unverified" };
+  }
+
+  async function clearSubscriptionCheckouts(id: SubscriptionId, owner: AgentKey): Promise<StripeReply<{ readonly retained: boolean }>> {
+    let retained = false;
+    const query = new URLSearchParams({ subscription: id, limit: "100" });
+    for (;;) {
+      const listed = await call("list checkout sessions for erasure", "GET", `/checkout/sessions?${query}`);
+      if (!listed.ok) return listed;
+      const list = CheckoutList.safeParse(listed.value);
+      if (!list.success) return { ok: false, status: 200, detail: "checkout list unreadable" };
+      for (const { id: session } of list.data.data) {
+        const path = `/checkout/sessions/${encodeURIComponent(session)}`;
+        const checkout = await checkoutState(path, session, owner);
+        if (!checkout.ok) {
+          if (checkout.status === 404) continue;
+          return checkout;
+        }
+        if (checkout.value.subscription !== id || checkout.value.status !== "complete") {
+          return { ok: false, status: 200, detail: "checkout subscription unverified" };
+        }
+        const cleared = await clearCheckout(path, checkout.value);
+        if (!cleared.ok) return cleared;
+        retained ||= cleared.value.retained;
+      }
+      if (!list.data.has_more) return { ok: true, value: { retained } };
+      const cursor = list.data.data.at(-1)?.id;
+      if (!cursor || query.get("starting_after") === cursor) return { ok: false, status: 200, detail: "checkout pagination stalled" };
+      query.set("starting_after", cursor);
+    }
   }
 
   return {
@@ -112,6 +188,69 @@ export function stripeApi(cfg: StripeConfig, rules: PlanRules, fetch: Fetch): St
     async subscription(id) {
       const r = await call("subscription", "GET", `/subscriptions/${encodeURIComponent(id)}`);
       return !r.ok && r.status === 404 ? { ok: true, value: null } : r;
+    },
+    async closeCheckout(id, owner) {
+      const path = `/checkout/sessions/${encodeURIComponent(id)}`;
+      let current = await checkoutState(path, id, owner);
+      if (!current.ok) {
+        if (current.status === 404) return { ok: true, value: { subscription: null, retained: false } };
+        return current;
+      }
+      if (current.value.status === "open") {
+        const expired = await call("expire checkout for erasure", "POST", `${path}/expire`);
+        if (!expired.ok && expired.status !== 400) return expired;
+        current = await checkoutState(path, id, owner);
+        if (!current.ok) return current;
+      }
+      const checkout = current.value;
+      if (checkout.status === "open" || (checkout.status === "complete" && !checkout.subscription)) {
+        return { ok: false, status: 200, detail: "checkout termination unverified" };
+      }
+      const cleared = await clearCheckout(path, checkout);
+      if (!cleared.ok) return cleared;
+      return {
+        ok: true,
+        value: {
+          subscription: checkout.status === "complete" ? checkout.subscription as SubscriptionId : null,
+          retained: cleared.value.retained,
+        },
+      };
+    },
+    async closeSubscription(id, owner) {
+      const path = `/subscriptions/${encodeURIComponent(id)}`;
+      const r = await call("read subscription for erasure", "GET", path);
+      // Stripe keeps canceled subscriptions readable. A 404 here means the key, mode or account
+      // changed, so the caller holds and retries instead of telling the person their plan ended.
+      if (!r.ok) return r;
+      const subscription = ErasingSubscription.safeParse(r.value);
+      if (!subscription.success || subscription.data.id !== id || (subscription.data.metadata.agent_key && subscription.data.metadata.agent_key !== owner)) {
+        return { ok: false, status: 200, detail: "subscription identity unverified" };
+      }
+      const current = subscription.data;
+      const closed = current.status === "canceled" || current.status === "incomplete_expired";
+      let retained = false;
+      if (current.metadata.agent_key) {
+        const cleared = await call("clear subscription metadata for erasure", "POST", path, { form: { "metadata[agent_key]": "" } });
+        if (!cleared.ok) {
+          if (!permanentRefusal(cleared)) return cleared;
+          retained = true;
+        } else {
+          const verified = ErasingSubscription.safeParse(cleared.value);
+          if (!verified.success || verified.data.id !== id || verified.data.metadata.agent_key) {
+            return { ok: false, status: 200, detail: "subscription metadata removal unverified" };
+          }
+        }
+      }
+      if (!closed) {
+        const canceled = await call("cancel subscription for erasure", "DELETE", path);
+        if (!canceled.ok) return canceled;
+        const verified = ErasingSubscription.safeParse(canceled.value);
+        if (!verified.success || verified.data.id !== id || verified.data.status !== "canceled") {
+          return { ok: false, status: 200, detail: "subscription cancellation unverified" };
+        }
+      }
+      const checkouts = await clearSubscriptionCheckouts(id, owner);
+      return checkouts.ok ? { ok: true, value: { retained: retained || checkouts.value.retained } } : checkouts;
     },
   };
 }
@@ -143,7 +282,7 @@ export async function verifySignature(payload: string, header: string | null, se
 
 
 /** Which subscription an event is about and whose DO handles it; the state itself is fetched from Stripe. */
-export type BillingEvent = { readonly id: string; readonly subscription: SubscriptionId; readonly owner: AgentKey };
+export type BillingEvent = { readonly id: string; readonly subscription: SubscriptionId; readonly owner: AgentKey; readonly checkout?: CheckoutId };
 
 type ParsedEvent =
   | { readonly kind: "event"; readonly event: BillingEvent }
@@ -153,7 +292,7 @@ type ParsedEvent =
 const AGENT_KEY = new RegExp(`^p:(${CHANNEL_IDS.join("|")}):[^:]+$`);
 const Metadata = z.record(z.string(), z.string()).nullish();
 const Envelope = z.object({ id: z.string().min(1), type: z.string(), data: z.object({ object: z.unknown() }) });
-const Session = z.object({ mode: z.string(), client_reference_id: z.string().nullish(), metadata: Metadata, subscription: z.string().nullish() });
+const Session = z.object({ id: z.string().min(1).optional(), mode: z.string(), client_reference_id: z.string().nullish(), metadata: Metadata, subscription: z.string().nullish() });
 const EventSubscription = z.object({ id: z.string().min(1), metadata: Metadata });
 
 const agentKey = (raw: string | null | undefined): AgentKey | null => (raw && AGENT_KEY.test(raw) ? (raw as AgentKey) : null);
@@ -170,7 +309,8 @@ export function parseEvent(raw: unknown): ParsedEvent {
     if (s.data.mode !== "subscription" || !s.data.subscription) return { kind: "ignored", reason: "not a subscription checkout" };
     const owner = agentKey(s.data.client_reference_id ?? s.data.metadata?.agent_key);
     if (!owner) return { kind: "ignored", reason: "checkout without our agent key" };
-    return { kind: "event", event: { id, subscription: s.data.subscription as SubscriptionId, owner } };
+    const checkout = s.data.id;
+    return { kind: "event", event: { id, subscription: s.data.subscription as SubscriptionId, owner, ...(checkout ? { checkout: checkout as CheckoutId } : {}) } };
   }
 
   if (!(STRIPE_EVENT_TYPES as readonly string[]).includes(type)) return { kind: "ignored", reason: `event type ${type}` };

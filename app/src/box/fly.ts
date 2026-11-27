@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { HOST_OK, type BoxHost, type Fetch, type HostFailure, type HostResult } from "./host.ts";
+import { HOST_OK, type BoxHost, type Fetch, type FlyBoxRetirement, type HostFailure, type HostResult } from "./host.ts";
 import { boxName, type BoxName, type BoxToken } from "./names.ts";
 
 export const FLY_API = "https://api.machines.dev/v1";
@@ -24,6 +24,7 @@ const AppReply = z.object({ organization: z.object({ slug: z.string() }).nullish
 const AppsReply = z.object({ apps: z.array(z.object({ name: z.string() })) });
 const IpsReply = z.object({ ips: z.array(z.object({ ip: z.string(), shared: z.boolean().nullish(), egress: z.boolean().nullish() })).nullable() });
 export const FlyVolumesReply = z.array(z.object({ id: z.string(), name: z.string(), state: z.string(), auto_backup_enabled: z.boolean().optional() }));
+const RetirementVolumes = z.array(z.object({ id: z.string(), state: z.string(), attached_machine_id: z.string().nullish() }));
 const VolumeReply = z.object({ id: z.string(), auto_backup_enabled: z.literal(false) });
 const MachinesReply = z.array(z.object({ id: z.string(), config: z.unknown() }));
 
@@ -75,7 +76,7 @@ export function machineConfig(cfg: FlyConfig, token: BoxToken, volumeId: string)
   };
 }
 
-export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, timeoutMs: number = FLY_TIMEOUT_MS): BoxHost {
+export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, timeoutMs: number = FLY_TIMEOUT_MS): BoxHost & FlyBoxRetirement {
   const authorization = flyAuthorization(cfg.apiToken);
 
   async function call(method: string, path: string, body?: unknown): Promise<Reply | HostFailure> {
@@ -104,22 +105,58 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
   }
 
   function read<T>(r: Reply, schema: z.ZodType<T>, what: string): T | HostFailure {
-    if (!success(r.status)) return fail(false, `${what}: ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+    if (!success(r.status)) {
+      return { ...fail(false, `${what}: ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`), ...(r.status === 404 ? { missing: true as const } : {}) };
+    }
     const parsed = schema.safeParse(r.body);
     return parsed.success ? parsed.data : fail(false, `${what}: unexpected reply`);
   }
 
   const failed = (x: unknown): x is HostFailure => typeof x === "object" && x !== null && "ok" in x && x.ok === false;
 
-  /** Fly accepts "personal" as an org alias but can report the org's real slug, or none, on an app. The filtered list is the proof. */
-  async function ownerInOrg(name: BoxName, ownerSlug: string | null): Promise<boolean | HostFailure> {
-    if (ownerSlug === cfg.org) return true;
-    if (cfg.org !== "personal") return false;
-    const listed = await call("GET", `/apps?org_slug=${encodeURIComponent(cfg.org)}`);
+  async function retirementVolumes(name: BoxName) {
+    const path = `/apps/${name}/volumes`;
+    const listed = await call("GET", path);
+    return listed.ok ? read(listed, RetirementVolumes, `GET ${path}`) : listed;
+  }
+
+  /** App names the org token can see. Only a successful read proves an app is absent. */
+  async function appNames(): Promise<readonly string[] | HostFailure> {
+    const path = `/apps?org_slug=${encodeURIComponent(cfg.org)}`;
+    const listed = await call("GET", path);
     if (!listed.ok) return listed;
-    const apps = read(listed, AppsReply, "GET /apps?org_slug=personal");
-    if (failed(apps)) return apps;
-    return apps.apps.some((app) => app.name === name);
+    const reply = read(listed, AppsReply, `GET ${path}`);
+    return failed(reply) ? reply : reply.apps.map(({ name: app }) => app);
+  }
+
+  /**
+   * Fly can report a different slug or omit the org for the personal alias. Use the filtered
+   * list to prove ownership in that case, and to verify a 404 before treating an app as gone.
+   */
+  async function ownership(name: BoxName, purpose: "provision" | "retire" = "retire"): Promise<HostResult> {
+    const path = `/apps/${name}`;
+    const got = await call("GET", path);
+    if (!got.ok) return got;
+    if (got.status === 404 && purpose === "retire") {
+      const names = await appNames();
+      if (failed(names)) return fail(true, names.detail);
+      return names.includes(name)
+        ? fail(true, `app ${name} is listed but unreadable`)
+        : { ...fail(false, `app ${name} is gone`), missing: true };
+    }
+    const owner = read(got, AppReply, `GET ${path}`);
+    if (failed(owner)) {
+      return purpose === "retire" ? fail(true, owner.detail) : fail(false, `app name ${name} is taken outside ${cfg.org}`);
+    }
+    const slug = owner.organization?.slug ?? null;
+    if (cfg.org === "personal") {
+      const names = await appNames();
+      if (failed(names)) return purpose === "retire" ? fail(true, names.detail) : names;
+      if (names.includes(name)) return HOST_OK;
+    } else if (slug === cfg.org) {
+      return HOST_OK;
+    }
+    return fail(false, slug === null ? `app ${name} is outside ${cfg.org}` : `app ${name} belongs to ${slug}`);
   }
 
   async function app(name: BoxName): Promise<HostResult> {
@@ -131,14 +168,8 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
     }
     const taken = created.status === 409 || (created.status === 422 && NameTaken.safeParse(created.body).success);
     if (!taken) return fail(false, `POST /apps: ${created.status} ${JSON.stringify(created.body).slice(0, 200)}`);
-    const got = await call("GET", `/apps/${name}`);
-    if (!got.ok) return got;
-    const owner = read(got, AppReply, `GET /apps/${name}`);
-    if (failed(owner)) return fail(false, `app name ${name} is taken outside ${cfg.org}`);
-    const ownerSlug = owner.organization?.slug ?? null;
-    const owned = await ownerInOrg(name, ownerSlug);
-    if (failed(owned)) return owned;
-    if (!owned) return fail(false, ownerSlug === null ? `app ${name} is outside ${cfg.org}` : `app ${name} belongs to ${ownerSlug}`);
+    const owned = await ownership(name, "provision");
+    if (!owned.ok) return owned;
     log("app", "exists");
     return HOST_OK;
   }
@@ -237,6 +268,135 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       const r = await call("DELETE", `/apps/${name}?force=true`);
       if (!r.ok) return r;
       return success(r.status) || r.status === 404 ? HOST_OK : fail(false, `DELETE /apps/${name}: ${r.status}`);
+    },
+    async retirementTarget(name) {
+      const owned = await ownership(name);
+      if (failed(owned)) return owned;
+      const volumes = await retirementVolumes(name);
+      if (failed(volumes)) {
+        if (!volumes.missing) return volumes;
+        const again = await ownership(name);
+        return failed(again) ? again : fail(true, `app ${name} disappeared after locate`);
+      }
+      const live = volumes.filter((v) => !GONE_VOLUME.has(v.state));
+      const mounted = live.filter((v) => v.state === "created" && v.attached_machine_id);
+      if (live.length === 0) {
+        return { ok: true, target: { disk: null, machine: null, disks: [] } };
+      }
+      if (live.length === 1) {
+        const only = live[0];
+        return {
+          ok: true,
+          target: {
+            disk: mounted.length === 1 ? only.id : null,
+            machine: mounted.length === 1 ? only.attached_machine_id ?? null : null,
+            disks: [only.id],
+          },
+        };
+      }
+      // More than one live volume: only the single mounted disk is proven. Unknown extras are
+      // left for retireWipedDisk to hold, never added to the deletion set.
+      if (mounted.length === 1) {
+        return {
+          ok: true,
+          target: { disk: mounted[0].id, machine: mounted[0].attached_machine_id ?? null, disks: [mounted[0].id] },
+        };
+      }
+      return fail(true, "cannot identify one mounted disk among several volumes");
+    },
+    async retirementRecheck(name, target) {
+      const owned = await ownership(name);
+      if (failed(owned)) return owned;
+      const volumes = await retirementVolumes(name);
+      if (failed(volumes)) {
+        if (!volumes.missing) return volumes;
+        // A missing volume list is not proof the app is gone: the app read just succeeded.
+        const again = await ownership(name);
+        return failed(again) ? again : fail(true, "volume list unavailable");
+      }
+      const live = volumes.filter((v) => !GONE_VOLUME.has(v.state));
+      const saved = target.disk ? [target.disk] : target.disks ?? [];
+      // Ownership above proved the app still exists, so an empty volume list means its data is
+      // gone, not that the app is absent. Keep the reservation and let app evidence decide.
+      if (live.length === 0) return fail(true, "app remains without a live volume");
+      if (!target.disk && saved.length > 1) return fail(true, "retirement target includes several unproven disks");
+      for (const v of live) {
+        if (!saved.includes(v.id)) return fail(true, "a different live volume appeared");
+        const attached = v.attached_machine_id ?? null;
+        // A no-wipe target never authorizes a newly mounted disk or its machine.
+        if (!target.disk && attached !== null) return fail(true, "volume attached without a wipe");
+        if (target.disk && attached !== null && attached !== target.machine) {
+          return fail(true, "volume attached to a different machine");
+        }
+      }
+      return { ok: true, state: "present" };
+    },
+    async retireWipedDisk(name, target) {
+      const owned = await ownership(name);
+      if (failed(owned)) return owned;
+      const volumes = await retirementVolumes(name);
+      if (failed(volumes)) return volumes;
+      const disks = target.disks ?? (target.disk ? [target.disk] : []);
+      // Only the disk whose wipe was proven may be deleted. A persisted target from an older
+      // revision may list extra live volumes; hold rather than promote them to trusted.
+      if (target.disk !== null && disks.some((id) => id !== target.disk)) {
+        return fail(true, "retirement target includes an unproven disk");
+      }
+      if (target.disk === null && disks.length > 1) {
+        return fail(true, "retirement target includes several unproven disks");
+      }
+      const live = volumes.filter((v) => !GONE_VOLUME.has(v.state));
+      const known = new Set(disks);
+      if (live.some((v) => !known.has(v.id))) return fail(true, "unexpected live volume remains");
+      for (const v of live) {
+        const attached = v.attached_machine_id ?? null;
+        if (target.disk === null && attached !== null) return fail(true, "volume attached without a wipe");
+        if (target.disk !== null && attached !== null && attached !== target.machine) {
+          return fail(true, "volume attached to a different machine");
+        }
+      }
+
+      // Delete only the saved machine. A machine read from the current volume row may be a
+      // replacement, including one attached to a volume already being destroyed.
+      const machines = target.machine ? [target.machine] : [];
+      for (const machine of machines) {
+        const removed = await call("DELETE", `/apps/${name}/machines/${encodeURIComponent(machine)}?force=true`);
+        if (!removed.ok) return removed;
+        if (!success(removed.status) && removed.status !== 404) return fail(true, "box machine retirement unverified");
+      }
+
+      for (const disk of new Set([...disks, ...(target.disk ? [target.disk] : [])])) {
+        if (GONE_VOLUME.has(volumes.find((v) => v.id === disk)?.state ?? "destroyed")) continue;
+        const removed = await call("DELETE", `/apps/${name}/volumes/${encodeURIComponent(disk)}`);
+        if (!removed.ok) return removed;
+        if (!success(removed.status) && removed.status !== 404) return fail(true, "box disk retirement unverified");
+      }
+
+      const remaining = await retirementVolumes(name);
+      if (failed(remaining)) return remaining;
+      if (remaining.some((v) => !GONE_VOLUME.has(v.state))) return fail(true, "box disk remains live");
+      return HOST_OK;
+    },
+    async removeRetiredApp(name) {
+      const owned = await ownership(name);
+      if (failed(owned)) return owned.missing ? HOST_OK : owned;
+      const before = await retirementVolumes(name);
+      if (failed(before)) return before.missing ? fail(true, "app disappeared before retirement") : before;
+      if (before.some((v) => !GONE_VOLUME.has(v.state))) return fail(true, "unexpected live volume remains");
+      const removedApp = await call("DELETE", `/apps/${name}`);
+      if (!removedApp.ok) return removedApp;
+      if (!success(removedApp.status) && removedApp.status !== 404) return fail(true, "box app retirement unverified");
+      const app = await call("GET", `/apps/${name}`);
+      if (!app.ok) return app;
+      if (app.status !== 404) return fail(true, "box app remains live");
+      const names = await appNames();
+      if (failed(names)) return fail(true, names.detail);
+      if (names.includes(name)) return fail(true, "box app remains live");
+      const volumes = await retirementVolumes(name);
+      if (failed(volumes)) return volumes.missing ? HOST_OK : volumes;
+      return volumes.some((v) => !GONE_VOLUME.has(v.state))
+        ? fail(true, "box volumes remain live")
+        : HOST_OK;
     },
   };
 }

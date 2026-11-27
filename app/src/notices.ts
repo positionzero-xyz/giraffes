@@ -249,7 +249,7 @@ const en: Notices = {
   acceptButton: "Accept plan",
   consentButton: "I'm 18+ and agree",
   privacy:
-    "Before we start: I keep our chat and the notes I make about you so I can help you over time. Nobody else reads them, and you can ask me to forget something at any time. You need to be 18 or over. Tap the button to agree.",
+    "Before we start: I keep our chat and the notes I make about you so I can help you over time. Nobody else reads them. You can ask me to forget a note, or send /erase to stop and delete your account. You need to be 18 or over. Tap the button to agree.",
   welcome: "You're in. Tell me what you'd like a hand with. I may send a morning check-in when I have AI access and something useful to share.",
   waitlist: {
     no_code: "Hi! I'm in a small invite-only beta for now. If you have an invite code, send it here.",
@@ -275,7 +275,7 @@ const en: Notices = {
           "Your reminders still go out either way.",
         ].join("\n")
       : "I can't connect an AI for you yet. Your reminders still go out.",
-  boxNotReady: "Your Claude plan isn't ready to answer yet. Send /claude to check the connection.",
+  boxNotReady: "Your Claude plan isn't ready to answer yet. Send /claude to see where it stands. I might say setup is still running, send you a sign-in link, or confirm it's connected.",
   boxSignedOut: "Your Claude plan isn't signed in. Once you sign in, I'll answer requests from the last 24 hours. Send /claude for a sign-in link.",
   catchUp: "Here's my answer to what you sent earlier.",
   ownCapReached: (cap) => `You've used the $${cap} monthly limit you set for your key. Send /key cap <dollars> to change it. It resets on the 1st.`,
@@ -444,7 +444,7 @@ const th: Notices = {
   acceptButton: "ยอมรับแผนนี้",
   consentButton: "อายุ 18+ และยอมรับ",
   privacy:
-    "ก่อนเริ่มนะคะ: เราจะเก็บแชตและโน้ตเกี่ยวกับคุณไว้เพื่อช่วยคุณได้ต่อเนื่อง ไม่มีใครอื่นอ่าน และขอให้ลืมเรื่องไหนก็ได้ทุกเมื่อ ต้องมีอายุ 18 ปีขึ้นไป กดปุ่มด้านล่างเพื่อยอมรับค่ะ",
+    "ก่อนเริ่มนะคะ: เราจะเก็บแชตและโน้ตเกี่ยวกับคุณไว้เพื่อช่วยคุณได้ต่อเนื่อง ไม่มีใครอื่นอ่าน ขอให้ลืมโน้ตเรื่องไหนก็ได้ หรือส่ง /erase เพื่อหยุดและลบข้อมูลบัญชีของคุณ ต้องมีอายุ 18 ปีขึ้นไป กดปุ่มด้านล่างเพื่อยอมรับค่ะ",
   welcome: "เข้าร่วมรุ่นทดลองแล้วค่ะ อยากให้ช่วยเรื่องไหนบอกได้เลย ถ้าใช้ AI ได้และมีเรื่องที่น่าบอก อาจทักไปตอนเช้านะคะ",
   waitlist: {
     no_code: "สวัสดีค่ะ ตอนนี้เปิดให้ใช้เฉพาะคนที่ได้รับเชิญก่อน ถ้ามีรหัสเชิญ ส่งมาที่นี่ได้เลยค่ะ",
@@ -470,7 +470,7 @@ const th: Notices = {
           "การแจ้งเตือนที่คุณขอไว้ยังส่งถึงคุณตามปกติค่ะ",
         ].join("\n")
       : "ตอนนี้ยังเชื่อม AI ให้ไม่ได้ค่ะ แต่การแจ้งเตือนที่คุณขอไว้ยังส่งถึงคุณตามปกตินะคะ",
-  boxNotReady: "ตอนนี้แพ็กเกจ Claude ของคุณยังไม่พร้อมตอบค่ะ ส่ง /claude เพื่อตรวจสอบการเชื่อมต่อได้เลยนะคะ",
+  boxNotReady: "ตอนนี้แพ็กเกจ Claude ของคุณยังไม่พร้อมตอบค่ะ ส่ง /claude เพื่อดูสถานะได้เลยนะคะ คำตอบอาจเป็นการแจ้งว่ายังตั้งค่าอยู่ ลิงก์เข้าสู่ระบบ หรือการยืนยันว่าเชื่อมแพ็กเกจแล้วค่ะ",
   boxSignedOut: "ตอนนี้ Claude ของคุณยังไม่ได้ลงชื่อเข้าใช้ค่ะ เมื่อลงชื่อเข้าใช้แล้ว จะตอบคำขอที่คุณส่งมาในช่วง 24 ชั่วโมงที่ผ่านมานะคะ ส่ง /claude เพื่อรับลิงก์ลงชื่อเข้าใช้ค่ะ",
   catchUp: "ขอตอบข้อความที่คุณส่งมาก่อนหน้านี้นะคะ",
   ownCapReached: (cap) => `ใช้ key ของคุณครบวงเงิน $${cap} ต่อเดือนที่ตั้งไว้แล้วค่ะ ส่ง /key cap <จำนวนดอลลาร์> เพื่อเปลี่ยน วงเงินจะเริ่มใหม่วันที่ 1 ค่ะ`,

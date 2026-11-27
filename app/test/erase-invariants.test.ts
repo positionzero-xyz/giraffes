@@ -1,5 +1,8 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { expect, test, vi } from "vitest";
+import { prepareOutsideWrite } from "../src/action/writes";
+import { ERASE_JOB, type Erasure } from "../src/agent/account";
+import { AgentStore } from "../src/agent/store";
 import { flyHost } from "../src/box/fly";
 import type { Fetch, FlyDiskRetirement } from "../src/box/host";
 import type { BoxName } from "../src/box/names";
@@ -7,6 +10,71 @@ import { stripeApi, type CheckoutId } from "../src/billing/stripe";
 import type { SubscriptionId } from "../src/billing/plan";
 import type { EpochMs } from "../src/domain";
 import { billingOn, devChat, fakeBox } from "./testkit";
+
+async function outsideApprovalFixture(user: string) {
+  const person = await devChat(user, { model: null, at: "2099-11-04T10:00" });
+  await person.say("hello");
+  const stub = env.AGENT.get(env.AGENT.idFromName(person.agent));
+
+  await runInDurableObject(stub, (_, { storage }) => {
+    const store = new AgentStore(storage);
+    const now = person.clock.now();
+    const proposed = prepareOutsideWrite({
+      intent: "send-private-note", provider: "mail", action: "send", args: { body: "Private note" },
+      epoch: store.forget().epoch, now, approval: { owner: person.agent, expiresAt: (now + 60_000) as EpochMs },
+    });
+    if (!proposed?.approval) throw new Error("missing approval fixture");
+    expect(store.putOutsideWrite(proposed.write, proposed.approval)).toMatchObject({
+      kind: "created", approval: { writeId: proposed.write.id },
+    });
+  });
+
+  await person.say("/erase");
+  const confirm = person.channel.delivered.at(-1)?.button;
+  if (!confirm) throw new Error("erasure button missing");
+  return { person, stub, confirm: `/tap ${confirm.data}` };
+}
+
+test("a confirmed account erase removes an outside write and its linked approval", async () => {
+  const { person, stub, confirm } = await outsideApprovalFixture("erase-outside-write");
+  await person.say(confirm);
+
+  const state = await runInDurableObject(stub, (_, { storage }) => ({
+    job: storage.kv.get<Erasure>(ERASE_JOB)?.kind,
+    writes: storage.sql.exec("SELECT id FROM outside_write").toArray(),
+    approvals: storage.sql.exec("SELECT id FROM outside_approval").toArray(),
+  }));
+  expect({ ...state, message: person.channel.delivered.at(-1)?.text }).toEqual({
+    job: undefined, writes: [], approvals: [], message: expect.stringMatching(/deleted your live Giraffe data/),
+  });
+  expect((await person.snapshot()).agent).toBeNull();
+});
+
+test("a persistent approval deletion failure rolls back the erase on every attempt", async () => {
+  const { person, stub, confirm } = await outsideApprovalFixture("erase-outside-write-fault");
+  await runInDurableObject(stub, (_, { storage }) => {
+    storage.sql.exec(`CREATE TRIGGER fail_approval_delete BEFORE DELETE ON outside_approval
+      BEGIN SELECT RAISE(ABORT, 'approval deletion failed'); END`);
+  });
+
+  const persisted = () => runInDurableObject(stub, (_, { storage }) => ({
+    job: storage.kv.get<Erasure>(ERASE_JOB),
+    linkedWrites: storage.sql.exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM outside_write JOIN outside_approval ON write_id = outside_write.id",
+    ).one().count,
+  }));
+  await person.say(confirm);
+  const first = await persisted();
+  expect(first).toMatchObject({ job: { kind: "starting" }, linkedWrites: 1 });
+  if (first.job?.nextAt === undefined) throw new Error("erasure retry is missing");
+  person.clock.set(first.job.nextAt);
+  await person.settle();
+
+  const second = await persisted();
+  expect(second).toMatchObject({ job: { kind: "starting" }, linkedWrites: 1 });
+  expect(second.job?.nextAt).toBeGreaterThan(first.job.nextAt);
+  expect(person.channel.delivered.at(-1)?.text).toMatch(/permanently delete your account data/);
+});
 
 const cfg = { apiToken: "offline", org: "fixture-org", image: "offline", region: "sin", volumeGb: 1, appPrefix: "gbox-", secret: "offline" };
 const appPath = (name: string) => "/v1/apps/" + name;

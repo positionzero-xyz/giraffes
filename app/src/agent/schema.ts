@@ -552,6 +552,52 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE checkout_session ADD COLUMN closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1));
   `,
   `
+  CREATE TABLE outside_write (
+    id            TEXT PRIMARY KEY,
+    intent        TEXT NOT NULL UNIQUE,
+    provider      TEXT NOT NULL,
+    action        TEXT NOT NULL,
+    operation_id  TEXT NOT NULL UNIQUE,
+    args          TEXT NOT NULL,
+    epoch         INTEGER NOT NULL,
+    status        TEXT NOT NULL CHECK (status IN ('approval_pending', 'ready', 'verifying', 'uncertain', 'succeeded', 'failed', 'dropped')),
+    attempt       INTEGER NOT NULL DEFAULT 0,
+    in_doubt      INTEGER NOT NULL DEFAULT 0 CHECK (in_doubt IN (0, 1)),
+    lease_until   INTEGER,
+    receipt       TEXT,
+    failure       TEXT,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL,
+    CHECK ((receipt IS NULL) = (status IS NOT 'succeeded')),
+    CHECK (failure IS NULL OR status IN ('failed', 'uncertain'))
+  );
+
+  CREATE TABLE outside_approval (
+    id           TEXT PRIMARY KEY,
+    write_id     TEXT NOT NULL UNIQUE REFERENCES outside_write (id),
+    owner_key    TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'consumed', 'refused', 'expired')),
+    expires_at   INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL,
+    decided_at   INTEGER,
+    decided_by   TEXT,
+    consumed_at  INTEGER,
+    CHECK ((status = 'consumed') = (consumed_at IS NOT NULL))
+  );
+
+  CREATE TRIGGER outside_write_immutable
+  BEFORE UPDATE OF intent, provider, action, operation_id, args, epoch ON outside_write
+  BEGIN
+    SELECT RAISE (ABORT, 'outside write action is immutable');
+  END;
+
+  CREATE TRIGGER outside_approval_immutable
+  BEFORE UPDATE OF write_id, owner_key ON outside_approval
+  BEGIN
+    SELECT RAISE (ABORT, 'outside approval binding is immutable');
+  END;
+  `,
+  `
   CREATE TABLE rate_event (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
     kind  TEXT NOT NULL CHECK (kind IN ('feedback', 'invite')),

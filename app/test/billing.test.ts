@@ -1014,6 +1014,10 @@ describe("checkout and the portal", () => {
         subscription_ids TEXT PRIMARY KEY, delivery_id TEXT NOT NULL, ready_at INTEGER, notified INTEGER NOT NULL DEFAULT 0
       )`);
       storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, ready_at) VALUES ('sub_a sub_b', 'existing-id', 9000)");
+      storage.sql.exec("DROP TRIGGER IF EXISTS outside_approval_immutable");
+      storage.sql.exec("DROP TRIGGER IF EXISTS outside_write_immutable");
+      storage.sql.exec("DROP TABLE IF EXISTS outside_approval");
+      storage.sql.exec("DROP TABLE IF EXISTS outside_write");
       storage.sql.exec("ALTER TABLE checkout_session DROP COLUMN closed");
       storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeAttempts));
       migrate(storage);
@@ -1049,6 +1053,10 @@ describe("checkout and the portal", () => {
         storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN telegram_redirect");
         storage.sql.exec("ALTER TABLE billing_alert DROP COLUMN destination_wait");
         storage.sql.exec("DROP TABLE rate_event");
+        storage.sql.exec("DROP TRIGGER IF EXISTS outside_approval_immutable");
+        storage.sql.exec("DROP TRIGGER IF EXISTS outside_write_immutable");
+        storage.sql.exec("DROP TABLE IF EXISTS outside_approval");
+        storage.sql.exec("DROP TABLE IF EXISTS outside_write");
         storage.sql.exec("ALTER TABLE checkout_session DROP COLUMN closed");
         storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeDestinationRecovery));
         storage.sql.exec("INSERT INTO billing_alert (subscription_ids, delivery_id, notified, closed_as) VALUES ('sub_a sub_b', 'old-id', 1, 'gone')");

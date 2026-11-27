@@ -17,7 +17,7 @@ import type { BoxHostKind } from "../box/host";
 import type { BoxName } from "../box/names";
 import type { Usage } from "../model/client";
 import { PURPOSES, type CallPurpose } from "../model/routes";
-import type { QuotaReading } from "../policy/quota";
+import type { LineQuotaKind, QuotaReading } from "../policy/quota";
 import { REMINDER_REJECTIONS } from "../policy/schedule";
 
 export const MODEL_CALL_STATUSES = [
@@ -146,9 +146,13 @@ export interface Ledger {
   releaseBox(agent: AgentKey, at: EpochMs): Promise<void>;
   recordLineQuota(r: QuotaReading): Promise<void>;
   lineQuota(): Promise<QuotaReading | null>;
-  lineQuotaAlerts(month: UtcMonth): Promise<number[]>;
-  lineQuotaAlerted(month: UtcMonth, percent: number, via: "line" | "telegram" | "log", at: EpochMs): Promise<void>;
+  recordLineReply(month: UtcMonth): Promise<void>;
+  lineReplyCount(month: UtcMonth): Promise<number>;
+  lineQuotaAlerts(kind: LineQuotaKind, month: UtcMonth): Promise<number[]>;
+  lineQuotaAlerted(kind: LineQuotaKind, month: UtcMonth, percent: number, via: "line" | "telegram" | "log", at: EpochMs): Promise<void>;
 }
+
+const LINE_QUOTA_ALERT_TABLE = { push: "line_quota_alert", reply: "line_reply_quota_alert" } satisfies Record<LineQuotaKind, string>;
 
 const APPEND_CHUNK = 100;
 
@@ -357,13 +361,19 @@ export function d1Ledger(db: D1Database): Ledger {
         .first<{ at: EpochMs; month: UtcMonth; quota: number | null; used: number }>();
       return r ? { at: r.at, month: r.month, limit: r.quota, used: r.used } : null;
     },
-    async lineQuotaAlerts(month) {
-      const { results } = await db.prepare("SELECT percent FROM line_quota_alert WHERE month = ?").bind(month).all<{ percent: number }>();
+    async recordLineReply(month) {
+      await db.prepare("INSERT INTO line_reply_usage (month, used) VALUES (?, 1) ON CONFLICT (month) DO UPDATE SET used = used + 1").bind(month).run();
+    },
+    async lineReplyCount(month) {
+      return (await db.prepare("SELECT used FROM line_reply_usage WHERE month = ?").bind(month).first<number>("used")) ?? 0;
+    },
+    async lineQuotaAlerts(kind, month) {
+      const { results } = await db.prepare(`SELECT percent FROM ${LINE_QUOTA_ALERT_TABLE[kind]} WHERE month = ?`).bind(month).all<{ percent: number }>();
       return results.map((r) => r.percent);
     },
-    async lineQuotaAlerted(month, percent, via, at) {
+    async lineQuotaAlerted(kind, month, percent, via, at) {
       await db
-        .prepare("INSERT INTO line_quota_alert (month, percent, via, at) VALUES (?, ?, ?, ?) ON CONFLICT (month, percent) DO NOTHING")
+        .prepare(`INSERT INTO ${LINE_QUOTA_ALERT_TABLE[kind]} (month, percent, via, at) VALUES (?, ?, ?, ?) ON CONFLICT (month, percent) DO NOTHING`)
         .bind(month, percent, via, at)
         .run();
     },

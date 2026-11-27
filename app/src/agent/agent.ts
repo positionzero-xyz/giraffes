@@ -2085,12 +2085,13 @@ function boxDeps(c: BoxConfig): BoxDeps | null {
 
 function defaultDeps(env: Env): AgentDeps {
   const config = loadConfig(env);
+  const ledger = d1Ledger(env.LEDGER);
   return {
     connect: connect((input, init) => fetch(input, init)),
     keys: config.keys,
     included: config.included,
-    ledger: d1Ledger(env.LEDGER),
-    channels: makeChannels(config),
+    ledger,
+    channels: makeChannels(config, ledger),
     operatorChat: config.operatorChat,
     clock: { now: () => Date.now() as EpochMs },
     box: boxDeps(config.box),

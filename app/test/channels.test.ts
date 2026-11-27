@@ -188,13 +188,25 @@ describe("LINE delivery", () => {
     expect(seen.map((s) => s.url.split("/").pop())).toEqual(["reply"]);
   });
 
-  test("a fresh reply token uses the free reply API with every text", async () => {
+  test("a fresh reply token uses the reply API with every text", async () => {
     const seen = stubFetch(() => Response.json({}));
 
     expect(await line().deliver(outbound({ reply: fresh }), NOW)).toEqual({ kind: "sent", via: "reply" });
     expect(seen.map((s) => s.url)).toEqual(["https://api.line.me/v2/bot/message/reply"]);
     expect(seen[0].body).toEqual({ replyToken: "reply-token-1", messages: [{ type: "text", text: "Done." }, { type: "text", text: "(note)" }] });
     expect(seen[0].headers.get("authorization")).toBe("Bearer line-access-token");
+  });
+
+  test("a failed quota write leaves an accepted reply marked as sent", async () => {
+    const seen = stubFetch(() => Response.json({}));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const line = lineChannel({ channelSecret: LINE_SECRET, accessToken: "line-access-token" }, async () => {
+      throw new Error("D1 unavailable");
+    });
+
+    expect(await line.deliver(outbound({ reply: fresh }), NOW)).toEqual({ kind: "sent", via: "reply" });
+    expect(seen.map((s) => s.url)).toEqual(["https://api.line.me/v2/bot/message/reply"]);
+    expect(warn.mock.calls).toEqual([[{ code: "line_reply_usage_write_failed" }]]);
   });
 
   test("a token near expiry, or none, pushes with the outbox id as the retry key", async () => {

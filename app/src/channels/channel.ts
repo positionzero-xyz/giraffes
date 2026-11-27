@@ -1,6 +1,8 @@
 import { diagnostic } from "../diagnostics";
 import type { ChannelId, EpochMs, Identity, InboundEnvelope, OutboundMessage, OutboxId } from "../domain";
 import type { Config, OperatorChat } from "../config";
+import type { Ledger } from "../ledger/ledger";
+import { utcMonth } from "../policy/time";
 import { lineChannel } from "./line";
 import { SEND_MESSAGE_MAX_CHARS, telegramChannel } from "./telegram";
 import { devChannel } from "./dev";
@@ -48,9 +50,9 @@ export async function whileWorking<T>(channel: ChannelAdapter, to: Identity, run
 
 export type ChannelRegistry = { readonly [K in ChannelId]: ChannelAdapter };
 
-export function makeChannels(config: Config): ChannelRegistry {
+export function makeChannels(config: Config, ledger?: Pick<Ledger, "recordLineReply">): ChannelRegistry {
   return {
-    line: lineChannel(config.line),
+    line: lineChannel(config.line, ledger ? (at) => ledger.recordLineReply(utcMonth(at)) : undefined),
     telegram: telegramChannel(config.telegram),
     dev: devChannel(config.devMode),
   };

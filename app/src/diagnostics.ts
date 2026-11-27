@@ -21,6 +21,8 @@ export type Diagnostic = DrainPhase
   | "line_loading_failed"
   | "line_quota"
   | "line_quota_unavailable"
+  | "line_reply_quota"
+  | "line_reply_usage_write_failed"
   | "operator_alert_date_lookup_failed"
   | "operator_alert_failed"
   | "operator_alert_unconfirmed"

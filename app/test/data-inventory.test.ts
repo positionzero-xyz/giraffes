@@ -73,6 +73,8 @@ const d1 = {
   lifecycle: { identity: "id agent_key", operational: "change source at" },
   line_quota: { operational: "at month quota used" },
   line_quota_alert: { operational: "month percent via at" },
+  line_reply_quota_alert: { operational: "month percent via at" },
+  line_reply_usage: { operational: "month used" },
   model_call: { empty: "model", identity: "id agent_key", operational: "purpose backend status estimate_micro cost_micro input_tokens output_tokens cache_read_tokens cache_write_tokens at" },
   safety_incident: { empty: "detail", identity: "id agent_key", operational: "kind at" },
   survey_response: { identity: "agent_key", operational: "answered_at answer" },
@@ -111,7 +113,7 @@ test("every Durable Object and D1 column has a data classification, including in
 test("ledger erase covers every person table and removes indirect enrollment and billing links", async () => {
   const person = personAgentKey({ channel: "telegram", channelUserId: "100" });
   const remaining = personAgentKey({ channel: "telegram", channelUserId: "200" });
-  const shared = ["beta", "line_quota", "line_quota_alert"];
+  const shared = ["beta", "line_quota", "line_quota_alert", "line_reply_quota_alert", "line_reply_usage"];
   const indirect = ["billing_duplicate", "billing_invite", "billing_seat", "billing_subscription", "enrollment", "invite_code"];
   expect([...personLedgerTables, ...indirect, ...shared].sort()).toEqual(Object.keys(d1).sort());
 

@@ -66,7 +66,7 @@ function toEvent(e: WebhookEvent): ChannelEvent | null {
   }
 }
 
-export function lineChannel(secrets: { channelSecret: string; accessToken: string } | null): ChannelAdapter {
+export function lineChannel(secrets: { channelSecret: string; accessToken: string } | null, recordReply?: (at: EpochMs) => Promise<void>): ChannelAdapter {
   if (!secrets) return disabledChannel("line");
   const auth = { authorization: `Bearer ${secrets.accessToken}`, "content-type": "application/json" };
 
@@ -159,7 +159,17 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
       const messages = toMessages(msg);
       if (msg.reply && now < msg.reply.expiresAt - REPLY_TOKEN_SAFETY_MS) {
         const replied = await reply(msg.reply.token, messages);
-        if (replied !== null) return replied;
+        if (replied !== null) {
+          if (replied.kind === "sent" && recordReply) {
+            try {
+              await recordReply(now);
+            } catch {
+              // A counter failure must not cause the outbox to resend an accepted reply.
+              diagnostic("line_reply_usage_write_failed");
+            }
+          }
+          return replied;
+        }
         if (msg.replyOnly) return { kind: "failed", detail: "reply_only: the reply token was refused" };
         if (!live()) return { kind: "fenced" };
         const pushed = await push(msg, messages);

@@ -291,6 +291,7 @@ export function agentArgs(req: AgentRequest, toolsFile: string, session: { reado
     "--tools", "",
     "--append-system-prompt", req.append,
     "--strict-mcp-config",
+    "--settings", JSON.stringify({ includeGitInstructions: false }),
     "--mcp-config", JSON.stringify(mcp),
     "--allowedTools", req.tools.map((t) => `${TOOL_PREFIX}${t.name}`).join(","),
     "--setting-sources", "",

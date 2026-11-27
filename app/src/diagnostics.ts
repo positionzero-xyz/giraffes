@@ -18,6 +18,7 @@ export type Diagnostic = DrainPhase
   | "included_provider_refused"
   | "invite_failed"
   | "ledger_flush_failed"
+  | "line_loading_failed"
   | "line_quota"
   | "line_quota_unavailable"
   | "operator_alert_date_lookup_failed"
@@ -35,6 +36,7 @@ export type Diagnostic = DrainPhase
   | "stripe_refresh_failed"
   | "stripe_standing_unavailable"
   | "telegram_callback_failed"
+  | "telegram_typing_failed"
   | "turn_compaction_failed";
 
 export function diagnostic(code: Diagnostic, value?: number): void {

@@ -22,7 +22,6 @@ const MINUTE_MS = 60 * 1000;
 
 export const SCHEDULE = {
   maxPendingReminders: 20,
-  maxDailyRoutineFires: 3,
   lateAfterMs: 60 * 60 * 1000,
   agentMinLeadMs: MINUTE_MS,
   maxHorizonMs: 366 * 24 * 60 * 60 * 1000,
@@ -119,7 +118,7 @@ export type Firing =
       readonly event: Extract<AgentEvent, { kind: "wakeup" } | { kind: "checkin" }>;
       readonly next: NewWakeup | null;
     }
-  | { readonly kind: "skip"; readonly wakeup: PendingWakeup; readonly reason: "blocked" | "routine_budget"; readonly next: NewWakeup | null };
+  | { readonly kind: "skip"; readonly wakeup: PendingWakeup; readonly reason: "blocked" };
 
 export function planFiring(
   now: EpochMs,
@@ -127,25 +126,16 @@ export function planFiring(
   status: PersonStatus,
   checkinLocal: TimeOfDay,
   due: readonly PendingWakeup[],
-  routinesFiredToday = 0,
 ): Firing[] {
   const firings: Firing[] = [];
   for (const w of due) {
     if (status === "blocked") {
-      firings.push({ kind: "skip", wakeup: w, reason: "blocked", next: null });
+      firings.push({ kind: "skip", wakeup: w, reason: "blocked" });
       continue;
     }
     if (fireAt(w, tz) > now) continue;
     switch (w.kind) {
-      case "reminder": {
-        const next: NewReminder | null = w.repeat && {
-          key: w.key, kind: "reminder", origin: w.origin, note: w.note, dueAt: nextOccurrence(w.repeat, now, tz), bookkeeping: false, repeat: w.repeat,
-        };
-        if (next && routinesFiredToday >= SCHEDULE.maxDailyRoutineFires) {
-          firings.push({ kind: "skip", wakeup: w, reason: "routine_budget", next });
-          break;
-        }
-        if (next) routinesFiredToday++;
+      case "reminder":
         firings.push({
           kind: "fire",
           wakeup: w,
@@ -162,10 +152,9 @@ export function planFiring(
             bookkeeping: w.bookkeeping,
             repeat: w.repeat,
           },
-          next,
+          next: w.repeat && { key: w.key, kind: "reminder", origin: w.origin, note: w.note, dueAt: nextOccurrence(w.repeat, now, tz), bookkeeping: false, repeat: w.repeat },
         });
         break;
-      }
       case "checkin": {
         const day = localDate(now, tz);
         firings.push({

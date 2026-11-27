@@ -1,0 +1,73 @@
+name: checks
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: npm ci
+      - name: typecheck
+        run: npx tsc --noEmit
+      - name: app tests
+        run: npm test
+
+  box:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: box
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: npm ci
+      - name: box tests
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee box.log
+          grep -Eq '^(# |ℹ )pass [1-9]' box.log || { echo "::error::no box test passed"; exit 1; }
+          grep -Eq '^(# |ℹ )skipped 0$' box.log || { echo "::error::a box test was skipped"; exit 1; }
+
+  box-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: build the box image
+        run: docker build -t giraffes-box:check box
+      - name: image hardening
+        run: sh box/test/image.sh giraffes-box:check
+      - name: box tests inside the image
+        run: |
+          set -o pipefail
+          docker run --rm \
+            -v "$PWD/box/test:/opt/box/test:ro" \
+            -v "$PWD/box/mock-api.mjs:/opt/box/mock-api.mjs:ro" \
+            giraffes-box:check sh -c 'cd /opt/box && node --test --test-reporter=tap test/*.test.ts' 2>&1 | tee box-image.log
+          grep -Eq '^# pass [1-9]' box-image.log || { echo "::error::no box test passed in the image"; exit 1; }
+          grep -Eq '^# skipped 0$' box-image.log || { echo "::error::a box test was skipped in the image"; exit 1; }

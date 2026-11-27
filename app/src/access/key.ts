@@ -281,7 +281,7 @@ function labelledValue(before: string, separator: string, raw: string, after: st
   if (!wrapped && /\s/.test(GROUPED_VALUE_START.exec((raw + onLine).replace(/^[("'“‘[{<`]/, ""))?.[0] ?? "")) return null;
 
   const core = wrapped ? value : value.replace(/^[("'“‘[{<`]+/, "").replace(/[.,;:!?…)"'”’\]}>`]+$/, "");
-  // Quotes mark whatever they hold as the value; brackets often hold an aside, `password: (same)`, so they need a credential's shape.
+  // Quotes mark the value's edges, so a quoted phrase may hold spaces; quoted or bracketed, it still needs a credential's shape (`password: "none"` stays).
   const quoted = wrapped && QUOTES.has(raw[0]);
   if (core.length < (quoted ? 1 : 4)) return null;
   const appPassword = APP_PASSWORD_SHAPE.test(core);
@@ -296,7 +296,7 @@ function labelledValue(before: string, separator: string, raw: string, after: st
   const shaped = appPassword || (/\p{L}/u.test(core) && /\d/.test(core)) || /^\d{4,}$/.test(core) || mixedSymbol;
   // A copula can introduce ordinary prose, so mid-sentence it needs a value no word looks like.
   const strong = mixedSymbol || (upperAndLower && /\d/.test(core));
-  let counts = quoted || (explicit ? shaped : strong || (endsStatement && shaped));
+  let counts = quoted || explicit ? shaped : strong || (endsStatement && shaped);
   // `pass` alone is also a ticket (`boarding pass: TG628`, `season pass: summer2026`), so its value must look generated.
   if (/^pass\b/i.test(before)) counts &&= /[a-z]/.test(core) && core.length >= 7 && (interleaved(core) || (mixedSymbol && /\d/.test(core)));
   return counts ? removed : null;

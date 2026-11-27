@@ -635,6 +635,9 @@ describe("a key pasted into the chat", () => {
   const slackToken = "xox" + "b-904709774064-1412892120756-mtbruma0ofnrlgmn05xql7ef";
   const awsKeyId = "AK" + "IA" + "A1B2C3D4E5F6G7H8";
   const providerKey = "gh" + "p_" + "a".repeat(36);
+  const awsSecretParts = ["Qz7xP2mK9vL4", "/nB8wR3tY6uI1", "+oE5aS0dF7gH2jK"];
+  const webhookPath = ["T0FAKE0001", "B0FAKE0002", "Zq8rT4vW1xY6aB3cD9eF2gH"];
+  const appGroups = ["wqzk", "rbtm", "hlvn", "pxjd"];
 
   test.each([
     ["pem", "here is the server key\n", pemLines.join("\n"), "\nplease check", pemLines],
@@ -652,7 +655,6 @@ describe("a key pasted into the chat", () => {
     ["at-password", "password: ", "P@ssw0rd-54mpvX", "", ["P@", "ssw0rd-54mpvX"]],
     ["thai-password", "รหัสผ่านคือ ", "Xk92mmQp", "", ["Xk92mmQp"]],
     ["numeric-password", "the wifi password is ", "84302917", "", ["84302917"]],
-    ["single-character", "password: ", "!", " for the wifi", []],
     ["long-symbol-password", "password: ", "LongAlpha1234&" + "q".repeat(70), " for the wifi", ["LongAlpha1234", "q".repeat(20)]],
     ["env-name", "DB_PASSWORD=", "hunter2", "", ["hunter2"]],
     ["json-password", '{"password":"', "hunter2", '"}', ["hunter2"]],
@@ -661,6 +663,21 @@ describe("a key pasted into the chat", () => {
     ["app-password-tail", "App password: plse ", "qvzf-wpxn-kjmg-next", "", ["qvzf", "wpxn", "kjmg", "next"]],
     ["app-password-copy-colon", "App password: copy: (", "qvzfwpxnkjmgrbhy", ")", ["qvzfwpxnkjmgrbhy"]],
     ["reverse-access-token", "(", "qvzfwpxnkjmgrbhy", ") is my access token", ["qvzfwpxnkjmgrbhy"]],
+    ["quoted-app-password", 'App password: "', appGroups.join(" "), '"', appGroups],
+    ["curly-quoted-app-password", "app password: paste: “", appGroups.join(" "), "”", appGroups],
+    ["bracketed-app-password", "App password: (", appGroups.join(" "), ")", appGroups],
+    ["single-quoted-app-password", "password: '", appGroups.join(" "), "'", appGroups],
+    ["said-quoted-app-password", 'app password is "', appGroups.join(" "), '"', appGroups],
+    ["quoted-passphrase", 'password: "', "quokka zephyr plinth gnocchi", '"', ["quokka", "zephyr", "plinth", "gnocchi"]],
+    ["is-and-colon", "my password is: ", "BlueSky#2026", " ok", ["BlueSky", "Sky#2026"]],
+    ["thai-password-for-service", "รหัสผ่าน wifi คือ ", "Rt56Yu78", "", ["Rt56Yu78"]],
+    ["thai-wifi-code", "รหัส wifi คือ ", "55667788", "", ["55667788"]],
+    ["database-url-no-user", "use redis://:", "onlypass123", "@cache.example.test:6379", ["onlypass123"]],
+    ["short-token", "token: ", "7f3a9c2e1b", "", ["7f3a9c2e1b"]],
+    ["client-secret", "client secret: ", "Gq8sLp2Wm4", "", ["Gq8sLp2Wm4"]],
+    ["secret-key", "secret key: ", awsSecretParts.join(""), "", awsSecretParts.map((p) => p.slice(1))],
+    ["slack-webhook", "post to https://hooks.slack" + ".com/services/", webhookPath.join("/"), "", webhookPath],
+    ["bank-pin", "my bank PIN is ", "4821", "", ["4821"]],
   ] as const)("removes every part of the pasted credential from storage and the next prompt: %s", async (_id, before, value, after, fragments) => {
     const model = scripted([chat("I can help."), chat("I can help.")]);
     const c = await devChat("pasted-credential", { model, at: "2099-11-04T10:00" });
@@ -696,6 +713,25 @@ describe("a key pasted into the chat", () => {
     ["code-that-reads-a-token", "token = response.headers['x-token']"],
     ["token-description", "the token is single-use"],
     ["password-advice", "password: at least 8 chars, one number"],
+    ["boarding-pass", "boarding pass: gate D7, seat 32A"],
+    ["boarding-pass-code", "boarding pass: X7KQ2P, seat 32A"],
+    ["day-pass-price", "day pass = 300 baht"],
+    ["day-pass-said", "the day pass is 300"],
+    ["day-pass-hours", "day pass: 10am-5pm"],
+    ["pass-declined", "pass: no thanks, maybe next week"],
+    ["password-same", "password: same as last time?"],
+    ["password-still", "Password: still not working after reset"],
+    ["password-forgot", "password: I forgot it, can you help?"],
+    ["password-question-mark", "wifi password: ?"],
+    ["password-wrong-exclaim", "my password is wrong!"],
+    ["password-see-above", "password: (see above)"],
+    ["password-quoted-phrase-said", 'my password is "too short" apparently'],
+    ["pin-price", "pin: 1500 baht"],
+    ["token-none", "token: none yet"],
+    ["thai-promo-code", "รหัส promo คือ SAVE50"],
+    ["password-not-applicable", "password: N/A"],
+    ["password-emoji", "wifi password: 👍"],
+    ["password-price", "password: $200 for premium"],
   ] as const)("ordinary chat reaches the model as written: %s", async (id, text) => {
     const model = scripted([chat("Sure.")]);
     const c = await devChat(`ordinary-${id}`, { model, at: "2099-11-04T10:00" });

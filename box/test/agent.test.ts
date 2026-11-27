@@ -30,6 +30,15 @@ const SCHEDULE = {
   },
 };
 const REMEMBER = { name: "remember", description: "Remember a fact.", inputSchema: { type: "object", properties: { note: { type: "string" } }, required: ["note"] } };
+const TASK = {
+  name: "task",
+  description: "Open a task, propose its plan, or close it.",
+  inputSchema: {
+    type: "object",
+    properties: { op: { enum: ["open", "propose", "close"] }, ref: { type: "string", pattern: "^[a-z0-9][a-z0-9-]{0,39}$" }, kind: { type: "string" }, title: { type: "string" }, plan: { type: "string" } },
+    required: ["op", "ref", "kind", "title", "plan"],
+  },
+};
 
 type Turn = { readonly turn: string; readonly session?: string | null; readonly fresh?: string | null; readonly append?: string };
 const turnBody = (t: Turn) => ({ model: "claude-haiku-5-5", append: t.append ?? APPEND, session: t.session ?? null, turn: t.turn, fresh: t.fresh ?? null, tools: [SCHEDULE, REMEMBER] });
@@ -118,6 +127,19 @@ describe("an agent turn through the real Claude Code CLI", { skip: existsSync(CL
     assert.equal(r.body.text, "Water at 3.");
     assert.deepEqual(r.body.refusedCalls, [{ name: "schedule_wakeup", input, problems: ["missing note", "at has the wrong type or value"] }]);
     assert.deepEqual(r.body.calls, [{ name: "remember", input: { note: "Prefers morning reminders." } }]);
+  });
+
+  it("refuses a bad task ref so the model can fix it in the same turn", async () => {
+    const input = { op: "open", ref: "Bad ref", kind: "other", title: "Book a train", plan: "" };
+    const corrected = { ...input, ref: "book-train" };
+    writeFileSync(script, JSON.stringify({
+      calls: [{ name: "task", input }, { name: "task", input: corrected }],
+      text: "Noted.",
+    }));
+    const r = await postAgent({ ...turnBody({ turn: "New\nPerson: I need to book a train" }), tools: [TASK] });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.calls, [{ name: "task", input: corrected }]);
+    assert.deepEqual(r.body.refusedCalls, [{ name: "task", input, problems: ["ref has the wrong type or value"] }]);
   });
 
   it("resumes the session the Worker names, which keeps the system prompt it started with, so a memory change has to travel in the message", async () => {

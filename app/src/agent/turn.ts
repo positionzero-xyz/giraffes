@@ -161,13 +161,19 @@ export function turnFromAgent(raw: unknown): unknown {
   const reply = AgentReply.safeParse(raw);
   if (!reply.success) return null;
   const text = reply.data.text.trim();
-  const tasks = reply.data.calls.filter((c) => c.name === TASK_TOOL).map((c) => c.input);
-  const about = tasks.at(-1)?.ref;
+  const tasks: z.infer<typeof TaskOpSchema>[] = [];
+  const refusedCalls = [...(reply.data.refusedCalls ?? [])];
+  for (const call of reply.data.calls) {
+    if (call.name !== TASK_TOOL) continue;
+    const task = TaskOpSchema.safeParse(call.input);
+    if (task.success) tasks.push(task.data);
+    else refusedCalls.push({ ...call, problems: task.error.issues.map((issue) => issue.message) });
+  }
   return {
     actions: [...reply.data.calls.filter((c) => c.name !== TASK_TOOL).map((c) => ({ ...c.input, type: c.name })), text ? { type: "send", text } : { type: "quiet" }],
-    refusedCalls: reply.data.refusedCalls,
+    refusedCalls,
     tasks,
-    about: typeof about === "string" ? about : "",
+    about: tasks.at(-1)?.ref ?? "",
   };
 }
 

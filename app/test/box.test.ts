@@ -857,6 +857,58 @@ describe("a turn on the person's own Claude Code session", () => {
     expect((await c.snapshot()).tasks).toEqual([]);
     expect(c.logs("rejection").map((l) => l.reason)).toEqual(["tool_refused"]);
   });
+
+  test("a bad task ref from the box does not lose the check-in reply or a valid task call", async () => {
+    const { box, c } = await signedIn("bad-task-ref", "2099-11-04T08:00");
+    box.replies.push({
+      kind: "reply",
+      step: turn({ actions: [send("Morning! Have you booked the train?")], tasks: [openTask(TRIP, TITLE, "plan"), openTask("Bad ref", "Invalid")] }),
+    });
+
+    await c.advanceTo("2099-11-04T09:00");
+
+    expect(await c.received()).toEqual(["Morning! Have you booked the train?"]);
+    expect((await c.snapshot()).tasks.map((task) => task.ref)).toEqual([TRIP]);
+    expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "task_followup"]]);
+    expect(c.logs("rejection").map((r) => r.reason)).toEqual(["tool_refused"]);
+  });
+
+  test("a near-miss task ref from the box links the check-in to the one open task", async () => {
+    const { box, c } = await signedIn("typo-task-ref", "2099-11-04T08:00");
+    box.replies.push({ kind: "reply", step: turn({ actions: [send("Noted.")], tasks: [openTask(TRIP, TITLE, "plan")] }) });
+    await c.say("I want a weekend in Chiang Mai");
+    box.replies.push({
+      kind: "reply",
+      step: turn({ actions: [send("Still thinking about Chiang Mai?")], tasks: [openTask("chiang-mai-tirp", TITLE, "plan")] }),
+    });
+
+    await c.advanceTo("2099-11-04T09:00");
+
+    expect(await c.received()).toEqual(["Noted.", "Still thinking about Chiang Mai?"]);
+    expect((await c.snapshot()).tasks.map((task) => task.ref)).toEqual([TRIP]);
+    expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "task_followup"]]);
+  });
+
+  test("an ambiguous near-miss task ref from the box is refused without losing the reply", async () => {
+    const { box, c } = await signedIn("ambiguous-task-ref", "2099-11-04T08:00");
+    const other = "chiang-mai-drib";
+    box.replies.push({
+      kind: "reply",
+      step: turn({ actions: [send("Noted.")], tasks: [openTask(TRIP, TITLE), openTask(other, "Get a basketball")] }),
+    });
+    await c.say("I want a trip and a basketball");
+    box.replies.push({
+      kind: "reply",
+      step: turn({ actions: [send("How's it going?")], tasks: [openTask("chiang-mai-trib", TITLE)] }),
+    });
+
+    await c.advanceTo("2099-11-04T09:00");
+
+    expect(await c.received()).toEqual(["Noted.", "How's it going?"]);
+    expect((await c.snapshot()).tasks.map((task) => task.ref).sort()).toEqual([other, TRIP]);
+    expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "unlinked"]]);
+    expect(c.logs("rejection").map((r) => r.reason)).toEqual(["task_unknown"]);
+  });
 });
 
 describe("connecting a Claude plan", () => {

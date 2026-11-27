@@ -25,7 +25,11 @@ export default defineConfig(async () => ({
     }),
   ],
   test: {
+    dangerouslyIgnoreUnhandledErrors: false,
+    // Integration tests advance fake time through serialized Durable Object alarms; parallel files can exceed the 5 s default.
+    testTimeout: 20_000,
+    globalSetup: ["./test/runtime-guard.global-setup.mjs"],
     setupFiles: ["./test/setup.ts"],
-    provide: { d1Migrations: await readD1Migrations("./src/ledger") },
+    provide: { d1Migrations: await readD1Migrations("./src/ledger/migrations") },
   },
 }));

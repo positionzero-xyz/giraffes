@@ -109,6 +109,7 @@ function fakeFly(org = "giraffes") {
   const volumes = new Map<string, { id: string; name: string; state: string; auto_backup_enabled: boolean }[]>();
   const machines = new Map<string, { id: string; config: Record<string, unknown> }[]>();
   const requests: FlyRequest[] = [];
+  const omitOrgs = new Set<string>();
   const failures: { method: string; path: string; status: number; body?: unknown }[] = [];
   let n = 0;
   const fetch: Fetch = async (input, init) => {
@@ -123,13 +124,18 @@ function fakeFly(org = "giraffes") {
       return f.body === undefined ? new Response("boom", { status: f.status }) : Response.json(f.body, { status: f.status });
     }
     const [, app, sub, id] = url.pathname.match(/^\/v1\/apps(?:\/([^/]+))?(?:\/(\w+))?(?:\/([^/]+))?$/) ?? [];
+    if (!app && method === "GET") {
+      const orgSlug = url.searchParams.get("org_slug");
+      const mine = [...apps.entries()].filter(([, owner]) => (orgSlug === "personal" ? owner !== "someone-else" : owner === orgSlug));
+      return Response.json({ apps: mine.map(([name]) => ({ name })) });
+    }
     if (!app && method === "POST") {
       if (apps.has(body.app_name)) return Response.json({ error: "Validation failed: Name has already been taken", status: "name_taken" }, { status: 422 });
       apps.set(body.app_name, body.org_slug);
       return Response.json({ id: `app${++n}`, created_at: 1 }, { status: 201 });
     }
     if (!app || !apps.has(app)) return Response.json({ error: "not found" }, { status: 404 });
-    if (!sub && method === "GET") return Response.json({ name: app, organization: { slug: apps.get(app) } });
+    if (!sub && method === "GET") return Response.json(omitOrgs.has(app) ? { name: app } : { name: app, organization: { slug: apps.get(app) } });
     if (!sub && method === "DELETE") {
       apps.delete(app);
       return new Response(null, { status: 202 });
@@ -167,7 +173,7 @@ function fakeFly(org = "giraffes") {
     }
     return Response.json({ error: "no route" }, { status: 404 });
   };
-  return { fetch, apps, ips, volumes, machines, requests, failures, org };
+  return { fetch, apps, ips, volumes, machines, requests, failures, org, omitOrgs };
 }
 
 const flyConfig: FlyConfig = {
@@ -337,6 +343,39 @@ describe("fly host", () => {
     fly.apps.set(app, "someone-else");
     expect(await host.ensure(app, token)).toMatchObject({ ok: false, retryable: false });
     expect(fly.machines.get(app)).toBeUndefined();
+  });
+
+  test("the personal alias accepts an existing app Fly reports under the personal org's real slug", async () => {
+    const fly = fakeFly();
+    fly.apps.set(app, "beam-personal-abc123");
+    const host = flyHost({ ...flyConfig, org: "personal" }, fly.fetch);
+
+    expect(await host.ensure(app, token)).toEqual({ ok: true });
+    expect(fly.requests.some((r) => r.method === "GET" && r.path === "/apps?org_slug=personal")).toBe(true);
+    expect(fly.machines.get(app)).toHaveLength(1);
+  });
+
+  test("an app reply with no organization fails closed outside the personal alias", async () => {
+    const fly = fakeFly();
+    fly.apps.set(app, "giraffes");
+    fly.omitOrgs.add(app);
+
+    expect(await flyHost(flyConfig, fly.fetch).ensure(app, token)).toMatchObject({ ok: false, retryable: false });
+    expect(fly.machines.get(app)).toBeUndefined();
+  });
+
+  test("the personal-filtered app list decides ownership when the direct app reply omits organization", async () => {
+    const mine = fakeFly();
+    mine.apps.set(app, "beam-personal-abc123");
+    mine.omitOrgs.add(app);
+    expect(await flyHost({ ...flyConfig, org: "personal" }, mine.fetch).ensure(app, token)).toEqual({ ok: true });
+    expect(mine.machines.get(app)).toHaveLength(1);
+
+    const foreign = fakeFly();
+    foreign.apps.set(app, "someone-else");
+    foreign.omitOrgs.add(app);
+    expect(await flyHost({ ...flyConfig, org: "personal" }, foreign.fetch).ensure(app, token)).toMatchObject({ ok: false, retryable: false });
+    expect(foreign.machines.get(app)).toBeUndefined();
   });
 
   test("a name Fly refuses for another reason fails with Fly's words, not as a name owned elsewhere", async () => {
@@ -717,7 +756,8 @@ describe("connecting a Claude plan", () => {
     expect(box.healthCalls).toHaveLength(1 + BOX.pollForMs / BOX.pollEveryMs);
     expect((await c.snapshot()).box?.state).toBe("signed_out");
     expect(model.calls).toHaveLength(0);
-  });
+  // This drive walks every 30-second sign-in poll for the full half-hour polling window.
+  }, 10_000);
 
   test("a provisioning step that died after creating the app is retried and converges on one app and one link", async () => {
     const box = fakeBox({ host: ["die"] });
@@ -958,7 +998,7 @@ describe("connecting a Claude plan", () => {
     expect(box.parses).toHaveLength(2);
   });
 
-  test("an unavailable box backs the turn off, never spends anyone's money, skips the box for 5 minutes, and then tries it again", async () => {
+  test("an unavailable box blip backs the turn off, retries it on the box, and never spends anyone's money", async () => {
     const box = fakeBox({ signedIn: true });
     const model = scripted([]);
     const c = await devChat("hal", { model, at: "2099-11-04T10:00", box: box.deps });
@@ -967,17 +1007,19 @@ describe("connecting a Claude plan", () => {
 
     box.replies.push({ kind: "status", status: 503 });
     await c.say("hello");
-    await c.advanceTo("2099-11-04T10:04");
-    expect(await c.received()).toEqual([NOTICE.failed]);
-    expect((await c.snapshot()).box?.state).toBe("signed_in");
-    expect(box.parses).toHaveLength(1);
+    box.replies.push({ kind: "reply", step: chat("Recovered on your plan.") });
+    await c.advanceTo("2099-11-04T10:01");
 
-    c.clock.set(local("2099-11-04T10:05"));
+    expect(await c.received()).toEqual(["Recovered on your plan."]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+    expect(box.parses).toHaveLength(2);
+
     box.replies.push({ kind: "reply", step: chat("Back on your plan.") });
     await c.say("later");
     expect(await c.received()).toEqual(["Back on your plan."]);
     expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
       ["box", "unavailable"],
+      ["box", "settled"],
       ["box", "settled"],
     ]);
     expect(model.calls).toHaveLength(0);
@@ -1013,7 +1055,7 @@ describe("connecting a Claude plan", () => {
     await c.received();
     await giveKey(c.agent);
 
-    box.replies.push({ kind: "status", status: 503 });
+    box.replies.push({ kind: "status", status: 503 }, { kind: "status", status: 503 }, { kind: "status", status: 503 });
     await c.say("hello");
     await c.advanceTo("2099-11-04T10:04");
     expect(await c.received()).toEqual([NOTICE.backupAsk("OpenCode Go"), NOTICE.failed]);
@@ -1027,8 +1069,62 @@ describe("connecting a Claude plan", () => {
     expect(c.logs("model_call").map((r) => [r.backend, r.status])).toEqual([
       ["box", "unavailable"],
       ["box", "unavailable"],
+      ["box", "unavailable"],
+      ["box", "unavailable"],
       ["key", "settled"],
     ]);
+  });
+
+  test("a resting backup key does not hold a recovered box off", async () => {
+    const box = fakeBox({ signedIn: true });
+    const provider = fakeProvider([{ kind: "output", value: { actions: [{ type: "send", text: "From your key." }], tasks: [], about: "" } }]);
+    const c = await devChat("resk", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await giveKey(c.agent, { backup: true });
+    await c.received();
+
+    box.replies.push({ kind: "status", status: 503 });
+    await c.say("first");
+    expect(await c.received()).toEqual(["From your key."]);
+    expect(box.parses).toHaveLength(1);
+    expect(provider.seen).toHaveLength(1);
+
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (_agent, state) => {
+      state.storage.sql.exec("UPDATE model_key SET fault = 'rate', failures = 1, rest_until = NULL, told_on = NULL, unreadable_under = NULL");
+    });
+    box.replies.push({ kind: "reply", step: chat("Back on your plan.") });
+    await c.say("second");
+
+    expect(await c.received()).toEqual(["Back on your plan."]);
+    expect(box.parses).toHaveLength(2);
+    expect(provider.seen).toHaveLength(1);
+  });
+
+  test("a backup key without worst-case cap room does not hold a recovered box off", async () => {
+    const box = fakeBox({ signedIn: true });
+    const provider = fakeProvider([{ kind: "output", value: { actions: [{ type: "send", text: "From your key." }], tasks: [], about: "" } }]);
+    const c = await devChat("capk", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await giveKey(c.agent, { backup: true });
+    await c.received();
+
+    box.replies.push({ kind: "status", status: 503 });
+    await c.say("first");
+    expect(await c.received()).toEqual(["From your key."]);
+    expect(box.parses).toHaveLength(1);
+    expect(provider.seen).toHaveLength(1);
+
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (_agent, state) => {
+      state.storage.sql.exec("UPDATE model_key SET cap_micro = 1");
+    });
+    box.replies.push({ kind: "reply", step: chat("Back on your plan.") });
+    await c.say("second");
+
+    expect(await c.received()).toEqual(["Back on your plan."]);
+    expect(box.parses).toHaveLength(2);
+    expect(provider.seen).toHaveLength(1);
   });
 
   test("a box that answers signed_out says the backup key answers for now, and the key does", async () => {

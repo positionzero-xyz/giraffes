@@ -12,5 +12,16 @@ if [ -n "$(git -C "$here" status --porcelain -- .)" ]; then
 fi
 image="registry.fly.io/$app:$(git -C "$here" rev-parse --short HEAD)"
 docker build --platform linux/amd64 -t "$image" "$here"
-docker push "$image"
+for attempt in 1 2 3; do
+  if docker push "$image"; then
+    break
+  else
+    status=$?
+  fi
+  if [ "$attempt" = 3 ]; then
+    exit "$status"
+  fi
+  echo "docker push failed (attempt $attempt of 3); retrying in 10 seconds" >&2
+  sleep 10
+done
 echo "$image"

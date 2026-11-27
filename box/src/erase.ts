@@ -9,7 +9,7 @@ export type EraseState = { readonly box: string; readonly floor: number; readonl
 const SIGN_IN = new Set([".credentials.json", ".claude.json"]);
 const SIGN_IN_FIELDS = new Set(["oauthAccount"]);
 
-function writeDurably(file: string, text: string): void {
+export function writeDurably(file: string, text: string): void {
   const next = `${file}.next`;
   const fd = openSync(next, "w", 0o600);
   try {

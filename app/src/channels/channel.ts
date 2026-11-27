@@ -18,10 +18,15 @@ export type Delivery =
   /** `live` turned false before a later request of this delivery, which was then not sent. */
   | { readonly kind: "fenced" };
 
+export type OperatorAlertDelivery = Delivery
+  | { readonly kind: "chat_unavailable"; readonly detail: string }
+  | { readonly kind: "chat_migrated"; readonly chatId: string; readonly detail: string };
+
 export interface ChannelAdapter {
   receive(req: Request): Promise<Received>;
   /** `live`, when given, is asked right before every request after the first; the caller asks it before calling. */
   deliver(msg: OutboundMessage, now: EpochMs, live?: () => boolean): Promise<Delivery>;
+  deliverOperatorAlert?(msg: OutboundMessage, now: EpochMs): Promise<OperatorAlertDelivery>;
 }
 
 export type ChannelRegistry = { readonly [K in ChannelId]: ChannelAdapter };

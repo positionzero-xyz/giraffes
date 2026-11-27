@@ -53,6 +53,40 @@ describe("conversation", () => {
   });
 });
 
+describe("working on it", () => {
+  test.each(["telegram", "line"] as const)("on %s, the person sees a reply being made until it is sent, refreshed for a long turn", async (channel) => {
+    const model = scripted([hold(chat("Here's your day."))]);
+    const c = await devChat("ida", { model, at: "2099-11-04T10:00", channel });
+
+    await c.post("what's on today?");
+    await until(() => c.channel.shown.length >= 3);
+    expect(await c.received()).toEqual([]);
+    model.release();
+    await c.settle();
+    const shownByReply = c.channel.shown.length;
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(await c.received()).toEqual(["Here's your day."]);
+    expect(c.channel.shown.length).toBe(shownByReply);
+    expect(new Set(c.channel.shown.map((to) => `${to.channel}:${to.channelUserId}`))).toEqual(new Set([`${channel}:ida`]));
+    model.assertDone();
+  });
+
+  test("a check-in nobody asked for shows nothing", async () => {
+    const model = scripted([chat("Hi!"), chat("Morning! Anything on today?")]);
+    const c = await devChat("jon", { model, at: "2099-11-04T10:00", channel: "telegram" });
+    await c.say("hi");
+    const shownByReply = c.channel.shown.length;
+    expect(shownByReply).toBeGreaterThan(0);
+
+    await c.advanceTo("2099-11-05T12:00");
+
+    expect(await c.received()).toEqual(["Hi!", "Morning! Anything on today?"]);
+    expect(c.channel.shown.length).toBe(shownByReply);
+    model.assertDone();
+  });
+});
+
 describe("reminders", () => {
   test("a reminder or cancel that code rejects is corrected in the same message, and why is logged", async () => {
     const model = scripted([

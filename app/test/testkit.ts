@@ -190,13 +190,21 @@ export type Delivered = {
   readonly button?: { readonly label: string; readonly data: string };
 };
 
-export type ScriptedChannel = ChannelAdapter & { readonly delivered: readonly Delivered[] };
+export type ScriptedChannel = ChannelAdapter & { readonly delivered: readonly Delivered[]; readonly shown: readonly Identity[] };
 
 export function scriptedChannel(steps: readonly DeliveryStep[] = []): ScriptedChannel {
   const queue = [...steps];
   const delivered: Delivered[] = [];
+  const shown: Identity[] = [];
   return {
     delivered,
+    shown,
+    working: {
+      everyMs: 5,
+      show: async (to) => {
+        shown.push(to);
+      },
+    },
     receive: async () => {
       throw new Error("the agent never receives through its channel");
     },

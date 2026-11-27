@@ -380,6 +380,57 @@ describe("/forget lists every saved item and deletes only what the person picks"
     expect(await sql(c, "SELECT key, due_at FROM wakeup WHERE kind = 'reminder' AND status = 'pending'")).toEqual([{ key: "stretch", due_at: local("2099-11-07T07:00") }]);
   });
 
+  test("a routine that already fired is one entry, and picking it deletes all of it while the other routine keeps firing", async () => {
+    const key = `${MARKER}-stretch`;
+    const model = scripted([
+      turn({ actions: [routine(key, "2099-11-04T10:30", `Stretch by the ${MARKER} gate`, "daily"), routine("pills", "2099-11-05T07:30", "Take the pills", "daily"), send("Set.")] }),
+      chat(`Time to stretch by the ${MARKER} gate.`),
+      chat("Time for the pills."),
+    ]);
+    const c = await devChat("pick-fired-routine", { model, at: "2099-11-04T10:00" });
+    await say(c, "remind me daily at 10:30 to stretch by the gate, and at 7:30 to take the pills");
+    await c.advanceTo("2099-11-04T10:31");
+    expect(await c.received()).toEqual([`Time to stretch by the ${MARKER} gate.`]);
+    const counted = "SELECT COUNT(*) AS n FROM routine_delivery WHERE sending_id IS NULL AND at > ?";
+    expect(await sql(c, counted, c.clock.now() - 86_400_000)).toEqual([{ n: 1 }]);
+
+    const page = (await say(c, "/forget"))[0];
+    const lines = page.split("\n");
+    const entries = (k: string) => lines.flatMap((l, i) => (l === `Key: ${k}` ? [{ number: Number(lines[i - 2].split(".")[0]), status: lines[i + 1] }] : []));
+    expect.soft(entries(key)).toEqual([{ number: expect.any(Number), status: "Status: pending" }]);
+    expect.soft(entries("pills")).toHaveLength(1);
+
+    const stretch = entries(key).find((e) => e.status === "Status: pending");
+    if (!stretch) throw new Error(`no pending entry for ${key}: ${page}`);
+    expect(await say(c, `/forget ${codeOf(page)} ${stretch.number}`)).toEqual([receipt({ deleted: [[stretch.number]] })]);
+    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await sql(c, "SELECT COUNT(*) AS n FROM wakeup WHERE key = ?", key)).toEqual([{ n: 0 }]);
+    expect(await sql(c, counted, c.clock.now() - 86_400_000)).toEqual([{ n: 1 }]);
+
+    await c.advanceTo("2099-11-05T07:31");
+    expect(await c.received()).toEqual(["Time for the pills."]);
+    expect(await sql(c, "SELECT key, due_at FROM wakeup WHERE kind = 'reminder' AND status = 'pending'")).toEqual([{ key: "pills", due_at: local("2099-11-06T07:30") }]);
+    expect(await sql(c, counted, c.clock.now() - 86_400_000)).toEqual([{ n: 2 }]);
+  });
+
+  test("a one-off reminder with the same key and note as a routine stays its own entry and isn't deleted with it", async () => {
+    const c = await devChat("pick-one-off", { model: scripted([]), at: "2099-11-04T10:00" });
+    await say(c, "/forget status");
+    await sql(c, `INSERT INTO wakeup (key, kind, origin, note, due_at, status, created_at, created_by, repeat, repeat_anchor) VALUES
+      ('stretch', 'reminder', 'person', 'Stretch', ?, 'fired', 0, 'test', NULL, NULL),
+      ('stretch', 'reminder', 'person', 'Stretch', ?, 'fired', 0, 'test', 'daily', '2099-11-03T07:00'),
+      ('stretch', 'reminder', 'person', 'Stretch', ?, 'pending', 0, 'test', 'daily', '2099-11-03T07:00')`,
+    local("2099-11-02T07:00"), local("2099-11-03T07:00"), local("2099-11-05T07:00"));
+
+    const page = (await say(c, "/forget"))[0];
+    const lines = page.split("\n");
+    const entries = lines.flatMap((l, i) => (l === "Key: stretch" ? [{ number: Number(lines[i - 2].split(".")[0]), status: lines[i + 1] }] : []));
+    expect(entries.map((e) => e.status)).toEqual(["Status: fired", "Status: pending"]);
+
+    await say(c, `/forget ${codeOf(page)} ${entries[1].number}`);
+    expect(await sql(c, "SELECT status, repeat FROM wakeup WHERE key = 'stretch'")).toEqual([{ status: "fired", repeat: null }]);
+  });
+
   test("an old Accept on a deleted task's plan, tapped or typed, accepts nothing", async () => {
     const { c } = await seeded("pick-accept", { extra: [chat("Okay!"), chat("Okay again!")] });
     const button = c.channel.delivered.at(-1)?.button?.data;
@@ -592,7 +643,7 @@ describe("stores added on main", () => {
     const page = (await say(c, "/forget"))[0];
     const lines = page.split("\n");
     const picks = lines.flatMap((l, i) => (l === `Key: ${key}` ? [Number(lines[i - 2].split(".")[0])] : []));
-    expect(picks).toHaveLength(2);
+    expect(picks).toHaveLength(1);
     expect(await say(c, `/forget ${codeOf(page)} ${picks.join(" ")}`)).toEqual([receipt({ deleted: [picks] })]);
 
     expect(await holding(c, MARKER)).toEqual([]);

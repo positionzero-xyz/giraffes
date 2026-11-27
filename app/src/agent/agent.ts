@@ -1312,7 +1312,7 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #admission(view: TurnView, a: AgentRow): Promise<void> {
-    if (this.#deps.admission === "open") {
+    if (this.#deps.admission === "open" && view.admission.state !== "removed") {
       const now = this.#deps.clock.now();
       const admitted = { next: { state: "admitted", seat: STAFF, at: now }, change: "consented", ensureCheckin: checkinWakeup(now, a.tz, a.checkinLocal) } as const;
       this.#commit(planWithoutModel(view, { kind: "admission", commit: admitted, text: null, consent: false }), view, a.key, { kind: "none" });

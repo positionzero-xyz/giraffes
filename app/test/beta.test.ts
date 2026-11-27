@@ -205,6 +205,27 @@ describe("admission to the beta", () => {
     expect(c.logs("admission").map((r) => r.change)).toEqual(["consented", "removed"]);
   });
 
+  test("with open admission, a removed person stays removed, and a message, a consent tap or a code gets the fixed reply without the model or D1", async () => {
+    const refuse = async () => {
+      throw new Error("must not be asked");
+    };
+    const ledger = Object.assign(memoryLedger(), { checkInvite: refuse, claimSeat: refuse });
+    const model = scripted([chat("Hi.")]);
+    const c = await devChat("gone-open", { model, at: "2099-11-04T10:00", admission: "open", ledger });
+    await c.say("hi");
+    await c.received();
+
+    await c.remove();
+    await c.say("hello?");
+    await c.tap("c");
+    await c.say(`/join ${CODE}`);
+
+    expect(await c.received()).toEqual([t.removed, t.removed, t.removed]);
+    expect(model.calls).toHaveLength(1);
+    expect((await c.snapshot()).admission).toMatchObject({ state: "removed" });
+    expect(c.logs("admission").map((r) => r.change)).toEqual(["consented", "removed"]);
+  });
+
   test("a removed person's key link no longer validates, and their tickets are gone", async () => {
     const provider = fakeProvider([{ kind: "output", value: { ok: true } }]);
     const c = await devChat("rem1", { model: null, provider, at: "2099-11-04T10:00", admission: "beta" });

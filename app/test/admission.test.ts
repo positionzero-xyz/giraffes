@@ -39,6 +39,11 @@ describe("a code is checked when it is presented", () => {
     });
   });
 
+  test("both consent notices name the account delete command", () => {
+    expect(NOTICES.en.privacy).toContain("/erase");
+    expect(NOTICES.th.privacy).toContain("/erase");
+  });
+
   test("a bad, used or full code waitlists the person and says why", () => {
     for (const kind of ["bad_code", "used", "full"] as const) {
       const step = planAdmission(view(stranger, message(code)), { kind: "checked", check: { kind } });

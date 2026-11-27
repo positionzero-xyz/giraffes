@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { boundedRequestBody } from "../body";
-import { eventKey, parseButton, personAgentKey, type ChannelEvent, type EpochMs, type InboundEnvelope, type OutboundMessage } from "../domain";
-import { CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
+import { diagnostic } from "../diagnostics";
+import { eventKey, parseButton, personAgentKey, type ChannelEvent, type EpochMs, type Identity, type InboundEnvelope, type OutboundMessage } from "../domain";
+import { CHANNEL_API_TIMEOUT_MS, CHANNEL_RETRY_MS, disabledChannel, sameSecret, type ChannelAdapter, type Delivery, type Received } from "./channel";
 
 const API = "https://api.line.me/v2/bot/message";
 const Quota = z.discriminatedUnion("type", [
@@ -20,6 +21,8 @@ const REPLY_TOKEN_SAFETY_MS = 10_000;
 const MAX_MESSAGES = 5;
 const MAX_TEXT = 5000;
 const MAX_WEBHOOK_BYTES = 1024 * 1024;
+/** LINE shows the loading animation for this long, or until the next message to the person. */
+const LOADING_SECONDS = 20;
 
 const WebhookBody = z.object({ events: z.array(z.unknown()) });
 const WebhookEvent = z.object({
@@ -63,13 +66,22 @@ function toEvent(e: WebhookEvent): ChannelEvent | null {
   }
 }
 
-export function lineChannel(secrets: { channelSecret: string; accessToken: string } | null): ChannelAdapter {
+export function lineChannel(
+  secrets: { channelSecret: string; accessToken: string } | null,
+  recordReply?: (at: EpochMs) => Promise<void>,
+  timeoutMs = CHANNEL_API_TIMEOUT_MS,
+): ChannelAdapter {
   if (!secrets) return disabledChannel("line");
   const auth = { authorization: `Bearer ${secrets.accessToken}`, "content-type": "application/json" };
 
   async function reply(token: string, messages: readonly object[]): Promise<Delivery | null> {
     try {
-      const res = await fetch(`${API}/reply`, { method: "POST", headers: auth, body: JSON.stringify({ replyToken: token, messages }) });
+      const res = await fetch(`${API}/reply`, {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({ replyToken: token, messages }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
       if (res.ok) return { kind: "sent", via: "reply" };
       // LINE answers 400 to an invalid or already used reply token.
       if (res.status === 400) return null;
@@ -90,6 +102,7 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
         method: "POST",
         headers: { ...auth, "x-line-retry-key": msg.id },
         body: JSON.stringify({ to: msg.to.channelUserId, messages }),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (res.ok || res.status === 409) return { kind: "sent", via: "push" };
       const body = await res.text();
@@ -97,6 +110,20 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
       return classify(res.status, body);
     } catch (err) {
       return { kind: "retry", afterMs: CHANNEL_RETRY_MS, detail: String(err) };
+    }
+  }
+
+  async function loading(to: Identity): Promise<void> {
+    try {
+      const res = await fetch("https://api.line.me/v2/bot/chat/loading/start", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({ chatId: to.channelUserId, loadingSeconds: LOADING_SECONDS }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) diagnostic("line_loading_failed", res.status);
+    } catch {
+      diagnostic("line_loading_failed");
     }
   }
 
@@ -137,11 +164,23 @@ export function lineChannel(secrets: { channelSecret: string; accessToken: strin
 
     deliverOperatorAlert: (msg) => push(msg, toMessages(msg), true),
 
+    working: { everyMs: (LOADING_SECONDS - 5) * 1000, show: loading },
+
     async deliver(msg: OutboundMessage, now: EpochMs, live: () => boolean = () => true): Promise<Delivery> {
       const messages = toMessages(msg);
       if (msg.reply && now < msg.reply.expiresAt - REPLY_TOKEN_SAFETY_MS) {
         const replied = await reply(msg.reply.token, messages);
-        if (replied !== null) return replied;
+        if (replied !== null) {
+          if (replied.kind === "sent" && recordReply) {
+            try {
+              await recordReply(now);
+            } catch {
+              // A counter failure must not cause the outbox to resend an accepted reply.
+              diagnostic("line_reply_usage_write_failed");
+            }
+          }
+          return replied;
+        }
         if (msg.replyOnly) return { kind: "failed", detail: "reply_only: the reply token was refused" };
         if (!live()) return { kind: "fenced" };
         const pushed = await push(msg, messages);
@@ -186,9 +225,12 @@ function invalidPushRecipient(body: string): boolean {
 }
 
 /** This month's message limit (null when the account has none) and the messages sent so far, which count pushes and not replies. */
-export async function lineQuota(accessToken: string): Promise<{ readonly limit: number | null; readonly used: number }> {
+export async function lineQuota(accessToken: string, timeoutMs = CHANNEL_API_TIMEOUT_MS): Promise<{ readonly limit: number | null; readonly used: number }> {
   const get = async (path: string): Promise<unknown> => {
-    const res = await fetch(`${API}/${path}`, { headers: { authorization: `Bearer ${accessToken}` } });
+    const res = await fetch(`${API}/${path}`, {
+      headers: { authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
     if (!res.ok) throw new Error(`LINE ${path}: ${res.status} ${await res.text()}`);
     return res.json();
   };

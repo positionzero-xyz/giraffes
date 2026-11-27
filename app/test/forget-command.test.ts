@@ -440,13 +440,15 @@ describe("delivery of the forget's own messages", () => {
     await runInDurableObject<Agent, void>(stubOf(c.agent), (a) => a.withDeps({ box: box.deps }));
     await sql(c, "INSERT INTO box (one, name, host, url, state, state_at) VALUES (1, 'gbox-x', 'fly', 'https://gbox-x.box.test', 'signed_in', 0)");
     box.created.add("gbox-x");
+    box.reachable = false;
     await c.remove();
     c.clock.set((c.clock.now() + 1000) as EpochMs);
-    box.reachable = false;
     await message("/forget all", true);
+    expect(await sql(c, "SELECT state FROM box")).toEqual([{ state: "reclaiming" }]);
     box.reachable = true;
     c.clock.set((c.clock.now() + 120_000) as EpochMs);
     await c.settle();
+    expect(await sql(c, "SELECT state FROM box")).toEqual([]);
     expect(line.sent).toEqual([]);
 
     await message("/forget status", true);

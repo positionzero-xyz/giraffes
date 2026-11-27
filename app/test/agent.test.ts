@@ -1,7 +1,13 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
+import { AGENT_SYSTEM } from "../src/agent/prompt";
+import { MIGRATIONS, migrate } from "../src/agent/schema";
+import { AgentStore } from "../src/agent/store";
 import { TURN } from "../src/agent/turn";
-import type { EpochMs, LocalDateTime, TimeZone } from "../src/domain";
+import type { ChannelAdapter, ChannelRegistry } from "../src/channels/channel";
+import { lineChannel } from "../src/channels/line";
+import { telegramChannel } from "../src/channels/telegram";
+import { eventKey, type EpochMs, type LocalDateTime, type TimeZone } from "../src/domain";
 import { DEV_CAP_MICRO } from "../src/access/access";
 import { HAIKU_5_5 } from "../src/model/providers";
 import { routeFor } from "../src/model/routes";
@@ -11,7 +17,7 @@ import { costOf } from "../src/policy/spend";
 import { fromLocal, toLocal } from "../src/policy/time";
 import type { Env } from "../src/config";
 import worker from "../src/worker";
-import { cancel, chat, devChat, hold, local, memoryLedger, quiet, routine, schedule, scripted, send, throws, turn, wall } from "./testkit";
+import { cancel, chat, devChat, hold, local, memoryLedger, quiet, rewindForgetCommandSchema, routine, schedule, scripted, send, throws, turn, wall } from "./testkit";
 
 const NOTICE = NOTICES.en;
 const inputThatSpendsTheCap = (DEV_CAP_MICRO * 1_000_000) / HAIKU_5_5.inputPerM;
@@ -48,6 +54,40 @@ describe("conversation", () => {
     expect(model.calls[0].user).not.toContain("second question");
     expect(model.calls[1].user).toContain("You: First answer.");
     expect(model.calls[1].user).toContain("## New\nPerson: second question");
+    model.assertDone();
+  });
+});
+
+describe("working on it", () => {
+  test.each(["telegram", "line"] as const)("on %s, the person sees a reply being made until it is sent, refreshed for a long turn", async (channel) => {
+    const model = scripted([hold(chat("Here's your day."))]);
+    const c = await devChat("ida", { model, at: "2099-11-04T10:00", channel });
+
+    await c.post("what's on today?");
+    await until(() => c.channel.shown.length >= 3);
+    expect(await c.received()).toEqual([]);
+    model.release();
+    await c.settle();
+    const shownByReply = c.channel.shown.length;
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(await c.received()).toEqual(["Here's your day."]);
+    expect(c.channel.shown.length).toBe(shownByReply);
+    expect(new Set(c.channel.shown.map((to) => `${to.channel}:${to.channelUserId}`))).toEqual(new Set([`${channel}:ida`]));
+    model.assertDone();
+  });
+
+  test("a check-in nobody asked for shows nothing", async () => {
+    const model = scripted([chat("Hi!"), chat("Morning! Anything on today?")]);
+    const c = await devChat("jon", { model, at: "2099-11-04T10:00", channel: "telegram" });
+    await c.say("hi");
+    const shownByReply = c.channel.shown.length;
+    expect(shownByReply).toBeGreaterThan(0);
+
+    await c.advanceTo("2099-11-05T12:00");
+
+    expect(await c.received()).toEqual(["Hi!", "Morning! Anything on today?"]);
+    expect(c.channel.shown.length).toBe(shownByReply);
     model.assertDone();
   });
 });
@@ -274,6 +314,14 @@ describe("reminders", () => {
 describe("routines", () => {
   const reminders = async (c: Awaited<ReturnType<typeof devChat>>) =>
     (await c.snapshot()).pendingWakeups.filter((w) => w.kind === "reminder").map((w) => [w.key, wall(w.dueAt), w.kind === "reminder" ? w.repeat : null]);
+  const fireEarly = async (c: Awaited<ReturnType<typeof devChat>>, user: string, key: string) => {
+    const res = await SELF.fetch("https://agent.test/dev/fire", {
+      method: "POST",
+      body: JSON.stringify({ user, key }),
+    });
+    expect(res.status).toBe(200);
+    await c.settle();
+  };
 
   test("a daily routine fires at its time every day, and code schedules each next one", async () => {
     const model = scripted([
@@ -294,6 +342,202 @@ describe("routines", () => {
     await c.advanceTo("2099-11-05T08:00");
     expect(await c.received()).toEqual(["Stretch again."]);
     expect(c.channel.delivered.slice(1).map((d) => wall(d.at))).toEqual(["2099-11-04T08:00", "2099-11-05T08:00"]);
+    model.assertDone();
+  });
+
+  test("an asked routine stops at six for 24 hours, logs the drop, and lets a one-off through", async () => {
+    const model = scripted([
+      turn({ actions: [
+        routine("stretch", "2099-11-04T22:30", "Stretch", "daily"),
+        schedule("pills", "2099-11-04T23:00", "Take your pills"),
+      ] }),
+      ...Array.from({ length: 7 }, () => chat("Stretch time.")),
+      chat("Take your pills."),
+      chat("Stretch time."),
+      chat("Stretch time."),
+      turn({ actions: [quiet()] }),
+      chat("Stretch time."),
+    ]);
+    const user = "routine-limit";
+    const c = await devChat(user, { model, at: "2099-11-04T22:29" });
+
+    await c.say("Remind me to stretch every day, and to take my pills tonight.");
+    await c.advanceTo("2099-11-04T22:30");
+    for (let i = 0; i < 5; i++) await fireEarly(c, user, "stretch");
+    expect(await c.received()).toEqual(Array.from({ length: 6 }, () => "Stretch time."));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await fireEarly(c, user, "stretch");
+      expect(warn).toHaveBeenCalledWith({ code: "routine_delivery_budget" });
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(1);
+    expect((await reminders(c)).find(([key]) => key === "stretch")?.[1]).toBe("2099-11-05T22:30");
+
+    await c.advanceTo("2099-11-04T23:00");
+    expect(await c.received()).toEqual(["Take your pills."]);
+    await c.advanceTo("2099-11-05T00:01");
+    await fireEarly(c, user, "stretch");
+    expect(await c.received()).toEqual([]);
+
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, async (agent) => {
+      const { op } = await agent.beginForget({ at: c.clock.now(), seq: null });
+      await agent.endForget(op);
+    });
+    await c.advanceTo("2099-11-05T00:03");
+    await fireEarly(c, user, "stretch");
+    expect(await c.received()).toEqual([]);
+
+    await c.advanceTo("2099-11-05T22:30");
+    expect(await c.received()).toEqual(["Stretch time."]);
+    model.assertDone();
+  });
+
+  test("unasked and asked routines share the same rolling allowance", async () => {
+    const routines = Array.from({ length: 7 }, (_, i) => ({
+      ...routine(`routine-${i}`, "2099-11-04T11:00", `Routine ${i}`, "daily"), asked: i >= 2 && i < 6,
+    }));
+    const model = scripted([
+      turn({ actions: routines.slice(0, 4) }),
+      turn({ actions: routines.slice(4) }),
+      ...Array.from({ length: 7 }, (_, i) => chat(`Routine ${i}`)),
+    ]);
+    const c = await devChat("routine-mixed", { model, at: "2099-11-04T10:00" });
+
+    await c.say("Set up my first routines.");
+    await c.say("Set up the rest of my routines.");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await c.advanceTo("2099-11-04T11:00");
+      expect(warn).toHaveBeenCalledWith({ code: "routine_delivery_budget" });
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(await c.received()).toEqual(Array.from({ length: 6 }, (_, i) => `Routine ${i}`));
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(1);
+    expect(c.logs("unasked").map((row) => row.status)).toEqual(["sent", "sent", "dropped_budget"]);
+    expect(await reminders(c)).toHaveLength(7);
+    model.assertDone();
+  });
+
+  test.each([
+    { kind: "in_doubt", afterMs: 60_000 },
+    { kind: "throw" },
+  ] as const)("a routine retry after $kind still needs room in the rolling allowance", async (step) => {
+    const model = scripted([
+      turn({ actions: Array.from({ length: 6 }, (_, i) => routine(`routine-${i}`, "2099-11-04T11:00", `Routine ${i}`, "daily")) }),
+      ...Array.from({ length: 6 }, (_, i) => chat(`Routine ${i}`)),
+    ]);
+    const c = await devChat(`routine-${step.kind}`, {
+      model,
+      at: "2099-11-04T10:00",
+      deliveries: [step],
+    });
+
+    await c.say("Set up my routines.");
+    await c.advanceTo("2099-11-04T11:01");
+    expect(await c.received()).toHaveLength(5);
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(1);
+    expect(await reminders(c)).toHaveLength(6);
+    model.assertDone();
+  });
+
+  test.each(["line", "telegram"] as const)("%s routines recover all six sends after six refused requests", async (channel) => {
+    const texts = Array.from({ length: 6 }, (_, i) => `Routine ${i}`);
+    const model = scripted([
+      turn({ actions: texts.map((text, i) => routine(`r-${i}`, i < 2 ? "2099-11-04T10:00" : "2099-11-04T18:00", text, "daily")) }),
+      ...texts.map(chat),
+    ]);
+    const c = await devChat("routine-outage", { model, at: "2099-11-04T09:30", channel });
+    await c.say("Set up my routines.");
+    const adapter = channel === "line"
+      ? lineChannel({ channelSecret: "test", accessToken: "test" })
+      : telegramChannel({ botToken: "123:abc", webhookSecret: "test" });
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (agent) => agent.withDeps({
+      channels: { line: c.channel, telegram: c.channel, dev: c.channel, [channel]: { receive: adapter.receive, deliver: adapter.deliver } },
+    }));
+    let requests = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      requests++;
+      return requests <= 6 ? Response.json({}, { status: requests % 2 === 0 ? 503 : 429 }) : Response.json({});
+    });
+    try {
+      await c.advanceTo("2099-11-04T20:00");
+      const outbox = (await c.snapshot()).outbox;
+      expect(outbox.map((row) => [row.texts[0], row.status])).toEqual(texts.map((text) => [text, "sent"]));
+      expect(requests).toBe(12);
+      model.assertDone();
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  test("westward time-zone changes leave no extra room for routines", async () => {
+    const user = "routine-zone-change";
+    const stretches = (count: number) => Array.from({ length: count }, () => chat("Stretch time."));
+    const model = scripted([
+      turn({ actions: [routine("stretch", "2099-11-04T00:10", "Stretch", "daily")] }),
+      ...stretches(6),
+      turn({ actions: [{ type: "set_locale", timeZone: "Asia/Dhaka", language: "en" }] }),
+      ...stretches(6),
+      turn({ actions: [{ type: "set_locale", timeZone: "Asia/Karachi", language: "en" }] }),
+      ...stretches(6),
+    ]);
+    const c = await devChat(user, { model, at: "2099-11-04T00:05" });
+    await c.say("Remind me to stretch every day.");
+    await c.advanceTo("2099-11-04T00:10");
+    for (let i = 0; i < 5; i++) await fireEarly(c, user, "stretch");
+    expect(await c.received()).toHaveLength(6);
+
+    for (const [at, city] of [["2099-11-04T01:15", "Dhaka"], ["2099-11-04T02:20", "Karachi"]]) {
+      await c.advanceTo(at);
+      await c.say(`I live in ${city} now.`);
+      for (let i = 0; i < 6; i++) await fireEarly(c, user, "stretch");
+    }
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).agent?.tz).toBe("Asia/Karachi");
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(12);
+    model.assertDone();
+  });
+
+  test("the first capped release counts recent sent and uncertain routines from the old outbox", async () => {
+    const user = "routine-upgrade";
+    const model = scripted([
+      turn({ actions: [routine("stretch", "2099-11-04T11:00", "Stretch", "daily"), schedule("once", "2099-11-04T11:30", "One-off")] }),
+      chat("Stretch time."),
+      chat("Stretch time."),
+      chat("Maybe delivered."),
+      chat("One-off."),
+      ...Array.from({ length: 4 }, () => chat("Stretch time.")),
+    ]);
+    const c = await devChat(user, {
+      model,
+      at: "2099-11-04T10:00",
+      deliveries: [{ kind: "sent" }, { kind: "sent" }, { kind: "in_doubt", afterMs: 60 * 60_000 }],
+    });
+    await c.say("Remind me to stretch daily, and once at 11:30.");
+    await c.advanceTo("2099-11-04T11:00");
+    await fireEarly(c, user, "stretch");
+    await fireEarly(c, user, "stretch");
+    await c.advanceTo("2099-11-04T11:30");
+    expect(await c.received()).toEqual(["Stretch time.", "Stretch time.", "One-off."]);
+
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (_agent, { storage }) => {
+      storage.sql.exec("DROP TABLE routine_delivery");
+      rewindForgetCommandSchema(storage.sql);
+      const routineCap = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE routine_delivery"));
+      storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(routineCap));
+      migrate(storage);
+    });
+    for (let i = 0; i < 4; i++) await fireEarly(c, user, "stretch");
+    expect(await c.received()).toEqual(["Stretch time.", "Stretch time.", "Stretch time."]);
+    expect((await c.snapshot()).outbox.filter((o) => o.status === "dropped")).toHaveLength(1);
     model.assertDone();
   });
 
@@ -485,6 +729,20 @@ describe("time zone and language", () => {
     ]);
     expect(model.calls.at(-1)?.user).toContain("Europe/London");
     model.assertDone();
+  });
+
+  test("in the turn that changes the zone, the model is told Now still shows the old zone's time and not to state the time", async () => {
+    const model = scripted([turn({ actions: [locale("Europe/London", "en"), send("Welcome to London!")] })]);
+    const c = await devChat("noa", { model, at: "2099-11-04T21:40" });
+
+    await c.say("I just moved to London");
+
+    const call = model.calls.at(-1);
+    expect(call?.user).toContain("2099-11-04 21:40 (Wednesday), Asia/Bangkok");
+    for (const system of [call?.system, AGENT_SYSTEM]) {
+      expect(system).toMatch(/set_locale[^\n]*the time under Now is still in the old zone, so don't tell the person the time in that turn/);
+    }
+    expect((await c.snapshot()).agent?.tz).toBe("Europe/London");
   });
 
   test("a time zone code can't read is rejected, logged and corrected, and the zone stays", async () => {
@@ -733,6 +991,72 @@ describe("delivery", () => {
 
     expect(c.channel.delivered.map((d) => [d.text, d.via])).toEqual([["Hi!", "push"]]);
   });
+
+  test.each([
+    { channel: "line", user: "U00000000000000000000000000000003", key: (n: number) => eventKey.line(`timeout-${n}`) },
+    { channel: "telegram", user: "777000111", key: (n: number) => eventKey.telegram(900000 + n) },
+  ] as const)("a hung $channel send ends within its time limit and the next queued message goes out", async ({ channel, user, key }) => {
+    const model = scripted([chat("Hi!")]);
+    const c = await devChat(user, { model, at: "2099-11-04T10:00", channel });
+    await c.say("hello");
+    expect(await c.received()).toEqual(["Hi!"]);
+
+    const timeoutMs = 30;
+    const real = channel === "line"
+      ? lineChannel({ channelSecret: "line-channel-secret-for-tests", accessToken: "line-access-token" }, undefined, timeoutMs)
+      : telegramChannel({ botToken: "123:abc", webhookSecret: "tg-webhook-secret" }, timeoutMs);
+    const kinds: string[] = [];
+    const sent: string[] = [];
+    const adapter: ChannelAdapter = {
+      receive: (req) => real.receive(req),
+      async deliver(msg, now, live) {
+        const delivery = await real.deliver(msg, now, live);
+        kinds.push(delivery.kind);
+        if (delivery.kind === "sent") sent.push(msg.texts.join("\n"));
+        return delivery;
+      },
+    };
+    const channels: ChannelRegistry = channel === "line"
+      ? { line: adapter, telegram: c.channel, dev: c.channel }
+      : { line: c.channel, telegram: adapter, dev: c.channel };
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (agent) => agent.withDeps({ channels }));
+
+    const first = `${channel} first`;
+    const second = `${channel} second`;
+    await runInDurableObject(stub, (_agent, state) => {
+      const store = new AgentStore(state.storage);
+      const at = c.clock.now();
+      store.notifyOnce(`${channel}-timeout-one`, key(1), { texts: [first], note: first }, at);
+      store.notifyOnce(`${channel}-timeout-two`, key(2), { texts: [second], note: second }, at);
+    });
+
+    const requests: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      requests.push(String(input));
+      if (requests.length > 1) return Promise.resolve(Response.json({}));
+      return new Promise<Response>((_, reject) => {
+        const signal = init?.signal;
+        if (!signal) return;
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    });
+    try {
+      await c.settle();
+
+      expect(kinds).toEqual(["retry", "sent"]);
+      expect(sent).toEqual([second]);
+      expect(requests).toHaveLength(2);
+      const rows = (await c.snapshot()).outbox.filter((row) => row.texts[0] === first || row.texts[0] === second);
+      expect(rows.map((row) => [row.texts[0], row.status])).toEqual([
+        [first, "pending"],
+        [second, "sent"],
+      ]);
+      model.assertDone();
+    } finally {
+      fetchMock.mockRestore();
+    }
+  }, 2_000);
 });
 
 describe("spend", () => {

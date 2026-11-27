@@ -1,6 +1,8 @@
 import { diagnostic } from "../diagnostics";
-import type { ChannelId, EpochMs, InboundEnvelope, OutboundMessage, OutboxId } from "../domain";
+import type { ChannelId, EpochMs, Identity, InboundEnvelope, OutboundMessage, OutboxId } from "../domain";
 import type { Config, OperatorChat } from "../config";
+import type { Ledger } from "../ledger/ledger";
+import { utcMonth } from "../policy/time";
 import { lineChannel } from "./line";
 import { SEND_MESSAGE_MAX_CHARS, telegramChannel } from "./telegram";
 import { devChannel } from "./dev";
@@ -27,13 +29,30 @@ export interface ChannelAdapter {
   /** `live`, when given, is asked right before every request after the first; the caller asks it before calling. */
   deliver(msg: OutboundMessage, now: EpochMs, live?: () => boolean): Promise<Delivery>;
   deliverOperatorAlert?(msg: OutboundMessage, now: EpochMs): Promise<OperatorAlertDelivery>;
+  /** A sign that a reply is being made. It is not a message, so it spends no reply token; it fades unless shown again within `everyMs`. Never throws. */
+  readonly working?: { readonly everyMs: number; show(to: Identity): Promise<void> };
+}
+
+/** Shows `to` that a reply is being made while `run` runs. */
+export async function whileWorking<T>(channel: ChannelAdapter, to: Identity, run: () => Promise<T>): Promise<T> {
+  const working = channel.working;
+  if (!working) return run();
+  const shows = [working.show(to)];
+  const timer = setInterval(() => shows.push(working.show(to)), working.everyMs);
+  try {
+    return await run();
+  } finally {
+    clearInterval(timer);
+    // A sign that lands after the reply would linger as if another reply were coming.
+    await Promise.all(shows);
+  }
 }
 
 export type ChannelRegistry = { readonly [K in ChannelId]: ChannelAdapter };
 
-export function makeChannels(config: Config): ChannelRegistry {
+export function makeChannels(config: Config, ledger?: Pick<Ledger, "recordLineReply">): ChannelRegistry {
   return {
-    line: lineChannel(config.line),
+    line: lineChannel(config.line, ledger ? (at) => ledger.recordLineReply(utcMonth(at)) : undefined),
     telegram: telegramChannel(config.telegram),
     dev: devChannel(config.devMode),
   };
@@ -53,6 +72,13 @@ export async function tellOperator(channels: ChannelRegistry, to: OperatorChat, 
   return to.channel;
 }
 
+/** Chat apps show text as written, so the Markdown a model still writes is turned into plain text. */
+export function plainText(text: string): string {
+  return text
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label: string, url: string) => (label === url ? url : `${label} (${url})`))
+    .replace(/\*\*(?=\S)([^*\n]*?\S)\*\*/g, "$1");
+}
+
 export function disabledChannel(id: ChannelId): ChannelAdapter {
   return {
     receive: async () => ({ kind: "rejected", status: 404 }),
@@ -67,3 +93,4 @@ export function sameSecret(a: string, b: string): boolean {
 }
 
 export const CHANNEL_RETRY_MS = 30_000;
+export const CHANNEL_API_TIMEOUT_MS = 10_000;

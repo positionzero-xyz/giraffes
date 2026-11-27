@@ -6,10 +6,33 @@ export type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 export const BOX_HOST_KINDS = ["fly", "static"] as const;
 export type BoxHostKind = (typeof BOX_HOST_KINDS)[number];
 
-export type HostFailure = { readonly ok: false; readonly retryable: boolean; readonly detail: string };
+export type HostFailure = { readonly ok: false; readonly retryable: boolean; readonly detail: string; readonly missing?: true };
 export type HostResult = { readonly ok: true } | HostFailure;
 
 export const HOST_OK: HostResult = { ok: true };
+
+export type FlyDiskRetirement = {
+  /** The mounted disk whose account wipe binds the proof; null when no single mounted disk can be proven. */
+  readonly disk: string | null;
+  readonly machine: string | null;
+  /** Every live volume the app owns, so retirement destroys older or unattached disks too. */
+  readonly disks: readonly string[];
+};
+
+export type FlyRetirementCheck =
+  | { readonly ok: true; readonly state: "present" | "gone" }
+  | HostFailure;
+
+export interface FlyBoxRetirement {
+  /** Run before wiping so the authenticated box proof can be bound to the mounted disk. */
+  retirementTarget(name: BoxName): Promise<{ readonly ok: true; readonly target: FlyDiskRetirement } | HostFailure>;
+  /** Re-read ownership and the saved identity without choosing a replacement volume. */
+  retirementRecheck(name: BoxName, target: FlyDiskRetirement): Promise<FlyRetirementCheck>;
+  /** Run after the identified disk has acknowledged an account wipe. */
+  retireWipedDisk(name: BoxName, target: FlyDiskRetirement): Promise<HostResult>;
+  /** Run after the caller has durably recorded the disk retirement proof. */
+  removeRetiredApp(name: BoxName): Promise<HostResult>;
+}
 
 export interface BoxHost {
   readonly kind: BoxHostKind;

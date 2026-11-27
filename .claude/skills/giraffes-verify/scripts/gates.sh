@@ -52,7 +52,7 @@ for rev in "$@"; do
   fi
 
   (cd "$wt/app" && npx tsc --noEmit > "$log.tsc.log" 2>&1); tc=$?
-  (cd "$wt/app" && npx vitest run > "$log.vitest.log" 2>&1); vt=$?
+  (cd "$wt/app" && npm test > "$log.vitest.log" 2>&1); vt=$?
   passed=$(count "$log.vitest.log" 'Tests +[0-9]+ passed'); failed=$(count "$log.vitest.log" '[0-9]+ failed')
   if [ "$vt" = 0 ] && [ "${passed:-0}" -gt 0 ]; then app="PASS ${passed}"; else app="FAIL exit=$vt passed=${passed:-0} failed=${failed:-?}"; fi
 
@@ -75,18 +75,17 @@ for rev in "$@"; do
   lbox="n/a"
   if [ -d "$wt/box/test" ] && [ -f "$wt/box/Dockerfile" ]; then
     img="giraffes-box-gate-$sha"
-    stage="$OUT/linux-stage-$name"
-    rm -rf "$stage"
-    mkdir -p "$stage"
-    cp -r "$wt/box/src" "$stage/src" && cp -r "$wt/box/test" "$stage/test" && cp "$wt/box/mock-api.mjs" "$stage/mock-api.mjs"
     if ! docker info >/dev/null 2>&1; then
       lbox="FAIL docker unavailable"
     elif ! docker build -q -t "$img" "$(cygpath -w "$wt/box")" > "$log.dockerbuild.log" 2>&1; then
       lbox="FAIL docker build"
     else
-      docker run --rm -v "$(cygpath -m "$stage"):/boxtest:ro" \
+      # Older tests resolve the CLI via ../node_modules relative to the test file.
+      docker run --rm -v "$(cygpath -m "$wt/box/test"):/opt/box/test:ro" \
+        -v "$(cygpath -m "$wt/box/mock-api.mjs"):/opt/box/mock-api.mjs:ro" \
+        -v "$(cygpath -m "$wt/box/up.sh"):/opt/box/up.sh:ro" \
         -e BOX_TEST_CLI=/opt/box/node_modules/@anthropic-ai/claude-code/bin/claude.exe \
-        "$img" sh -c 'cd /boxtest && node --test test/*.test.ts' > "$log.linuxbox.log" 2>&1; lb=$?
+        "$img" sh -c 'cd /opt/box && node --test test/*.test.ts' > "$log.linuxbox.log" 2>&1; lb=$?
       lbp=$(count "$log.linuxbox.log" '^(# |ℹ )pass [0-9]+')
       lbs=$(count "$log.linuxbox.log" '^(# |ℹ )skipped [0-9]+')
       lskiplines=$(grep -c '^﹣' "$log.linuxbox.log" || true)
@@ -98,7 +97,6 @@ for rev in "$@"; do
       else lbox="PASS ${lbp}"; fi
       docker rmi "$img" >/dev/null 2>&1
     fi
-    rm -rf "$stage"
   fi
 
   control_note="research/$(printf 'Z')-note"

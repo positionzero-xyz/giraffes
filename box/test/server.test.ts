@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request, type RequestOptions } from "node:http";
@@ -75,6 +75,73 @@ beforeEach(() => {
   clockOffset = 0;
   signIn(false);
   rmSync(join(dir, "events.log"), { force: true });
+});
+
+it("retires only the named disk and keeps it closed after a restart", async () => {
+  const root = mkdtempSync(join(tmpdir(), "box-account-erase-"));
+  const config = join(root, "config");
+  const credentials = join(config, ".credentials.json");
+  const account = join(config, ".claude.json");
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir);
+  const options = {
+    token: TOKEN,
+    cli: [process.execPath, FAKE, root],
+    home: join(root, "home"),
+    configDir: config,
+    scratchDirs: [],
+    sessionFile: join(root, ".giraffe-session"),
+    stateFile: join(stateDir, "erase.json"),
+  };
+  const open = async () => {
+    const box = createBox(options);
+    await new Promise<void>((resolve) => box.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(box.address() as AddressInfo).port}`;
+    return {
+      close: () => new Promise<void>((resolve) => {
+        box.close(() => resolve());
+        box.closeAllConnections();
+      }),
+      send: (path: string, body?: unknown) => fetch(url + path, {
+        method: body === undefined ? "GET" : "POST",
+        headers: { authorization: bearer, "content-type": "application/json", connection: "close" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+    };
+  };
+  let disk = await open();
+  try {
+    mkdirSync(config, { recursive: true });
+    writeFileSync(credentials, "fixture credentials");
+    writeFileSync(account, JSON.stringify({ oauthAccount: "fixture account" }));
+    writeFileSync(options.sessionFile, "fixture session");
+    const { box } = await (await disk.send("/health")).json();
+    assert.deepEqual(await (await disk.send("/erase", { epoch: 2 })).json(), { box, floor: 2 });
+    assert(existsSync(credentials));
+    assert(existsSync(account));
+    writeFileSync(options.sessionFile, "new fixture session");
+    const request = { scope: "account", box, epoch: 3 };
+    const wrongDisk = { ...request, box: "60471385-6368-48d1-be37-cbe42e70e8ce" };
+    assert.equal((await disk.send("/erase", { box: wrongDisk.box, epoch: 3 })).status, 412);
+    assert(existsSync(options.sessionFile));
+    assert.deepEqual(await (await disk.send("/erase", { box, epoch: 3 })).json(), { box, floor: 3 });
+    assert.equal(existsSync(options.sessionFile), false);
+    assert(existsSync(credentials));
+    writeFileSync(options.sessionFile, "account fixture session");
+    assert.equal((await disk.send("/erase", wrongDisk)).status, 412);
+    assert(existsSync(credentials));
+    assert.deepEqual(await (await disk.send("/erase", request)).json(), { box, floor: 3, scope: "account" });
+    for (const path of [credentials, account, options.sessionFile]) assert.equal(existsSync(path), false);
+    await disk.close();
+    disk = await open();
+    assert.equal((await disk.send("/erase", { epoch: 2 })).status, 412);
+    assert.equal((await disk.send("/parse", { ...turn(), box, epoch: 3 })).status, 412);
+    assert.equal((await disk.send("/signin/start", { ticket: ticket() })).status, 412);
+    assert.deepEqual(await (await disk.send("/erase", request)).json(), { box, floor: 3, scope: "account" });
+  } finally {
+    await disk.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 it("logs only typed diagnostics when the CLI puts private text in stderr or the result subtype", async (t) => {
@@ -345,5 +412,20 @@ describe("erase, with the fake CLI", () => {
     assert.deepEqual([erased.status, erased.body], [200, { box, floor: 2 }]);
     assert.deepEqual((await held).body, { error: "claude_failed" });
     assert.deepEqual(events().map((e) => e.split(" ").slice(0, 2).join(" ")), ["turn start"]);
+  });
+
+  it("finishes the erase when a process is still releasing its working folder", async (t) => {
+    signIn(true);
+    const box = (await call("GET", "/health", { auth: bearer })).body.box;
+    const held = join(dir, "tmp", "claude-cwd-held");
+    mkdirSync(held, { recursive: true });
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 800)"], { cwd: held, stdio: "ignore" });
+    t.after(() => {
+      if (!child.killed) child.kill();
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    const erased = await call("POST", "/erase", { auth: bearer, body: { epoch: 3 } });
+    assert.deepEqual([erased.status, erased.body], [200, { box, floor: 3 }]);
+    assert.equal(existsSync(held), false);
   });
 });

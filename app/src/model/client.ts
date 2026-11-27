@@ -195,9 +195,15 @@ function anthropic(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): Model
   };
 }
 
+/** A reasoning model on Mistral answers with a list of chunks, a thinking one and then the text. */
+const OpenAIContent = z.union([z.string(), z.array(z.object({ type: z.string(), text: z.string().optional() }))]);
+
+const textOf = (content: z.infer<typeof OpenAIContent> | null | undefined): string =>
+  typeof content === "string" ? content : (content ?? []).flatMap((c) => (c.type === "text" && c.text !== undefined ? [c.text] : [])).join("");
+
 const OpenAIReply = z.object({
   choices: z
-    .array(z.object({ message: z.object({ content: z.string().nullish(), refusal: z.string().nullish() }), finish_reason: z.string().nullish() }))
+    .array(z.object({ message: z.object({ content: OpenAIContent.nullish(), refusal: z.string().nullish() }), finish_reason: z.string().nullish() }))
     .min(1),
   usage: z.unknown().optional(),
 });
@@ -247,7 +253,7 @@ function openai(fetch: Fetch, e: Endpoint, timeouts: ProviderTimeouts): ModelCli
       const refused = (choice.message.refusal ?? "") !== "" || choice.finish_reason === "content_filter";
       return {
         kind: "reply",
-        text: choice.message.content ?? "",
+        text: textOf(choice.message.content),
         stop: refused ? "refusal" : choice.finish_reason === "length" ? "max_tokens" : "end",
         usage: u && cached <= u.prompt_tokens
           ? { inputTokens: u.prompt_tokens - cached, outputTokens: u.completion_tokens, cacheWriteTokens: 0, cacheReadTokens: cached }

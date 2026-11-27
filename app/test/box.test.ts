@@ -5,7 +5,7 @@ import { boxClient } from "../src/box/client";
 import { flyHost, machineConfig, type FlyConfig } from "../src/box/fly";
 import type { Fetch } from "../src/box/host";
 import { BOX, boxMessage, type BoxSay } from "../src/box/machine";
-import { boxName, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
+import { boxName, boxSessionOwner, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
 import { MIGRATIONS } from "../src/agent/schema";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs } from "../src/domain";
@@ -216,6 +216,128 @@ describe("the static host shares one Claude login", () => {
 });
 
 describe("fly host", () => {
+  test("account erasure waits for the wiped volume to stop being live before deleting its app", async () => {
+    let volumeLive = true;
+    let appExists = true;
+    const requests: string[] = [];
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      requests.push(`${method} ${path}`);
+      if (method === "GET" && path === `/v1/apps/${app}`) {
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (method === "GET" && path === "/v1/apps") {
+        return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      }
+      if (method === "GET" && path.endsWith("/volumes")) {
+        return Response.json([{ id: "vol_1", state: volumeLive ? "created" : "pending_destroy", attached_machine_id: volumeLive ? "machine_1" : null }]);
+      }
+      if (method === "DELETE" && path === `/v1/apps/${app}`) appExists = false;
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    expect(found).toEqual({ ok: true, target: { disk: "vol_1", machine: "machine_1", disks: ["vol_1"] } });
+    if (!found.ok) throw new Error(found.detail);
+    expect(await host.retireWipedDisk(app, found.target)).toMatchObject({ ok: false, retryable: true });
+    expect(requests).toContain(`DELETE /v1/apps/${app}/volumes/vol_1`);
+    expect(requests).not.toContain(`DELETE /v1/apps/${app}`);
+    volumeLive = false;
+    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true });
+    expect(await host.removeRetiredApp(app)).toEqual({ ok: true });
+    expect(requests).toContain(`DELETE /v1/apps/${app}`);
+    expect(requests).toContain("GET /v1/apps");
+  });
+
+  test("retirement destroys an app with no volume instead of waiting for a mount", async () => {
+    let appExists = true;
+    const deletes: string[] = [];
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      if (method === "GET" && path === `/v1/apps/${app}`) {
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (method === "GET" && path === "/v1/apps") return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      if (method === "GET" && path.endsWith("/volumes")) return Response.json([]);
+      if (method === "DELETE") {
+        deletes.push(path);
+        if (path === `/v1/apps/${app}`) appExists = false;
+      }
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    expect(found).toEqual({ ok: true, target: { disk: null, machine: null, disks: [] } });
+    if (!found.ok) throw new Error(found.detail);
+    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true });
+    expect(await host.removeRetiredApp(app)).toEqual({ ok: true });
+    expect(deletes).toEqual([`/v1/apps/${app}`]);
+  });
+
+  test("retirement destroys every unattached volume the app owns", async () => {
+    let state = "created";
+    const deletes: string[] = [];
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      if (method === "GET" && path === `/v1/apps/${app}`) return Response.json({ organization: { slug: "giraffes" } });
+      if (method === "GET" && path === "/v1/apps") return Response.json({ apps: [{ name: app }] });
+      if (method === "GET" && path.endsWith("/volumes")) {
+        return Response.json([{ id: "vol_old", state, attached_machine_id: null }]);
+      }
+      if (method === "DELETE" && path.endsWith("/volumes/vol_old")) {
+        deletes.push(path);
+        state = "pending_destroy";
+      }
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    expect(found).toEqual({ ok: true, target: { disk: null, machine: null, disks: ["vol_old"] } });
+    if (!found.ok) throw new Error(found.detail);
+    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true });
+    expect(deletes).toEqual([`/v1/apps/${app}/volumes/vol_old`]);
+  });
+
+  test("an app read of 404 is gone only when the org app list confirms it", async () => {
+    let listed = false;
+    const host = flyHost(flyConfig, async (url) => {
+      const path = new URL(url).pathname;
+      if (path === `/v1/apps/${app}`) return new Response(null, { status: 404 });
+      if (path === "/v1/apps") return Response.json({ apps: listed ? [{ name: app }] : [] });
+      return new Response(null, { status: 500 });
+    });
+
+    expect(await host.retirementTarget(app)).toMatchObject({ ok: false, missing: true });
+    listed = true;
+    const held = await host.retirementTarget(app);
+    expect(held).toMatchObject({ ok: false, retryable: true });
+    expect(held).not.toMatchObject({ missing: true });
+  });
+
+  test("an app that disappears after locate reports missing so the caller relocates", async () => {
+    let appExists = true;
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      if (method === "GET" && path === `/v1/apps/${app}`) {
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (method === "GET" && path === "/v1/apps") return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      if (method === "GET" && path.endsWith("/volumes")) {
+        return Response.json([{ id: "vol_1", state: "created", attached_machine_id: "machine_1" }]);
+      }
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    if (!found.ok) throw new Error(found.detail);
+    appExists = false;
+    expect(await host.retireWipedDisk(app, found.target)).toMatchObject({ ok: false, missing: true });
+  });
+
   test("provisioning sends the contract's requests: app, shared v4 and v6, a data volume, one machine", async () => {
     const fly = fakeFly();
     const host = flyHost(flyConfig, fly.fetch);
@@ -494,6 +616,21 @@ describe("box client", () => {
     expect(await boxClient(down).erase("https://b", token, 3)).toMatchObject({ kind: "pending" });
   });
 
+  test("account erase requires proof for the requested disk and scope", async () => {
+    const box = "00000000-0000-4000-8000-000000000001";
+    const request = { scope: "account", box, epoch: 3 } as const;
+    expect(await boxClient(answering(200, { box, floor: 4 })).erase("https://b", token, request)).toMatchObject({ kind: "pending" });
+    expect(await boxClient(answering(200, {
+      box: "00000000-0000-4000-8000-000000000002", floor: 4, scope: "account",
+    })).erase("https://b", token, request)).toMatchObject({ kind: "pending" });
+    const receipt = { box, floor: 4, scope: "account" };
+    const accountErase = boxClient(async (_url, init) => {
+      expect(JSON.parse(String(init?.body))).toEqual(request);
+      return new Response(JSON.stringify(receipt), { status: 200 });
+    });
+    expect(await accountErase.erase("https://b", token, request)).toEqual({ kind: "erased", ...receipt });
+  });
+
   test("a reply is read as the bridge's, and the default parse timeout is 120 s", async () => {
     const ok = answering(200, { structured: { a: "hi" }, usage: { input_tokens: 5, output_tokens: 2 }, stop: "end" });
     expect(await boxClient(ok).parse("https://b", token, req)).toEqual({
@@ -633,6 +770,21 @@ describe("a turn on the person's own Claude Code session", () => {
     expect(box.replies).toEqual([]);
   });
 
+  test("a late box reminder gets the standard notice without asking the session for lateNotice", async () => {
+    const { box, c } = await signedIn("late-box", "2099-11-04T21:30");
+    box.replies.push({ kind: "reply", step: turn({ actions: [schedule("bins", "2099-11-04T23:00", "Ask about the bins", false), send("OK.")] }) });
+    await c.say("I need to take the bins out later");
+    await c.received();
+    box.replies.push({ kind: "reply", step: chat("Did the bins go out?") });
+
+    await c.advanceTo("2099-11-05T08:00");
+
+    expect(await c.received()).toEqual([`${NOTICE.lateFallback("2099-11-04 23:00")}\nDid the bins go out?`]);
+    const reminder = box.parses.at(-1)?.user;
+    expect(reminder).toContain('Your wake-up "bins" fired');
+    expect(reminder).not.toContain("lateNotice");
+  });
+
   test("a person with only their Claude plan gets their daily check-in from the box", async () => {
     const { box, c } = await signedIn("checkin", "2099-11-04T08:00");
     box.replies.push({ kind: "reply", step: chat("Morning! Want me to plan the long weekend?") });
@@ -719,6 +871,58 @@ describe("a turn on the person's own Claude Code session", () => {
     expect(c.channel.delivered.at(-1)).not.toHaveProperty("button");
     expect((await c.snapshot()).tasks).toEqual([]);
     expect(c.logs("rejection").map((l) => l.reason)).toEqual(["tool_refused"]);
+  });
+
+  test("a bad task ref from the box does not lose the check-in reply or a valid task call", async () => {
+    const { box, c } = await signedIn("bad-task-ref", "2099-11-04T08:00");
+    box.replies.push({
+      kind: "reply",
+      step: turn({ actions: [send("Morning! Have you booked the train?")], tasks: [openTask(TRIP, TITLE, "plan"), openTask("Bad ref", "Invalid")] }),
+    });
+
+    await c.advanceTo("2099-11-04T09:00");
+
+    expect(await c.received()).toEqual(["Morning! Have you booked the train?"]);
+    expect((await c.snapshot()).tasks.map((task) => task.ref)).toEqual([TRIP]);
+    expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "task_followup"]]);
+    expect(c.logs("rejection").map((r) => r.reason)).toEqual(["tool_refused"]);
+  });
+
+  test("a near-miss task ref from the box links the check-in to the one open task", async () => {
+    const { box, c } = await signedIn("typo-task-ref", "2099-11-04T08:00");
+    box.replies.push({ kind: "reply", step: turn({ actions: [send("Noted.")], tasks: [openTask(TRIP, TITLE, "plan")] }) });
+    await c.say("I want a weekend in Chiang Mai");
+    box.replies.push({
+      kind: "reply",
+      step: turn({ actions: [send("Still thinking about Chiang Mai?")], tasks: [openTask("chiang-mai-tirp", TITLE, "plan")] }),
+    });
+
+    await c.advanceTo("2099-11-04T09:00");
+
+    expect(await c.received()).toEqual(["Noted.", "Still thinking about Chiang Mai?"]);
+    expect((await c.snapshot()).tasks.map((task) => task.ref)).toEqual([TRIP]);
+    expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "task_followup"]]);
+  });
+
+  test("an ambiguous near-miss task ref from the box is refused without losing the reply", async () => {
+    const { box, c } = await signedIn("ambiguous-task-ref", "2099-11-04T08:00");
+    const other = "chiang-mai-drib";
+    box.replies.push({
+      kind: "reply",
+      step: turn({ actions: [send("Noted.")], tasks: [openTask(TRIP, TITLE), openTask(other, "Get a basketball")] }),
+    });
+    await c.say("I want a trip and a basketball");
+    box.replies.push({
+      kind: "reply",
+      step: turn({ actions: [send("How's it going?")], tasks: [openTask("chiang-mai-trib", TITLE)] }),
+    });
+
+    await c.advanceTo("2099-11-04T09:00");
+
+    expect(await c.received()).toEqual(["Noted.", "How's it going?"]);
+    expect((await c.snapshot()).tasks.map((task) => task.ref).sort()).toEqual([other, TRIP]);
+    expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "unlinked"]]);
+    expect(c.logs("rejection").map((r) => r.reason)).toEqual(["task_unknown"]);
   });
 });
 
@@ -993,6 +1197,7 @@ describe("connecting a Claude plan", () => {
           append: expect.stringContaining("You are Giraffe"),
           tools: ["schedule_wakeup", "cancel_wakeup", "remember", "set_locale", "forget", "task"],
           session: null,
+          sessionOwner: await boxSessionOwner(BOX_SECRET, "p:dev:fin" as AgentKey),
           resumed: false,
           fresh: expect.stringContaining("Person: hello"),
         },
@@ -1006,6 +1211,27 @@ describe("connecting a Claude plan", () => {
       ["no_model", 0],
       ["acted", 0],
     ]);
+  });
+
+  test("each person names their own opaque session owner", async () => {
+    const box = fakeBox({ signedIn: true });
+    const first = await devChat("sess-one", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    const second = await devChat("sess-two", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    await first.say("/claude");
+    await second.say("/claude");
+    await first.received();
+    await second.received();
+    box.replies.push({ kind: "reply", step: chat("One.") }, { kind: "reply", step: chat("Two.") });
+
+    await first.say("hello one");
+    await second.say("hello two");
+
+    const owners = box.parses.map((p) => p.agent?.sessionOwner);
+    expect(owners).toHaveLength(2);
+    expect(owners[0]).toMatch(/^[0-9a-f]{32}$/);
+    expect(owners[1]).toMatch(/^[0-9a-f]{32}$/);
+    expect(owners[0]).not.toBe(owners[1]);
+    expect(owners.join(" ")).not.toContain("sess-");
   });
 
   test("a box that answers signed_out mid-turn is marked and the person gets one fresh link, and no other money answers for it", async () => {

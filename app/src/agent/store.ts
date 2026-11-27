@@ -4,6 +4,22 @@
  */
 import type { PaidPlan, PlanRow, Standing, SubscriptionId } from "../billing/plan";
 import type { CheckoutId } from "../billing/stripe";
+import { canonicalJsonObject, parseJsonObject, type JsonObject } from "../action/json";
+import type {
+  ApprovalConsumption,
+  ApprovalDecision,
+  NewOutsideApproval,
+  NewOutsideWrite,
+  OutsideApproval,
+  OutsideApprovalId,
+  OutsideApprovalStatus,
+  OutsideWrite,
+  OutsideWriteId,
+  OutsideWritePut,
+  OutsideWriteStatus,
+  WriteFinish,
+  WriteReconciliation,
+} from "../action/writes";
 import type { BoxHostKind } from "../box/host";
 import { dueAt, type Box, type BoxState, type ReclaimReason } from "../box/machine";
 import { commandOf } from "./commands";
@@ -82,6 +98,7 @@ import {
 } from "./tasks";
 import type { AdmissionChange, AdmissionCommit } from "./admission";
 import { coveredByForget, laterCutoff, newForgetCode, providerOrder, type Claim, type ForgetCommand, type ForgetState, type ProviderOrder } from "./forget";
+import { ROUTINE_OUTBOX } from "./schema";
 import { TURN, type Asked, type Batch, type BoxReplyBackfill, type BoxSession, type BoxSessionSeen, type InboxItem, type Outbound, type SeqTurn, type TurnCommit, type TurnRow } from "./turn";
 
 export type AgentRow = {
@@ -94,6 +111,8 @@ export type AgentRow = {
   readonly statusAt: EpochMs;
 };
 
+export type RateEventKind = "feedback" | "invite";
+
 type SavedReference = SavedCursor & { readonly snapshot: string | null };
 
 export type OutboxRow = Omit<OutboundMessage, "texts"> & {
@@ -104,6 +123,7 @@ export type OutboxRow = Omit<OutboundMessage, "texts"> & {
   readonly inDoubt: boolean;
   readonly triggerKind: AgentEventKind;
   readonly admittedDay: LocalDate | null;
+  readonly routine: boolean;
   readonly attempts: number;
   readonly taskId: TaskId | null;
   readonly purpose: UnaskedPurpose | null;
@@ -213,6 +233,7 @@ type OutboxCols = {
   reply_token: string | null;
   reply_expires: EpochMs | null;
   admitted_day: LocalDate | null;
+  routine: number;
   in_doubt: number;
   attempts: number;
   task_id: TaskId | null;
@@ -289,6 +310,36 @@ export type KeyTicket = {
 
 export type NewKey = Omit<StoredKey, "backup" | "backupAskedAt" | "revision" | "health">;
 
+type OutsideWriteCols = {
+  id: OutsideWriteId;
+  intent: string;
+  provider: string;
+  action: string;
+  operation_id: OutsideWrite["operationId"];
+  args: string;
+  epoch: ForgetEpoch;
+  status: OutsideWriteStatus;
+  attempt: number;
+  in_doubt: number;
+  lease_until: EpochMs | null;
+  receipt: string | null;
+  failure: string | null;
+  created_at: EpochMs;
+  updated_at: EpochMs;
+};
+
+type OutsideApprovalCols = {
+  id: OutsideApprovalId;
+  write_id: OutsideWriteId;
+  owner_key: OutsideApproval["owner"];
+  status: OutsideApprovalStatus;
+  expires_at: EpochMs;
+  created_at: EpochMs;
+  decided_at: EpochMs | null;
+  decided_by: OutsideApproval["owner"] | null;
+  consumed_at: EpochMs | null;
+};
+
 type BoxCols = {
   name: BoxName;
   host: BoxHostKind;
@@ -355,6 +406,46 @@ const toReservation = (r: ReservationCols): Reservation => ({
 
 function fromJson<T>(text: string): T {
   return JSON.parse(text);
+}
+
+function jsonObject(text: string): JsonObject {
+  const parsed = parseJsonObject(JSON.parse(text));
+  if (parsed === undefined) throw new Error("invalid JSON object in durable state");
+  return parsed;
+}
+
+function toOutsideWrite(r: OutsideWriteCols): OutsideWrite {
+  return {
+    id: r.id,
+    intent: r.intent,
+    provider: r.provider,
+    action: r.action,
+    operationId: r.operation_id,
+    args: jsonObject(r.args),
+    epoch: r.epoch,
+    status: r.status,
+    attempt: r.attempt,
+    inDoubt: r.in_doubt === 1,
+    leaseUntil: r.lease_until,
+    receipt: r.receipt === null ? null : jsonObject(r.receipt),
+    failure: r.failure,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function toOutsideApproval(r: OutsideApprovalCols): OutsideApproval {
+  return {
+    id: r.id,
+    writeId: r.write_id,
+    owner: r.owner_key,
+    status: r.status,
+    expiresAt: r.expires_at,
+    createdAt: r.created_at,
+    decidedAt: r.decided_at,
+    decidedBy: r.decided_by,
+    consumedAt: r.consumed_at,
+  };
 }
 
 /** The id D1 knows a task by, unique across people. */
@@ -461,6 +552,7 @@ export class AgentStore {
       readonly trialEndsAt: EpochMs | null;
       /** Set when this person is admitted on first contact: a dev identity, or anyone while admission is open. */
       readonly admit: Seat | null;
+      readonly startBoundary?: EpochMs;
     },
     now: EpochMs,
     privacy: ForgetCommand | null = null,
@@ -487,6 +579,9 @@ export class AgentStore {
         now,
       ).rowsWritten;
       if (created > 0) {
+        if (first.startBoundary !== undefined) {
+          this.sql.exec("UPDATE forget SET epoch = ?, cutoff_at = ?, cutoff_seq = NULL", first.startBoundary, first.startBoundary);
+        }
         this.insertLogs(
           [{ stream: "agent", id: `agent:${envelope.agent}`, agent: envelope.agent, channel: envelope.identity.channel, firstSeenAt: now }],
           now,
@@ -528,6 +623,8 @@ export class AgentStore {
       const poisoned = batch && Math.max(...batch.items.map((i) => i.attempts)) >= TURN.maxClaimAttempts ? batch : null;
       if (!poisoned) this.sql.exec("UPDATE inbox SET status = 'pending' WHERE status = 'processing'");
       this.sql.exec("UPDATE outbox SET status = 'pending', in_doubt = 1 WHERE status = 'sending'");
+      // An interrupted request might have reached the channel before the result was saved.
+      this.sql.exec("UPDATE routine_delivery SET at = ?, sending_id = NULL WHERE sending_id IS NOT NULL", now);
       const open = this.sql
         .exec<ReservationCols>(
           "SELECT id, month, scope, purpose, model, backend, estimate_micro, instance FROM reservation WHERE instance != ?",
@@ -647,6 +744,17 @@ export class AgentStore {
       this.sql.exec("SELECT 1 FROM inbox WHERE outcome = ? AND finished_at >= ? AND kind IN ('message', 'lifecycle') LIMIT 1", outcome, dayStart).toArray()
         .length > 0
     );
+  }
+
+  /** Records one event and answers whether the rolling window was already full. */
+  rateLimited(kind: RateEventKind, now: EpochMs, windowMs: number, limit: number): boolean {
+    return this.tx(() => {
+      this.sql.exec("DELETE FROM rate_event WHERE kind = ? AND at <= ?", kind, now - windowMs);
+      const count = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM rate_event WHERE kind = ?", kind).one().n;
+      if (count >= limit) return true;
+      this.sql.exec("INSERT INTO rate_event (kind, at) VALUES (?, ?)", kind, now);
+      return false;
+    });
   }
 
   admission(): Admission {
@@ -839,6 +947,14 @@ export class AgentStore {
     return r ? { id: r.id, seenSeq: r.seen_seq, memory: r.memory, replyBackfill: fromJson(r.reply_backfill) } : null;
   }
 
+  oldestBoxHistory(after: number): readonly SeqTurn[] {
+    return this.sql.exec<SeqTurn>(
+      "SELECT seq, role, text, at FROM turn WHERE seq > MAX(?, (SELECT through_turn_seq FROM memory)) ORDER BY seq LIMIT ?",
+      after,
+      COMPACTION.promptTurns,
+    ).toArray();
+  }
+
   /**
    * Saves a turn only while its batch is still claimed: a forget that began during the turn closed the batch's rows, so
    * the turn's result is dropped whole. False when it was.
@@ -852,7 +968,8 @@ export class AgentStore {
       const tasks = this.applyTasks(commit.tasks, commit.trigger, commit.outbound ? outboxId : null, now);
       let seenSeq = seen?.sentThrough ?? 0;
       let gap = seen !== null && this.sql.exec("SELECT seq FROM turn WHERE seq > ? LIMIT 1", seenSeq).toArray().length > 0;
-      const replyBackfill: BoxReplyBackfill[] = [];
+      const previous = seen ? this.boxSession() : null;
+      const replyBackfill: BoxReplyBackfill[] = previous && previous.id === seen?.id ? previous.replyBackfill.filter((r) => r.seq > seenSeq) : [];
       for (const t of commit.turns) {
         const { seq } = this.sql.exec<{ seq: number }>("INSERT INTO turn (role, text, at, event_key) VALUES (?, ?, ?, ?) RETURNING seq", t.role, t.text, t.at, t.eventKey).one();
         if (!seen) continue;
@@ -1123,10 +1240,10 @@ export class AgentStore {
     this.sql.exec("UPDATE agent SET claude_plan_at = NULL");
   }
 
-  removeBox(name: BoxName, message: NoteMessage, now: EpochMs): void {
+  removeBox(name: BoxName, message: NoteMessage | null, now: EpochMs): void {
     this.tx(() => {
       this.sql.exec("DELETE FROM box WHERE name = ?", name);
-      this.insertMessage(eventKey.box(name), message, now);
+      if (message) this.insertMessage(eventKey.box(name), message, now);
     });
   }
 
@@ -1180,7 +1297,7 @@ export class AgentStore {
 
   openCheckouts(): readonly { readonly id: CheckoutId; readonly eventKey: EventKey }[] {
     return this.sql
-      .exec<{ id: CheckoutId; event_key: EventKey }>("SELECT id, event_key FROM checkout_session ORDER BY created_at, id")
+      .exec<{ id: CheckoutId; event_key: EventKey }>("SELECT id, event_key FROM checkout_session WHERE closed = 0 ORDER BY created_at, id")
       .toArray()
       .map((r) => ({ id: r.id, eventKey: r.event_key }));
   }
@@ -1190,7 +1307,12 @@ export class AgentStore {
   }
 
   checkoutClosed(id: CheckoutId): void {
-    this.sql.exec("DELETE FROM checkout_session WHERE id = ?", id);
+    this.sql.exec("UPDATE checkout_session SET closed = 1 WHERE id = ?", id);
+  }
+
+  checkoutIds(): readonly CheckoutId[] {
+    return this.sql.exec<{ id: CheckoutId }>("SELECT id FROM checkout_session ORDER BY created_at, id")
+      .toArray().map(({ id }) => id);
   }
 
   billingEventSeen(id: string): boolean {
@@ -1351,8 +1473,8 @@ export class AgentStore {
     return this.sql
       .exec<OutboxCols>(
         `SELECT id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, admitted_day, in_doubt, attempts, task_id, purpose, choice, reply_only,
-                saved_snapshot, saved_item, saved_offset, privacy, epoch
-         FROM outbox WHERE status = 'pending' AND ready_at <= ? AND (? = 0 OR epoch = ?) ORDER BY created_at, rowid LIMIT ?`,
+                saved_snapshot, saved_item, saved_offset, privacy, epoch, (${ROUTINE_OUTBOX}) AS routine
+         FROM outbox o WHERE status = 'pending' AND ready_at <= ? AND (? = 0 OR epoch = ?) ORDER BY created_at, rowid LIMIT ?`,
         now,
         op === null ? 0 : 1,
         epoch,
@@ -1367,6 +1489,7 @@ export class AgentStore {
           eventKey: r.event_key,
           triggerKind: r.trigger_kind,
           admittedDay: r.admitted_day,
+          routine: r.routine === 1,
           attempts: r.attempts,
           taskId: r.task_id,
           purpose: r.purpose,
@@ -1390,17 +1513,32 @@ export class AgentStore {
       .one().n;
   }
 
+  routineSendsInLastDay(now: EpochMs): number {
+    return this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM routine_delivery WHERE at > ?", now - DAY_MS).one().n;
+  }
+
   /**
    * False when the row is no longer waiting or a forget began since `epoch`; nothing may then be sent for it. The
    * forget's own messages need only their epoch to be current, since they go out during its hold.
    */
-  markSending(id: OutboxId, admittedDay: LocalDate | null, epoch: ForgetEpoch, privacy: boolean = false): boolean {
-    if (privacy ? this.forget().epoch !== epoch : !this.live(epoch)) return false;
-    return this.sql.exec(
-      "UPDATE outbox SET status = 'sending', admitted_day = ?, attempts = attempts + 1 WHERE id = ? AND status = 'pending'",
-      admittedDay,
-      id,
-    ).rowsWritten > 0;
+  markSending(id: OutboxId, admittedDay: LocalDate | null, epoch: ForgetEpoch, routineAt: EpochMs | null, privacy: boolean = false): boolean {
+    return this.tx(() => {
+      if (privacy ? this.forget().epoch !== epoch : !this.live(epoch)) return false;
+      const started = this.sql.exec(
+        "UPDATE outbox SET status = 'sending', admitted_day = ?, attempts = attempts + 1 WHERE id = ? AND status = 'pending'",
+        admittedDay,
+        id,
+      ).rowsWritten > 0;
+      if (started && routineAt !== null) {
+        this.sql.exec("INSERT INTO routine_delivery (at, sending_id) VALUES (?, ?)", routineAt, id);
+      }
+      return started;
+    });
+  }
+
+  finishRoutineDelivery(id: OutboxId, countedAt: EpochMs | null): void {
+    if (countedAt === null) this.sql.exec("DELETE FROM routine_delivery WHERE sending_id = ?", id);
+    else this.sql.exec("UPDATE routine_delivery SET at = ?, sending_id = NULL WHERE sending_id = ?", countedAt, id);
   }
 
   markSent(id: OutboxId, via: "reply" | "push", now: EpochMs, logs: readonly LogRow[], next: SavedCursor | null = null): void {
@@ -1693,6 +1831,195 @@ export class AgentStore {
     );
   }
 
+  putOutsideWrite(write: NewOutsideWrite, approval: NewOutsideApproval | null): OutsideWritePut {
+    return this.tx(() => {
+      const forget = this.forget();
+      if (forget.op !== null || forget.epoch !== write.epoch) return { kind: "stale" };
+      const inserted = this.sql.exec(
+        `INSERT OR IGNORE INTO outside_write (id, intent, provider, action, operation_id, args, epoch, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        write.id,
+        write.intent,
+        write.provider,
+        write.action,
+        write.operationId,
+        canonicalJsonObject(write.args),
+        write.epoch,
+        write.status,
+        write.now,
+        write.now,
+      ).rowsWritten;
+      if (inserted > 0) {
+        if (approval) {
+          this.sql.exec(
+            "INSERT INTO outside_approval (id, write_id, owner_key, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+            approval.id,
+            approval.writeId,
+            approval.owner,
+            approval.expiresAt,
+            approval.now,
+          );
+        }
+        const created = this.outsideWrite(write.id);
+        if (!created) throw new Error("outside write insert missing");
+        return { kind: "created", write: created, approval: approval ? this.outsideApproval(approval.id) : null };
+      }
+      const existing = this.sql
+        .exec<OutsideWriteCols>(
+          "SELECT id, intent, provider, action, operation_id, args, epoch, status, attempt, in_doubt, lease_until, receipt, failure, created_at, updated_at FROM outside_write WHERE intent = ?",
+          write.intent,
+        )
+        .toArray()[0];
+      if (!existing) throw new Error("outside write conflict missing");
+      const current = toOutsideWrite(existing);
+      const existingApproval = this.approvalForWrite(current.id);
+      const sameAction =
+        current.provider === write.provider && current.action === write.action && canonicalJsonObject(current.args) === canonicalJsonObject(write.args);
+      const sameApproval =
+        approval === null
+          ? existingApproval === null
+          : existingApproval !== null && existingApproval.owner === approval.owner;
+      if (!sameAction || !sameApproval) return { kind: "conflict", write: current };
+      return { kind: "existing", write: current, approval: existingApproval };
+    });
+  }
+
+  outsideWrite(id: OutsideWriteId): OutsideWrite | null {
+    const r = this.sql
+      .exec<OutsideWriteCols>(
+        "SELECT id, intent, provider, action, operation_id, args, epoch, status, attempt, in_doubt, lease_until, receipt, failure, created_at, updated_at FROM outside_write WHERE id = ?",
+        id,
+      )
+      .toArray()[0];
+    return r ? toOutsideWrite(r) : null;
+  }
+
+  outsideApproval(id: OutsideApprovalId): OutsideApproval | null {
+    const r = this.sql
+      .exec<OutsideApprovalCols>(
+        "SELECT id, write_id, owner_key, status, expires_at, created_at, decided_at, decided_by, consumed_at FROM outside_approval WHERE id = ?",
+        id,
+      )
+      .toArray()[0];
+    return r ? toOutsideApproval(r) : null;
+  }
+
+  approvalForWrite(writeId: OutsideWriteId): OutsideApproval | null {
+    const r = this.sql
+      .exec<OutsideApprovalCols>(
+        "SELECT id, write_id, owner_key, status, expires_at, created_at, decided_at, decided_by, consumed_at FROM outside_approval WHERE write_id = ?",
+        writeId,
+      )
+      .toArray()[0];
+    return r ? toOutsideApproval(r) : null;
+  }
+
+  beginOutsideWrite(id: OutsideWriteId, now: EpochMs, leaseMs: number, epoch: ForgetEpoch): { readonly attempt: number } | null {
+    const r = this.sql
+      .exec<{ attempt: number }>(
+        `UPDATE outside_write SET status = 'verifying', attempt = attempt + 1, lease_until = ?, updated_at = ?
+         WHERE id = ? AND status = 'ready' AND epoch = ?
+           AND EXISTS (SELECT 1 FROM forget WHERE op IS NULL AND epoch = ?)
+         RETURNING attempt`,
+        (now + leaseMs) as EpochMs,
+        now,
+        id,
+        epoch,
+        epoch,
+      )
+      .toArray()[0];
+    return r ?? null;
+  }
+
+  finishOutsideWrite(id: OutsideWriteId, attempt: number, outcome: WriteFinish, now: EpochMs): boolean {
+    return (
+      this.sql.exec(
+        `UPDATE outside_write SET status = ?, in_doubt = ?, lease_until = NULL, receipt = ?, failure = ?, updated_at = ?
+         WHERE id = ? AND attempt = ? AND status = 'verifying'`,
+        outcome.kind,
+        outcome.kind === "uncertain" ? 1 : 0,
+        outcome.kind === "succeeded" ? canonicalJsonObject(outcome.receipt) : null,
+        outcome.kind === "failed" ? outcome.reason : null,
+        now,
+        id,
+        attempt,
+      ).rowsWritten > 0
+    );
+  }
+
+  reconcileOutsideWrite(id: OutsideWriteId, attempt: number, outcome: WriteReconciliation, now: EpochMs): boolean {
+    return (
+      this.sql.exec(
+        `UPDATE outside_write SET status = ?, in_doubt = ?, lease_until = NULL, receipt = ?, failure = ?, updated_at = ?
+         WHERE id = ? AND attempt = ? AND status IN ('verifying', 'uncertain')`,
+        outcome.kind,
+        outcome.kind === "uncertain" ? 1 : 0,
+        outcome.kind === "succeeded" ? canonicalJsonObject(outcome.receipt) : null,
+        outcome.kind === "failed" ? outcome.reason : null,
+        now,
+        id,
+        attempt,
+      ).rowsWritten > 0
+    );
+  }
+
+  private expireOutsideApproval(id: OutsideApprovalId, writeId: OutsideWriteId, now: EpochMs): void {
+    this.sql.exec("UPDATE outside_approval SET status = 'expired' WHERE id = ? AND status IN ('pending', 'approved')", id);
+    this.sql.exec(
+      "UPDATE outside_write SET status = 'failed', lease_until = NULL, failure = 'approval expired', updated_at = ? WHERE id = ? AND status = 'approval_pending'",
+      now,
+      writeId,
+    );
+  }
+
+  decideOutsideApproval(id: OutsideApprovalId, actor: OutsideApproval["owner"], decision: "approve" | "refuse", now: EpochMs): ApprovalDecision {
+    return this.tx(() => {
+      const approval = this.outsideApproval(id);
+      if (!approval) return { kind: "missing" };
+      if (approval.owner !== actor) return { kind: "wrong_owner" };
+      if (approval.status === "consumed") return { kind: "used" };
+      if (approval.status === "expired" || approval.expiresAt <= now) {
+        this.expireOutsideApproval(id, approval.writeId, now);
+        return { kind: "expired" };
+      }
+      if (approval.status === "approved") return { kind: "already_approved" };
+      if (approval.status === "refused") return { kind: "already_refused" };
+      const status = decision === "approve" ? "approved" : "refused";
+      this.sql.exec("UPDATE outside_approval SET status = ?, decided_at = ?, decided_by = ? WHERE id = ? AND status = 'pending'", status, now, actor, id);
+      if (decision === "refuse") {
+        this.sql.exec(
+          "UPDATE outside_write SET status = 'failed', lease_until = NULL, failure = 'approval refused', updated_at = ? WHERE id = ? AND status = 'approval_pending'",
+          now,
+          approval.writeId,
+        );
+      }
+      return { kind: status };
+    });
+  }
+
+  consumeOutsideApproval(id: OutsideApprovalId, writeId: OutsideWriteId, now: EpochMs): ApprovalConsumption {
+    return this.tx(() => {
+      const approval = this.outsideApproval(id);
+      if (!approval) return { kind: "missing" };
+      if (approval.writeId !== writeId) return { kind: "mismatched" };
+      if (approval.status === "consumed") return { kind: "used" };
+      if (approval.status === "expired" || approval.expiresAt <= now) {
+        this.expireOutsideApproval(id, approval.writeId, now);
+        return { kind: "expired" };
+      }
+      if (approval.status !== "approved") return { kind: "not_approved" };
+      if (this.outsideWrite(writeId)?.status !== "approval_pending") return { kind: "unavailable" };
+      const consumed = this.sql.exec(
+        "UPDATE outside_approval SET status = 'consumed', consumed_at = ? WHERE id = ? AND status = 'approved'",
+        now,
+        id,
+      ).rowsWritten;
+      if (consumed === 0) return { kind: "used" };
+      this.sql.exec("UPDATE outside_write SET status = 'ready', updated_at = ? WHERE id = ? AND status = 'approval_pending'", now, writeId);
+      return { kind: "consumed" };
+    });
+  }
+
   recordGroup(group: AgentKey, version: number): void {
     this.sql.exec(
       "INSERT INTO owned_group (group_key, version) VALUES (?, ?) ON CONFLICT (group_key) DO UPDATE SET version = excluded.version",
@@ -1858,6 +2185,29 @@ export class AgentStore {
     return this.forget().op !== null;
   }
 
+  clearForErasure(job: Extract<Erasure, { kind: "preparing" }>): void {
+    this.tx(() => {
+      this.sql.exec("PRAGMA defer_foreign_keys = ON");
+      const tables = this.sql.exec<{ name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'table'
+          AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' AND name NOT GLOB '__cf_*'
+          AND name NOT IN ('meta', 'forget')`,
+      ).toArray();
+      for (const { name } of tables) this.sql.exec(`DELETE FROM "${name.replaceAll('"', '""')}"`);
+      this.sql.exec("INSERT INTO memory (one) VALUES (1)");
+      this.sql.exec("INSERT INTO log_flush (one) VALUES (1)");
+      this.sql.exec("INSERT INTO key_revision (one) VALUES (1)");
+      this.sql.exec("INSERT INTO saved_items (one) VALUES (1)");
+      this.storage.kv.delete(ERASE_CHALLENGE);
+      this.storage.kv.delete(START_CHALLENGE);
+      this.storage.kv.put(ERASE_JOB, job);
+    });
+  }
+
+  detachInviter(inviter: AgentKey): void {
+    this.sql.exec("UPDATE admission SET inviter = NULL, code = NULL WHERE state = 'admitted' AND inviter = ?", inviter);
+  }
+
   /**
    * Opens a forget: the epoch moves on, so every result of work begun before now is stale, and the cutoff moves to the
    * trigger's place in its provider's order. Work in flight, waiting events the cutoff covers, waiting wake-ups and every
@@ -1893,6 +2243,16 @@ export class AgentStore {
     );
     this.sql.exec("UPDATE inbox SET catch_up = NULL, catch_up_budget = NULL WHERE catch_up IS NOT NULL");
     this.sql.exec("UPDATE outbox SET status = 'dropped', drop_reason = 'forgotten', closed_at = ? WHERE status IN ('pending', 'sending')", now);
+    this.sql.exec(
+      `UPDATE outside_write SET status = 'dropped', lease_until = NULL,
+         in_doubt = CASE WHEN status IN ('verifying', 'uncertain') THEN 1 ELSE in_doubt END, updated_at = ?
+       WHERE status IN ('approval_pending', 'ready', 'verifying', 'uncertain')`,
+      now,
+    );
+    this.sql.exec(
+      `UPDATE outside_approval SET status = 'expired'
+       WHERE status IN ('pending', 'approved') AND write_id IN (SELECT id FROM outside_write WHERE status = 'dropped')`,
+    );
     return { op, epoch };
   }
 
@@ -2142,6 +2502,8 @@ export class AgentStore {
     });
     this.sql.exec("DELETE FROM inbox WHERE status IN ('done', 'failed') AND finished_at < ?", now - DEDUPE_WINDOW_MS);
     this.sql.exec("DELETE FROM outbox WHERE status IN ('sent', 'dropped') AND closed_at < ?", now - OUTBOX_KEEP_MS);
+    this.sql.exec("DELETE FROM routine_delivery WHERE at <= ? AND sending_id IS NULL", now - DAY_MS);
     this.sql.exec("DELETE FROM billing_event WHERE at < ?", now - DEDUPE_WINDOW_MS);
   }
 }
+import { ERASE_CHALLENGE, ERASE_JOB, START_CHALLENGE, type Erasure } from "./account";

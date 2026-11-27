@@ -11,7 +11,7 @@ import { loadConfig, type BillingConfig, type Env } from "../src/config";
 import type { Agent, AgentSnapshot, BillingDeps, BoxDeps } from "../src/agent/agent";
 import type { TurnOutput } from "../src/agent/turn";
 import { boxClient } from "../src/box/client";
-import type { BoxHost, HostResult } from "../src/box/host";
+import type { BoxHost, FlyBoxRetirement, HostResult } from "../src/box/host";
 import { boxName, type BoxName } from "../src/box/names";
 import type { ChannelAdapter } from "../src/channels/channel";
 import type { AdmissionMode } from "../src/agent/admission";
@@ -23,8 +23,9 @@ import { DEFAULT_TIME_ZONE, fromLocal, toLocal } from "../src/policy/time";
 import { devLane, DEV_URL_SCRIPTED, type IncludedConfig, type KeysConfig } from "../src/access/access";
 import { seal } from "../src/access/key";
 import { AgentStore } from "../src/agent/store";
+import { MIGRATIONS } from "../src/agent/schema";
 import { connect, SecretKey, type Fetch, type ProviderTimeouts, type SchemaMode } from "../src/model/client";
-import { PROVIDERS, type ProviderId } from "../src/model/providers";
+import { defaultModelOf, PROVIDERS, type ProviderId } from "../src/model/providers";
 
 export { scripted };
 
@@ -63,6 +64,8 @@ export function memoryLedger(): MemoryLedger {
     async lineQuota() {
       return this.lineQuotaReading as QuotaReading | null;
     },
+    recordLineReply: (month) => seats.recordLineReply(month),
+    lineReplyCount: (month) => seats.lineReplyCount(month),
     async lineQuotaAlerts() {
       return [];
     },
@@ -166,7 +169,7 @@ export async function giveKey(
   await runInDurableObject(stub, (_agent, state) => {
     const store = new AgentStore(state.storage);
     const saved = store.saveKey(
-      { provider, baseUrl, model: k.model ?? p.defaultModel ?? "custom-model", auth: p.auth, mode: k.mode ?? "strict", sealed, hint: key.hint, capMicro: (k.capMicro ?? 5_000_000) as MicroUsd, connectedAt: 0 as EpochMs },
+      { provider, baseUrl, model: k.model ?? defaultModelOf(p) ?? "custom-model", auth: p.auth, mode: k.mode ?? "strict", sealed, hint: key.hint, capMicro: (k.capMicro ?? 5_000_000) as MicroUsd, connectedAt: 0 as EpochMs },
       store.keyRevision(),
       null,
       [],
@@ -190,13 +193,21 @@ export type Delivered = {
   readonly button?: { readonly label: string; readonly data: string };
 };
 
-export type ScriptedChannel = ChannelAdapter & { readonly delivered: readonly Delivered[] };
+export type ScriptedChannel = ChannelAdapter & { readonly delivered: readonly Delivered[]; readonly shown: readonly Identity[] };
 
 export function scriptedChannel(steps: readonly DeliveryStep[] = []): ScriptedChannel {
   const queue = [...steps];
   const delivered: Delivered[] = [];
+  const shown: Identity[] = [];
   return {
     delivered,
+    shown,
+    working: {
+      everyMs: 5,
+      show: async (to) => {
+        shown.push(to);
+      },
+    },
     receive: async () => {
       throw new Error("the agent never receives through its channel");
     },
@@ -401,7 +412,7 @@ export type FakeBox = {
   readonly parses: {
     readonly authorization: string | null;
     readonly user: string;
-    readonly agent: { readonly append: string; readonly tools: readonly string[]; readonly session: string | null; readonly resumed: boolean; readonly fresh: string | null; readonly ephemeral?: boolean } | null;
+    readonly agent: { readonly append: string; readonly tools: readonly string[]; readonly session: string | null; readonly sessionOwner?: string; readonly resumed: boolean; readonly fresh: string | null; readonly ephemeral?: boolean; readonly once?: boolean } | null;
     /** The volume and forget epoch the request named, or null when it named none. */
     readonly at?: { readonly box: unknown; readonly epoch: unknown } | null;
   }[];
@@ -415,6 +426,7 @@ export type FakeBox = {
   /** While set, an erase waits for it before it answers. */
   eraseHold: Promise<void> | null;
   readonly sessions: Set<string>;
+  /** An image from before session names: it ignores them, reports none, and has no one-off route. */
   ignoresSession: boolean;
   signedIn: boolean;
   /** False makes the box's own URL unreachable, as a wedged machine or a network fault would. */
@@ -455,7 +467,9 @@ export function fakeBox(
     reachable: true,
     nameOf: (user: string) => boxName(BOX_SECRET, "gbox-", personAgentKey({ channel: "dev", channelUserId: user })),
   };
-  const host: BoxHost = {
+  const retiring = new Map<string, string>();
+  const wiped = new Set<string>();
+  const host: BoxHost & FlyBoxRetirement = {
     kind: "fly",
     get image() {
       return box.image;
@@ -482,6 +496,23 @@ export function fakeBox(
       if (step === "die") throw new Error("the host step died after destroying the app");
       return { ok: true };
     },
+    async retirementTarget(name) {
+      if (!box.created.has(name)) return { ok: false, retryable: false, missing: true, detail: "no box" };
+      const id = retiring.get(name) ?? opts.volume ?? crypto.randomUUID();
+      retiring.set(name, id);
+      return { ok: true, target: { disk: id, machine: name, disks: [id] } };
+    },
+    async retirementRecheck(name, target) {
+      return target.disk === retiring.get(name)
+        ? { ok: true, state: "present" }
+        : { ok: false, retryable: true, detail: "disk changed" };
+    },
+    async retireWipedDisk(name) {
+      return wiped.has(name) ? { ok: true } : { ok: false, retryable: true, detail: "disk not wiped" };
+    },
+    async removeRetiredApp(name) {
+      return host.destroy(name);
+    },
   };
   const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
     const url = new URL(input);
@@ -490,23 +521,31 @@ export function fakeBox(
     if (!box.created.has(name) || !box.reachable) throw new TypeError("fetch failed: no such host");
     const authorization = new Headers(init?.headers).get("authorization");
     if (url.pathname === "/health") {
-      return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test", ...(opts.volume ? { box: opts.volume } : {}) });
+      return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test", box: retiring.get(name) ?? opts.volume });
     }
     if (url.pathname === "/erase") {
-      const { epoch } = JSON.parse(String(init?.body)) as { epoch: number };
-      box.erases.push(epoch);
-      if (box.eraseHold) await box.eraseHold;
-      const step = box.eraseSteps.shift() ?? "ok";
-      if (step === "old_image") return new Response("not found", { status: 404 });
-      if (step === "fail") return Response.json({ error: "erase_incomplete" }, { status: 500 });
-      box.floor = Math.max(box.floor, epoch);
-      box.sessions.clear();
-      const id = step === "wrong_box" ? "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b" : opts.volume;
-      return Response.json({ box: id, floor: box.floor });
+      const request = JSON.parse(String(init?.body));
+      if (!Number.isSafeInteger(request.epoch) || request.epoch <= 0) return new Response(null, { status: 400 });
+      if (request.scope === undefined && request.box === undefined) {
+        box.erases.push(request.epoch);
+        if (box.eraseHold) await box.eraseHold;
+        const step = box.eraseSteps.shift() ?? "ok";
+        if (step === "old_image") return new Response("not found", { status: 404 });
+        if (step === "fail") return Response.json({ error: "erase_incomplete" }, { status: 500 });
+        box.floor = Math.max(box.floor, request.epoch);
+        box.sessions.clear();
+        const id = step === "wrong_box" ? "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b" : opts.volume;
+        return Response.json({ box: id, floor: box.floor });
+      }
+      if (request.scope !== "account" || request.box !== retiring.get(name)) return new Response(null, { status: 412 });
+      wiped.add(name);
+      return Response.json({ box: request.box, scope: "account", floor: request.epoch });
     }
-    if (url.pathname === "/parse" || url.pathname === "/agent") {
-      const agent = url.pathname === "/agent";
-      const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; fresh?: string | null; session?: string | null; append?: string; tools?: { name: string }[]; ephemeral?: boolean; box?: unknown; epoch?: unknown };
+    if (url.pathname === "/agent/once" && box.ignoresSession) return Response.json({ error: "not_found" }, { status: 404 });
+    if (url.pathname === "/parse" || url.pathname === "/agent" || url.pathname === "/agent/once") {
+      const agent = url.pathname !== "/parse";
+      const once = url.pathname === "/agent/once";
+      const body = JSON.parse(String(init?.body)) as { user?: string; turn?: string; fresh?: string | null; session?: string | null; sessionOwner?: string; append?: string; tools?: { name: string }[]; ephemeral?: boolean; box?: unknown; epoch?: unknown };
       const named = box.ignoresSession ? null : (body.session ?? null);
       const resumed = box.ignoresSession || (named !== null && box.sessions.has(named));
       const session = resumed ? named : crypto.randomUUID();
@@ -514,7 +553,7 @@ export function fakeBox(
       box.parses.push({
         authorization,
         user: read,
-        agent: agent ? { append: body.append ?? "", tools: (body.tools ?? []).map((t) => t.name), session: body.session ?? null, resumed, fresh: body.fresh ?? null, ...(body.ephemeral === true ? { ephemeral: true } : {}) } : null,
+        agent: agent ? { append: body.append ?? "", tools: (body.tools ?? []).map((t) => t.name), session: body.session ?? null, ...(body.sessionOwner === undefined ? {} : { sessionOwner: body.sessionOwner }), resumed, fresh: body.fresh ?? null, ...(body.ephemeral === true ? { ephemeral: true } : {}), ...(once ? { once: true } : {}) } : null,
         at: body.box === undefined && body.epoch === undefined ? null : { box: body.box, epoch: body.epoch },
       });
       const step = box.replies.shift();
@@ -719,4 +758,16 @@ export function checkoutEvent(o: { readonly user: string; readonly sub: string; 
 export function stripeChange(kit: BillingKit, o: StripeSubscriptionOpts & { readonly type?: SubscriptionEventType; readonly id?: string }): Promise<Response> {
   kit.stripe.subscriptions.set(o.sub, stripeSubscription(o));
   return postStripe(subscriptionEvent(o));
+}
+
+/** Takes the forget command's columns back out, so a test can run the migrations again from an older schema version. */
+export function rewindForgetCommandSchema(sql: SqlStorage): void {
+  sql.exec(`
+    ALTER TABLE outbox DROP COLUMN epoch;
+    ALTER TABLE outbox DROP COLUMN privacy;
+    DROP TABLE forget;
+    ALTER TABLE box DROP COLUMN volume;
+  `);
+  const foundation = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE forget ("));
+  sql.exec(MIGRATIONS[foundation]);
 }

@@ -330,6 +330,85 @@ describe("the Durable Object is the one record of the chat for the box session",
     expect(c.logs("turn").at(-1)?.historyTrimmed).toBe(false);
   });
 
+  test("a resumed box turn keeps exact rows that fit its own prompt but not a small backup key's", async () => {
+    const box = fakeBox({ signedIn: true });
+    const provider = fakeProvider();
+    const c = await devChat("boxfit", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+
+    const long = Array.from({ length: 12 }, (_, i) => `${i} ${"ก".repeat(1_200)}`);
+    for (const [i, text] of long.entries()) {
+      box.replies.push({ kind: "reply", step: chat(`Reply ${i}.`) });
+      await c.say(text);
+    }
+    expect(await c.received()).toHaveLength(12);
+    await giveKey(c.agent, { backup: true, provider: "alibaba", key: "sk-alibaba-0123456789", mode: "loose" });
+
+    const compactionOrTurn = { kind: "output" as const, value: { summary: "Kept.", actions: [send("Still here.")], tasks: [], about: "" } };
+    box.replies.push({ kind: "reply", step: compactionOrTurn }, { kind: "reply", step: chat("Still here.") });
+    await c.say("a short question");
+
+    expect(await c.received()).toEqual(["Still here."]);
+    const last = lastBox(box);
+    expect(last.resumed).toBe(true);
+    expect(last.user).toContain("Person: a short question");
+    expect(last.user).not.toContain(`Person: ${long[0]}`);
+    const rows = (await c.snapshot()).turns.map((row) => row.text);
+    for (const text of long) expect(rows).toContain(text);
+  });
+
+  test.each([
+    { title: "the box catches up on every backup-key turn when more than 90 rows wait and compaction fails", lostSession: false },
+    { title: "a replacement box session catches up even when the oldest page needs to be trimmed", lostSession: true },
+  ])("$title", async ({ lostSession }) => {
+    const padding = lostSession ? ` ${"ก".repeat(900)}` : "";
+    const messages = Array.from({ length: 50 }, (_, i) => `Backup question ${i}.${padding}`);
+    const replies = messages.map((_, i) => `Backup answer ${i}.`);
+    const key = fakeProvider(replies.map((reply) => keyReply(reply)));
+    const compaction = fakeProvider([{ kind: "output", value: { summary: "" } }]);
+    const provider = async (url: string, init?: RequestInit): Promise<Response> => {
+      const body = JSON.parse(String(init?.body)) as { system: { text: string }[] };
+      return (body.system[0].text === COMPACTION_SYSTEM ? compaction : key)(url, init);
+    };
+    const box = fakeBox({ signedIn: true });
+    const c = await devChat("backfill-overflow", { model: scripted([]), provider, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    await giveKey(c.agent, { backup: true });
+    await c.received();
+    box.replies.push({ kind: "reply", step: chat("Hi.") });
+    await c.say("hello");
+
+    box.replies.push({ kind: "status", status: 503 });
+    for (const message of messages) await c.say(message);
+    expect(compaction.seen).toHaveLength(1);
+    expect((await c.received()).slice(-replies.length)).toEqual(replies);
+
+    c.clock.set(local("2099-11-04T10:10"));
+    if (lostSession) box.sessions.clear();
+    compaction.steps.push({ kind: "output", value: { summary: "" } });
+    box.replies.push({ kind: "refusal" }, { kind: "reply", step: chat("Back on your box.") });
+    await c.say("are you back?");
+    expect(await c.received()).toEqual(["Back on your box."]);
+    expect(box.parses.slice(-2).map((p) => (p.agent ? "agent" : "compaction"))).toEqual(["compaction", "agent"]);
+    const first = lastBox(box);
+    expect(first.resumed).toBe(!lostSession);
+    if (lostSession) expect(first.user).toContain("later lines left out");
+    expect(first.user).toContain(`Person: ${messages[0]}`);
+    expect(first.user).not.toContain(`Person: ${messages.at(-1)}`);
+
+    box.replies.push({ kind: "reply", step: chat("All caught up.") });
+    await c.say("keep going");
+    expect(await c.received()).toEqual(["All caught up."]);
+    const second = lastBox(box);
+    expect(second.resumed).toBe(true);
+    for (const line of [...messages.map((text) => `Person: ${text}`), ...replies.map((text) => `You: ${text}`)]) {
+      expect([first.user, second.user].filter((prompt) => prompt.includes(line)), line).toHaveLength(1);
+    }
+    expect(second.user).not.toContain("Person: are you back?");
+    expect(second.user).not.toContain("You: Back on your box.");
+  });
+
   test("a group turn its owner's box serves runs in a session of its own and leaves the owner's session record alone", async () => {
     const { box, c } = await boxChat("own");
     box.replies.push({ kind: "reply", step: chat("Hi.") });
@@ -342,12 +421,35 @@ describe("the Durable Object is the one record of the chat for the box session",
     box.replies.push({ kind: "reply", step: chat("For the group.") });
     const prompt = { sections: [{ title: "New", keep: ["Person: hi from the group"], trim: [], dropRank: 0 }] };
     expect(await owner.serve({ group, ownershipVersion: 1, purpose: "turn", system: "s", prompt })).toMatchObject({ kind: "ok", call: { lane: "box" } });
-    expect(lastBox(box)).toMatchObject({ session: null, resumed: false, ephemeral: true, append: AGENT_SYSTEM, user: "## New\nPerson: hi from the group" });
+    expect(lastBox(box)).toMatchObject({ session: null, resumed: false, ephemeral: true, once: true, append: AGENT_SYSTEM, user: "## New\nPerson: hi from the group" });
 
     box.replies.push({ kind: "reply", step: chat("Hi again.") });
     await c.say("me again");
     expect(lastBox(box)).toMatchObject({ session: mine, resumed: true });
     expect(lastBox(box).ephemeral).toBeUndefined();
+    expect(lastBox(box).once).toBeUndefined();
+    expect(lastBox(box).user).not.toContain("hi from the group");
+  });
+
+  test("a group turn its owner's box can't keep out of the owner's session, on an old image, is refused, not answered from that session", async () => {
+    const { box, c } = await boxChat("own-old");
+    box.ignoresSession = true;
+    box.replies.push({ kind: "reply", step: chat("Hi.") });
+    await c.say("hello");
+    const owner = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    const group = "g:telegram:-100456" as AgentKey;
+    await owner.recordGroup(group, 1);
+    const turns = box.parses.length;
+
+    box.replies.push({ kind: "reply", step: chat("For the group.") });
+    const prompt = { sections: [{ title: "New", keep: ["Person: hi from the group"], trim: [], dropRank: 0 }] };
+    expect(await owner.serve({ group, ownershipVersion: 1, purpose: "turn", system: "s", prompt })).toEqual({ kind: "unavailable" });
+    expect(box.parses).toHaveLength(turns);
+    expect(box.replies.splice(0)).toHaveLength(1);
+
+    box.replies.push({ kind: "reply", step: chat("Hi again.") });
+    await c.say("me again");
+    expect((await c.received()).at(-1)).toBe("Hi again.");
     expect(lastBox(box).user).not.toContain("hi from the group");
   });
 

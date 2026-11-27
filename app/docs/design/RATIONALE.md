@@ -113,7 +113,7 @@ Tracing a flow takes three files: `worker.ts`, `agent.ts`, and one pure module.
 - **Inventory before the row.** `/claude` claims a D1 `boxes` slot with one conditional insert. A retry of the same person's claim is granted. If D1 can't be reached, the command backs off like an unavailable model.
 - **The ticket stays out of prompts.** The sign-in link is in the outbox row only. The turn history keeps the text with `<sign-in link>` in its place.
 - **Routing.** The box is the first lane `ModelAccess` tries, for turns and compaction alike. `planAllowsBox` is the plan check, and it allows everyone until billing lands. A box that can't answer falls back to nothing that costs money, unless the person said their key may back it up.
-- **The static host has one fixed name,** `BOX_APP_PREFIX` + `static`, because its box holds one `BOX_TOKEN` and the token derives from the name. Every person on a static host shares that box.
+- **The static host has one fixed name,** `BOX_APP_PREFIX` + `static`, because its box holds one `BOX_TOKEN` and the token derives from the name. Every person on a static host shares that box. The Worker derives a different opaque `sessionOwner` from each agent key, so the box's rollback session files stay per person even there.
 
 ## Policy decided by code
 

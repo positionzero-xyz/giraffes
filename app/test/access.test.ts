@@ -285,6 +285,22 @@ describe("a person's own key", () => {
     ]);
   });
 
+  test("someone who adds the agent over the monthly limit they set gets the cap notice then, and not again that day", async () => {
+    const provider = fakeProvider();
+    const c = await devChat("eff", { model: null, provider, at: "2099-11-04T10:00" });
+    await giveKey(c.agent, { capMicro: 10 });
+
+    await c.say("/follow");
+    expect(await c.received()).toEqual([NOTICE.ownCapReached("0.00")]);
+    await c.say("hello");
+    expect(await c.received()).toEqual([]);
+    expect(provider.seen).toHaveLength(0);
+    expect(c.logs("turn").map((l) => [l.eventKind, l.outcome])).toEqual([
+      ["lifecycle", "refused_budget"],
+      ["message", "refused_budget"],
+    ]);
+  });
+
   test("in loose mode a bad reply is repaired once, and both attempts are charged", async () => {
     const provider = fakeProvider([{ kind: "text", text: "Sure! Here you go" }, reply("Repaired.")]);
     const c = await devChat("eli", { model: null, provider, at: "2099-11-04T10:00" });
@@ -527,12 +543,12 @@ describe("money a provider may have billed", () => {
 describe("pricing a model no preset lists", () => {
   test("an unlisted model is priced at the dearest card its protocol's presets publish, and marked approximate", () => {
     const dear = { ...PROVIDERS.anthropic.models["claude-haiku-5-5"].card, inputPerM: 3_000_000, outputPerM: 15_000_000 };
-    const table = { ...PROVIDERS, deepinfra: { ...PROVIDERS.deepinfra, models: { ...PROVIDERS.deepinfra.models, "big-model": { card: { ...dear, longPrompt: null }, effort: false } } } };
+    const table = { ...PROVIDERS, deepinfra: { ...PROVIDERS.deepinfra, models: { ...PROVIDERS.deepinfra.models, "big-model": { name: "Big", pick: null, card: { ...dear, longPrompt: null }, effort: false } } } };
 
     const openai = modelOf("openai-compatible", "whatever", table);
     expect(openai.priced).toBe(false);
     expect(openai.model.card.outputPerM).toBe(15_000_000);
-    expect(modelOf("anthropic-compatible", "whatever", table).model.card.outputPerM).toBe(PROVIDERS.anthropic.models["claude-haiku-5-5"].card.outputPerM);
+    expect(modelOf("anthropic-compatible", "whatever", table).model.card.outputPerM).toBe(PROVIDERS["opencode-go"].models["claude-haiku-5-5"].card.outputPerM);
     expect(modelOf("deepinfra", "big-model", table).priced).toBe(true);
   });
 

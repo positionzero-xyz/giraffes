@@ -1,3 +1,7 @@
+export const ROUTINE_OUTBOX = `o.trigger_kind = 'wakeup' AND EXISTS (
+  SELECT 1 FROM wakeup WHERE id = CAST(substr(o.event_key, length('wake:') + 1) AS INTEGER) AND repeat IS NOT NULL
+)`;
+
 export const MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE agent (
@@ -547,6 +551,73 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE billing_alert ADD COLUMN telegram_redirect TEXT;
   ALTER TABLE billing_alert ADD COLUMN destination_wait INTEGER NOT NULL DEFAULT 0;
   UPDATE billing_alert SET ready_at = unixepoch() * 1000, notified = 0, closed_as = NULL WHERE closed_as = 'gone';
+  `,
+  `
+  ALTER TABLE checkout_session ADD COLUMN closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1));
+  `,
+  `
+  CREATE TABLE outside_write (
+    id            TEXT PRIMARY KEY,
+    intent        TEXT NOT NULL UNIQUE,
+    provider      TEXT NOT NULL,
+    action        TEXT NOT NULL,
+    operation_id  TEXT NOT NULL UNIQUE,
+    args          TEXT NOT NULL,
+    epoch         INTEGER NOT NULL,
+    status        TEXT NOT NULL CHECK (status IN ('approval_pending', 'ready', 'verifying', 'uncertain', 'succeeded', 'failed', 'dropped')),
+    attempt       INTEGER NOT NULL DEFAULT 0,
+    in_doubt      INTEGER NOT NULL DEFAULT 0 CHECK (in_doubt IN (0, 1)),
+    lease_until   INTEGER,
+    receipt       TEXT,
+    failure       TEXT,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL,
+    CHECK ((receipt IS NULL) = (status IS NOT 'succeeded')),
+    CHECK (failure IS NULL OR status IN ('failed', 'uncertain'))
+  );
+
+  CREATE TABLE outside_approval (
+    id           TEXT PRIMARY KEY,
+    write_id     TEXT NOT NULL UNIQUE REFERENCES outside_write (id),
+    owner_key    TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'consumed', 'refused', 'expired')),
+    expires_at   INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL,
+    decided_at   INTEGER,
+    decided_by   TEXT,
+    consumed_at  INTEGER,
+    CHECK ((status = 'consumed') = (consumed_at IS NOT NULL))
+  );
+
+  CREATE TRIGGER outside_write_immutable
+  BEFORE UPDATE OF intent, provider, action, operation_id, args, epoch ON outside_write
+  BEGIN
+    SELECT RAISE (ABORT, 'outside write action is immutable');
+  END;
+
+  CREATE TRIGGER outside_approval_immutable
+  BEFORE UPDATE OF write_id, owner_key ON outside_approval
+  BEGIN
+    SELECT RAISE (ABORT, 'outside approval binding is immutable');
+  END;
+  `,
+  `
+  CREATE TABLE rate_event (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind  TEXT NOT NULL CHECK (kind IN ('feedback', 'invite')),
+    at    INTEGER NOT NULL
+  );
+  CREATE INDEX rate_event_kind_at ON rate_event (kind, at);
+  `,
+  `
+  CREATE TABLE routine_delivery (
+    at         INTEGER NOT NULL,
+    sending_id TEXT UNIQUE
+  );
+  INSERT INTO routine_delivery (at, sending_id)
+    SELECT COALESCE(o.closed_at, o.ready_at), CASE WHEN o.status = 'sending' THEN o.id END
+    FROM outbox o
+    WHERE (o.status IN ('sent', 'sending') OR o.in_doubt = 1) AND ${ROUTINE_OUTBOX};
   `,
   `
   ALTER TABLE forget ADD COLUMN phase TEXT CHECK (phase IN ('review', 'erase'));

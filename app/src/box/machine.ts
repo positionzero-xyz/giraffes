@@ -227,7 +227,8 @@ export function onCommand(b: Box, now: EpochMs): Reply {
 
 /** `/claude remove`: the person takes their plan's box away. */
 export function onRemove(b: Box, now: EpochMs): Reply {
-  return { box: b.state === "reclaiming" ? b : reclaimNow(b, "removed", now), say: "removing" };
+  if (b.state !== "reclaiming") return { box: reclaimNow(b, "removed", now), say: "removing" };
+  return { box: b.reason === "removed" ? b : { ...b, reason: "removed" }, say: "removing" };
 }
 
 /** With billing on, a box outlives the plan that allowed it by `retireAfterMs`, and the person is told once when that starts. */

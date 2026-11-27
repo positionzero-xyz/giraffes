@@ -295,7 +295,24 @@ describe("entering a key on the page", () => {
     const html = await res.text();
     expect(html).not.toMatch(/<script[^>]+src=/);
     expect(html).toContain("OpenCode Go");
+    expect(html).toContain("Claude Haiku 5.5");
+    expect(html).toContain("Another model");
+    expect(html).toContain("id=\"modelPick\"");
+    expect(html).toContain('if (!$("modelRow").hidden && typedModel === "")');
     expect(html).toContain(NOTICES.th.keyPage.connect);
+  });
+
+  test("the page lists the provider's priced model and offers another", async () => {
+    const html = await (await SELF.fetch("https://giraffes.test/key")).text();
+    const data = JSON.parse(/<script type="application\/json" id="data">(.*?)<\/script>/.exec(html)?.[1] ?? "") as {
+      providers: { id: string; models: { id: string; pick: string | null }[] }[];
+    };
+
+    expect(data.providers.find((p) => p.id === "opencode-go")?.models.map((m) => [m.id, m.pick])).toEqual([
+      ["claude-haiku-5-5", null],
+    ]);
+    expect(data.providers.find((p) => p.id === "mistral")?.models.map((m) => m.id)).toEqual(["mistral-small-2603"]);
+    expect(html).toContain("Another model");
   });
 
   test("the key page says checking can use more than one small request in both languages", async () => {
@@ -596,8 +613,43 @@ describe("a key pasted into the chat", () => {
     expect(model.calls[0].user).toContain(KEY_REMOVED);
   });
 
+  test("four short ordinary words reach the model as written, with no key warning", async () => {
+    const model = scripted([chat("Sure.")]);
+    const c = await devChat("max", { model, at: "2099-11-04T10:00" });
+
+    await c.say("book cafe near work");
+
+    expect(model.calls).toHaveLength(1);
+    expect(model.calls[0].user).toContain("book cafe near work");
+    expect((await c.received()).join("\n")).not.toContain(NOTICE.pastedKey(null).split("\n")[0]);
+  });
+
+  test.each([
+    ["memo", "edit memo weds noon"],
+    ["model-name", "Can I use my API key with Qwen3-Coder-480B-A35B-Instruct?"],
+  ] as const)("ordinary chat reaches the model as written: %s", async (id, text) => {
+    const model = scripted([chat("Sure.")]);
+    const c = await devChat(`ordinary-${id}`, { model, at: "2099-11-04T10:00" });
+
+    await c.say(text);
+
+    expect(model.calls).toHaveLength(1);
+    expect(model.calls[0].user).toContain(text);
+    expect((await c.received()).join("\n")).not.toContain(NOTICE.pastedKey(null).split("\n")[0]);
+  });
+
   test.each([
     ["sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", true],
+    ["abcd-efgh-ijkl-mnop", true],
+    ["abcd efgh ijkl mnop", true],
+    ["My app password is abcd efgh ijkl mnop keep it private.", true],
+    ["They both read each page.", false],
+    ["password: x8Kp2Qz9Lm4Rt7Bv3N", true],
+    ["x8Kp2Qz9Lm4Rt7Bv3N is my app password", true],
+    ["x8Kp2Qz9Lm4Rt7Bv3N", true],
+    ["this will take some time", false],
+    ["this-will-take-time", false],
+    ["please make sure your door is closed", false],
     ["oc_sk_9f8e7d6c5b4a3210fedcba", true],
     ["sk-or-v1-0123456789abcdef0123456789abcdef", true],
     ["my key is aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE ok", true],
@@ -618,8 +670,51 @@ describe("a key pasted into the chat", () => {
     ["ANTHROPIC_API_KEY=sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", true],
     ["commit 3f9a2c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39 and 1f9a2c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39", false],
     ["https://github.com/org/repo/commit/3f9a2c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39", false],
+    ["book cafe near work", false],
+    ["pick milk eggs soap", false],
+    ["shopping list:\nmilk eggs rice soap\nbread", false],
+    ["I forgot my password, book cafe near work", false],
+    ["my password is unpredictable", false],
+    ["password confirmation", false],
+    ["authentication token", false],
+    ["Mistral-Small-2603 is cheapest", false],
+    ["I switched to Mistral-Small-2603 today", false],
+    ["Mistral-Small-2603 token price", false],
+    ["does my api key work with Mistral-Small-2603", false],
+    ["my api key is for deepseek-v4-1-flash-1017", false],
+    ["รหัสพัสดุ TH0123456789AB", false],
+    ["password: Xk29fLq8Wm2p", true],
+    ["password is Xk29fLq8Wm2p", true],
+    ["รหัสผ่าน icloud: Xk29fLq8Wm2p", true],
+    ["รหัสผ่านคือ Xk29fLq8Wm2p", true],
+    ["พาสเวิร์ด Xk29fLq8Wm2p", true],
+    ["รหัส: Xk29fLq8Wm2p", true],
+    ["รหัสผ่านแอป gmail คือ qwer tyui opas dfgh ช่วยตั้งค่าให้หน่อย", true],
+    ["my gmail app pw is qwer tyui opas dfgh thanks", true],
+    ["password: Mistral-Small-2603", true],
+    ["password: unpredictable", true],
+    ["my app password is book qwer tyui work", true],
+    ["x8Kp2Qz9Lm4Rt7B is my app password", true],
+    ["password for gmail is x8Kp2Qz9Lm4Rt7B", true],
+    ["password:\nx8Kp2Qz9Lm4Rt7B", true],
+    ["password for icloud is Xk29fLq8Wm2p", true],
+    ["รหัสผ่าน icloud คือ Xk29fLq8Wm2p", true],
+    ["dakfUp-nixjy2-qibgyv", true],
+    ["my password is dakfUp-nixjy2-qibgyv", true],
+    ["Llama-4-Maverick-17B is cheaper", false],
+    ["GPT-4o-mini-2024-07-18 is cheaper", false],
+    ["edit memo weds noon", false],
+    ["Can I use my API key with Qwen3-Coder-480B-A35B-Instruct?", false],
+    ["password: Qwen3-Coder-480B-A35B-Instruct", true],
+    ["password is this will take time", true],
   ])("%s is %s", (text, found) => {
     expect(redactSecrets(text).found).toBe(found);
+  });
+
+  test("the context allowance is measured after the end of the hint", () => {
+    const token = "Xk29fLq8Wm2p";
+    expect(redactSecrets(`password:${" ".repeat(31)}${token}`).found).toBe(true);
+    expect(redactSecrets(`password:${" ".repeat(32)}${token}`).found).toBe(false);
   });
 
   const bareKey = "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE";
@@ -630,6 +725,11 @@ describe("a key pasted into the chat", () => {
 
   test.each([`${bareKey}.com`, `a.${bareKey}.b`, `https://h/${bareKey}/x`, `${bareKey}/path`])("keeps a host or path intact: %s", (text) => {
     expect(redactSecrets(text)).toEqual({ text, found: false });
+  });
+
+  test("an explicit app-password label wins over following prose, while ordinary prose stays intact", () => {
+    expect(redactSecrets("My app password is abcd efgh ijkl mnop keep it private.")).toEqual({ text: `My app password is ${KEY_REMOVED} keep it private.`, found: true });
+    expect(redactSecrets("They both read each page.")).toEqual({ text: "They both read each page.", found: false });
   });
 
   test("a key inside a link is removed and the rest of the link is kept", () => {
@@ -747,10 +847,17 @@ describe("the Mistral preset", () => {
     });
   });
 
-  test("a pasted Vibe plan key with no model gets the same Small 4 on the same URL", () => {
+  test("a pasted Vibe plan key with no model gets the same Mistral model on the same URL", () => {
     expect(draftKey({ provider: "mistral-vibe", model: "", baseUrl: "", key: "AbCdEfGhIjKlMnOpQrStUvWxYz012345" }, { devMode: false })).toMatchObject({
       ok: true,
       value: { provider: "mistral-vibe", baseUrl: "https://api.mistral.ai/v1", model: "mistral-small-2603" },
+    });
+  });
+
+  test("an explicitly typed unlisted model is kept for the provider to judge", () => {
+    expect(draftKey({ provider: "mistral", model: "mistral-medium-2608", baseUrl: "", key: "AbCdEfGhIjKlMnOpQrStUvWxYz012345" }, { devMode: false })).toMatchObject({
+      ok: true,
+      value: { provider: "mistral", model: "mistral-medium-2608" },
     });
   });
 });

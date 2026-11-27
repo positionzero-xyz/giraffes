@@ -1,6 +1,7 @@
 import {
   parseInviteCode,
   type Admission,
+  type AgentEvent,
   type Cohort,
   type EpochMs,
   type Half,
@@ -16,7 +17,7 @@ import { checkinWakeup, type NewWakeup } from "../policy/schedule";
 import { localDate } from "../policy/time";
 import type { Batch } from "./turn";
 
-export const ADMISSION = { caps: { recruit: 40, joiner: 60 }, invitesPerPerson: 5 } as const;
+export const ADMISSION = { caps: { recruit: 40, joiner: 60 }, invitesPerPerson: 5, inviteChecksPerHour: 5, feedbackPerDay: 5 } as const;
 
 /** `beta` admits by invite code and consent; `open` admits everyone at first contact. */
 export const ADMISSION_MODES = ["beta", "open"] as const;
@@ -93,8 +94,14 @@ export function planAdmission(view: AdmissionView, answer: AdmissionAnswer | nul
 function codeIn(batch: Batch): InviteCode | null {
   let code: InviteCode | null = null;
   for (const { event: e } of batch.items) {
-    if (e.kind === "lifecycle" && e.code) code = e.code;
-    if (e.kind === "message") code = parseInviteCode(/^\/join\s+(\S+)$/i.exec(e.text.trim())?.[1] ?? e.text) ?? code;
+    code = inviteIn(e) ?? code;
   }
   return code;
+}
+
+export function inviteIn(event: AgentEvent): InviteCode | null {
+  if (event.kind === "lifecycle") return event.code ?? null;
+  return event.kind === "message"
+    ? parseInviteCode(/^\/join\s+(\S+)$/i.exec(event.text.trim())?.[1] ?? event.text)
+    : null;
 }

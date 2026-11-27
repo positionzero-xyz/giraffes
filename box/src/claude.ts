@@ -101,8 +101,18 @@ function readAt(body: Json): At | undefined {
   return typeof body.box === "string" && SESSION_ID.test(body.box) && isEpoch(body.epoch) ? { box: body.box, epoch: body.epoch } : undefined;
 }
 
-export function readEraseRequest(body: unknown): number | null {
-  return isObject(body) && isEpoch(body.epoch) && body.epoch > 0 ? body.epoch : null;
+type EraseRequest =
+  | { readonly scope: "workspace"; readonly epoch: number; readonly box?: string }
+  | { readonly scope: "account"; readonly epoch: number; readonly box: string };
+
+export function readEraseRequest(body: unknown): EraseRequest | null {
+  if (!isObject(body) || !isEpoch(body.epoch) || body.epoch === 0) return null;
+  const { box, epoch, scope } = body;
+  if (box === undefined) return scope === undefined ? { scope: "workspace", epoch } : null;
+  if (typeof box !== "string" || !SESSION_ID.test(box)) return null;
+  if (scope === undefined) return { scope: "workspace", epoch, box };
+  if (scope === "account") return { scope, epoch, box };
+  return null;
 }
 
 export function readParseRequest(body: unknown): ParseRequest | null {
@@ -178,7 +188,8 @@ export type AgentTool = { readonly name: string; readonly description: string; r
 export type AgentRequest = {
   readonly model: string;
   readonly append: string;
-  readonly session: string | null | undefined;
+  readonly session: string | null;
+  readonly sessionOwner: string | undefined;
   readonly turn: string;
   readonly fresh: string | null;
   readonly tools: readonly AgentTool[];
@@ -195,6 +206,7 @@ export type AgentReply =
   | { readonly status: 502; readonly body: { error: "claude_failed" } };
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const SESSION_OWNER = /^[0-9a-f]{32}$/;
 
 export const isSessionId = (v: string): boolean => SESSION_ID.test(v);
 
@@ -220,23 +232,28 @@ export function deleteSessionTranscripts(configDir: string, sessionIds: readonly
 const TOOL_PREFIX = "mcp__giraffe__";
 const MCP_SERVER = fileURLToPath(new URL("./giraffe-mcp.ts", import.meta.url).href);
 
-export function readAgentRequest(body: unknown): AgentRequest | null {
+/** `once` is the route for turns that aren't the person's own chat, which an image without it answers 404. */
+export function readAgentRequest(body: unknown, once = false): AgentRequest | null {
   if (!isObject(body) || !Array.isArray(body.tools)) return null;
   const { model, append, turn } = body;
   if (typeof model !== "string" || typeof append !== "string" || typeof turn !== "string" || !turn.trim()) return null;
   const session = body.session;
-  if (session !== undefined && session !== null && (typeof session !== "string" || !SESSION_ID.test(session))) return null;
+  // An old Worker sends a group's turn and the person's alike with no session, so the box can't keep the group out.
+  if (session === undefined || (session !== null && (typeof session !== "string" || !SESSION_ID.test(session)))) return null;
+  const sessionOwner = body.sessionOwner;
+  if (sessionOwner !== undefined && (typeof sessionOwner !== "string" || !SESSION_OWNER.test(sessionOwner))) return null;
   const fresh = body.fresh ?? null;
   if (fresh !== null && (typeof fresh !== "string" || !fresh.trim())) return null;
   const at = readAt(body);
   if (at === undefined || (body.ephemeral !== undefined && typeof body.ephemeral !== "boolean")) return null;
-  if (body.ephemeral === true && typeof session === "string") return null;
+  const ephemeral = once || body.ephemeral === true;
+  if (ephemeral && session !== null) return null;
   const tools: AgentTool[] = [];
   for (const t of body.tools) {
     if (!isObject(t) || typeof t.name !== "string" || !/^[a-z_]{1,40}$/.test(t.name) || typeof t.description !== "string" || !isObject(t.inputSchema)) return null;
     tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema });
   }
-  return { model, append, session, turn, fresh, tools, at, ...(body.ephemeral === true ? { ephemeral: true } : {}) };
+  return { model, append, session, sessionOwner, turn, fresh, tools, at, ...(ephemeral ? { ephemeral: true } : {}) };
 }
 
 function toolProblems(content: unknown): string[] {
@@ -281,6 +298,7 @@ export function agentArgs(req: AgentRequest, toolsFile: string, session: { reado
     "--tools", "",
     "--append-system-prompt", req.append,
     "--strict-mcp-config",
+    "--settings", JSON.stringify({ includeGitInstructions: false }),
     "--mcp-config", JSON.stringify(mcp),
     "--allowedTools", req.tools.map((t) => `${TOOL_PREFIX}${t.name}`).join(","),
     "--setting-sources", "",

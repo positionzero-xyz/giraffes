@@ -96,7 +96,7 @@ function reply(body) {
     ["message_stop", {}]], holdMs };
 }
 
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => (raw += c));
   req.on("end", () => {
@@ -122,4 +122,8 @@ http.createServer((req, res) => {
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ type: "error", error: { type: "not_found_error", message: "mock" } }));
   });
-}).listen(PORT, "127.0.0.1", () => console.log(`mock on ${PORT}`));
+});
+server.listen(PORT, "127.0.0.1", () => {
+  const address = server.address();
+  console.log(`mock on ${typeof address === "object" && address !== null ? address.port : PORT}`);
+});

@@ -79,6 +79,7 @@ import { connect, type Connect } from "../model/client";
 import { bytesOf, renderPrompt, type PromptParts } from "../model/prompt";
 import { PROVIDERS } from "../model/providers";
 import { routeFor, type CallPurpose, type Purpose } from "../model/routes";
+import { estimate, fits } from "../policy/spend";
 import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach";
 import { inLineReserve, type QuotaReading } from "../policy/quota";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
@@ -273,10 +274,13 @@ export class Agent extends DurableObject<Env> {
     return "queued";
   }
 
-  billingEvent(e: BillingEvent): Promise<"applied" | "duplicate" | "ignored"> {
-    return this.#runBilling(() => this.#billingEvent(e)).catch(() => {
-      throw new Error("billing event failed");
+  billingEvent(e: BillingEvent): Promise<"applied" | "duplicate" | "ignored" | "failed"> {
+    const run = this.#runBilling(() => this.#billingEvent(e)).catch(() => {
+      diagnostic("stripe_event_failed");
+      return "failed" as const;
     });
+    this.#billing = run;
+    return run;
   }
 
   #runBilling<T>(work: () => Promise<T>): Promise<T> {
@@ -312,12 +316,16 @@ export class Agent extends DurableObject<Env> {
     }
     const sub = read.subscription;
     await store.applySubscription(sub, this.#deps.clock.now());
+    if (this.#erasure()) return "ignored";
     if (e.checkout) this.#store.checkoutClosed(e.checkout);
-    await this.refreshPlan(sub.owner);
+    if (!(await this.refreshPlan(sub.owner))) throw new Error("owner refresh failed");
     for (const member of await store.members(sub.id)) {
-      await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member);
+      if (this.#erasure()) return "ignored";
+      if (!(await this.env.AGENT.get(this.env.AGENT.idFromName(member)).refreshPlan(member))) throw new Error("member refresh failed");
     }
+    if (this.#erasure()) return "ignored";
     await this.#flagDuplicate(sub.owner);
+    if (this.#erasure()) return "ignored";
     this.#store.billingEventDone(e.id, this.#deps.clock.now());
     return "applied";
   }
@@ -326,11 +334,12 @@ export class Agent extends DurableObject<Env> {
     const { store } = this.#deps.billing;
     const now = this.#deps.clock.now();
     const owned = await store.owned(owner, now);
-    if (owned.length < 2) return;
+    if (this.#erasure() || owned.length < 2) return;
     const ids = owned.join(" ");
     diagnostic("stripe_duplicate_subscription");
     await store.recordDuplicate(owner, owned, now);
     await this.#armNoLaterThan(now);
+    if (this.#erasure()) return;
     this.#store.queueBillingAlert(ids, now);
     await this.#deliverBillingAlert();
     this.ctx.waitUntil(this.alarm());
@@ -412,24 +421,28 @@ export class Agent extends DurableObject<Env> {
     return next && Math.max(next.ready_at, this.#billingAlertStorageRetryAt) as EpochMs;
   }
 
-  async refreshPlan(agent: AgentKey): Promise<void> {
-    if (this.#erasure()) return;
+  async refreshPlan(agent: AgentKey): Promise<boolean> {
+    if (this.#erasure()) return true;
     const version = this.#accountVersion;
-    const { config, store } = this.#deps.billing;
-    const now = this.#deps.clock.now();
-    const standing = await store.standing(agent, now).catch(() => {
-      throw new Error("billing standing unavailable");
-    });
-    if (version !== this.#accountVersion) return;
-    const before = this.#plan(now);
-    const after = planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, config.on, config.rules);
-    const a = this.#store.agent();
-    const text = config.on && a ? planChanged(before, after, now, a.language) : null;
-    const message = text ? { key: eventKey.billing("plan"), message: { texts: [text] as const, note: text } } : null;
-    this.#store.applyStanding(standing, message, now);
-    if (message) {
-      await this.#armNoLaterThan(now);
-      this.ctx.waitUntil(this.alarm());
+    try {
+      const { config, store } = this.#deps.billing;
+      const now = this.#deps.clock.now();
+      const standing = await store.standing(agent, now);
+      if (version !== this.#accountVersion) return true;
+      const before = this.#plan(now);
+      const after = planOf({ trialEndsAt: this.#store.plan()?.trialEndsAt ?? null, ...standing }, now, config.on, config.rules);
+      const a = this.#store.agent();
+      const text = config.on && a ? planChanged(before, after, now, a.language) : null;
+      const message = text ? { key: eventKey.billing("plan"), message: { texts: [text] as const, note: text } } : null;
+      this.#store.applyStanding(standing, message, now);
+      if (message) {
+        await this.#armNoLaterThan(now);
+        this.ctx.waitUntil(this.alarm());
+      }
+      return true;
+    } catch {
+      diagnostic("stripe_refresh_failed");
+      return false;
     }
   }
 
@@ -1681,6 +1694,14 @@ export class Agent extends DurableObject<Env> {
     return health.kind === "unavailable" ? { kind: "down", retryable: true, detail: health.detail } : health;
   }
 
+  /** True only when the consented backup key is currently healthy and has unspent cap room. */
+  #backupKeyCanServe(now: EpochMs, purpose: CallPurpose): boolean {
+    const key = this.#store.key();
+    if (!key?.backup || key.health.kind !== "ok") return false;
+    const route = routeFor({ kind: "key", provider: key.provider, model: key.model }, purpose);
+    return fits(this.#store.spend("byok", utcMonth(now)), estimate(route, route.promptBytes), key.capMicro);
+  }
+
   /**
    * Every request names the box's volume, read once from /health, and the epoch of the work that sends it, so an image
    * with erase refuses work from before its last erase. The claim is checked again after each await, right before a fetch.
@@ -1694,7 +1715,8 @@ export class Agent extends DurableObject<Env> {
     const box = this.#store.box();
     const agent = this.#agent().key;
     if (!boxServes(deps, agent) || box?.state !== "signed_in") return { kind: "moved_on", transient: false, told: false };
-    if (this.#deps.clock.now() < this.#skipBoxUntil) return { kind: "moved_on", transient: true, told: false };
+    const startedAt = this.#deps.clock.now();
+    if (startedAt < this.#skipBoxUntil && this.#backupKeyCanServe(startedAt, purpose)) return { kind: "moved_on", transient: true, told: false };
     const token = await boxToken(deps.secret, box.name);
     let volume = this.#store.boxVolume();
     if (volume === null) {
@@ -1725,7 +1747,7 @@ export class Agent extends DurableObject<Env> {
         return { kind: "moved_on", transient: true, told: false };
       case "unavailable":
         diagnostic("box_unavailable");
-        this.#skipBoxUntil = now + BOX.skipAfterUnavailableMs;
+        if (this.#backupKeyCanServe(now, purpose)) this.#skipBoxUntil = now + BOX.skipAfterUnavailableMs;
         this.#store.appendLogs([missed("unavailable")], now);
         return { kind: "moved_on", transient: true, told: false };
       default:

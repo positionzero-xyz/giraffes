@@ -1,5 +1,5 @@
-import { env } from "cloudflare:test";
-import { describe, expect, test } from "vitest";
+import { applyD1Migrations, env } from "cloudflare:test";
+import { describe, expect, inject, test } from "vitest";
 import { COHORTS, HALVES, TASK_KINDS, type AgentKey, type EpochMs, type MicroUsd } from "../src/domain";
 import type { BoxName } from "../src/box/names";
 import { BOX_HOST_KINDS } from "../src/box/host";
@@ -144,6 +144,42 @@ describe("log shipping", () => {
 });
 
 describe("schema", () => {
+  test("the tool_refused migration upgrades the previous table and lets later rows flush", async () => {
+    for (const sql of [
+      "DROP TRIGGER IF EXISTS diagnostic_action_rejection_insert",
+      "DROP TRIGGER IF EXISTS diagnostic_action_rejection_update",
+      "DROP INDEX IF EXISTS action_rejection_agent_time",
+      "DROP TABLE action_rejection",
+      `CREATE TABLE action_rejection (
+        id        TEXT PRIMARY KEY,
+        agent_key TEXT NOT NULL,
+        turn_id   TEXT NOT NULL,
+        action    TEXT NOT NULL,
+        reason    TEXT NOT NULL CHECK (reason IN ('duplicate', 'limit', 'past', 'too_far', 'bad_time', 'bad_key', 'reserved_key', 'task_limit', 'task_unknown', 'task_done', 'plan_empty', 'plan_too_thin', 'too_many_proposals', 'too_many_task_ops', 'not_pending', 'bad_zone', 'too_many_sends', 'too_many_actions', 'too_long')),
+        at        INTEGER NOT NULL
+      )`,
+      "CREATE INDEX action_rejection_agent_time ON action_rejection (agent_key, at)",
+      "INSERT INTO action_rejection (id, agent_key, turn_id, action, reason, at) VALUES ('legacy-row', 'p:dev:a', 'p:dev:a|turn', '', 'bad_time', 0)",
+    ]) await env.LEDGER.prepare(sql).run();
+    await expect(
+      env.LEDGER.prepare("INSERT INTO action_rejection (id, agent_key, turn_id, action, reason, at) VALUES ('blocked-row', 'p:dev:a', 'p:dev:a|turn', '', 'tool_refused', 1)").run(),
+    ).rejects.toThrow();
+
+    const migration = inject("d1Migrations").find((m) => m.name.startsWith("0002_"));
+    if (!migration) throw new Error("0002 migration missing");
+    await applyD1Migrations(env.LEDGER, [migration], "upgrade_test_migrations");
+
+    const ledger = d1Ledger(env.LEDGER);
+    await ledger.append([{ stream: "rejection", id: "flushed-row", agent: agent("a"), turnId: "p:dev:a|turn", reason: "tool_refused", at }]);
+    await ledger.append([{ stream: "rejection", id: "later-row", agent: agent("a"), turnId: "p:dev:a|turn", reason: "bad_time", at: (at + 1) as EpochMs }]);
+
+    expect((await env.LEDGER.prepare("SELECT id, reason FROM action_rejection ORDER BY at, id").all()).results).toEqual([
+      { id: "legacy-row", reason: "bad_time" },
+      { id: "flushed-row", reason: "tool_refused" },
+      { id: "later-row", reason: "bad_time" },
+    ]);
+  });
+
   test("each enumerated column allows exactly the values of the TypeScript union that writes it", async () => {
     const tables = await env.LEDGER.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table'").all<{ name: string; sql: string }>();
     const allowed = new Map(

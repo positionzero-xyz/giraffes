@@ -126,30 +126,37 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
     const listed = await call("GET", path);
     if (!listed.ok) return listed;
     const reply = read(listed, AppsReply, `GET ${path}`);
-    if (failed(reply)) return { ok: false, retryable: true, detail: reply.detail };
-    return reply.apps.map(({ name: app }) => app);
+    return failed(reply) ? reply : reply.apps.map(({ name: app }) => app);
   }
 
   /**
-   * A name alone is not ownership. Read the app and require this org. A 404 is only gone when a
-   * successful org app list omits the name; an unreadable list holds instead of claiming removal.
+   * Fly can report a different slug or omit the org for the personal alias. Use the filtered
+   * list to prove ownership in that case, and to verify a 404 before treating an app as gone.
    */
-  async function ownership(name: BoxName): Promise<HostResult> {
-    const got = await call("GET", `/apps/${name}`);
+  async function ownership(name: BoxName, purpose: "provision" | "retire" = "retire"): Promise<HostResult> {
+    const path = `/apps/${name}`;
+    const got = await call("GET", path);
     if (!got.ok) return got;
-    if (got.status === 404) {
+    if (got.status === 404 && purpose === "retire") {
       const names = await appNames();
-      if (failed(names)) return names;
+      if (failed(names)) return fail(true, names.detail);
       return names.includes(name)
         ? fail(true, `app ${name} is listed but unreadable`)
         : { ...fail(false, `app ${name} is gone`), missing: true };
     }
-    const owner = read(got, AppReply, `GET /apps/${name}`);
-    if (failed(owner)) return { ...fail(true, owner.detail) };
-    if (!owner.organization || owner.organization.slug !== cfg.org) {
-      return fail(false, `app ${name} ownership unverified`);
+    const owner = read(got, AppReply, `GET ${path}`);
+    if (failed(owner)) {
+      return purpose === "retire" ? fail(true, owner.detail) : fail(false, `app name ${name} is taken outside ${cfg.org}`);
     }
-    return HOST_OK;
+    const slug = owner.organization?.slug ?? null;
+    if (cfg.org === "personal") {
+      const names = await appNames();
+      if (failed(names)) return purpose === "retire" ? fail(true, names.detail) : names;
+      if (names.includes(name)) return HOST_OK;
+    } else if (slug === cfg.org) {
+      return HOST_OK;
+    }
+    return fail(false, slug === null ? `app ${name} is outside ${cfg.org}` : `app ${name} belongs to ${slug}`);
   }
 
   async function app(name: BoxName): Promise<HostResult> {
@@ -161,11 +168,8 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
     }
     const taken = created.status === 409 || (created.status === 422 && NameTaken.safeParse(created.body).success);
     if (!taken) return fail(false, `POST /apps: ${created.status} ${JSON.stringify(created.body).slice(0, 200)}`);
-    const got = await call("GET", `/apps/${name}`);
-    if (!got.ok) return got;
-    const owner = read(got, AppReply, `GET /apps/${name}`);
-    if (failed(owner)) return fail(false, `app name ${name} is taken outside ${cfg.org}`);
-    if (owner.organization && owner.organization.slug !== cfg.org) return fail(false, `app ${name} belongs to ${owner.organization.slug}`);
+    const owned = await ownership(name, "provision");
+    if (!owned.ok) return owned;
     log("app", "exists");
     return HOST_OK;
   }
@@ -386,7 +390,7 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       if (!app.ok) return app;
       if (app.status !== 404) return fail(true, "box app remains live");
       const names = await appNames();
-      if (failed(names)) return names;
+      if (failed(names)) return fail(true, names.detail);
       if (names.includes(name)) return fail(true, "box app remains live");
       const volumes = await retirementVolumes(name);
       if (failed(volumes)) return volumes.missing ? HOST_OK : volumes;

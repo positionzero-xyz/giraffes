@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -193,6 +193,8 @@ export type AgentRequest = {
   readonly fresh: string | null;
   readonly tools: readonly AgentTool[];
   readonly at: At;
+  /** True for a one-off turn whose session nothing may resume. */
+  readonly ephemeral?: boolean;
 };
 export type SessionUsed = { readonly id: string; readonly resumed: boolean };
 export type AgentCall = { readonly name: string; readonly input: Json };
@@ -203,6 +205,23 @@ export type AgentReply =
   | { readonly status: 502; readonly body: { error: "claude_failed" } };
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+export const isSessionId = (v: string): boolean => SESSION_ID.test(v);
+
+/** Deletes every transcript Claude Code kept for session ids Giraffe will never resume. */
+export function deleteSessionTranscripts(configDir: string, sessionIds: readonly string[]): void {
+  const projects = join(configDir, "projects");
+  for (const id of new Set(sessionIds.filter(isSessionId))) {
+    try {
+      if (!existsSync(projects)) return;
+      for (const project of readdirSync(projects, { withFileTypes: true })) {
+        if (project.isDirectory()) rmSync(join(projects, project.name, `${id}.jsonl`), { force: true });
+      }
+    } catch (err) {
+      diagnostic({ code: "session_cleanup_failed", error: err instanceof Error ? ((err as NodeJS.ErrnoException).code ?? err.name) : "unknown" });
+    }
+  }
+}
 
 const TOOL_PREFIX = "mcp__giraffe__";
 const MCP_SERVER = fileURLToPath(new URL("./giraffe-mcp.ts", import.meta.url).href);
@@ -216,13 +235,14 @@ export function readAgentRequest(body: unknown): AgentRequest | null {
   const fresh = body.fresh ?? null;
   if (fresh !== null && (typeof fresh !== "string" || !fresh.trim())) return null;
   const at = readAt(body);
-  if (at === undefined) return null;
+  if (at === undefined || (body.ephemeral !== undefined && typeof body.ephemeral !== "boolean")) return null;
+  if (body.ephemeral === true && typeof session === "string") return null;
   const tools: AgentTool[] = [];
   for (const t of body.tools) {
     if (!isObject(t) || typeof t.name !== "string" || !/^[a-z_]{1,40}$/.test(t.name) || typeof t.description !== "string" || !isObject(t.inputSchema)) return null;
     tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema });
   }
-  return { model, append, session, turn, fresh, tools, at };
+  return { model, append, session, turn, fresh, tools, at, ...(body.ephemeral === true ? { ephemeral: true } : {}) };
 }
 
 function toolProblems(content: unknown): string[] {
@@ -256,7 +276,7 @@ function toolCalls(events: readonly Json[]): ToolCalls {
   return out;
 }
 
-function agentArgs(req: AgentRequest, toolsFile: string, session: { readonly id: string; readonly resume: boolean }): string[] {
+export function agentArgs(req: AgentRequest, toolsFile: string, session: { readonly id: string; readonly resume: boolean }): string[] {
   const mcp = { mcpServers: { giraffe: { type: "stdio", command: process.execPath, args: [MCP_SERVER, toolsFile] } } };
   return [
     "-p",
@@ -270,6 +290,7 @@ function agentArgs(req: AgentRequest, toolsFile: string, session: { readonly id:
     "--mcp-config", JSON.stringify(mcp),
     "--allowedTools", req.tools.map((t) => `${TOOL_PREFIX}${t.name}`).join(","),
     "--setting-sources", "",
+    ...(req.ephemeral === true ? ["--no-session-persistence"] : []),
     ...(session.resume ? ["--resume", session.id] : ["--session-id", session.id]),
   ];
 }
@@ -281,20 +302,23 @@ const agentEnv = (): NodeJS.ProcessEnv => ({ ...process.env, CLAUDE_CODE_DISABLE
  * One turn of the person's own Claude Code session: Claude Code keeps its system prompt and gets ours appended, has no
  * built-in tools, and acts only through Giraffe's tools, which answer "noted". The Worker applies the calls.
  */
-export async function agentTurn(cli: Cli, req: AgentRequest, signal?: AbortSignal): Promise<AgentReply> {
+export async function agentTurn(cli: Cli, req: AgentRequest, signal: AbortSignal | undefined, configDir: string): Promise<AgentReply> {
   const toolsFile = join(mkdtempSync(join(tmpdir(), "giraffe-tools-")), "tools.json");
   writeFileSync(toolsFile, JSON.stringify(req.tools));
   const started = Date.now();
   const startNew = () => ({ id: randomUUID(), resume: false });
   let session = req.session ? { id: req.session, resume: true } : startNew();
+  let replaced: string | null = null;
   const input = () => `${JSON.stringify({ type: "user", message: { role: "user", content: session.resume ? req.turn : (req.fresh ?? req.turn) } })}\n`;
   let run = await runClaude(cli, agentArgs(req, toolsFile, session), input(), TURN_TIMEOUT_MS, signal, agentEnv());
   if (session.resume && /No conversation found with session ID/.test(run.stdout + run.stderr)) {
     diagnostic({ code: "session_missing" });
+    replaced = session.id;
     session = startNew();
     run = await runClaude(cli, agentArgs(req, toolsFile, session), input(), TURN_TIMEOUT_MS, signal, agentEnv());
   }
   rmSync(dirname(toolsFile), { recursive: true, force: true });
+  deleteSessionTranscripts(configDir, [...(req.ephemeral === true ? [session.id] : []), ...(replaced === null ? [] : [replaced])]);
   if (signal?.aborted) return { status: 502, body: { error: "claude_failed" } };
   const events = run.stdout.split("\n").map(parseJson).filter(isObject);
   const result = events.findLast((e) => e.type === "result");

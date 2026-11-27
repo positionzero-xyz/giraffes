@@ -3,3 +3,11 @@ node_modules/
 .dev.vars
 __pycache__/
 *.log
+
+# Personal agent files. Shared agent setup is AGENTS.md, CLAUDE.md, .claude/settings.json, .claude/skills and .claude/hooks.
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/worktrees/
+.claude/launch.json
+.claude/staging/
+.arena/

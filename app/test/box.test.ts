@@ -216,6 +216,128 @@ describe("the static host shares one Claude login", () => {
 });
 
 describe("fly host", () => {
+  test("account erasure waits for the wiped volume to stop being live before deleting its app", async () => {
+    let volumeLive = true;
+    let appExists = true;
+    const requests: string[] = [];
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      requests.push(`${method} ${path}`);
+      if (method === "GET" && path === `/v1/apps/${app}`) {
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (method === "GET" && path === "/v1/apps") {
+        return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      }
+      if (method === "GET" && path.endsWith("/volumes")) {
+        return Response.json([{ id: "vol_1", state: volumeLive ? "created" : "pending_destroy", attached_machine_id: volumeLive ? "machine_1" : null }]);
+      }
+      if (method === "DELETE" && path === `/v1/apps/${app}`) appExists = false;
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    expect(found).toEqual({ ok: true, target: { disk: "vol_1", machine: "machine_1", disks: ["vol_1"] } });
+    if (!found.ok) throw new Error(found.detail);
+    expect(await host.retireWipedDisk(app, found.target)).toMatchObject({ ok: false, retryable: true });
+    expect(requests).toContain(`DELETE /v1/apps/${app}/volumes/vol_1`);
+    expect(requests).not.toContain(`DELETE /v1/apps/${app}`);
+    volumeLive = false;
+    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true });
+    expect(await host.removeRetiredApp(app)).toEqual({ ok: true });
+    expect(requests).toContain(`DELETE /v1/apps/${app}`);
+    expect(requests).toContain("GET /v1/apps");
+  });
+
+  test("retirement destroys an app with no volume instead of waiting for a mount", async () => {
+    let appExists = true;
+    const deletes: string[] = [];
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      if (method === "GET" && path === `/v1/apps/${app}`) {
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (method === "GET" && path === "/v1/apps") return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      if (method === "GET" && path.endsWith("/volumes")) return Response.json([]);
+      if (method === "DELETE") {
+        deletes.push(path);
+        if (path === `/v1/apps/${app}`) appExists = false;
+      }
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    expect(found).toEqual({ ok: true, target: { disk: null, machine: null, disks: [] } });
+    if (!found.ok) throw new Error(found.detail);
+    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true });
+    expect(await host.removeRetiredApp(app)).toEqual({ ok: true });
+    expect(deletes).toEqual([`/v1/apps/${app}`]);
+  });
+
+  test("retirement destroys every unattached volume the app owns", async () => {
+    let state = "created";
+    const deletes: string[] = [];
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      if (method === "GET" && path === `/v1/apps/${app}`) return Response.json({ organization: { slug: "giraffes" } });
+      if (method === "GET" && path === "/v1/apps") return Response.json({ apps: [{ name: app }] });
+      if (method === "GET" && path.endsWith("/volumes")) {
+        return Response.json([{ id: "vol_old", state, attached_machine_id: null }]);
+      }
+      if (method === "DELETE" && path.endsWith("/volumes/vol_old")) {
+        deletes.push(path);
+        state = "pending_destroy";
+      }
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    expect(found).toEqual({ ok: true, target: { disk: null, machine: null, disks: ["vol_old"] } });
+    if (!found.ok) throw new Error(found.detail);
+    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true });
+    expect(deletes).toEqual([`/v1/apps/${app}/volumes/vol_old`]);
+  });
+
+  test("an app read of 404 is gone only when the org app list confirms it", async () => {
+    let listed = false;
+    const host = flyHost(flyConfig, async (url) => {
+      const path = new URL(url).pathname;
+      if (path === `/v1/apps/${app}`) return new Response(null, { status: 404 });
+      if (path === "/v1/apps") return Response.json({ apps: listed ? [{ name: app }] : [] });
+      return new Response(null, { status: 500 });
+    });
+
+    expect(await host.retirementTarget(app)).toMatchObject({ ok: false, missing: true });
+    listed = true;
+    const held = await host.retirementTarget(app);
+    expect(held).toMatchObject({ ok: false, retryable: true });
+    expect(held).not.toMatchObject({ missing: true });
+  });
+
+  test("an app that disappears after locate reports missing so the caller relocates", async () => {
+    let appExists = true;
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      if (method === "GET" && path === `/v1/apps/${app}`) {
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (method === "GET" && path === "/v1/apps") return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      if (method === "GET" && path.endsWith("/volumes")) {
+        return Response.json([{ id: "vol_1", state: "created", attached_machine_id: "machine_1" }]);
+      }
+      return new Response(null, { status: 200 });
+    });
+
+    const found = await host.retirementTarget(app);
+    if (!found.ok) throw new Error(found.detail);
+    appExists = false;
+    expect(await host.retireWipedDisk(app, found.target)).toMatchObject({ ok: false, missing: true });
+  });
+
   test("provisioning sends the contract's requests: app, shared v4 and v6, a data volume, one machine", async () => {
     const fly = fakeFly();
     const host = flyHost(flyConfig, fly.fetch);
@@ -492,6 +614,21 @@ describe("box client", () => {
       throw new TypeError("fetch failed");
     };
     expect(await boxClient(down).erase("https://b", token, 3)).toMatchObject({ kind: "pending" });
+  });
+
+  test("account erase requires proof for the requested disk and scope", async () => {
+    const box = "00000000-0000-4000-8000-000000000001";
+    const request = { scope: "account", box, epoch: 3 } as const;
+    expect(await boxClient(answering(200, { box, floor: 4 })).erase("https://b", token, request)).toMatchObject({ kind: "pending" });
+    expect(await boxClient(answering(200, {
+      box: "00000000-0000-4000-8000-000000000002", floor: 4, scope: "account",
+    })).erase("https://b", token, request)).toMatchObject({ kind: "pending" });
+    const receipt = { box, floor: 4, scope: "account" };
+    const accountErase = boxClient(async (_url, init) => {
+      expect(JSON.parse(String(init?.body))).toEqual(request);
+      return new Response(JSON.stringify(receipt), { status: 200 });
+    });
+    expect(await accountErase.erase("https://b", token, request)).toEqual({ kind: "erased", ...receipt });
   });
 
   test("a reply is read as the bridge's, and the default parse timeout is 120 s", async () => {
@@ -808,7 +945,8 @@ describe("connecting a Claude plan", () => {
     expect(box.healthCalls).toHaveLength(1 + BOX.pollForMs / BOX.pollEveryMs);
     expect((await c.snapshot()).box?.state).toBe("signed_out");
     expect(model.calls).toHaveLength(0);
-  });
+  // This drive walks every 30-second sign-in poll for the full half-hour polling window.
+  }, 10_000);
 
   test("a provisioning step that died after creating the app is retried and converges on one app and one link", async () => {
     const box = fakeBox({ host: ["die"] });
@@ -960,6 +1098,68 @@ describe("connecting a Claude plan", () => {
     await c.say("/claude");
 
     expect(await c.received()).toEqual([say("connected")]);
+    expect((await c.snapshot()).box?.state).toBe("signed_in");
+  });
+
+  const NOT_READY = [
+    {
+      lang: "en" as const,
+      channel: undefined,
+      ids: ["not-ready-setup", "not-ready-gone-out", "not-ready-gone-in"],
+      text: "Your Claude plan isn't ready to answer yet. Send /claude to see where it stands. I might say setup is still running, send you a sign-in link, or confirm it's connected.",
+    },
+    {
+      lang: "th" as const,
+      channel: "line" as const,
+      ids: ["U00000000000000000000000000000b01", "U00000000000000000000000000000b02", "U00000000000000000000000000000b03"],
+      text: "ตอนนี้แพ็กเกจ Claude ของคุณยังไม่พร้อมตอบค่ะ ส่ง /claude เพื่อดูสถานะได้เลยนะคะ คำตอบอาจเป็นการแจ้งว่ายังตั้งค่าอยู่ ลิงก์เข้าสู่ระบบ หรือการยืนยันว่าเชื่อมแพ็กเกจแล้วค่ะ",
+    },
+  ];
+
+  test.each(NOT_READY)("in $lang, a request while setup runs gets the not-ready notice, and /claude says setup is still running", async ({ lang, channel, ids, text }) => {
+    const retry = { retryable: true, detail: "503" };
+    const box = fakeBox({ host: [retry, retry, retry, retry] });
+    const c = await devChat(ids[0], { model: null, at: "2099-11-04T10:00", box: box.deps, channel });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([boxMessage("setting_up", lang, null).text]);
+    expect((await c.snapshot()).box?.state).toBe("provisioning");
+
+    await c.say("hello");
+    expect(await c.received()).toEqual([text]);
+
+    await c.say("/claude");
+    expect(await c.received()).toEqual([boxMessage("still_setting_up", lang, null).text]);
+  });
+
+  test.each(NOT_READY)("in $lang, a request after the box is gone gets the not-ready notice, and /claude sets it up and sends a link", async ({ lang, channel, ids, text }) => {
+    const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }] });
+    const c = await devChat(ids[1], { model: null, at: "2099-11-04T10:00", box: box.deps, channel });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([boxMessage("setting_up", lang, null).text, boxMessage("setup_failed", lang, null).text]);
+    expect((await c.snapshot()).box).toBeNull();
+
+    await c.say("hello");
+    expect(await c.received()).toEqual([text]);
+
+    await c.say("/claude");
+    const [setup, link, ...rest] = await c.received();
+    expect([setup, rest]).toEqual([boxMessage("setting_up", lang, null).text, []]);
+    expect(link.replace(LINK, "<sign-in link>")).toBe(boxMessage("link", lang, null).note);
+  });
+
+  test.each(NOT_READY)("in $lang, a request after the box is gone gets the not-ready notice, and /claude confirms a sign-in the box already has", async ({ lang, channel, ids, text }) => {
+    const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }], signedIn: true });
+    const c = await devChat(ids[2], { model: null, at: "2099-11-04T10:00", box: box.deps, channel });
+    await c.say("/claude");
+    await c.received();
+    expect((await c.snapshot()).box).toBeNull();
+
+    await c.say("hello");
+    expect(await c.received()).toEqual([text]);
+
+    box.replies.push({ kind: "reply", step: chat("Hi.") });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([boxMessage("setting_up", lang, null).text, boxMessage("connected", lang, null).text, `${NOTICES[lang].catchUp}\nHi.`]);
     expect((await c.snapshot()).box?.state).toBe("signed_in");
   });
 

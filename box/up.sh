@@ -2,7 +2,9 @@
 # usage: BOX_TOKEN=<token> box/up.sh <name> <host-port> <data-dir> [--mock [script-file]]
 # Runs the box image (BOX_IMAGE, default giraffes-box:mvp) on 127.0.0.1:<host-port> with the person's state in <data-dir>.
 # --mock signs the CLI in with a fake API key against box/mock-api.mjs running inside the box, with every Anthropic host resolved to loopback.
-# With --mock, a script file can make the mock call Giraffe tools; MOCK_DUMPS=<host-dir> keeps each raw request the mock gets as a file there.
+# With --mock, a script file can make the mock call Giraffe tools.
+# MOCK_DUMPS=<host-dir> saves raw requests there. Without an explicit script, the mock reads
+# <host-dir>/mock-script.json, which can be replaced while the box is running.
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 name=$1 port=$2 data=$3 mode=${4:-} script=${5:-}
@@ -27,6 +29,9 @@ if [ "$mode" = --mock ] && [ -n "${MOCK_DUMPS:-}" ]; then
   mkdir -p "$MOCK_DUMPS"
   mock+=(-v "$(cd "$MOCK_DUMPS" && { pwd -W 2>/dev/null || pwd; }):/dumps")
   dumps=/dumps
+  if [ -z "$script_in_box" ]; then
+    script_in_box=/dumps/mock-script.json
+  fi
 fi
 if [ "$mode" = --mock ]; then
   mock+=(-v "$here:/box:ro"

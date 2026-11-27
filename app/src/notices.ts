@@ -44,7 +44,7 @@ export type Notices = {
   readonly noPortal: string;
   readonly duplicateAlerted: string;
   readonly duplicateRetrying: (outcome: "retry" | "in_doubt" | "refused", retrySeconds: number) => string;
-  readonly duplicateAlertGone: string;
+  readonly duplicateAlertDelayed: string;
   readonly invite: (code: string) => string;
   readonly inviteNotOwner: string;
   readonly inviteFull: (seats: number) => string;
@@ -192,16 +192,16 @@ const en: Notices = {
   noLinks: "I couldn't make the payment links just now. Send /plan again in a minute.",
   manage: (link) => `To change or cancel your plan: ${link}`,
   noPortal: "I couldn't make the link to manage your plan just now. Send /plan again in a minute.",
-  duplicateAlerted: "It looks like you have more than one paid plan. I've alerted our billing team. They can review it now and decide whether to cancel a plan or issue a refund. Check your payment statement for extra charges in the meantime.",
+  duplicateAlerted: "I detected overlapping paid plans. I've alerted our billing team. They can review it now and check whether a billing change or refund is needed. Check your payment statement for extra charges in the meantime.",
   duplicateRetrying: (outcome, retrySeconds) => {
     const delivery = {
       retry: "I tried to alert our billing team, but delivery hasn't been confirmed.",
       in_doubt: "The billing team may already have received the alert.",
       refused: "The billing alert couldn't be delivered.",
     }[outcome];
-    return `It looks like you have more than one paid plan. ${delivery} I've scheduled another attempt in ${retrySeconds} seconds. I'll keep trying unless the billing chat is permanently unavailable. Check your payment statement for extra charges.`;
+    return `I detected overlapping paid plans. ${delivery} I've scheduled another attempt in ${retrySeconds} seconds. I'll keep trying. Check your payment statement for extra charges.`;
   },
-  duplicateAlertGone: "It looks like you have more than one paid plan. The billing chat is no longer reachable, so automatic attempts have stopped. Check your payment statement for extra charges.",
+  duplicateAlertDelayed: "I detected overlapping paid plans. The billing alert is delayed because I couldn't reach our billing chat. I'll try again in 24 hours, or sooner if I receive updated billing chat settings. Check your payment statement for extra charges.",
   invite: (code) => `Ask the person you want to add to send me this within 7 days. It works once.\n/join ${code}`,
   inviteNotOwner: "Only the owner of a Plus plan can invite people. Send /plan to see the plans.",
   inviteFull: (seats) => `All ${seats} places on your Plus plan are taken.`,
@@ -387,16 +387,16 @@ const th: Notices = {
   noLinks: "ตอนนี้สร้างลิงก์ชำระเงินไม่ได้ค่ะ ส่ง /plan อีกครั้งในอีกสักครู่นะคะ",
   manage: (link) => `เปลี่ยนหรือยกเลิกแพ็กเกจได้ที่: ${link}`,
   noPortal: "ตอนนี้สร้างลิงก์จัดการแพ็กเกจไม่ได้ค่ะ ส่ง /plan อีกครั้งในอีกสักครู่นะคะ",
-  duplicateAlerted: "ดูเหมือนว่าคุณมีแพ็กเกจแบบชำระเงินมากกว่าหนึ่งแพ็กเกจ แจ้งทีมดูแลการชำระเงินแล้วค่ะ ทีมตรวจสอบได้เลยว่าควรยกเลิกแพ็กเกจหรือคืนเงินหรือไม่ ระหว่างนี้คุณตรวจสอบยอดที่ถูกเรียกเก็บเกินได้จากรายการเดินบัญชีค่ะ",
+  duplicateAlerted: "ตรวจพบช่วงที่แพ็กเกจแบบชำระเงินของคุณซ้อนกันค่ะ แจ้งทีมดูแลการชำระเงินแล้วค่ะ ทีมตรวจสอบได้เลยว่าต้องแก้ไขการเรียกเก็บเงินหรือคืนเงินหรือไม่ ระหว่างนี้คุณตรวจสอบรายการเดินบัญชีได้ว่ามียอดเรียกเก็บเกินหรือไม่ค่ะ",
   duplicateRetrying: (outcome, retrySeconds) => {
     const delivery = {
       retry: "พยายามแจ้งทีมแล้ว แต่ยังยืนยันไม่ได้ว่าทีมได้รับค่ะ",
       in_doubt: "ทีมอาจได้รับการแจ้งเตือนแล้วค่ะ",
       refused: "ส่งการแจ้งเตือนให้ทีมดูแลการชำระเงินไม่สำเร็จค่ะ",
     }[outcome];
-    return `ดูเหมือนว่าคุณมีแพ็กเกจแบบชำระเงินมากกว่าหนึ่งแพ็กเกจ ${delivery} ระบบจะลองอีกครั้งในอีก ${retrySeconds} วินาที และจะลองส่งต่อไปจนกว่าจะสำเร็จหรือไม่สามารถติดต่อแชตของทีมได้อีกค่ะ คุณตรวจสอบยอดที่ถูกเรียกเก็บเกินได้จากรายการเดินบัญชีค่ะ`;
+    return `ตรวจพบช่วงที่แพ็กเกจแบบชำระเงินของคุณซ้อนกันค่ะ ${delivery} ระบบจะลองอีกครั้งในอีก ${retrySeconds} วินาที และจะพยายามส่งต่อไปค่ะ คุณตรวจสอบรายการเดินบัญชีได้ว่ามียอดเรียกเก็บเกินหรือไม่ค่ะ`;
   },
-  duplicateAlertGone: "ดูเหมือนว่าคุณมีแพ็กเกจแบบชำระเงินมากกว่าหนึ่งแพ็กเกจ ไม่สามารถติดต่อแชตของทีมดูแลการชำระเงินได้อีก ระบบจึงหยุดส่งการแจ้งเตือนอัตโนมัติค่ะ คุณตรวจสอบยอดที่ถูกเรียกเก็บเกินได้จากรายการเดินบัญชีค่ะ",
+  duplicateAlertDelayed: "ตรวจพบช่วงที่แพ็กเกจแบบชำระเงินของคุณซ้อนกันค่ะ การแจ้งเตือนล่าช้าเพราะตอนนี้ติดต่อแชตของทีมดูแลการชำระเงินไม่ได้ ระบบจะลองอีกครั้งในอีก 24 ชั่วโมง หรือเร็วกว่านั้นหากได้รับการตั้งค่าแชตใหม่ค่ะ คุณตรวจสอบรายการเดินบัญชีได้ว่ามียอดเรียกเก็บเกินหรือไม่ค่ะ",
   invite: (code) => `ให้คนที่อยากเพิ่มส่งข้อความนี้มาภายใน 7 วัน ใช้ได้ครั้งเดียวค่ะ\n/join ${code}`,
   inviteNotOwner: "เฉพาะเจ้าของแพ็กเกจ Plus เท่านั้นที่เชิญคนได้ค่ะ ส่ง /plan เพื่อดูแพ็กเกจ",
   inviteFull: (seats) => `ที่ในแพ็กเกจ Plus เต็มครบ ${seats} ที่แล้วค่ะ`,

@@ -19,7 +19,7 @@ type Classification = {
 const durable = {
   admission: { secret: "code", identity: "inviter", operational: "one state reason cohort half state_at told_on" },
   agent: { saved: "tz checkin_local language", identity: "agent_key channel_user_id", operational: "one channel status status_at created_at claude_plan_at" },
-  billing_alert: { identity: "subscription_ids delivery_id", operational: "ready_at notified attempts closed_as" },
+  billing_alert: { identity: "subscription_ids delivery_id operator_route telegram_redirect", operational: "ready_at notified attempts closed_as destination_wait" },
   billing_event: { identity: "id", operational: "at" },
   box: { identity: "name url volume", operational: "one host state state_at link_sent_at signin_poll_until attempts next_at poll_at reclaim_at reclaim_reason retire_at image ensure_at" },
   box_session: { chat: "memory reply_backfill", identity: "id", operational: "one seen_seq" },

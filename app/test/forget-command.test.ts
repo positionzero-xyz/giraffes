@@ -550,6 +550,30 @@ describe("the model flag and recovery on other paths", () => {
 });
 
 describe("stores added on main", () => {
+  test("a routine that fired leaves no marker once the person picks it, and its send still counts toward the routine cap", async () => {
+    const key = `${MARKER}-stretch`;
+    const model = scripted([
+      turn({ actions: [routine(key, "2099-11-04T10:30", `Stretch by the ${MARKER} gate`, "daily"), send("Set.")] }),
+      chat(`Time to stretch by the ${MARKER} gate.`),
+    ]);
+    const c = await devChat("routine-marker", { model, at: "2099-11-04T10:00" });
+    await say(c, "remind me daily at 10:30 to stretch by the gate");
+    await c.advanceTo("2099-11-04T10:31");
+    expect(await c.received()).toEqual([`Time to stretch by the ${MARKER} gate.`]);
+    const counted = "SELECT COUNT(*) AS n FROM routine_delivery WHERE sending_id IS NULL AND at > ?";
+    expect(await sql(c, counted, c.clock.now() - 86_400_000)).toEqual([{ n: 1 }]);
+    expect(await holding(c, MARKER)).toEqual(["inbox.payload", "outbox.texts", "turn.text", "wakeup.key", "wakeup.note"]);
+
+    const page = (await say(c, "/forget"))[0];
+    const lines = page.split("\n");
+    const picks = lines.flatMap((l, i) => (l === `Key: ${key}` ? [Number(lines[i - 2].split(".")[0])] : []));
+    expect(picks).toHaveLength(2);
+    expect(await say(c, `/forget ${codeOf(page)} ${picks.join(" ")}`)).toEqual([receipt({ deleted: [picks] })]);
+
+    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await sql(c, counted, c.clock.now() - 86_400_000)).toEqual([{ n: 1 }]);
+  });
+
   test("every forget deletes outside writes and their approvals, even when the person keeps every saved item", async () => {
     const c = await devChat("outside-writes", { model: scripted([]), at: "2099-11-04T10:00" });
     await say(c, "/forget status");

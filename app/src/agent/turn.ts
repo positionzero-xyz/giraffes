@@ -347,42 +347,55 @@ export function memoryHeldAfter(view: TurnView, commit: TurnCommit): string {
   return memoryBlock(view.summary, [...view.notes, ...commit.notes].slice(-TURN.recentNotes));
 }
 
+type BoxPrompt = PromptParts & {
+  readonly sentThrough: number;
+  readonly historySeqs?: readonly number[];
+};
+
 export type BoxTurnPrompt = {
   readonly append: string;
   readonly session: string | null;
-  readonly turn: PromptParts;
-  readonly fresh: PromptParts;
-  readonly sentThrough: number;
+  readonly turn: BoxPrompt;
+  readonly fresh: BoxPrompt;
 };
 
-export function renderBoxTurn(view: TurnView, held: BoxSession | null): BoxTurnPrompt {
+export function renderBoxTurn(
+  view: TurnView,
+  held: BoxSession | null,
+  overflow?: { readonly unseen: readonly SeqTurn[]; readonly fresh: readonly SeqTurn[] },
+): BoxTurnPrompt {
   const memory = memoryBlock(view.summary, view.notes);
   const seen = held?.seenSeq ?? 0;
   const replies = new Map(held?.replyBackfill.map((r) => [r.seq, r]));
-  const unseen = view.recent.filter((r) => r.seq > seen).flatMap((r): SeqTurn[] => {
+  const pending = overflow?.unseen ?? view.recent.filter((r) => r.seq > seen);
+  const unseen = pending.flatMap((r): SeqTurn[] => {
     const reply = replies.get(r.seq);
     if (!reply) return [r];
     return reply.notice === null ? [] : [{ ...r, role: "note", text: reply.notice }];
   });
   const conversation = (rows: readonly SeqTurn[]): PromptSection[] =>
-    rows.length ? [{ title: "Conversation you haven't seen", keep: [], trim: conversationLines(rows, view.tz), dropRank: 1, history: true }] : [];
+    rows.length ? [{ title: "Conversation you haven't seen", keep: [], trim: conversationLines(rows, view.tz), dropRank: 1, history: true, trimNewest: overflow !== undefined }] : [];
   const lines = memoryLines(view.summary, view.notes);
   const update = memory !== (held?.memory ?? "") ? [keep("Memory (replaces the memory you had)", lines.length ? lines : ["(empty)"])] : [];
-  const parts = (rows: readonly SeqTurn[], extra: readonly PromptSection[]): PromptParts => ({
+  const parts = (rows: readonly SeqTurn[], extra: readonly PromptSection[], sentThrough: number): BoxPrompt => ({
     sections: [nowSection(view), ...extra, ...lookAhead(view), ...conversation(rows), newSection(view, false)],
+    sentThrough,
+    ...(overflow ? { historySeqs: rows.map((r) => r.seq) } : {}),
   });
+  const fresh = overflow?.fresh ?? view.recent;
+  const sentThrough = Math.max(seen, pending.at(-1)?.seq ?? 0);
   return {
     append: memory ? `${AGENT_SYSTEM}\n\n${memory}` : AGENT_SYSTEM,
     session: held?.id ?? null,
-    turn: parts(unseen, update),
-    fresh: parts(view.recent, []),
-    sentThrough: Math.max(seen, view.recent.at(-1)?.seq ?? 0),
+    turn: parts(unseen, update, sentThrough),
+    fresh: parts(fresh, [], overflow ? fresh.at(-1)?.seq ?? 0 : sentThrough),
   };
 }
 
 /** A turn that isn't the person's own chat, such as a group's, runs in a session of its own that nothing records. */
 export function oneOffBoxTurn(prompt: PromptParts): BoxTurnPrompt {
-  return { append: AGENT_SYSTEM, session: null, turn: prompt, fresh: prompt, sentThrough: 0 };
+  const parts = { ...prompt, sentThrough: 0 };
+  return { append: AGENT_SYSTEM, session: null, turn: parts, fresh: parts };
 }
 
 export type NewTurn = TurnRow & {

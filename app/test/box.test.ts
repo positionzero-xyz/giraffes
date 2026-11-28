@@ -2356,6 +2356,18 @@ describe("a sign-in link sent for the box before a replacement", () => {
     expect(await c.received()).toEqual([say("removed")]);
   });
 
+  test("a replacement set up once the old link and its grace ran out is deleted without a wipe when its setup fails", async () => {
+    const { c, fly, ledger } = await replacementInSetup("old-link-expired-failed-setup", "2099-11-04T10:32");
+
+    await c.advanceTo("2099-11-04T11:10");
+
+    expect(fly.destructive()).toEqual(fly.unwipedDelete());
+    expect(fly.requests.filter((r) => r === "box /health")).toHaveLength(BOX.maxProvisionAttempts - 1 + 3);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+    expect(await c.received()).toEqual([say("setup_failed")]);
+  });
+
   test("an account erase keeps no record of the last sign-in link while it waits for the box", async () => {
     const fly = replaceableFly();
     const c = await devChat("old-link-erase", { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", ledger: memoryLedger(), box: fly.deps });

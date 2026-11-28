@@ -24,7 +24,7 @@ export type EraseBoxReference = {
   /** Absent in records saved before setups existed, which were all made for name-only keys. */
   readonly setup: BoxSetup | null;
   readonly incarnation: string | null;
-  /** Setup began after every sign-in link for this name and its grace ran out, so no link opened it. Older records may have served the person. */
+  /** The box was still in setup under its own setup's key, so no sign-in link could open it. Older records may have served the person. */
   readonly neverServed?: true;
 };
 

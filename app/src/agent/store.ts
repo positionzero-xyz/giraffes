@@ -225,7 +225,6 @@ type WakeupCols = {
   repeat_anchor: LocalDateTime | null;
 };
 const WAKEUP_COLS = "id, key, kind, origin, note, due_at, task_id, bookkeeping, repeat, repeat_anchor";
-const BOX_LINK_EXPIRES = "box:link-expires";
 type OutboxCols = {
   id: OutboxId;
   event_key: EventKey;
@@ -1263,15 +1262,6 @@ export class AgentStore {
     this.sql.exec("UPDATE box SET volume = ? WHERE name = ?", volume, name);
   }
 
-  /** Outlives the box row, since a replacement box has the same name and token and the link opens it too. */
-  boxLinkExpiresAt(): EpochMs | null {
-    return this.storage.kv.get<EpochMs>(BOX_LINK_EXPIRES) ?? null;
-  }
-
-  noteBoxLink(expiresAt: EpochMs): void {
-    this.storage.kv.put(BOX_LINK_EXPIRES, expiresAt);
-  }
-
   forgetClaudePlan(): void {
     this.sql.exec("UPDATE agent SET claude_plan_at = NULL");
   }
@@ -2261,7 +2251,6 @@ export class AgentStore {
       this.sql.exec("INSERT INTO saved_items (one) VALUES (1)");
       this.storage.kv.delete(ERASE_CHALLENGE);
       this.storage.kv.delete(START_CHALLENGE);
-      this.storage.kv.delete(BOX_LINK_EXPIRES);
       this.storage.kv.put(ERASE_JOB, job);
     });
   }

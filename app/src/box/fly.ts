@@ -373,17 +373,20 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
         if (!success(removed.status) && removed.status !== 404) return fail(true, "box machine retirement unverified");
       }
 
+      let diskDeleteAccepted: true | undefined;
       for (const disk of new Set([...disks, ...(target.disk ? [target.disk] : [])])) {
         if (GONE_VOLUME.has(volumes.find((v) => v.id === disk)?.state ?? "destroyed")) continue;
         const removed = await call("DELETE", `/apps/${name}/volumes/${encodeURIComponent(disk)}`);
         if (!removed.ok) return removed;
-        if (!success(removed.status) && removed.status !== 404) return fail(true, "box disk retirement unverified");
+        if (success(removed.status)) diskDeleteAccepted = true;
+        else if (removed.status !== 404) return fail(true, "box disk retirement unverified");
       }
 
+      const proof = diskDeleteAccepted ? { diskDeleteAccepted } : {};
       const remaining = await retirementVolumes(name);
-      if (failed(remaining)) return remaining;
-      if (remaining.some((v) => !GONE_VOLUME.has(v.state))) return fail(true, "box disk remains live");
-      return HOST_OK;
+      if (failed(remaining)) return { ...remaining, ...proof };
+      if (remaining.some((v) => !GONE_VOLUME.has(v.state))) return { ...fail(true, "box disk remains live"), ...proof };
+      return { ...HOST_OK, ...proof };
     },
     async removeRetiredApp(name) {
       const owned = await ownership(name);

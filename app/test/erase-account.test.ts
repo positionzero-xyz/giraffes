@@ -378,6 +378,27 @@ test("a reclaimed Fly box is disclosed without holding account deletion open", a
   expect(await env.LEDGER.prepare("SELECT name FROM boxes WHERE agent_key = ?").bind(c.agent).first()).toBeNull();
 });
 
+test("a reclaimed-box receipt saved before the upgrade still delivers on retry", async () => {
+  const c = await devChat("erase-receipt-upgrade", { model: null, at: "2099-11-04T10:01" });
+  const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+  // Captured from a retryable receipt delivery on origin/main at 007d16a.
+  await runInDurableObject(stub, (_, { storage }) => {
+    storage.kv.put("account:erase", {
+      kind: "receipt", id: "6aa384f5-8680-4ac3-b77d-0c3cef348ac0", person: "p:dev:erase-receipt-upgrade",
+      to: { channel: "dev", channelUserId: "erase-receipt-upgrade" }, language: "en", epoch: 1, reply: undefined,
+      expiresAt: 4097530800000, nextAt: 4097444460000, attempted: false,
+      box: { kind: "reclaimed", host: "fly" }, endedSubscription: false, stripeRetained: false,
+    });
+  });
+
+  await c.alarm();
+
+  expect(await c.received()).toEqual([expect.stringContaining(
+    "Your box was removed earlier. Giraffe could not verify a disk wipe.\n\nFly may retain older disk copies for up to 60 days after removal.",
+  )]);
+  expect(await runInDurableObject(stub, (_, { storage }) => storage.kv.get("account:erase"))).toBeUndefined();
+});
+
 test("erase still clears expired unpaid Stripe sessions and discloses retained references", async () => {
   const billing = billingOn();
   let available = false;

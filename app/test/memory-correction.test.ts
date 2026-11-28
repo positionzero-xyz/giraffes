@@ -7,7 +7,7 @@ import { MIGRATIONS, migrate } from "../src/agent/schema";
 import { AgentStore } from "../src/agent/store";
 import type { AgentKey, EpochMs } from "../src/domain";
 import type { ScriptStep } from "../src/model/scripted";
-import { cancel, chat, devChat, fakeBox, holding, local, propose, rewindQuoteRewrites, schedule, scripted, send, turn, type DevChat } from "./testkit";
+import { cancel, chat, devChat, fakeBox, hold, holding, local, postTelegramUpdate, propose, rewindQuoteRewrites, schedule, scripted, send, turn, type DevChat } from "./testkit";
 
 const WRONG = "Zanzibar";
 const RIGHT = "Mombasa";
@@ -467,6 +467,57 @@ describe("don't remember", () => {
     expect(model.calls.slice(1).map((call) => call.user.split("## New")[1].includes(SECRET))).toEqual([false, false]);
     expect(await sql(c, "SELECT COUNT(*) AS n FROM inbox WHERE payload LIKE ?", "%" + SECRET + "%")).toEqual([{ n: 0 }]);
   });
+
+  test.each(["after the reply", "while the reply is pending"] as const)(
+    "keeps private Telegram edits %s out of history and the summary input",
+    async (when) => {
+      const pending = when === "while the reply is pending";
+      const user = pending ? 10512 : 10511;
+      const privateTurn = turn({ actions: [dontRemember(), send("Got it.")] });
+      const model = scripted(
+        [pending ? hold(privateTurn) : privateTurn, chat("Okay."), chat("Okay.")],
+        { compaction: [{ kind: "output", value: { summary: "The person chats about the weather." } }] },
+      );
+      const c = await devChat(String(user), { model, at: "2099-11-04T10:00", channel: "telegram" });
+      const original = { chat: { id: user, type: "private" }, message_id: 81, date: c.clock.now() / 1000 };
+      const editedText = "The revised hint is " + SECRET;
+
+      expect((await postTelegramUpdate({
+        update_id: 1, message: { ...original, text: "Don't remember this: my hint is daisy." },
+      })).status).toBe(200);
+      try {
+        if (pending) await expect.poll(() => model.calls.length).toBe(1);
+        else await c.settle();
+        c.clock.set(local("2099-11-04T10:01"));
+        expect((await postTelegramUpdate({
+          update_id: 2, edited_message: { ...original, edit_date: c.clock.now() / 1000, text: editedText },
+        })).status).toBe(200);
+      } finally {
+        model.release();
+      }
+      await c.settle();
+      expect.soft(await c.received()).toEqual(["Got it."]);
+      expect.soft((await c.snapshot()).turns.map((t) => t.text).join("\n")).not.toContain(editedText);
+      expect.soft(await sql(c, "SELECT payload FROM inbox WHERE payload LIKE ?", `%${SECRET}%`)).toEqual([]);
+
+      await sql(c, `INSERT INTO turn (role, text, at, event_key)
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 60) SELECT 'person', 'weather chat ' || i, ?, 'dev:filler' FROM n`, c.clock.now());
+      await c.alarm();
+
+      const compaction = model.calls.find((call) => call.purpose === "compaction");
+      expect(compaction?.user).toContain("weather chat 1");
+      expect.soft(compaction?.user).not.toContain(editedText);
+      expect(await sql(c, "SELECT summary FROM memory")).toEqual([{ summary: "The person chats about the weather." }]);
+
+      const ordinaryEdit = "Actually, expect rain.";
+      expect((await postTelegramUpdate({
+        update_id: 3, edited_message: { ...original, message_id: 82, edit_date: c.clock.now() / 1000, text: ordinaryEdit },
+      })).status).toBe(200);
+      await c.settle();
+      expect(model.calls.at(-1)?.user).toContain(ordinaryEdit);
+      expect((await c.snapshot()).turns.some((t) => t.text.includes(ordinaryEdit))).toBe(true);
+    },
+  );
 
   test("clears the quote on a transient turn and drops a later quote of that message", async () => {
     const model = scripted([turn({ actions: [dontRemember(), send("Got it.")] }), chat("I see.")]);

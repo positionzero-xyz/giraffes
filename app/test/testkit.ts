@@ -789,9 +789,11 @@ export function stripeChange(kit: BillingKit, o: StripeSubscriptionOpts & { read
   return postStripe(subscriptionEvent(o));
 }
 
-/** Takes the forget command's columns back out, so a test can run the migrations again from an older schema version. */
+/** Removes the forget and correction columns so a test can replay migrations from an older schema. */
 export function rewindForgetCommandSchema(sql: SqlStorage): void {
   sql.exec(`
+    ALTER TABLE turn DROP COLUMN correction_spans;
+    ALTER TABLE outbox DROP COLUMN correction_spans;
     ALTER TABLE turn DROP COLUMN transient;
     ALTER TABLE outbox DROP COLUMN epoch;
     ALTER TABLE outbox DROP COLUMN privacy;

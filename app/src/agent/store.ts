@@ -40,6 +40,7 @@ import {
   type WaitlistReason,
   eventKey,
   parseChoice,
+  parseWakeupKey,
   personDecision,
   proposalId,
   type AgentEvent,
@@ -78,6 +79,7 @@ import {
 } from "../domain";
 import { diagnosticRow, modelCallRow, type Backend, type LogRow } from "../ledger/ledger";
 import { NOTICES } from "../notices";
+import { bytesOf } from "../model/prompt";
 import type { KeyFault, SchemaMode } from "../model/client";
 import type { Auth, ModelRef, ProviderId } from "../model/providers";
 import type { CallPurpose } from "../model/routes";
@@ -88,6 +90,7 @@ import type { Sealed, StoredKey } from "../access/key";
 import { COMPACTION, compactionDue, type CompactionCommit, type CompactionInput } from "./compaction";
 import {
   nextStatus,
+  TASKS,
   type AcceptableProposal,
   type OpenTask,
   type ProposalStatus,
@@ -98,9 +101,22 @@ import {
 } from "./tasks";
 import type { AdmissionChange, AdmissionCommit } from "./admission";
 import { coveredByForget, laterCutoff, newForgetCode, providerOrder, type Claim, type ForgetCommand, type ForgetState, type ProviderOrder } from "./forget";
-import { correctSlug, correctText, jsonStrings, WORD_COLUMNS, type Correction, type Fix } from "./correct";
+import { correctSlug, correctText, correctTracked, jsonStrings, type Correction, type CorrectionSpan } from "./correct";
 import { ROUTINE_OUTBOX } from "./schema";
 import { TURN, type Asked, type Batch, type BoxReplyBackfill, type BoxSession, type BoxSessionSeen, type InboxItem, type Outbound, type SeqTurn, type TurnCommit, type TurnRow } from "./turn";
+
+const REMINDER_WORDS = "kind = 'reminder' AND bookkeeping = 0";
+
+const cappedWords = (limit: number, size: (text: string) => number = (text) => text.length, where = "1") =>
+  ({ limit, size, where });
+
+export const CAPPED_WORD_COLUMNS = {
+  memory: { summary: cappedWords(COMPACTION.maxSummaryBytes, bytesOf) },
+  memory_note: { text: cappedWords(TURN.maxNoteBytes, bytesOf) },
+  proposal: { text: cappedWords(TASKS.maxPlanChars) },
+  task: { title: cappedWords(TASKS.maxTitleBytes, bytesOf) },
+  wakeup: { note: cappedWords(TURN.maxNoteBytes, bytesOf, REMINDER_WORDS) },
+};
 
 export type AgentRow = {
   readonly key: AgentKey;
@@ -973,7 +989,10 @@ export class AgentStore {
       const replyBackfill: BoxReplyBackfill[] = previous && previous.id === seen?.id ? previous.replyBackfill.filter((r) => r.seq > seenSeq) : [];
       for (const t of commit.turns) {
         const { seq } = this.sql
-          .exec<{ seq: number }>("INSERT INTO turn (role, text, at, event_key, transient) VALUES (?, ?, ?, ?, ?) RETURNING seq", t.role, t.text, t.at, t.eventKey, commit.transient ? 1 : 0)
+          .exec<{ seq: number }>(
+            "INSERT INTO turn (role, text, at, event_key, transient, correction_spans) VALUES (?, ?, ?, ?, ?, ?) RETURNING seq",
+            t.role, t.text, t.at, t.eventKey, commit.transient ? 1 : 0, JSON.stringify(t.spans ?? []),
+          )
           .one();
         if (!seen) continue;
         const view = t.boxView;
@@ -1021,47 +1040,134 @@ export class AgentStore {
       }
       this.sql.exec(
         `UPDATE inbox SET status = 'done', outcome = ?, finished_at = ?, catch_up = ?, catch_up_budget = ?,
-           attempts = CASE WHEN ? THEN 0 ELSE attempts END
+           attempts = CASE WHEN ? THEN 0 ELSE attempts END,
+           payload = CASE WHEN ? AND kind = 'message' THEN '{}' ELSE payload END
          WHERE event_key IN (SELECT value FROM json_each(?))`,
         commit.outcome,
         now,
         commit.waitForAccess ? "earlier" : null,
         commit.waitForAccess?.kind === "budget" ? commit.waitForAccess.budget : null,
         commit.waitForAccess ? 1 : 0,
+        commit.transient ? 1 : 0,
         JSON.stringify(commit.batchKeys),
       );
-      for (const c of commit.corrections) this.correct(c);
-      this.insertLogs(logs, now);
+      const correctionLogs: LogRow[] = [];
+      const turnLog = logs.find((row) => row.stream === "turn");
+      for (const [i, c] of commit.corrections.entries()) {
+        if (!this.correct(c, now) && turnLog) {
+          correctionLogs.push({
+            stream: "rejection", id: `${turnLog.id}|correction:${i}`, agent: turnLog.agent, turnId: turnLog.id, reason: "too_long", at: now,
+          });
+        }
+      }
+      this.insertLogs(logs.concat(correctionLogs), now);
       return true;
     });
   }
 
-  /**
-   * Rewrites every column that keeps the person's words, keys and refs included. The box session goes, so the next box
-   * turn starts a new session from the corrected chat and the box deletes the old transcript.
-   */
-  private correct(c: Correction): void {
-    const keys = this.slugRenames("SELECT DISTINCT key AS v FROM wakeup", "SELECT DISTINCT key AS v FROM wakeup WHERE kind = 'reminder'", c, "reminder");
+  private correct(c: Correction, now: EpochMs): boolean {
+    const keys = this.slugRenames("SELECT DISTINCT key AS v FROM wakeup", `SELECT DISTINCT key AS v FROM wakeup WHERE ${REMINDER_WORDS}`, c, "reminder");
     const refs = this.slugRenames("SELECT DISTINCT ref AS v FROM task", "SELECT DISTINCT ref AS v FROM task", c, "task");
-    const fix: Fix = { text: (s) => correctText(s, c), key: (k) => keys.get(k) ?? k, ref: (r) => refs.get(r) ?? r };
-    for (const [table, columns] of Object.entries(WORD_COLUMNS)) {
-      for (const [column, rewrite] of Object.entries(columns)) {
-        for (const row of this.sql.exec<{ id: number; v: string }>(`SELECT rowid AS id, ${column} AS v FROM ${table}`).toArray()) {
-          const next = rewrite(row.v, fix);
-          if (next !== row.v) this.sql.exec(`UPDATE ${table} SET ${column} = ? WHERE rowid = ?`, next, row.id);
-        }
+    if (keys === null || refs === null) return false;
+
+    let fits = true;
+    const replace = (text: string, limit: number, size: (text: string) => number = (s) => s.length): string => {
+      const next = correctText(text, c);
+      if (next !== text && size(next) > limit) fits = false;
+      return next;
+    };
+    const spans = {
+      person: Infinity, send: TURN.maxTextChars, late: TURN.maxLateNoticeChars, plan: TASKS.maxPlanChars, erase: Infinity,
+    } satisfies Record<CorrectionSpan["kind"], number>;
+    const rewrite = (text: string, kind: CorrectionSpan["kind"]) => replace(text, spans[kind]);
+
+    const updates: (() => void)[] = [];
+    const column = (table: string, name: string, edit: (v: string) => string, where = "1") => {
+      for (const { id, v } of this.sql.exec<{ id: number; v: string }>(`SELECT rowid AS id, ${name} AS v FROM ${table} WHERE ${where}`)) {
+        const next = edit(v);
+        if (next !== v) updates.push(() => this.sql.exec(`UPDATE ${table} SET ${name} = ? WHERE rowid = ?`, next, id));
+      }
+    };
+    for (const [table, columns] of Object.entries(CAPPED_WORD_COLUMNS)) {
+      for (const [name, { limit, size, where }] of Object.entries(columns)) {
+        column(table, name, (v) => replace(v, limit, size), where);
       }
     }
+    column("task", "ref", (v) => refs.get(v) ?? v);
+    column("wakeup", "key", (v) => keys.get(v) ?? v, REMINDER_WORDS);
+    column("inbox", "payload", (v) => {
+      const e = fromJson<Partial<AgentEvent>>(v);
+      if (e.kind === "message" && !e.redacted && typeof e.text === "string") return JSON.stringify({ ...e, text: replace(e.text, Infinity) });
+      if (e.kind === "wakeup" && !e.bookkeeping && e.key !== undefined && e.note !== undefined) {
+        return JSON.stringify({ ...e, key: keys.get(e.key) ?? e.key, note: replace(e.note, TURN.maxNoteBytes, bytesOf) });
+      }
+      return v;
+    });
+
+    const turns = this.sql.exec<{ seq: number; role: TurnRow["role"]; text: string; correction_spans: string | null; legacy_plan: number }>(
+      `SELECT t.seq, t.role, t.text, t.correction_spans,
+         CASE WHEN t.correction_spans IS NULL AND t.role = 'agent' THEN EXISTS (
+           SELECT 1 FROM proposal p JOIN outbox o ON o.id = p.outbox_id
+           WHERE o.event_key = t.event_key AND o.created_at = t.at AND NOT EXISTS (
+             SELECT 1 FROM turn later WHERE later.role = 'agent' AND later.event_key = t.event_key AND later.at = t.at AND later.seq > t.seq
+           )
+         ) ELSE 0 END AS legacy_plan
+       FROM turn t
+       WHERE t.correction_spans IS NOT NULL OR (
+         t.role = 'person' AND EXISTS (
+           SELECT 1 FROM inbox WHERE inbox.event_key = t.event_key AND inbox.kind = 'message'
+             AND json_extract(inbox.payload, '$.redacted') IS NULL
+         )
+       ) OR (
+         t.role = 'agent' AND t.event_key NOT GLOB 'wake:*' AND t.event_key NOT GLOB 'checkin:*'
+       )`,
+    );
+    for (const row of turns) {
+      // Legacy reminder and check-in replies can have a code-written prefix without recorded boundaries.
+      const legacyKind = row.role === "person" ? "person" : row.legacy_plan || row.text.length > TURN.maxTextChars ? "plan" : "send";
+      const parts: readonly CorrectionSpan[] = row.correction_spans === null
+        ? [{ kind: legacyKind, start: 0, length: row.text.length }]
+        : fromJson<CorrectionSpan[]>(row.correction_spans);
+      const next = correctTracked(row.text, parts, rewrite);
+      if (next === null) updates.push(() => this.sql.exec("DELETE FROM turn WHERE seq = ?", row.seq));
+      else if (next.text !== row.text) updates.push(() => this.sql.exec(
+        "UPDATE turn SET text = ?, correction_spans = ? WHERE seq = ?", next.text, JSON.stringify(next.spans), row.seq,
+      ));
+    }
+
+    for (const row of this.sql.exec<{ id: string; texts: string; correction_spans: string }>("SELECT id, texts, correction_spans FROM outbox WHERE correction_spans IS NOT NULL")) {
+      const parts = fromJson<CorrectionSpan[][]>(row.correction_spans);
+      const next = fromJson<string[]>(row.texts)
+        .map((text, i) => correctTracked(text, parts[i], rewrite))
+        .filter((part) => part !== null);
+      const texts = JSON.stringify(next.map((part) => part.text));
+      if (texts === row.texts) continue;
+      if (next.length === 0) {
+        updates.push(() => this.sql.exec(
+          `UPDATE outbox SET texts = '[]', correction_spans = NULL, choice = NULL, reply_token = NULL, reply_expires = NULL, event_key = 'forgotten',
+             status = CASE WHEN status IN ('pending', 'sending') THEN 'dropped' ELSE status END,
+             drop_reason = CASE WHEN status IN ('pending', 'sending') THEN 'forgotten' ELSE drop_reason END,
+             closed_at = COALESCE(closed_at, ?) WHERE id = ?`, now, row.id,
+        ));
+      } else {
+        updates.push(() => this.sql.exec(
+          "UPDATE outbox SET texts = ?, correction_spans = ? WHERE id = ?", texts, JSON.stringify(next.map((part) => part.spans)), row.id,
+        ));
+      }
+    }
+    if (!fits) return false;
+    for (const update of updates) update();
     const writes = this.sql.exec<{ id: string; args: string; receipt: string | null }>("SELECT id, args, receipt FROM outside_write").toArray();
-    for (const w of writes.filter((w) => [...jsonStrings(w.args), ...jsonStrings(w.receipt)].some((s) => fix.text(s) !== s))) {
+    for (const w of writes.filter((w) => [...jsonStrings(w.args), ...jsonStrings(w.receipt)].some((s) => correctText(s, c) !== s))) {
       this.sql.exec("DELETE FROM outside_approval WHERE write_id = ?", w.id);
       this.sql.exec("DELETE FROM outside_write WHERE id = ?", w.id);
     }
     this.sql.exec("DELETE FROM box_session");
+    return true;
   }
 
   /** Each key or ref among `renamable` the correction changes, mapped to a new one no row in `used` has, so the unique indexes hold. */
-  private slugRenames(used: string, renamable: string, c: Correction, fallback: string): ReadonlyMap<string, string> {
+  private slugRenames(used: string, renamable: string, c: Correction, fallback: string): ReadonlyMap<string, string> | null {
     const values = (query: string) => this.sql.exec<{ v: string }>(query).toArray().map((r) => r.v);
     const taken = new Set(values(used));
     const renames = new Map<string, string>();
@@ -1069,7 +1175,8 @@ export class AgentStore {
       const base = correctSlug(old, c) || fallback;
       if (base === old) continue;
       let next = base;
-      for (let n = 2; taken.has(next); n++) next = `${base.slice(0, 39 - String(n).length)}-${n}`;
+      for (let n = 2; taken.has(next); n++) next = `${base}-${n}`;
+      if (parseWakeupKey(next) === null) return null;
       taken.add(next);
       renames.set(old, next);
     }
@@ -1191,12 +1298,12 @@ export class AgentStore {
   private insertOutbox(
     id: OutboxId,
     key: EventKey,
-    out: Asked & Pick<Outbound, "texts" | "triggerKind" | "reply" | "replyOnly"> & { readonly taskId: TaskId | null; readonly choice: string | null },
+    out: Asked & Pick<Outbound, "texts" | "triggerKind" | "reply" | "replyOnly"> & Partial<Pick<Outbound, "spans">> & { readonly taskId: TaskId | null; readonly choice: string | null },
     now: EpochMs,
   ): void {
     this.sql.exec(
-      `INSERT INTO outbox (id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, ready_at, created_at, task_id, purpose, choice, reply_only)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO outbox (id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, ready_at, created_at, task_id, purpose, choice, reply_only, correction_spans)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       key,
       out.triggerKind,
@@ -1210,6 +1317,7 @@ export class AgentStore {
       out.intent === "unasked" ? out.purpose : null,
       out.choice,
       out.replyOnly ? 1 : 0,
+      out.spans?.some((spans) => spans.length > 0) ? JSON.stringify(out.spans) : null,
     );
   }
 
@@ -2384,7 +2492,7 @@ export class AgentStore {
     this.sql.exec("UPDATE memory SET summary = '', through_turn_seq = 0, compaction_failures = 0, compaction_retry_at = 0");
     this.sql.exec("DELETE FROM inbox WHERE kind IN ('wakeup', 'checkin')");
     this.sql.exec("UPDATE inbox SET payload = '{}' WHERE status IN ('done', 'failed')");
-    this.sql.exec("UPDATE outbox SET texts = '[]', choice = NULL, reply_token = NULL, reply_expires = NULL, event_key = 'forgotten' WHERE status IN ('sent', 'dropped')");
+    this.sql.exec("UPDATE outbox SET texts = '[]', correction_spans = NULL, choice = NULL, reply_token = NULL, reply_expires = NULL, event_key = 'forgotten' WHERE status IN ('sent', 'dropped')");
     this.sql.exec("DELETE FROM wakeup WHERE origin != 'person'");
     this.sql.exec("DELETE FROM proposal");
     this.sql.exec("DELETE FROM box_session");

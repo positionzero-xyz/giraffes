@@ -44,15 +44,17 @@ export function correctSlug(slug: string, c: Correction): string {
   const right = slugWords(c.right);
   const parts = slug.split("-");
   const out: string[] = [];
+  let matched = false;
   for (let i = 0; i < parts.length; ) {
     if (wrong.every((w, j) => parts[i + j] === w)) {
       out.push(...right);
+      matched = true;
       i += wrong.length;
     } else {
       out.push(parts[i++]);
     }
   }
-  return out.join("-").slice(0, 40).replace(/-+$/, "");
+  return matched ? out.join("-").replace(/-+$/, "") : slug;
 }
 
 /**
@@ -60,6 +62,8 @@ export function correctSlug(slug: string, c: Correction): string {
  * fit `maxBytes`, and the wrong words appear in what was saved: it can fix a fact, never rewrite the chat at large.
  */
 export function checkCorrection(raw: { readonly wrong: string; readonly right: string }, saved: readonly string[], maxBytes: number): CorrectionCheck {
+  const control = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+  if (control.test(raw.wrong) || control.test(raw.right)) return { ok: false, why: "malformed" };
   const correction = { wrong: raw.wrong.trim(), right: raw.right.trim() };
   const { wrong, right } = correction;
   if ([...wrong].length < 2 || right === "" || bytesOf(right) > maxBytes || wrong.toLowerCase() === right.toLowerCase()) {
@@ -68,31 +72,47 @@ export function checkCorrection(raw: { readonly wrong: string; readonly right: s
   return saved.some((s) => correctText(s, correction) !== s) ? { ok: true, correction } : { ok: false, why: "not_saved" };
 }
 
-export type Fix = { readonly text: (s: string) => string; readonly key: (s: string) => string; readonly ref: (s: string) => string };
+type SpanKind = "person" | "send" | "late" | "plan" | "erase";
 
-const json = <T>(v: string) => JSON.parse(v) as T;
-const words = (v: string, f: Fix) => f.text(v);
+export type CorrectionSpan = { readonly kind: SpanKind; readonly start: number; readonly length: number };
+export type TrackedText = { readonly text: string; readonly spans?: readonly CorrectionSpan[] };
 
-function correctEvent(e: Record<string, unknown>, f: Fix): Record<string, unknown> {
-  if (e.kind === "message" && typeof e.text === "string") return { ...e, text: f.text(e.text) };
-  if (e.kind === "wakeup" && typeof e.key === "string" && typeof e.note === "string") return { ...e, key: f.key(e.key), note: f.text(e.note) };
-  return e;
+export const tracked = (text: string, kind: SpanKind): TrackedText => ({ text, spans: [{ kind, start: 0, length: text.length }] });
+
+export function interpolated(text: string, words: string): TrackedText {
+  return { text, spans: [{ kind: "erase", start: text.lastIndexOf(words), length: words.length }] };
 }
 
-/** Every column that keeps the person's words, and how a correction rewrites it. */
-export const WORD_COLUMNS = {
-  memory: { summary: words },
-  memory_note: { text: words },
-  turn: { text: words },
-  proposal: { text: words },
-  task: { title: words, ref: (v: string, f: Fix) => f.ref(v) },
-  wakeup: { note: words, key: (v: string, f: Fix) => f.key(v) },
-  task_fact: {
-    detail: (v: string, f: Fix) => JSON.stringify(Object.fromEntries(Object.entries(json<Record<string, unknown>>(v)).map(([k, x]) => [k, typeof x === "string" ? f.text(x) : x]))),
-  },
-  outbox: { texts: (v: string, f: Fix) => JSON.stringify(json<string[]>(v).map(f.text)) },
-  inbox: { payload: (v: string, f: Fix) => JSON.stringify(correctEvent(json<Record<string, unknown>>(v), f)) },
-} as const satisfies Record<string, Record<string, (value: string, fix: Fix) => string>>;
+export function joinTracked(parts: readonly TrackedText[], separator = "\n"): TrackedText {
+  const spans: CorrectionSpan[] = [];
+  let start = 0;
+  for (const part of parts) {
+    for (const span of part.spans ?? []) spans.push({ ...span, start: start + span.start });
+    start += part.text.length + separator.length;
+  }
+  return { text: parts.map((part) => part.text).join(separator), spans };
+}
+
+export function correctTracked(
+  text: string,
+  spans: readonly CorrectionSpan[],
+  rewrite: (text: string, kind: SpanKind) => string,
+): TrackedText | null {
+  let from = 0;
+  let out = "";
+  const next: CorrectionSpan[] = [];
+  let erase = false;
+  for (const span of spans) {
+    const original = text.slice(span.start, span.start + span.length);
+    const revised = rewrite(original, span.kind);
+    erase ||= span.kind === "erase" && revised !== original;
+    out += text.slice(from, span.start);
+    next.push({ ...span, start: out.length, length: revised.length });
+    out += revised;
+    from = span.start + span.length;
+  }
+  return erase ? null : { text: out + text.slice(from), spans: next };
+}
 
 /**
  * Columns a correction can't rewrite in place, so it deletes their rows: the box session, whose transcript lives on the

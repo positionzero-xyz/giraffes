@@ -57,4 +57,15 @@ describe("which corrections code accepts", () => {
     expect(checkCorrection(fix("Kilimanjaro", "Mombasa"), saved, 300)).toEqual({ ok: false, why: "not_saved" });
     expect(checkCorrection(fix("Zanzi", "Mombasa"), saved, 300)).toEqual({ ok: false, why: "not_saved" });
   });
+
+  test.each([
+    ["Zanzibar", "Mombasa\n"],
+    ["Zanzibar", "Mom\u0000basa"],
+    ["Zanzibar", "Mom\u2028basa"],
+    ["Zanzibar\t", "Mombasa"],
+    ["Zanzi\nbar", "Mombasa"],
+  ])("refuses control characters in %j or %j", (wrong, right) => {
+    expect(checkCorrection(fix(wrong, right), ["Zanzibar and Zanzi bar"], 300)).toEqual({ ok: false, why: "malformed" });
+  });
+
 });

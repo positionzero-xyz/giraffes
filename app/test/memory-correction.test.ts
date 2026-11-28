@@ -43,6 +43,96 @@ async function later(c: DevChat, text: string): Promise<string[]> {
 }
 
 describe("a correction", () => {
+  test("refuses the whole correction when a note would exceed its byte cap", async () => {
+    const note = "ox ".repeat(100).trimEnd();
+    const replacement = "aardvark".repeat(37);
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note }, send("Noted ox.")] }),
+      turn({ actions: [correct("ox", replacement), send("Correction received.")] }),
+    ]);
+    const c = await devChat("correct-note-cap", { model, at: "2099-11-04T10:00" });
+    await later(c, "Remember these ox entries.");
+    await sql(c, "UPDATE memory SET summary = 'The person keeps ox entries.'");
+
+    expect(await later(c, "The name has changed.")).toEqual(["Correction received."]);
+
+    expect(await sql(c, "SELECT length(CAST(text AS BLOB)) AS bytes FROM memory_note")).toEqual([{ bytes: 299 }]);
+    expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: note }]);
+    expect(await sql(c, "SELECT summary FROM memory")).toEqual([{ summary: "The person keeps ox entries." }]);
+  });
+
+  test("refuses a replacement over 300 bytes even if the saved summary could hold it", async () => {
+    const replacement = "a".repeat(301);
+    const model = scripted([chat("Hello."), turn({ actions: [correct("ox", replacement), send("Okay.")] })]);
+    const c = await devChat("correct-replacement-cap", { model, at: "2099-11-04T10:00" });
+    await later(c, "Hello.");
+    await sql(c, "UPDATE memory SET summary = 'The person keeps ox entries.'");
+
+    expect(await later(c, "The name has changed.")).toEqual(["Okay."]);
+    expect(await sql(c, "SELECT summary FROM memory")).toEqual([{ summary: "The person keeps ox entries." }]);
+  });
+
+  test("refuses the correction when an outgoing model reply would exceed its cap", async () => {
+    const reply = "ox ".repeat(200).trimEnd();
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: "The label is ox." }, send("Noted.")] }),
+      turn({ actions: [correct("ox", "cow"), send(reply)] }),
+    ]);
+    const c = await devChat("correct-reply-cap", { model, at: "2099-11-04T10:00" });
+    await later(c, "Remember the label ox.");
+
+    expect(await later(c, "Change the label.")).toEqual([reply]);
+    expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: "The label is ox." }]);
+  });
+
+  test("refuses the correction when a wake-up key would exceed its cap", async () => {
+    const key = "old-" + "a".repeat(36);
+    const model = scripted([
+      turn({ actions: [schedule(key, "2099-11-05T09:00", "Take the old route"), send("Noted.")] }),
+      turn({ actions: [correct("old", "newer"), send("Okay.")] }),
+    ]);
+    const c = await devChat("correct-key-cap", { model, at: "2099-11-04T10:00" });
+    await later(c, "Remind me to take the old route tomorrow at nine.");
+
+    expect(await later(c, "The route name has changed.")).toEqual(["Okay."]);
+    expect(await sql(c, "SELECT key, note FROM wakeup WHERE kind = 'reminder'")).toEqual([{ key, note: "Take the old route" }]);
+  });
+
+  test.each(["region", "region\nReview marker"])("delivers the fixed invalid-zone notice during a correction to %j", async (replacement) => {
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: "My label is time zone." }, send("Noted.")] }),
+      turn({ actions: [correct("time zone", replacement), { type: "set_locale", language: "en", timeZone: "Invalid/Zone" }, send("The label was time zone.")] }),
+    ]);
+    const c = await devChat("correct-fixed-notice", { model, at: "2099-11-04T10:00" });
+    await later(c, "The label I use is time zone.");
+    const visible = await later(c, "Use the new label.");
+    const notice = "(I couldn't find that time zone, so I kept the one you had.)";
+
+    expect(visible.join("\n")).toContain(notice);
+    expect(await sql(c, "SELECT text FROM turn WHERE role = 'note'")).toEqual([{ text: notice }]);
+    const label = replacement === "region" ? replacement : "time zone";
+    expect(visible).toEqual(["The label was " + label + ".\n" + notice]);
+    expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: "My label is " + label + "." }]);
+  });
+
+  test("corrects identifiable personal and model history written before text sources were stored", async () => {
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: "My label is time zone." }, { type: "set_locale", language: "en", timeZone: "Invalid/Zone" }, send("Your label is time zone.")] }),
+      turn({ actions: [correct("time zone", "region"), send("Okay.")] }),
+    ]);
+    const c = await devChat("correct-legacy-history", { model, at: "2099-11-04T10:00" });
+    await later(c, "I call it time zone.");
+    await sql(c, "UPDATE turn SET correction_spans = NULL");
+    await sql(c, "UPDATE outbox SET correction_spans = NULL");
+
+    expect(await later(c, "Change the label.")).toEqual(["Okay."]);
+    expect(await sql(c, "SELECT role, text FROM turn ORDER BY seq LIMIT 3")).toEqual([
+      { role: "person", text: "I call it region." },
+      { role: "agent", text: "Your label is region." },
+      { role: "note", text: "(I couldn't find that time zone, so I kept the one you had.)" },
+    ]);
+  });
+
   test("replaces the wrong words in every store, and the next prompt carries only the right ones", async () => {
     const model = scripted([...seedSteps, turn({ actions: [correct(WRONG, RIGHT), send(`Thanks, ${RIGHT} it is.`)] }), chat("Hi!")]);
     const c = await devChat("correct-everywhere", { model, at: "2099-11-04T10:00" });
@@ -122,6 +212,23 @@ describe("what a correction leaves alone or deletes", () => {
     expect(await sql(c, "SELECT key FROM wakeup WHERE kind = 'checkin'")).toEqual([{ key: "daily-checkin" }]);
   });
 
+  test("clears a delivered plan receipt that quotes the wrong title", async () => {
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: "The destination is Zanzibar." }, send("Here's the itinerary.")], tasks: [propose("visit", "Zanzibar visit", PLAN)] }),
+      chat("Booked."),
+      turn({ actions: [correct(WRONG, RIGHT), send("Corrected.")] }),
+    ]);
+    const c = await devChat("correct-plan-receipt", { model, at: "2099-11-04T10:00" });
+    await later(c, "Please plan a visit to Zanzibar.");
+    await c.tap("a:1.1");
+    expect(await c.received()).toEqual(["Booked.\n(Plan accepted: Zanzibar visit.)"]);
+
+    expect(await later(c, "Use Mombasa instead.")).toEqual(["Corrected."]);
+    expect(await sql(c, "SELECT text FROM turn WHERE role = 'note'")).toEqual([]);
+    expect(await holding(c.agent, WRONG)).toEqual([]);
+    expect(await sql(c, "SELECT title FROM task")).toEqual([{ title: "Mombasa visit" }]);
+  });
+
   test("an outside write that mentions the wrong words is deleted with its approval, since its arguments can't change", async () => {
     const model = scripted([
       turn({ actions: [{ type: "remember", note: `Sister ${WRONG} lives in Hat Yai.` }, send("Noted.")] }),
@@ -147,6 +254,22 @@ describe("what a correction leaves alone or deletes", () => {
 });
 
 describe("don't remember", () => {
+  test("clears the completed message payload and still deduplicates the same event", async () => {
+    const c = await devChat("unsaved-inbox", {
+      model: scripted([turn({ actions: [dontRemember(), send("Got it.")] })]),
+      at: "2099-11-04T10:00",
+    });
+    const text = "Don't remember this: my PIN hint is " + SECRET + ".";
+    const event = { id: "unsaved-message" };
+    await c.say(text, event);
+    expect(await c.received()).toEqual(["Got it."]);
+    expect(await sql(c, "SELECT status, payload FROM inbox WHERE kind = 'message'")).toEqual([{ status: "done", payload: "{}" }]);
+
+    await c.say(text, event);
+    expect(await c.received()).toEqual([]);
+    expect(await sql(c, "SELECT status, payload FROM inbox WHERE kind = 'message'")).toEqual([{ status: "done", payload: "{}" }]);
+  });
+
   test("a turn the model flags saves no note, no wake-up or task of its own, and its words never reach the summary", async () => {
     const model = scripted(
       [

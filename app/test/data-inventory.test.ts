@@ -5,7 +5,8 @@ import { erasePersonLedger, personLedgerTables } from "../src/ledger/erase";
 import { personAgentKey } from "../src/domain";
 import type { AgentEvent, TaskFact } from "../src/domain";
 import type { BoxReplyBackfill } from "../src/agent/turn";
-import { DELETED_ON_CORRECTION, WORD_COLUMNS } from "../src/agent/correct";
+import { DELETED_ON_CORRECTION } from "../src/agent/correct";
+import { CAPPED_WORD_COLUMNS } from "../src/agent/store";
 
 type Classification = {
   saved?: string;
@@ -43,7 +44,7 @@ const durable = {
   },
   outbox: {
     chat: "texts", secret: "reply_token reply_expires", identity: "id event_key task_id saved_snapshot",
-    operational: "trigger_kind intent ready_at status admitted_day in_doubt attempts via drop_reason created_at closed_at purpose choice reply_only saved_item saved_offset privacy epoch",
+    operational: "trigger_kind intent ready_at status admitted_day in_doubt attempts via drop_reason created_at closed_at purpose choice reply_only saved_item saved_offset privacy epoch correction_spans",
   },
   outside_approval: { identity: "id write_id owner_key decided_by", operational: "status expires_at created_at decided_at consumed_at" },
   outside_write: { saved: "args receipt", identity: "id intent operation_id", operational: "provider action epoch status attempt in_doubt lease_until failure created_at updated_at" },
@@ -58,7 +59,7 @@ const durable = {
   spend_month: { operational: "scope month spent_micro" },
   task: { saved: "ref kind title status opened_at touched_at closed_at", identity: "id cause_key" },
   task_fact: { saved: "kind ref detail completes person_decision cause_kind cause_at at", identity: "id task_id cause_key" },
-  turn: { chat: "text", identity: "event_key", operational: "seq role at transient" },
+  turn: { chat: "text", identity: "event_key", operational: "seq role at transient correction_spans" },
   wakeup: { saved: "key note due_at status repeat repeat_anchor", identity: "id task_id created_by", operational: "kind origin created_at closed_at bookkeeping" },
 } satisfies Record<string, Classification>;
 
@@ -119,14 +120,15 @@ test("a correction rewrites or deletes every chat and saved column that can hold
   const notWords = [
     "agent.tz", "agent.checkin_local", "agent.language",
     "task.kind", "task.status", "task.opened_at", "task.touched_at", "task.closed_at",
-    "task_fact.kind", "task_fact.ref", "task_fact.completes", "task_fact.person_decision", "task_fact.cause_kind", "task_fact.cause_at", "task_fact.at",
+    "task_fact.kind", "task_fact.ref", "task_fact.detail", "task_fact.completes", "task_fact.person_decision", "task_fact.cause_kind", "task_fact.cause_at", "task_fact.at",
     "wakeup.due_at", "wakeup.status", "wakeup.repeat", "wakeup.repeat_anchor",
   ];
   const personal = Object.entries(durable).flatMap(([table, groups]: [string, Classification]) =>
     [groups.chat, groups.saved].flatMap((columns) => columns?.split(" ").map((c) => `${table}.${c}`) ?? []),
   );
   const handled = [
-    ...Object.entries(WORD_COLUMNS).flatMap(([table, columns]) => Object.keys(columns).map((c) => `${table}.${c}`)),
+    ...Object.entries(CAPPED_WORD_COLUMNS).flatMap(([table, columns]) => Object.keys(columns).map((c) => `${table}.${c}`)),
+    "inbox.payload", "outbox.texts", "turn.text", "task.ref", "wakeup.key",
     ...Object.entries(DELETED_ON_CORRECTION).flatMap(([table, columns]) => columns.map((c) => `${table}.${c}`)),
   ];
   expect([...handled, ...notWords].sort()).toEqual(personal.sort());

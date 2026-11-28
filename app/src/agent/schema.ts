@@ -638,6 +638,10 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE turn ADD COLUMN transient INTEGER NOT NULL DEFAULT 0 CHECK (transient IN (0, 1));
   `,
+  `
+  ALTER TABLE turn ADD COLUMN correction_spans TEXT;
+  ALTER TABLE outbox ADD COLUMN correction_spans TEXT;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

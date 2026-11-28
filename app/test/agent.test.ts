@@ -1217,8 +1217,8 @@ describe("delivery", () => {
     await runInDurableObject(stub, (_agent, state) => {
       const store = new AgentStore(state.storage);
       const at = c.clock.now();
-      store.notifyOnce(`${channel}-timeout-one`, key(1), { texts: [first], note: first }, at);
-      store.notifyOnce(`${channel}-timeout-two`, key(2), { texts: [second], note: second }, at);
+      store.notifyOnce(`${channel}-timeout-one`, key(1), { texts: [first], note: first }, at, "background");
+      store.notifyOnce(`${channel}-timeout-two`, key(2), { texts: [second], note: second }, at, "background");
     });
 
     const requests: string[] = [];

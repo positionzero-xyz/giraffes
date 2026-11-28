@@ -56,6 +56,7 @@ import {
   mayspend,
   newInviteCode,
   type Admission,
+  type AgentEventKind,
   type AgentKey,
   type EpochMs,
   type EventKey,
@@ -79,7 +80,7 @@ import { connect, type Connect } from "../model/client";
 import { PROVIDERS } from "../model/providers";
 import { routeFor, type CallPurpose } from "../model/routes";
 import { estimate, fits } from "../policy/spend";
-import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach";
+import { admitUnasked, OUTREACH, quietUntil, type UnaskedVerdict } from "../policy/outreach";
 import { inLineReserve, type QuotaReading } from "../policy/quota";
 import { checkinWakeup, fireAt, nextAlarm, planFiring, SCHEDULE, type PendingWakeup } from "../policy/schedule";
 import { DEFAULT_TIME_ZONE, localDate, startOfLocalDay, utcMonth } from "../policy/time";
@@ -101,6 +102,7 @@ import {
   globalTaskId,
   type AgentRow,
   type NoteMessage,
+  type NoticeTrigger,
   type OutboxRow,
   type OutboxView,
   type TaskSnapshot,
@@ -432,7 +434,7 @@ export class Agent extends DurableObject<Env> {
       const a = this.#store.agent();
       const text = config.on && a ? planChanged(before, after, now, a.language) : null;
       const message = text ? { key: eventKey.billing("plan"), message: { texts: [text] as const, note: text } } : null;
-      this.#store.applyStanding(standing, message, now);
+      this.#store.applyStanding(standing, message, now, "background");
       if (message) {
         await this.#armNoLaterThan(now);
         this.ctx.waitUntil(this.alarm());
@@ -1011,13 +1013,14 @@ export class Agent extends DurableObject<Env> {
       { key: eventKey.access(`connected:${after}`), message: { texts: [text], note: text } },
       [],
       after,
+      "answer",
       nonceHash,
     );
     if (!saved) {
       this.#store.finishTicket(nonceHash, "failed", "superseded");
       return { ok: false, error: "superseded" };
     }
-    this.#askBackupIfDue(after);
+    this.#askBackupIfDue(after, "answer");
     await this.#armNoLaterThan(after);
     this.ctx.waitUntil(this.alarm());
     return { ok: true, provider: label, model: d.model };
@@ -1041,12 +1044,12 @@ export class Agent extends DurableObject<Env> {
   }
 
   /** `again`: the plan's box was just reclaimed, so a key that wasn't a backup is asked about once more. */
-  #askBackupIfDue(now: EpochMs, again: boolean = false): void {
+  #askBackupIfDue(now: EpochMs, noticeTrigger: NoticeTrigger, again: boolean = false): void {
     const k = this.#store.key();
     const a = this.#store.agent();
     if (!k || k.backup || (k.backupAskedAt !== null && !again) || !a || !this.#store.claudePlan()) return;
     const text = NOTICES[a.language].backupAsk(PROVIDERS[k.provider].label);
-    this.#store.askBackup({ texts: [text], note: text }, choiceToken({ kind: "backup", revision: k.revision }), eventKey.access(`backup:${now}`), now, k.revision, again);
+    this.#store.askBackup({ texts: [text], note: text }, choiceToken({ kind: "backup", revision: k.revision }), eventKey.access(`backup:${now}`), now, noticeTrigger, k.revision, again);
   }
 
   async remove(): Promise<void> {
@@ -1062,7 +1065,7 @@ export class Agent extends DurableObject<Env> {
       this.#store.forgetClaudePlan();
       const retiring = onRemove(box, now).box;
       if (box.host === "fly" && box.state === "provisioning") this.#saveNeverServedRetirement(box);
-      if (retiring !== box) this.#store.applyBox(retiring, null, [], now);
+      if (retiring !== box) this.#store.applyBox(retiring, null, [], now, "background");
     });
     await this.#armNoLaterThan(now);
   }
@@ -1228,9 +1231,10 @@ export class Agent extends DurableObject<Env> {
       return this.#commit(planWithoutModel(view, { kind: "lapsed", alreadyToldToday }), view, a.key, { kind: "none" });
     }
 
-    const shown = await this.#historyThatFits(batch, a, view, plan, claim);
+    const noticeTrigger: NoticeTrigger = intentOf(first) === "reply" ? "answer" : "background";
+    const shown = await this.#historyThatFits(batch, a, view, plan, claim, noticeTrigger);
     const box = this.#boxTurn(shown);
-    const access = this.#access();
+    const access = this.#access(noticeTrigger);
     const catchUpBudget = batch.items[0].catchUp ? access.catchUpBudget(plan, this.#deps.clock.now()) ?? "unavailable" : null;
     const call = () => access.call({ purpose: "turn", system: TURN_SYSTEM, prompt: renderUser(shown), plan, box, claim });
     const served = intentOf(first) === "reply" ? await whileWorking(this.#deps.channels[a.identity.channel], a.identity, call) : await call();
@@ -1285,14 +1289,14 @@ export class Agent extends DurableObject<Env> {
    * When unsummarized turns are due to compact or don't fit the prompt the first lane would send, one compaction step
    * runs first, in this drain. If compaction is backing off or fails, each lane fits history to its own prompt.
    */
-  async #historyThatFits(batch: Batch, a: AgentRow, view: TurnView, plan: Plan, claim: Claim): Promise<TurnView> {
+  async #historyThatFits(batch: Batch, a: AgentRow, view: TurnView, plan: Plan, claim: Claim, noticeTrigger: NoticeTrigger): Promise<TurnView> {
     if (view.recent.length === 0) return view;
     const box = this.#boxTurn(view);
-    const fits = this.#access().turnFitsWhole({ system: TURN_SYSTEM, prompt: renderUser(view), box, plan });
+    const fits = this.#access(noticeTrigger).turnFitsWhole({ system: TURN_SYSTEM, prompt: renderUser(view), box, plan });
     const dueTurns = this.#store.compactionInput().turnCount > COMPACTION.triggerTurns;
     if (fits && !dueTurns) return view;
     try {
-      if (!(await this.#compactStep(plan, !dueTurns, claim))) return view;
+      if (!(await this.#compactStep(plan, !dueTurns, claim, noticeTrigger))) return view;
     } catch {
       diagnostic("turn_compaction_failed");
       return view;
@@ -1306,15 +1310,16 @@ export class Agent extends DurableObject<Env> {
     return NOTICES[lang].noAccess({ box, key: this.#deps.keys.on, included });
   }
 
-  #access(): ModelAccess {
+  #access(noticeTrigger: NoticeTrigger = "background"): ModelAccess {
     return new ModelAccess({
       store: this.#store,
       connect: this.#deps.connect,
-      box: this.#boxLane(),
+      box: this.#boxLane(noticeTrigger),
       keys: this.#deps.keys,
       included: this.#deps.included,
       clock: this.#deps.clock,
       instance: this.#instance,
+      noticeTrigger,
     });
   }
 
@@ -1327,7 +1332,7 @@ export class Agent extends DurableObject<Env> {
     return budget !== null && this.#store.hasWaitingRequests(now, budget) ? { plan, budget } : null;
   }
 
-  #boxLane(): BoxLane {
+  #boxLane(noticeTrigger: NoticeTrigger = "background"): BoxLane {
     return {
       state: () => {
         const box = this.#store.box();
@@ -1335,8 +1340,8 @@ export class Agent extends DurableObject<Env> {
         return box && a && boxServes(this.#deps.box, a.key) ? box.state : null;
       },
       parse: (req, claim) =>
-        this.#onBox(req.purpose, claim, (client, url, token, at) => client.parse(url, token, { model: req.model, system: req.system, user: req.user, jsonSchema: req.jsonSchema, at })),
-      agent: (req, claim) => this.#onBox("turn", claim, (client, url, token, at, sessionOwner) => client.agent(url, token, { ...req, sessionOwner, at })),
+        this.#onBox(req.purpose, claim, (client, url, token, at) => client.parse(url, token, { model: req.model, system: req.system, user: req.user, jsonSchema: req.jsonSchema, at }), noticeTrigger),
+      agent: (req, claim) => this.#onBox("turn", claim, (client, url, token, at, sessionOwner) => client.agent(url, token, { ...req, sessionOwner, at }), noticeTrigger),
     };
   }
 
@@ -1532,7 +1537,7 @@ export class Agent extends DurableObject<Env> {
     const { config, store } = this.#deps.billing;
     const now = this.#deps.clock.now();
     const standing = config.on ? await store.standing(agent, now) : NO_STANDING;
-    this.#store.applyStanding(standing, null, now);
+    this.#store.applyStanding(standing, null, now, "background");
     return { plan: this.#plan(now), standing };
   }
 
@@ -1672,7 +1677,7 @@ export class Agent extends DurableObject<Env> {
     const message = deps && t.box ? await this.#boxMessage(deps, t.box, t.say) : boxMessage(t.say, view.language, null);
     const commit = planWithoutModel(view, { kind: "command", text: message.text, note: message.note });
     this.#commit(commit, view, agent, { kind: "none" }, t.box);
-    this.#askBackupIfDue(this.#deps.clock.now());
+    this.#askBackupIfDue(this.#deps.clock.now(), "answer");
   }
 
   async #boxMessage(deps: BoxDeps, box: Box, say: BoxSay): Promise<{ readonly text: string; readonly note: string }> {
@@ -1692,7 +1697,7 @@ export class Agent extends DurableObject<Env> {
 
   async #stepBox(): Promise<void> {
     await this.#advanceBox();
-    this.#askBackupIfDue(this.#deps.clock.now());
+    this.#askBackupIfDue(this.#deps.clock.now(), "background");
   }
 
   async #advanceBox(): Promise<void> {
@@ -1705,7 +1710,7 @@ export class Agent extends DurableObject<Env> {
       const now = this.#deps.clock.now();
       const planned = onPlan(box, !this.#deps.billing.config.on || planAllowsBox(this.#plan(now).kind), now);
       const current = deps.host.image !== null && planned.box.image !== deps.host.image ? needsEnsure(planned.box, now) : planned.box;
-      if (current !== box) this.#store.applyBox(current, await this.#outboxMessage(deps, current, planned.say), [], now);
+      if (current !== box) this.#store.applyBox(current, await this.#outboxMessage(deps, current, planned.say), [], now, "background");
     }
     for (let i = 0; i < BOX_STEPS_PER_DRAIN; i++) {
       if (this.#erasure()) return;
@@ -1718,7 +1723,7 @@ export class Agent extends DurableObject<Env> {
         return;
       }
       if (!deps) return;
-      this.#store.applyBox(step.box, null, [], this.#deps.clock.now());
+      this.#store.applyBox(step.box, null, [], this.#deps.clock.now(), "background");
       if (step.kind === "ensure") {
         await this.#ensure(deps, step);
         continue;
@@ -1732,12 +1737,12 @@ export class Agent extends DurableObject<Env> {
   #saveBoxStep(box: Box, message: NoteMessage | null): void {
     const now = this.#deps.clock.now();
     if (box.state !== "reclaiming" || box.reason !== "failed") {
-      this.#store.applyBox(box, message, [], now);
+      this.#store.applyBox(box, message, [], now, "background");
       return;
     }
     this.ctx.storage.transactionSync(() => {
       this.#saveNeverServedRetirement(box);
-      this.#store.applyBox(box, message, [], now);
+      this.#store.applyBox(box, message, [], now, "background");
     });
   }
 
@@ -1776,16 +1781,16 @@ export class Agent extends DurableObject<Env> {
     await this.#deps.ledger.releaseBox(person, this.#deps.clock.now());
     const notice = mayspend(this.#store.admission()) ? goneMessage(box, language) : null;
     this.ctx.storage.transactionSync(() => {
-      this.#store.removeBox(box.name, notice && { texts: [notice.text], note: notice.note }, this.#deps.clock.now());
+      this.#store.removeBox(box.name, notice && { texts: [notice.text], note: notice.note }, this.#deps.clock.now(), "background");
       this.ctx.storage.kv.delete(BOX_RETIREMENT);
     });
-    if (box.reason !== "removed") this.#askBackupIfDue(this.#deps.clock.now(), true);
+    if (box.reason !== "removed") this.#askBackupIfDue(this.#deps.clock.now(), "background", true);
   }
 
   async #ensure(deps: BoxDeps, step: EnsureStep): Promise<void> {
     const ensured = await deps.host.ensure(step.box.name, await boxToken(deps.secret, step.box.name, step.box.setup));
     if (!ensured.ok) return diagnostic("box_ensure_failed");
-    this.#store.applyBox(afterEnsure(step, deps.host.image), null, [], this.#deps.clock.now());
+    this.#store.applyBox(afterEnsure(step, deps.host.image), null, [], this.#deps.clock.now(), "background");
     this.#store.setBoxVolume(step.box.name, null);
   }
 
@@ -1816,6 +1821,7 @@ export class Agent extends DurableObject<Env> {
     purpose: CallPurpose,
     claim: Claim,
     send: (client: BoxClient, url: string, token: BoxToken, at: BoxAt | undefined, sessionOwner: string) => Promise<BoxReply>,
+    noticeTrigger: NoticeTrigger,
   ): Promise<BoxAnswer> {
     const deps = this.#deps.box;
     const box = this.#store.box();
@@ -1842,7 +1848,7 @@ export class Agent extends DurableObject<Env> {
       case "signed_out": {
         const t = onSignedOut(box, now, this.#store.key()?.backup === true);
         const message = await this.#outboxMessage(deps, t.box, t.say);
-        this.#store.applyBox(t.box, claim.live() ? message : null, [missed("rejected")], now);
+        this.#store.applyBox(t.box, claim.live() ? message : null, [missed("rejected")], now, noticeTrigger);
         return { kind: "moved_on", transient: false, told: true };
       }
       case "stale":
@@ -1850,7 +1856,7 @@ export class Agent extends DurableObject<Env> {
         this.#store.appendLogs([missed("rejected")], now);
         return { kind: "moved_on", transient: true, told: false };
       case "unauthorized":
-        this.#store.applyBox(needsEnsure(box, now), null, [missed("rejected")], now);
+        this.#store.applyBox(needsEnsure(box, now), null, [missed("rejected")], now, noticeTrigger);
         return { kind: "moved_on", transient: true, told: false };
       case "unavailable":
         diagnostic("box_unavailable");
@@ -1899,7 +1905,7 @@ export class Agent extends DurableObject<Env> {
               stream: "unasked",
               id: row.id,
               agent: a.key,
-              triggerKind: row.triggerKind,
+              triggerKind: row.triggerKind as AgentEventKind,
               status,
               day,
               at: now,
@@ -1913,6 +1919,11 @@ export class Agent extends DurableObject<Env> {
     if (row.attempts >= MAX_DELIVERY_ATTEMPTS) return this.#store.drop(row.id, "failed", now, unaskedLog("failed", row.admittedDay), "pending");
     if (a.status === "blocked") return this.#store.drop(row.id, "blocked", now, unaskedLog("dropped_blocked", null), "pending");
     if (row.privacy === "receipt" && row.inDoubt && row.to.channel === "telegram") return this.#store.drop(row.id, "failed", now, [], "pending");
+
+    if (row.triggerKind === "background") {
+      const until = quietUntil(now, a.tz);
+      if (until !== null) return this.#store.reschedule(row.id, until, "pending");
+    }
 
     let day = row.admittedDay;
     if (row.intent === "unasked") {
@@ -2073,15 +2084,15 @@ export class Agent extends DurableObject<Env> {
    * One compaction page sized to the smallest budget among the person's lanes; true when it was committed. `force`:
    * the next turn's history doesn't fit, so fold even below the count that otherwise triggers it.
    */
-  async #compactStep(person: Plan, force: boolean, claim: Claim): Promise<boolean> {
+  async #compactStep(person: Plan, force: boolean, claim: Claim, noticeTrigger: NoticeTrigger = "background"): Promise<boolean> {
     if (this.#store.compactionRetryAt() > this.#deps.clock.now()) return false;
-    const budget = this.#access().budget("compaction", COMPACTION_SYSTEM, person);
+    const budget = this.#access(noticeTrigger).budget("compaction", COMPACTION_SYSTEM, person);
     if (budget === null) return false;
     const plan = planCompaction(this.#store.compactionInput(), budget, force);
     if (!plan) return false;
     let served: Served<"compaction">;
     try {
-      served = await this.#access().call({ purpose: "compaction", system: COMPACTION_SYSTEM, prompt: plan.prompt, plan: person, claim });
+      served = await this.#access(noticeTrigger).call({ purpose: "compaction", system: COMPACTION_SYSTEM, prompt: plan.prompt, plan: person, claim });
     } catch (err) {
       this.#store.compactionFailed(this.#deps.clock.now());
       throw err;

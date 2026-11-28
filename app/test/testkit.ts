@@ -174,6 +174,7 @@ export async function giveKey(
       null,
       [],
       0 as EpochMs,
+      "background",
     );
     if (!saved) throw new Error("giveKey: the key wasn't saved");
     if (k.backup !== undefined) store.setBackup(k.backup, 0 as EpochMs, store.keyRevision());

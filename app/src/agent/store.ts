@@ -83,6 +83,7 @@ import type { KeyFault, SchemaMode } from "../model/client";
 import type { Auth, ModelRef, ProviderId } from "../model/providers";
 import type { CallPurpose } from "../model/routes";
 import { SCHEDULE, type Firing, type NewWakeup, type PendingWakeup } from "../policy/schedule";
+import { quietUntil } from "../policy/outreach";
 import { DEFAULT_TIME_ZONE, fromLocal, toLocal } from "../policy/time";
 import type { MonthSpend, SpendScope } from "../policy/spend";
 import type { Sealed, StoredKey } from "../access/key";
@@ -114,6 +115,10 @@ export type AgentRow = {
 
 export type RateEventKind = "feedback" | "invite";
 
+/** `answer`: the notice answers the person's own action in this handling. `background`: an alarm or background job produced it. */
+export type NoticeTrigger = "answer" | "background";
+export type OutboxTriggerKind = AgentEventKind | "background";
+
 type SavedReference = SavedCursor & { readonly snapshot: string | null };
 
 export type OutboxRow = Omit<OutboundMessage, "texts"> & {
@@ -122,7 +127,7 @@ export type OutboxRow = Omit<OutboundMessage, "texts"> & {
   readonly privacy: Privacy | null;
   readonly epoch: ForgetEpoch | null;
   readonly inDoubt: boolean;
-  readonly triggerKind: AgentEventKind;
+  readonly triggerKind: OutboxTriggerKind;
   readonly admittedDay: LocalDate | null;
   readonly routine: boolean;
   readonly attempts: number;
@@ -249,7 +254,7 @@ const WAKEUP_COLS = "id, key, kind, origin, note, due_at, task_id, bookkeeping, 
 type OutboxCols = {
   id: OutboxId;
   event_key: EventKey;
-  trigger_kind: AgentEventKind;
+  trigger_kind: OutboxTriggerKind;
   intent: Intent;
   texts: string;
   reply_token: string | null;
@@ -1210,8 +1215,9 @@ export class AgentStore {
   private insertOutbox(
     id: OutboxId,
     key: EventKey,
-    out: Asked & Pick<Outbound, "texts" | "triggerKind" | "reply" | "replyOnly"> & { readonly taskId: TaskId | null; readonly choice: string | null },
+    out: Asked & Pick<Outbound, "texts" | "reply" | "replyOnly"> & { readonly triggerKind: OutboxTriggerKind; readonly taskId: TaskId | null; readonly choice: string | null },
     now: EpochMs,
+    readyAt: EpochMs = now,
   ): void {
     this.sql.exec(
       `INSERT INTO outbox (id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, ready_at, created_at, task_id, purpose, choice, reply_only)
@@ -1223,7 +1229,7 @@ export class AgentStore {
       JSON.stringify(out.texts),
       out.reply?.token ?? null,
       out.reply?.expiresAt ?? null,
-      now,
+      readyAt,
       now,
       out.taskId,
       out.intent === "unasked" ? out.purpose : null,
@@ -1271,10 +1277,10 @@ export class AgentStore {
     );
   }
 
-  applyBox(b: Box, message: NoteMessage | null, logs: readonly LogRow[], now: EpochMs): void {
+  applyBox(b: Box, message: NoteMessage | null, logs: readonly LogRow[], now: EpochMs, noticeTrigger: NoticeTrigger): void {
     this.tx(() => {
       this.writeBox(b);
-      if (message) this.insertMessage(eventKey.box(b.name), message, now);
+      if (message) this.insertMessage(eventKey.box(b.name), message, now, noticeTrigger);
       this.insertLogs(logs, now);
     });
   }
@@ -1304,20 +1310,23 @@ export class AgentStore {
     this.sql.exec("UPDATE agent SET claude_plan_at = NULL");
   }
 
-  removeBox(name: BoxName, message: NoteMessage | null, now: EpochMs): void {
+  removeBox(name: BoxName, message: NoteMessage | null, now: EpochMs, noticeTrigger: NoticeTrigger): void {
     this.tx(() => {
       this.sql.exec("DELETE FROM box WHERE name = ?", name);
-      if (message) this.insertMessage(eventKey.box(name), message, now);
+      if (message) this.insertMessage(eventKey.box(name), message, now, noticeTrigger);
     });
   }
 
-  private insertMessage(key: EventKey, message: NoteMessage, now: EpochMs, choice: string | null = null): void {
+  private insertMessage(key: EventKey, message: NoteMessage, now: EpochMs, noticeTrigger: NoticeTrigger, choice: string | null = null): void {
     this.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES ('note', ?, ?, ?)", message.note, now, key);
+    const tz = this.agent()?.tz ?? DEFAULT_TIME_ZONE;
+    const readyAt = noticeTrigger === "background" ? quietUntil(now, tz) ?? now : now;
     this.insertOutbox(
       crypto.randomUUID() as OutboxId,
       key,
-      { texts: message.texts, intent: "requested", triggerKind: "message", replyOnly: false, taskId: null, choice },
+      { texts: message.texts, intent: "requested", triggerKind: noticeTrigger === "background" ? "background" : "message", replyOnly: false, taskId: null, choice },
       now,
+      readyAt,
     );
   }
 
@@ -1333,7 +1342,7 @@ export class AgentStore {
     };
   }
 
-  applyStanding(s: Standing, message: { readonly key: EventKey; readonly message: NoteMessage } | null, now: EpochMs): void {
+  applyStanding(s: Standing, message: { readonly key: EventKey; readonly message: NoteMessage } | null, now: EpochMs, noticeTrigger: NoticeTrigger): void {
     this.tx(() => {
       this.sql.exec(
         `INSERT INTO plan (one, own_subscription, own_plan, seat_subscription, seat_owner, updated_at)
@@ -1346,15 +1355,15 @@ export class AgentStore {
         s.seat?.owner ?? null,
         now,
       );
-      if (message && this.agent()) this.insertMessage(message.key, message.message, now);
+      if (message && this.agent()) this.insertMessage(message.key, message.message, now, noticeTrigger);
     });
   }
 
   /** Tells the person `message` unless `once` was already told, marking it like a handled Stripe event. */
-  notifyOnce(once: string, key: EventKey, message: NoteMessage | null, now: EpochMs): void {
+  notifyOnce(once: string, key: EventKey, message: NoteMessage | null, now: EpochMs, noticeTrigger: NoticeTrigger): void {
     this.tx(() => {
       if (this.billingEventSeen(once)) return;
-      if (message && this.agent()) this.insertMessage(key, message, now);
+      if (message && this.agent()) this.insertMessage(key, message, now, noticeTrigger);
       this.billingEventDone(once, now);
     });
   }
@@ -1410,7 +1419,7 @@ export class AgentStore {
   finishBillingAlertAttempt(settlement: BillingAlertSettlement, now: EpochMs): void {
     this.tx(() => {
       const { text, subscriptionIds, kind } = settlement;
-      if (text && this.agent()) this.insertMessage(eventKey.billing("duplicate"), { texts: [text], note: text }, now);
+      if (text && this.agent()) this.insertMessage(eventKey.billing("duplicate"), { texts: [text], note: text }, now, "background");
       const readyAt = kind === "sent" ? null : kind === "migrated" ? now : now + settlement.delayMs;
       const notified = text ? (kind === "unavailable" ? 2 : 1) : 0;
       this.sql.exec(`UPDATE billing_alert SET ready_at = ?, notified = max(notified, ?), closed_as = ?,
@@ -1754,6 +1763,7 @@ export class AgentStore {
     message: { readonly key: EventKey; readonly message: NoteMessage } | null,
     logs: readonly LogRow[],
     now: EpochMs,
+    noticeTrigger: NoticeTrigger,
     ticket: string | null = null,
   ): boolean {
     return this.tx(() => {
@@ -1781,7 +1791,7 @@ export class AgentStore {
         revision,
         k.connectedAt,
       );
-      if (message) this.insertMessage(message.key, message.message, now);
+      if (message) this.insertMessage(message.key, message.message, now, noticeTrigger);
       this.insertLogs(logs, now);
       return true;
     });
@@ -1854,7 +1864,7 @@ export class AgentStore {
   }
 
   /** Asks the backup question once per key, or `again` when the plan's box went away; true when this call asked. */
-  askBackup(message: NoteMessage, choice: string, key: EventKey, now: EpochMs, expectRevision: number, again: boolean = false): boolean {
+  askBackup(message: NoteMessage, choice: string, key: EventKey, now: EpochMs, noticeTrigger: NoticeTrigger, expectRevision: number, again: boolean = false): boolean {
     return this.tx(() => {
       const asked =
         this.sql.exec(
@@ -1863,7 +1873,7 @@ export class AgentStore {
           expectRevision,
           again ? 1 : 0,
         ).rowsWritten > 0;
-      if (asked) this.insertMessage(key, message, now, choice);
+      if (asked) this.insertMessage(key, message, now, noticeTrigger, choice);
       return asked;
     });
   }
@@ -1879,6 +1889,7 @@ export class AgentStore {
     notice: { readonly key: EventKey; readonly message: NoteMessage } | null,
     today: LocalDate,
     now: EpochMs,
+    noticeTrigger: NoticeTrigger,
     expectRevision: number,
     under: string | null = null,
   ): "stale" | "rested" | "told" {
@@ -1895,7 +1906,7 @@ export class AgentStore {
         under,
         expectRevision,
       );
-      if (tell) this.insertMessage(notice.key, notice.message, now);
+      if (tell) this.insertMessage(notice.key, notice.message, now, noticeTrigger);
       return tell ? "told" : "rested";
     });
   }

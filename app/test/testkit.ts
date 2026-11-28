@@ -15,7 +15,7 @@ import type { BoxHost, FlyBoxRetirement, HostResult } from "../src/box/host";
 import { boxName, type BoxName } from "../src/box/names";
 import type { ChannelAdapter } from "../src/channels/channel";
 import type { AdmissionMode } from "../src/agent/admission";
-import { eventKey, parseChoice, personAgentKey, type AgentKey, type ChannelEvent, type EpochMs, type Identity, type LocalDateTime, type MicroUsd } from "../src/domain";
+import { eventKey, parseChoice, personAgentKey, type AgentKey, type ChannelEvent, type EpochMs, type Identity, type LocalDateTime, type MicroUsd, type ProviderMessageReference } from "../src/domain";
 import { d1Ledger, type Ledger, type LogRow } from "../src/ledger/ledger";
 import { scripted, scriptedConnect, type ScriptStep, type ScriptedModel } from "../src/model/scripted";
 import type { QuotaReading } from "../src/policy/quota";
@@ -181,7 +181,7 @@ export async function giveKey(
 }
 
 export type DeliveryStep =
-  | { readonly kind: "sent" }
+  | { readonly kind: "sent"; readonly providerMessages?: readonly ProviderMessageReference[] }
   | { readonly kind: "retry" | "in_doubt"; readonly afterMs: number }
   | { readonly kind: "throw" }
   | { readonly kind: "gone" };
@@ -217,7 +217,7 @@ export function scriptedChannel(steps: readonly DeliveryStep[] = []): ScriptedCh
         case "sent": {
           const via = msg.reply !== undefined && now < msg.reply.expiresAt ? "reply" : "push";
           delivered.push({ at: now, text: msg.texts.join("\n"), via, ...(msg.button ? { button: msg.button } : {}) });
-          return { kind: "sent", via };
+          return { kind: "sent", via, ...(step.providerMessages ? { providerMessages: step.providerMessages } : {}) };
         }
         case "retry":
         case "in_doubt":
@@ -778,6 +778,7 @@ export function rewindForgetCommandSchema(sql: SqlStorage): void {
     ALTER TABLE outbox DROP COLUMN privacy;
     DROP TABLE forget;
     ALTER TABLE box DROP COLUMN volume;
+    DROP TABLE IF EXISTS line_message;
   `);
   const foundation = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE forget ("));
   sql.exec(MIGRATIONS[foundation]);

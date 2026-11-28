@@ -3,7 +3,7 @@ import { expect, test } from "vitest";
 import { logSchema } from "../src/ledger/ledger";
 import { erasePersonLedger, personLedgerTables } from "../src/ledger/erase";
 import { personAgentKey } from "../src/domain";
-import type { AgentEvent, TaskFact } from "../src/domain";
+import type { AgentEvent, MessageQuote, TaskFact } from "../src/domain";
 import type { BoxReplyBackfill } from "../src/agent/turn";
 
 type Classification = {
@@ -26,13 +26,14 @@ const durable = {
   checkout_session: { identity: "id event_key", operational: "created_at closed" },
   forget: {
     secret: "code reply_token reply_expires", identity: "op",
-    operational: "one epoch opened_at cutoff_at cutoff_seq phase listed deleted retry_at attempts notice_at notices held_told_at receipt",
+    operational: "one epoch opened_at cutoff_at cutoff_seq completed_at phase listed deleted retry_at attempts notice_at notices held_told_at receipt",
   },
   inbox: { chat: "payload", identity: "event_key", operational: "seq kind received_at ready_at status attempts outcome finished_at catch_up catch_up_budget" },
   key_revision: { operational: "one revision" },
   key_ticket: { secret: "nonce_hash", operational: "expires_at revision status outcome created_at" },
   log_flush: { operational: "one failures retry_at" },
   log_outbox: { identity: "id", operational: "stream row created_at" },
+  line_message: { identity: "id outbox_id", operational: "position created_at" },
   memory: { chat: "summary", operational: "one through_turn_seq updated_at compaction_failures compaction_retry_at" },
   memory_note: { saved: "text", identity: "id event_key", operational: "created_at" },
   meta: { operational: "k v" },
@@ -165,13 +166,17 @@ test("ledger erase covers every person table and removes indirect enrollment and
 
 type Fields<T> = { [K in keyof T]-?: keyof Classification };
 const inbox = {
-  message: { kind: "operational", text: "chat", reply: "secret", redacted: "operational" },
+  message: { kind: "operational", text: "chat", reply: "secret", redacted: "operational", edited: "operational", quote: "chat" },
   lifecycle: { kind: "operational", change: "operational", at: "operational", reply: "secret", code: "secret" },
   choice: { kind: "operational", choice: "identity", at: "operational", reply: "secret", epoch: "operational" },
   wakeup: { kind: "operational", wakeupId: "identity", key: "saved", origin: "operational", note: "saved", dueAt: "saved",
     firedAt: "operational", task: "identity", bookkeeping: "operational", repeat: "saved" },
   checkin: { kind: "operational", day: "operational", dueAt: "operational", firedAt: "operational" },
 } satisfies { [K in AgentEvent["kind"]]: Fields<Extract<AgentEvent, { kind: K }>> };
+const quote = {
+  reference: { kind: "operational", id: "identity" },
+  text: { kind: "operational", text: "chat", at: "operational" },
+} satisfies { [K in MessageQuote["kind"]]: Fields<Extract<MessageQuote, { kind: K }>> };
 const fact = { kind: "saved", ref: "saved", detail: "saved", cause: "saved" } satisfies Fields<TaskFact>;
 const backfill = { seq: "identity", notice: "chat" } satisfies Fields<BoxReplyBackfill>;
 
@@ -192,5 +197,5 @@ test("diagnostic payload fields are explicitly classified and stored chat payloa
   expect(Object.fromEntries(logSchema.options.map((v) => [v.shape.stream.value, Object.keys(v.shape).sort()]))).toEqual(
     Object.fromEntries(Object.entries(fields).map(([stream, extra]) => [stream, `${common} ${extra}`.split(" ").sort()])),
   );
-  expect([inbox.message.text, fact.detail, backfill.notice]).toEqual(["chat", "saved", "chat"]);
+  expect([inbox.message.text, quote.text.text, fact.detail, backfill.notice]).toEqual(["chat", "chat", "saved", "chat"]);
 });

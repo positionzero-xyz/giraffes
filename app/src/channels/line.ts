@@ -14,6 +14,8 @@ const ErrorBody = z.object({
   message: z.string().optional(),
   details: z.array(z.object({ property: z.string().optional() })).optional(),
 });
+const SentMessageId = z.union([z.string().regex(/^\d+$/), z.number().int().refine(Number.isSafeInteger)]).transform((id) => String(id));
+const SentMessages = z.object({ sentMessages: z.array(z.object({ id: SentMessageId })).optional() });
 /** LINE says a reply token is good for about one minute. */
 const REPLY_TOKEN_TTL_MS = 60_000;
 const REPLY_TOKEN_SAFETY_MS = 10_000;
@@ -31,7 +33,7 @@ const WebhookEvent = z.object({
   timestamp: z.number(),
   source: z.object({ type: z.string(), userId: z.string().regex(/^U[0-9a-f]{32}$/).optional() }),
   replyToken: z.string().optional(),
-  message: z.object({ type: z.string(), text: z.string().optional() }).optional(),
+  message: z.object({ type: z.string(), text: z.string().optional(), quotedMessageId: z.string().regex(/^\d+$/).optional() }).optional(),
   postback: z.object({ data: z.string() }).optional(),
 });
 type WebhookEvent = z.infer<typeof WebhookEvent>;
@@ -49,7 +51,9 @@ function toEvent(e: WebhookEvent): ChannelEvent | null {
     case "message": {
       if (!e.message) return null;
       const text = e.message.type === "text" && e.message.text ? e.message.text : `[sent a ${e.message.type}]`;
-      return reply ? { kind: "message", text, reply } : { kind: "message", text };
+      const quote = e.message.quotedMessageId === undefined ? undefined : { kind: "reference" as const, id: e.message.quotedMessageId };
+      const message = { kind: "message" as const, text, ...(quote ? { quote } : {}) };
+      return reply ? { ...message, reply } : message;
     }
     case "follow":
       return reply ? { kind: "lifecycle", change: "follow", at, reply } : { kind: "lifecycle", change: "follow", at };
@@ -64,6 +68,13 @@ function toEvent(e: WebhookEvent): ChannelEvent | null {
     default:
       return null;
   }
+}
+
+async function sent(res: Response, via: "reply" | "push", messageCount: number): Promise<Delivery> {
+  const parsed = SentMessages.safeParse(await res.json().catch(() => null));
+  const ids = parsed.success ? parsed.data.sentMessages : undefined;
+  if (!ids || ids.length !== messageCount) return { kind: "sent", via };
+  return { kind: "sent", via, providerMessages: ids.map((m, position) => ({ id: m.id, position })) };
 }
 
 export function lineChannel(
@@ -82,7 +93,7 @@ export function lineChannel(
         body: JSON.stringify({ replyToken: token, messages }),
         signal: AbortSignal.timeout(timeoutMs),
       });
-      if (res.ok) return { kind: "sent", via: "reply" };
+      if (res.ok) return sent(res, "reply", messages.length);
       // LINE answers 400 to an invalid or already used reply token.
       if (res.status === 400) return null;
       const body = await res.text();
@@ -104,7 +115,7 @@ export function lineChannel(
         body: JSON.stringify({ to: msg.to.channelUserId, messages }),
         signal: AbortSignal.timeout(timeoutMs),
       });
-      if (res.ok || res.status === 409) return { kind: "sent", via: "push" };
+      if (res.ok || res.status === 409) return sent(res, "push", messages.length);
       const body = await res.text();
       if (operatorAlert && res.status === 400 && invalidPushRecipient(body)) return { kind: "recipient_gone" };
       return classify(res.status, body);

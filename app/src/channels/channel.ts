@@ -1,5 +1,5 @@
 import { diagnostic } from "../diagnostics";
-import type { ChannelId, EpochMs, Identity, InboundEnvelope, OutboundMessage, OutboxId } from "../domain";
+import type { ChannelId, EpochMs, Identity, InboundEnvelope, OutboundMessage, OutboxId, ProviderMessageReference } from "../domain";
 import type { Config, OperatorChat } from "../config";
 import type { Ledger } from "../ledger/ledger";
 import { utcMonth } from "../policy/time";
@@ -12,7 +12,7 @@ export type Received =
   | { readonly kind: "rejected"; readonly status: 401 | 404 | 413 };
 
 export type Delivery =
-  | { readonly kind: "sent"; readonly via: "reply" | "push" }
+  | { readonly kind: "sent"; readonly via: "reply" | "push"; readonly providerMessages?: readonly ProviderMessageReference[] }
   | { readonly kind: "retry"; readonly afterMs: number; readonly detail: string }
   | { readonly kind: "in_doubt"; readonly afterMs: number; readonly detail: string }
   | { readonly kind: "failed"; readonly detail: string }

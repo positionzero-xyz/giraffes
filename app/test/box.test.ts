@@ -6,6 +6,8 @@ import { flyHost, machineConfig, type FlyConfig } from "../src/box/fly";
 import { staticHost, type Fetch } from "../src/box/host";
 import { BOX, boxMessage, type BoxSay, type ReclaimReason } from "../src/box/machine";
 import { boxName, boxSessionOwner, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
+import { ACCOUNT_COPY, type EraseBox } from "../src/agent/account";
+import { Agent } from "../src/agent/agent";
 import { MIGRATIONS } from "../src/agent/schema";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs } from "../src/domain";
@@ -1579,11 +1581,12 @@ describe("confirming disk deletion on automatic reclaim", () => {
   }
 
   function flyReclaim({
-    machine, boxFailure, relistAfterAppDelete = false,
+    machine, boxFailure, relistAfterAppDelete = false, keepVolumeAfterDelete = !relistAfterAppDelete,
   }: {
     machine: string | null;
     boxFailure?: "health" | "erase";
     relistAfterAppDelete?: boolean;
+    keepVolumeAfterDelete?: boolean;
   }) {
     const requests: string[] = [];
     const boxRequests: string[] = [];
@@ -1607,7 +1610,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
         return Response.json([{ id: "vol_1", state: volumeState, attached_machine_id: machine }]);
       }
       if (method === "DELETE" && (path.endsWith("/volumes/vol_1") || path.endsWith("/machines/machine_1"))) {
-        if (path.endsWith("/volumes/vol_1") && relistAfterAppDelete) volumeState = "destroyed";
+        if (path.endsWith("/volumes/vol_1") && !keepVolumeAfterDelete) volumeState = "destroyed";
         return new Response(null, { status: 202 });
       }
       return new Response(null, { status: 500 });
@@ -1698,6 +1701,109 @@ describe("confirming disk deletion on automatic reclaim", () => {
       expect(boxRequests.filter((path) => path === failedPath)).toHaveLength(3);
     },
   );
+
+  async function failedSetupInRetryWindow(user: string) {
+    const fly = flyReclaim({ machine: "machine_1", boxFailure: "health", keepVolumeAfterDelete: false });
+    const { c, ledger } = await startReclaim(user, "failed", fly.deps);
+    await c.alarm();
+    expect(fly.boxRequests).toEqual(["/health"]);
+    expect(fly.destructive()).toEqual([]);
+    expect(await c.received()).toEqual([]);
+    return { ...fly, c, ledger };
+  }
+
+  test.each([false, true])("/claude remove during failed setup cleanup frees the slot (restart: %s)", async (restart) => {
+    const { c, ledger, deps, boxRequests, destructive } = await failedSetupInRetryWindow(`failed-remove-${restart}`);
+
+    await c.say("/claude remove");
+    expect(await c.received()).toEqual([say("removing")]);
+    if (restart) {
+      const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+      await runInDurableObject(stub, async (_agent, state) => {
+        const fresh = new Agent(state, testEnv);
+        fresh.withDeps({
+          admission: "open", clock: c.clock, ledger, box: deps,
+          channels: { dev: c.channel, line: c.channel, telegram: c.channel },
+        });
+        for (let retry = 0; retry < 2; retry++) {
+          const due = await state.storage.getAlarm();
+          if (due === null) throw new Error("missing cleanup retry alarm");
+          c.clock.set(due as EpochMs);
+          await fresh.alarm();
+        }
+      });
+    } else {
+      await c.advanceTo("2099-11-04T10:01");
+    }
+
+    expect(destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
+    expect(boxRequests).toEqual(["/health", "/health", "/health"]);
+    expect(await c.received()).toEqual([say("removed")]);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up")]);
+  });
+
+  test("operator removal during failed setup cleanup frees the slot", async () => {
+    const { c, ledger, boxRequests, destructive } = await failedSetupInRetryWindow("failed-operator-remove");
+
+    await c.remove();
+    await c.advanceTo("2099-11-04T10:01");
+
+    expect(destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
+    expect(boxRequests).toEqual(["/health", "/health", "/health"]);
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+  });
+
+  test("/erase during failed setup cleanup sends a receipt after the disk and app go", async () => {
+    const { c, boxRequests, requests, destructive } = await failedSetupInRetryWindow("failed-account-erase");
+    await testEnv.LEDGER.prepare("INSERT INTO boxes (agent_key, name, host, created_at) VALUES (?, ?, 'fly', ?)")
+      .bind(c.agent, app, c.clock.now()).run();
+
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erasure confirmation");
+    await c.tap(confirm.data);
+    expect(destructive()).toEqual([]);
+    expect((await c.received()).every((text) => !text.includes(ACCOUNT_COPY.en.receipt))).toBe(true);
+
+    await c.advanceTo("2099-11-04T10:03");
+
+    expect(destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
+    const diskCheck = requests.indexOf(volumeList, requests.indexOf(volumeDelete) + 1);
+    expect(diskCheck).toBeGreaterThan(requests.indexOf(volumeDelete));
+    expect(diskCheck).toBeLessThan(requests.indexOf(appDelete));
+    expect(boxRequests).toEqual(["/health", "/health", "/health"]);
+    const receipt = await c.received();
+    expect(receipt).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
+    expect(receipt[0]).toContain(ACCOUNT_COPY.en.reclaimedBox);
+    expect(await testEnv.LEDGER.prepare("SELECT name FROM boxes WHERE name = ?").bind(app).first()).toBeNull();
+  });
+
+  test("a saved retirement from before the failed-setup flag still requires a wipe", async () => {
+    const { deps, boxRequests, destructive } = flyReclaim({
+      machine: "machine_1", boxFailure: "health", keepVolumeAfterDelete: false,
+    });
+    const { c, ledger } = await startReclaim("legacy-failed-reclaim", "failed", deps);
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (_agent, state) => {
+      state.storage.kv.put("box:retirement", {
+        kind: "locate", box: { name: app, host: "fly", url: deps.host.urlOf(app), incarnation: null },
+      } satisfies EraseBox);
+    });
+
+    await c.alarm();
+    await c.advanceTo("2099-11-04T10:03");
+
+    expect(boxRequests.length).toBeGreaterThan(3);
+    expect(destructive()).toEqual([]);
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+    expect(ledger.boxes.has(c.agent)).toBe(true);
+  });
 
   test("a lapsed box with permanent health failure keeps its slot without deleting anything", async () => {
     const { deps, boxRequests, destructive } = flyReclaim({ machine: "machine_1", boxFailure: "health" });

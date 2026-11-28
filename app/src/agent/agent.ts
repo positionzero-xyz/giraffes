@@ -716,9 +716,8 @@ export class Agent extends DurableObject<Env> {
     return this.#resolveAccountBox(person, reference);
   }
 
-  async #retireBoxStep({ person, epoch, box: step, allowUnwipedRemoval }: {
+  async #retireBoxStep({ person, epoch, box: step }: {
     readonly person: AgentKey; readonly epoch: ForgetEpoch; readonly box: EraseBox;
-    readonly allowUnwipedRemoval?: boolean;
   }): Promise<EraseBox> {
     const deps = this.#deps.box;
     if (!("box" in step)) return step;
@@ -762,7 +761,7 @@ export class Agent extends DurableObject<Env> {
           ? { kind: "relocate", box, target: step.target, resume: "wipe-fly", wipeFailures: step.wipeFailures } satisfies EraseBox
           : step;
         const failedWipe = (): EraseBox => {
-          if (!allowUnwipedRemoval || fallback.kind !== "relocate") return fallback;
+          if (box.neverServed !== true || fallback.kind !== "relocate") return fallback;
           const wipeFailures = (fallback.wipeFailures ?? 0) + 1;
           return wipeFailures >= FAILED_SETUP_MAX_WIPE_ATTEMPTS
             ? { kind: "remove-volume", box, target: fallback.target, wipeSkipped: true }
@@ -1729,14 +1728,13 @@ export class Agent extends DurableObject<Env> {
     const sharedDevBox = box.reason !== "removed" && box.host === "static" && deps?.host.kind === "static" && deps.onlyFor === null;
     if (!sharedDevBox) {
       const epoch = (this.#store.forget().epoch + 1) as ForgetEpoch;
-      // A failed setup never served the person, so deleting its disk is enough if wiping fails.
-      const allowUnwipedRemoval = box.reason === "failed";
       let progress = this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) ?? this.#resolveAccountBox(person, {
         name: box.name, host: box.host, url: box.url, incarnation: this.#store.boxVolume(),
+        ...(box.reason === "failed" ? { neverServed: true } : {}),
       });
       while ("box" in progress) {
         this.ctx.storage.kv.put(BOX_RETIREMENT, progress);
-        const next = await this.#retireBoxStep({ person, epoch, box: progress, allowUnwipedRemoval });
+        const next = await this.#retireBoxStep({ person, epoch, box: progress });
         if (next === progress || next.kind === "relocate") {
           this.ctx.storage.kv.put(BOX_RETIREMENT, next);
           return diagnostic("box_reclaim_failed");

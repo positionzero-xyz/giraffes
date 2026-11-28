@@ -20,6 +20,8 @@ export type EraseBoxReference = {
   readonly host: BoxHostKind;
   readonly url: string | null;
   readonly incarnation: string | null;
+  /** Only set when retirement begins for a failed setup. Older records may have served the person. */
+  readonly neverServed?: true;
 };
 
 export type EraseBoxTarget = EraseBoxReference & { readonly url: string };

@@ -88,7 +88,7 @@ import { ADMISSION, inviteIn, planAdmission, type AdmissionAnswer, type Admissio
 import { COMPACTION, compactionCommit, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import {
-  ACCOUNT_COPY, ACCOUNT_RECEIPT_MS, ACCOUNT_RETRY_MS, ACCOUNT_WIPE_GRACE_MS, ERASE_CHALLENGE, ERASE_DIAGNOSTIC_MS, ERASE_JOB, START_CHALLENGE,
+  ACCOUNT_COPY, ACCOUNT_RECEIPT_MS, ACCOUNT_RETRY_MS, ACCOUNT_WIPE_GRACE_MS, ACCOUNT_WIPE_RETRY_MAX_MS, ERASE_CHALLENGE, ERASE_DIAGNOSTIC_MS, ERASE_JOB, START_CHALLENGE,
   digestChallenge, newAccountChallenge, type AccountChallenge, type EraseBilling, type EraseBox,
   type EraseBoxReference, type EraseBoxTarget, type Erasure, type StartChallenge,
 } from "./account";
@@ -606,7 +606,7 @@ export class Agent extends DurableObject<Env> {
       }
       while ("box" in current.box) {
         const now = this.#deps.clock.now();
-        if (current.boxRetry && now < current.boxRetry.nextAt) {
+        if (current.boxRetry?.waitingFor !== undefined && now < current.boxRetry.nextAt) {
           const delay = current.boxRetry.nextAt - now;
           return await this.#retryErasure(current.billing.kind === "pending" ? Math.min(delay, ACCOUNT_RETRY_MS) : delay);
         }
@@ -653,10 +653,12 @@ export class Agent extends DurableObject<Env> {
       (box.target?.disk != null || (box.target?.disks?.length ?? 0) > 0);
     let delay = box.kind === "unverified" && job.billing.kind === "done" ? ACCOUNT_RECEIPT_MS : ACCOUNT_RETRY_MS;
     if (wipeDeadline !== null || removingDisk) {
-      const attempts = job.boxRetry?.attempts ?? 0;
+      const graceLeft = wipeDeadline === null ? 0 : wipeDeadline - now;
+      const waitingFor = graceLeft > 0 ? "box-wipe" : "disk-delete";
+      const attempts = job.boxRetry?.waitingFor === waitingFor ? job.boxRetry.attempts : 0;
       delay = reclaimBackoff(attempts);
-      if (wipeDeadline !== null && wipeDeadline > now) delay = Math.min(delay, wipeDeadline - now);
-      job = { ...job, boxRetry: { attempts: attempts + 1, nextAt: (now + delay) as EpochMs } };
+      if (graceLeft > 0) delay = Math.min(delay, ACCOUNT_WIPE_RETRY_MAX_MS, graceLeft);
+      job = { ...job, boxRetry: { waitingFor, attempts: attempts + 1, nextAt: (now + delay) as EpochMs } };
       if (job.billing.kind === "pending") delay = Math.min(delay, ACCOUNT_RETRY_MS);
     }
     await this.#retryErasure(delay, this.#noteEraseHold(job, this.#eraseBoxHoldCode(job)));

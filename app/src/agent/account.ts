@@ -7,6 +7,7 @@ import type { BoxHostKind, FlyDiskRetirement } from "../box/host";
 export const ACCOUNT_CHALLENGE_MS = 15 * 60_000;
 export const ACCOUNT_RETRY_MS = 60_000;
 export const ACCOUNT_WIPE_GRACE_MS = 60 * 60_000;
+export const ACCOUNT_WIPE_RETRY_MAX_MS = 10 * 60_000;
 export const ACCOUNT_RECEIPT_MS = 24 * 60 * 60_000;
 export const ERASE_DIAGNOSTIC_MS = 24 * 60 * 60_000;
 export const ERASE_CHALLENGE = "account:erase-confirmation";
@@ -93,7 +94,8 @@ export type Erasure = ErasureIdentity & (
     readonly billing: EraseBilling;
     readonly box: EraseBox;
     readonly boxLedgerKey: string | null;
-    readonly boxRetry?: { readonly attempts: number; readonly nextAt: EpochMs };
+    /** Without `waitingFor` it was saved by a build that kept counting tries past the wipe deadline. */
+    readonly boxRetry?: { readonly waitingFor?: "box-wipe" | "disk-delete"; readonly attempts: number; readonly nextAt: EpochMs };
   }
   | { readonly kind: "receipt"; readonly expiresAt: EpochMs; readonly attempted: boolean; readonly box: EraseBoxReceipt | null; readonly endedSubscription: boolean; readonly stripeRetained: boolean }
 );

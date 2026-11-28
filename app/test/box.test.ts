@@ -6,9 +6,10 @@ import { flyHost, machineConfig, type FlyConfig } from "../src/box/fly";
 import { staticHost, type Fetch } from "../src/box/host";
 import { BOX, boxMessage, type BoxSay, type ReclaimReason } from "../src/box/machine";
 import { boxName, boxSessionOwner, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
-import { ACCOUNT_COPY, type EraseBox } from "../src/agent/account";
+import { ACCOUNT_COPY, ERASE_JOB, type EraseBox, type Erasure } from "../src/agent/account";
 import { Agent } from "../src/agent/agent";
 import { MIGRATIONS } from "../src/agent/schema";
+import type { StripeReply } from "../src/billing/stripe";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs } from "../src/domain";
 import { NOTICES } from "../src/notices";
@@ -1797,6 +1798,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
     box: NonNullable<Parameters<typeof devChat>[1]["box"]>,
     until: number,
     restart = false,
+    billing?: BillingKit["deps"],
   ) {
     const attempts: number[] = [];
     for (;;) {
@@ -1812,7 +1814,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
       await runInDurableObject(stub, async (_, state) => {
         const fresh = new Agent(state, testEnv);
         fresh.withDeps({
-          admission: "open", clock: c.clock, ledger, box,
+          admission: "open", clock: c.clock, ledger, box, ...(billing ? { billing } : {}),
           channels: { dev: c.channel, line: c.channel, telegram: c.channel },
         });
         await fresh.alarm();
@@ -1820,7 +1822,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
     }
   }
 
-  async function eraseDeadRemovedBox(user: string, keepVolumeAfterDelete = false) {
+  async function eraseDeadRemovedBox(user: string, keepVolumeAfterDelete = false, subscribed = false) {
     const fly = flyReclaim({ machine: "machine_1", boxFailure: "health", keepVolumeAfterDelete });
     const person = await startReclaim(user, "removed", fly.deps);
     const { c } = person;
@@ -1830,6 +1832,10 @@ describe("confirming disk deletion on automatic reclaim", () => {
     expect(fly.destructive()).toEqual([]);
     await testEnv.LEDGER.prepare("INSERT INTO boxes (agent_key, name, host, created_at) VALUES (?, ?, 'fly', ?)")
       .bind(c.agent, app, startedAt).run();
+    if (subscribed) {
+      await testEnv.LEDGER.prepare("INSERT INTO billing_subscription (id, owner_key, plan, status, seats, updated_at) VALUES (?, ?, 'standard', 'active', 1, 1)")
+        .bind("sub_" + user, c.agent).run();
+    }
 
     await c.say("/erase");
     const confirm = c.channel.delivered.at(-1)?.button;
@@ -1938,6 +1944,81 @@ describe("confirming disk deletion on automatic reclaim", () => {
     expect(await slot()).not.toBeNull();
 
     await expectErasedWithinAMinuteOfTheHour(person, restart);
+  });
+
+  async function eraseWhileStripeIsDown(user: string) {
+    let stripeDown = true;
+    const kit = billingOn();
+    const closeSubscription = async (): Promise<StripeReply<{ readonly retained: boolean }>> =>
+      stripeDown ? { ok: false, status: 500, detail: "stripe 500" } : { ok: true, value: { retained: false } };
+    const person = await eraseDeadRemovedBox(user, true, true);
+    const billing = { ...kit.deps, stripe: { ...kit.stripe, closeSubscription } };
+    return {
+      ...person,
+      drive: (until: number) => driveRetirement(person, person.deps, until, true, billing),
+      restoreStripe: () => { stripeDown = false; },
+    };
+  }
+
+  /** What the previous build saved here: tries counted across the wipe deadline, and a one-minute alarm for billing. */
+  async function saveAsPreviousBuild({ stub, c }: Awaited<ReturnType<typeof eraseWhileStripeIsDown>>, attempts: number, boxNextAt: number) {
+    await runInDurableObject(stub, async (_, { storage }) => {
+      const job = storage.kv.get<Extract<Erasure, { kind: "cleaning" }>>(ERASE_JOB);
+      expect(job?.billing.kind).toBe("pending");
+      const nextAt = c.clock.now() + 60_000;
+      storage.kv.put(ERASE_JOB, { ...job, boxRetry: { attempts, nextAt: boxNextAt }, nextAt });
+      await storage.setAlarm(nextAt);
+    });
+  }
+
+  test("an erase the previous build saved after the hour tries the disk again within a minute once billing clears", async () => {
+    const person = await eraseWhileStripeIsDown("erase-previous-build-after-hour");
+    const { c, startedAt, destructive, confirmVolumeGone, restoreStripe, drive, slot } = person;
+    await drive(startedAt + hour);
+    expect(destructive()).toContain(volumeDelete);
+    await saveAsPreviousBuild(person, 9, startedAt + 2 * hour);
+
+    confirmVolumeGone();
+    restoreStripe();
+    await drive(startedAt + hour + 60_000);
+    expect(destructive().at(-1)).toBe(appDelete);
+    expect(await c.received()).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
+    expect(await slot()).toBeNull();
+  });
+
+  test("an erase the previous build saved after the hour, whose disk never goes, holds the slot and backs off to hourly", async () => {
+    const person = await eraseWhileStripeIsDown("erase-previous-build-disk-stays");
+    const { c, startedAt, destructive, restoreStripe, drive, slot } = person;
+    await drive(startedAt + hour);
+    await saveAsPreviousBuild(person, 9, startedAt + 2 * hour);
+    restoreStripe();
+
+    const attempts = await drive(startedAt + 8 * hour);
+    expect(attempts.slice(0, 4).map((at) => (at - startedAt - hour) / 1000)).toEqual([60, 75, 105, 165]);
+    expect(attempts.at(-1)! - attempts.at(-2)!).toBe(hour);
+    expect(await c.received()).toEqual([]);
+    expect(await slot()).not.toBeNull();
+    expect(destructive()).not.toContain(appDelete);
+  });
+
+  test("an erase the previous build saved during the hour keeps tries ten minutes apart and deletes nothing early", async () => {
+    const person = await eraseWhileStripeIsDown("erase-previous-build-in-hour");
+    const { c, startedAt, destructive, restoreStripe, drive, slot } = person;
+    await drive(startedAt + 40 * 60_000);
+    await saveAsPreviousBuild(person, 8, startedAt + hour);
+    restoreStripe();
+
+    const savedAt = c.clock.now();
+    const tries = [savedAt, ...await drive(startedAt + hour - 1), startedAt + hour];
+    expect(Math.max(...tries.slice(1).map((at, i) => at - tries[i]))).toBeLessThanOrEqual(10 * 60_000);
+    expect(destructive()).toEqual([]);
+
+    const after = await drive(startedAt + 8 * hour);
+    expect(destructive()).toContain(volumeDelete);
+    expect(destructive()).not.toContain(appDelete);
+    expect(after.at(-1)! - after.at(-2)!).toBe(hour);
+    expect(await c.received()).toEqual([]);
+    expect(await slot()).not.toBeNull();
   });
 
   test.each([false, true])("removal after setup fails on the last alarm step frees the slot (restart: %s)", async (restart) => {

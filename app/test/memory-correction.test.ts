@@ -1,11 +1,13 @@
+import { createHash } from "node:crypto";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { prepareOutsideWrite } from "../src/action/writes";
 import type { Agent } from "../src/agent/agent";
+import { MIGRATIONS, migrate } from "../src/agent/schema";
 import { AgentStore } from "../src/agent/store";
 import type { AgentKey, EpochMs } from "../src/domain";
 import type { ScriptStep } from "../src/model/scripted";
-import { cancel, chat, devChat, fakeBox, holding, local, propose, schedule, scripted, send, turn, type DevChat } from "./testkit";
+import { cancel, chat, devChat, fakeBox, holding, local, propose, rewindQuoteRewrites, schedule, scripted, send, turn, type DevChat } from "./testkit";
 
 const WRONG = "Zanzibar";
 const RIGHT = "Mombasa";
@@ -61,21 +63,29 @@ describe("a correction", () => {
   });
 
   test.each([
-    ["line", false], ["line", true], ["telegram", false],
+    ["line", false], ["line", true], ["telegram", false], ["telegram", true],
   ] as const)("a reply to an old %s message (legacy: %s) uses the corrected words", async (channel, legacy) => {
     const id = "461230966842064897";
-    const model = scripted([
+    const script = scripted([
       turn({ actions: [{ type: "remember", note: "The city is Zanzibar." }, send("The city is Zanzibar.")] }),
       turn({ actions: [correct(WRONG, RIGHT), send("Updated.")] }),
       chat("I see."),
     ]);
+    let advance = () => {};
+    const model = { ...script, send(req: Parameters<typeof script.send>[0]) {
+      if (legacy) advance();
+      return script.send(req);
+    } };
     const c = await devChat("correct-old-quote", {
       model, at: "2099-11-04T10:00", channel,
       deliveries: [{ kind: "sent", providerMessages: [{ id, position: 0 }] }],
     });
+    advance = () => c.clock.set((c.clock.now() + 10) as EpochMs);
     expect(await later(c, "Remember the city Zanzibar.")).toEqual(["The city is Zanzibar."]);
     const at = c.clock.now();
     if (legacy) {
+      expect(await sql(c, "SELECT o.created_at - t.at AS delay FROM outbox o JOIN turn t USING (event_key) WHERE t.role = 'agent'"))
+        .toEqual([{ delay: 10 }]);
       await sql(c, "UPDATE turn SET correction_spans = NULL");
       await sql(c, "UPDATE outbox SET correction_spans = NULL");
     }
@@ -88,46 +98,81 @@ describe("a correction", () => {
     expect(await sql(c, "SELECT COUNT(*) AS n FROM inbox WHERE payload LIKE ?", "%" + WRONG + "%")).toEqual([{ n: 0 }]);
   });
 
+  test("keeps an unrelated old Telegram quote when its sent copy is still stored", async () => {
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: "The city is Zanzibar." }, send("Nothing else to add.")] }),
+      turn({ actions: [correct(WRONG, RIGHT), send("Updated.")] }),
+      chat("I see."),
+    ]);
+    const c = await devChat("correct-unrelated-quote", { model, at: "2099-11-04T10:00", channel: "telegram" });
+    await later(c, "Remember Zanzibar.");
+    const at = c.clock.now();
+    await later(c, "Change the name.");
+    await c.event({ kind: "message", text: "What did you mean?", quote: { kind: "text", at, text: "Nothing else to add." } });
+    expect(model.calls[2].user).toContain('context, not a request): "Nothing else to add."');
+  });
+
   test("refuses the whole correction when a note would exceed its byte cap", async () => {
-    const note = "ox ".repeat(100).trimEnd();
+    const note = "fox ".repeat(75).trimEnd();
     const replacement = "aardvark".repeat(37);
     const model = scripted([
-      turn({ actions: [{ type: "remember", note }, send("Noted ox.")] }),
-      turn({ actions: [correct("ox", replacement), send("Correction received.")] }),
+      turn({ actions: [{ type: "remember", note }, send("Noted fox.")] }),
+      turn({ actions: [correct("fox", replacement), send("Correction received.")] }),
     ]);
     const c = await devChat("correct-note-cap", { model, at: "2099-11-04T10:00" });
-    await later(c, "Remember these ox entries.");
-    await sql(c, "UPDATE memory SET summary = 'The person keeps ox entries.'");
+    await later(c, "Remember these fox entries.");
+    await sql(c, "UPDATE memory SET summary = 'The person keeps fox entries.'");
 
     expect(await later(c, "The name has changed.")).toEqual(["Correction received."]);
 
     expect(await sql(c, "SELECT length(CAST(text AS BLOB)) AS bytes FROM memory_note")).toEqual([{ bytes: 299 }]);
     expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: note }]);
-    expect(await sql(c, "SELECT summary FROM memory")).toEqual([{ summary: "The person keeps ox entries." }]);
+    expect(await sql(c, "SELECT summary FROM memory")).toEqual([{ summary: "The person keeps fox entries." }]);
+    expect(c.logs("rejection")).toEqual(expect.arrayContaining([expect.objectContaining({ reason: "too_long" })]));
   });
 
   test("refuses a replacement over 300 bytes even if the saved summary could hold it", async () => {
     const replacement = "a".repeat(301);
-    const model = scripted([chat("Hello."), turn({ actions: [correct("ox", replacement), send("Okay.")] })]);
+    const model = scripted([chat("Hello."), turn({ actions: [correct("fox", replacement), send("Okay.")] })]);
     const c = await devChat("correct-replacement-cap", { model, at: "2099-11-04T10:00" });
     await later(c, "Hello.");
-    await sql(c, "UPDATE memory SET summary = 'The person keeps ox entries.'");
+    await sql(c, "UPDATE memory SET summary = 'The person keeps fox entries.'");
 
     expect(await later(c, "The name has changed.")).toEqual(["Okay."]);
-    expect(await sql(c, "SELECT summary FROM memory")).toEqual([{ summary: "The person keeps ox entries." }]);
+    expect(await sql(c, "SELECT summary FROM memory")).toEqual([{ summary: "The person keeps fox entries." }]);
   });
 
   test("refuses the correction when an outgoing model reply would exceed its cap", async () => {
-    const reply = "ox ".repeat(200).trimEnd();
+    const reply = "fox ".repeat(150).trimEnd();
     const model = scripted([
-      turn({ actions: [{ type: "remember", note: "The label is ox." }, send("Noted.")] }),
-      turn({ actions: [correct("ox", "cow"), send(reply)] }),
+      turn({ actions: [{ type: "remember", note: "The label is fox." }, send("Noted.")] }),
+      turn({ actions: [correct("fox", "bear"), send(reply)] }),
     ]);
     const c = await devChat("correct-reply-cap", { model, at: "2099-11-04T10:00" });
-    await later(c, "Remember the label ox.");
+    await later(c, "Remember the label fox.");
 
     expect(await later(c, "Change the label.")).toEqual([reply]);
-    expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: "The label is ox." }]);
+    expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: "The label is fox." }]);
+  });
+
+  test("trims the already sent copies at a word boundary instead of refusing the correction", async () => {
+    const reply = "fox " + "route ".repeat(101) + "home";
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: "The label is fox." }, send(reply)] }),
+      turn({ actions: [correct("fox", "longer animal ".repeat(8).trimEnd()), send("Updated.")] }),
+      chat("Hello."),
+    ]);
+    const c = await devChat("correct-sent-cap", { model, at: "2099-11-04T10:00" });
+    const original = await later(c, "Remember the label fox.");
+    expect(original[0]).toHaveLength(600);
+    expect(await later(c, "Change the label.")).toEqual(["Updated."]);
+    expect(await holding(c.agent, "fox")).toEqual([]);
+    const [stored] = await sql<{ text: string }>(c, "SELECT json_extract(texts, '$[0]') AS text FROM outbox ORDER BY rowid LIMIT 1");
+    expect(stored.text.length).toBeLessThanOrEqual(600);
+    expect(stored.text).toMatch(/ route(?:…)?$/);
+    expect(await sql(c, "SELECT text FROM turn WHERE role = 'agent' ORDER BY seq LIMIT 1")).toEqual([stored]);
+    await later(c, "Hello.");
+    expect(model.calls.at(-1)?.user).not.toContain("fox");
   });
 
   test("refuses the correction when a wake-up key would exceed its cap", async () => {
@@ -299,6 +344,90 @@ describe("what a correction leaves alone or deletes", () => {
 });
 
 describe("don't remember", () => {
+  test("migration matches a private reply to its turn even when their write times differ", async () => {
+    const script = scripted([turn({ actions: [dontRemember(), send("Got it.")] })]);
+    let advance = () => {};
+    const model = { ...script, send(req: Parameters<typeof script.send>[0]) {
+      advance();
+      return script.send(req);
+    } };
+    const c = await devChat("unsaved-legacy-delivery", {
+      model, at: "2099-11-04T10:00", channel: "telegram",
+    });
+    advance = () => c.clock.set((c.clock.now() + 10) as EpochMs);
+    expect(await later(c, "Don't remember this: " + SECRET)).toEqual(["Got it."]);
+
+    await runInDurableObject(stubOf(c.agent), (_, { storage }) => {
+      const { sql } = storage;
+      expect(sql.exec("SELECT o.created_at - t.at AS delay FROM outbox o JOIN turn t USING (event_key) WHERE t.role = 'agent'").one())
+        .toEqual({ delay: 10 });
+      rewindQuoteRewrites(sql);
+      const beforeBackfill = MIGRATIONS.findIndex((m) => m.includes("ADD COLUMN quote_rewrites_before"));
+      sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(beforeBackfill));
+      migrate(storage);
+      expect(sql.exec("SELECT transient FROM outbox").one()).toEqual({ transient: 1 });
+    });
+  });
+
+  test("does not retain a digest of the private message or reply", async () => {
+    const text = "Don't remember this: " + SECRET;
+    const reply = "Got it.";
+    const c = await devChat("unsaved-no-digest", {
+      model: scripted([turn({ actions: [dontRemember(), send(reply)] })]),
+      at: "2099-11-04T10:00",
+      channel: "telegram",
+    });
+    expect(await later(c, text)).toEqual([reply]);
+    for (const value of [text, reply]) {
+      expect(await holding(c.agent, createHash("sha256").update(value).digest("hex"))).toEqual([]);
+    }
+  });
+
+  test("upgrading stored fingerprints is atomic and removes the private digest", async () => {
+    const c = await devChat("unsaved-legacy-digest", { model: scripted([]), at: "2099-11-04T10:00" });
+    const digest = createHash("sha256").update(SECRET).digest("hex");
+    await runInDurableObject(stubOf(c.agent), (_, { storage }) => {
+      const { sql } = storage;
+      rewindQuoteRewrites(sql);
+      const previous = MIGRATIONS.findIndex((m) => m.includes("ADD COLUMN quote_rewrites_before"));
+      sql.exec(MIGRATIONS[previous]);
+      sql.exec("INSERT INTO quote_rewrite (digest) VALUES (?)", digest);
+      sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(previous + 1));
+      sql.exec(`CREATE TRIGGER fail_version BEFORE UPDATE ON meta
+        WHEN NEW.k = 'schema_version' BEGIN SELECT RAISE(ABORT, 'checkpoint write failed'); END`);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        expect(() => migrate(storage)).toThrow("checkpoint write failed");
+        expect(sql.exec("SELECT digest FROM quote_rewrite").toArray()).toEqual([{ digest }]);
+        expect(sql.exec("SELECT name FROM sqlite_master WHERE name = 'private_quote_window'").toArray()).toEqual([]);
+      }
+      sql.exec("DROP TRIGGER fail_version");
+      migrate(storage);
+      migrate(storage);
+      expect(sql.exec("SELECT digest FROM quote_rewrite").toArray()).toEqual([]);
+      expect(sql.exec("SELECT quote_rewrites_before AS at FROM forget").one()).toEqual({ at: expect.any(Number) });
+    });
+  });
+
+  test("uses Telegram message ids to block private quotes even when their dates differ", async () => {
+    const privateId = "81";
+    const replyId = "82";
+    const model = scripted([turn({ actions: [dontRemember(), send("Got it.")] }), chat("Okay."), chat("I see.")]);
+    const c = await devChat("unsaved-telegram-ids", {
+      model, at: "2099-11-04T10:00", channel: "telegram",
+      deliveries: [{ kind: "sent", providerMessages: [{ id: replyId, position: 0 }] }],
+    });
+    const at = c.clock.now();
+    const original = { kind: "message" as const, messageId: privateId, text: "Don't remember this: " + SECRET };
+    await c.event(original);
+    c.clock.set((at + 60_000) as EpochMs);
+    for (const id of [privateId, replyId]) {
+      const quote = { kind: "text" as const, id, at: (at + 10_000) as EpochMs, text: SECRET };
+      await c.event({ kind: "message", text: "What about this?", quote });
+    }
+    expect(model.calls.slice(1).map((call) => call.user.split("## New")[1].includes(SECRET))).toEqual([false, false]);
+    expect(await sql(c, "SELECT COUNT(*) AS n FROM inbox WHERE payload LIKE ?", "%" + SECRET + "%")).toEqual([{ n: 0 }]);
+  });
+
   test("clears the quote on a transient turn and drops a later quote of that message", async () => {
     const model = scripted([turn({ actions: [dontRemember(), send("Got it.")] }), chat("I see.")]);
     const c = await devChat("unsaved-telegram-quote", { model, at: "2099-11-04T10:00", channel: "telegram" });
@@ -309,7 +438,7 @@ describe("don't remember", () => {
     expect(await sql(c, "SELECT payload FROM inbox WHERE kind = 'message'")).toEqual([{ payload: "{}" }]);
 
     c.clock.set((at + 60_000) as EpochMs);
-    await c.event({ kind: "message", text: "About that message", quote: { kind: "text", at, text } });
+    await c.event({ kind: "message", text: "About that message", quote: { kind: "text", at, text: SECRET } });
 
     expect(model.calls[1].user.split("## New")[1]).not.toContain(SECRET);
     expect(await sql(c, "SELECT COUNT(*) AS n FROM inbox WHERE payload LIKE ?", "%" + SECRET + "%")).toEqual([{ n: 0 }]);

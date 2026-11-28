@@ -44,13 +44,15 @@ const durable = {
     operational: "one kid backup_asked_at revision connected_at fault failures rest_until told_on unreadable_under",
   },
   outbox: {
-    chat: "texts", secret: "reply_token reply_expires", identity: "id event_key task_id saved_snapshot",
+    chat: "texts", secret: "reply_token reply_expires", identity: "id event_key task_id saved_snapshot telegram_message_id",
     operational: "trigger_kind intent ready_at status admitted_day in_doubt attempts via drop_reason created_at closed_at purpose choice reply_only saved_item saved_offset privacy epoch correction_spans transient",
   },
   outside_approval: { identity: "id write_id owner_key decided_by", operational: "status expires_at created_at decided_at consumed_at" },
   outside_write: { saved: "args receipt", identity: "id intent operation_id", operational: "provider action epoch status attempt in_doubt lease_until failure created_at updated_at" },
   owned_group: { identity: "group_key", operational: "version" },
   plan: { identity: "own_subscription seat_subscription seat_owner", operational: "one trial_ends_at own_plan updated_at" },
+  private_quote_id: { identity: "id" },
+  private_quote_window: { operational: "start_at end_at id_missing" },
   proposal: { chat: "text", identity: "id task_id outbox_id", operational: "version kind status created_at decided_at" },
   quote_rewrite: { chat: "text", operational: "digest expires_at" },
   rate_event: { identity: "id", operational: "kind at" },
@@ -187,7 +189,7 @@ test("ledger erase covers every person table and removes indirect enrollment and
 
 type Fields<T> = { [K in keyof T]-?: keyof Classification };
 const inbox = {
-  message: { kind: "operational", text: "chat", reply: "secret", redacted: "operational", edited: "operational", quote: "chat" },
+  message: { kind: "operational", text: "chat", reply: "secret", redacted: "operational", edited: "operational", messageId: "identity", quote: "chat" },
   lifecycle: { kind: "operational", change: "operational", at: "operational", reply: "secret", code: "secret" },
   choice: { kind: "operational", choice: "identity", at: "operational", reply: "secret", epoch: "operational" },
   wakeup: { kind: "operational", wakeupId: "identity", key: "saved", origin: "operational", note: "saved", dueAt: "saved",
@@ -196,7 +198,7 @@ const inbox = {
 } satisfies { [K in AgentEvent["kind"]]: Fields<Extract<AgentEvent, { kind: K }>> };
 const quote = {
   reference: { kind: "operational", id: "identity" },
-  text: { kind: "operational", text: "chat", at: "operational" },
+  text: { kind: "operational", text: "chat", at: "operational", id: "identity" },
 } satisfies { [K in MessageQuote["kind"]]: Fields<Extract<MessageQuote, { kind: K }>> };
 const fact = { kind: "saved", ref: "saved", detail: "saved", cause: "saved" } satisfies Fields<TaskFact>;
 const backfill = { seq: "identity", notice: "chat" } satisfies Fields<BoxReplyBackfill>;

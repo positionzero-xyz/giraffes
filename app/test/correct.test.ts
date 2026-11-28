@@ -11,8 +11,19 @@ describe("the words a correction replaces", () => {
     expect(correctText("12  Elm\nStreet", fix("12 Elm Street", "4 Oak Road"))).toBe("4 Oak Road");
   });
 
-  test("Thai words, which run together, are matched inside the text", () => {
+  test("matches Thai words that run together at word boundaries", () => {
     expect(correctText("พี่สมชายจะมาวันศุกร์", fix("สมชาย", "สมศรี"))).toBe("พี่สมศรีจะมาวันศุกร์");
+  });
+
+  test("workerd segments Thai and a correction leaves longer words alone", () => {
+    const segments = new Intl.Segmenter("th", { granularity: "word" }).segment("ปลายทางและปลา");
+    expect(segments.containing(2)?.segment).toBe("ปลาย");
+    expect(segments.containing(10)?.segment).toBe("ปลา");
+    expect(correctText("ปลายทางและปลา", fix("ปลา", "ไก่"))).toBe("ปลายทางและไก่");
+  });
+
+  test("refuses a two-character wrong word even if it was saved", () => {
+    expect(checkCorrection(fix("in", "at"), ["Works in Lyon."], 300)).toEqual({ ok: false, why: "malformed" });
   });
 
   test("symbols in either side are literal", () => {

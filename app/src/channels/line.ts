@@ -33,7 +33,7 @@ const WebhookEvent = z.object({
   timestamp: z.number(),
   source: z.object({ type: z.string(), userId: z.string().regex(/^U[0-9a-f]{32}$/).optional() }),
   replyToken: z.string().optional(),
-  message: z.object({ type: z.string(), text: z.string().optional(), quotedMessageId: z.string().regex(/^\d+$/).optional() }).optional(),
+  message: z.object({ id: z.string().regex(/^\d+$/).optional().catch(undefined), type: z.string(), text: z.string().optional(), quotedMessageId: z.string().regex(/^\d+$/).optional() }).optional(),
   postback: z.object({ data: z.string() }).optional(),
 });
 type WebhookEvent = z.infer<typeof WebhookEvent>;
@@ -51,8 +51,9 @@ function toEvent(e: WebhookEvent): ChannelEvent | null {
     case "message": {
       if (!e.message) return null;
       const text = e.message.type === "text" && e.message.text ? e.message.text : `[sent a ${e.message.type}]`;
+      const messageId = e.message.id;
       const quote = e.message.quotedMessageId === undefined ? undefined : { kind: "reference" as const, id: e.message.quotedMessageId };
-      const message = { kind: "message" as const, text, ...(quote ? { quote } : {}) };
+      const message = { kind: "message" as const, text, ...(messageId === undefined ? {} : { messageId }), ...(quote ? { quote } : {}) };
       return reply ? { ...message, reply } : message;
     }
     case "follow":

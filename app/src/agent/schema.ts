@@ -653,6 +653,22 @@ const REPLY_QUOTE_MIGRATIONS = [
   `,
 ];
 
+// A Telegram date covers its whole second. A LINE quote supplies an id and no date.
+export function privateQuoteMatch(id: string, at: string): string {
+  return `EXISTS (SELECT 1 FROM private_quote_id WHERE id = ${id})
+    OR EXISTS (
+      SELECT 1 FROM private_quote_window
+      WHERE (${id} IS NULL OR id_missing = 1) AND start_at <= ${at} + 999 AND end_at >= ${at}
+    )`;
+}
+
+export const DROP_PRIVATE_INBOX_QUOTES = `
+  UPDATE inbox SET payload = json_remove(payload, '$.quote')
+  WHERE CASE WHEN json_valid(payload) THEN
+    ${privateQuoteMatch("json_extract(payload, '$.quote.id')", "json_extract(payload, '$.quote.at')")}
+  END
+`;
+
 export const MIGRATIONS: readonly string[] = [
   ...SHARED_MIGRATIONS,
   ...REPLY_QUOTE_MIGRATIONS,
@@ -666,7 +682,7 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE outbox ADD COLUMN transient INTEGER NOT NULL DEFAULT 0 CHECK (transient IN (0, 1));
   UPDATE outbox SET transient = 1 WHERE EXISTS (
-    SELECT 1 FROM turn WHERE turn.event_key = outbox.event_key AND turn.at = outbox.created_at AND transient = 1
+    SELECT 1 FROM turn WHERE turn.event_key = outbox.event_key AND transient = 1 AND outbox.privacy IS NULL
   );
   ALTER TABLE forget ADD COLUMN quote_rewrites_before INTEGER;
   UPDATE forget SET quote_rewrites_before = (
@@ -680,6 +696,40 @@ export const MIGRATIONS: readonly string[] = [
     text       TEXT,
     expires_at INTEGER CHECK ((text IS NULL) = (expires_at IS NULL))
   );
+  `,
+  `
+  CREATE INDEX turn_event_key ON turn (event_key);
+  CREATE INDEX outbox_event_key ON outbox (event_key);
+  ALTER TABLE outbox ADD COLUMN telegram_message_id TEXT;
+  CREATE INDEX outbox_telegram_message ON outbox (telegram_message_id) WHERE telegram_message_id IS NOT NULL;
+  CREATE TABLE private_quote_id (id TEXT PRIMARY KEY);
+  CREATE TABLE private_quote_window (
+    start_at   INTEGER NOT NULL,
+    end_at     INTEGER NOT NULL CHECK (end_at >= start_at),
+    id_missing INTEGER NOT NULL CHECK (id_missing IN (0, 1)),
+    PRIMARY KEY (start_at, end_at, id_missing)
+  );
+
+  UPDATE outbox SET transient = 1 WHERE transient = 0 AND privacy IS NULL AND EXISTS (
+    SELECT 1 FROM turn WHERE turn.event_key = outbox.event_key AND transient = 1
+  );
+  INSERT OR IGNORE INTO private_quote_window (start_at, end_at, id_missing)
+    SELECT at, at, 1 FROM turn WHERE role = 'person' AND transient = 1;
+  INSERT OR IGNORE INTO private_quote_window (start_at, end_at, id_missing)
+    SELECT received_at, MAX(received_at, COALESCE(finished_at, received_at)), 1
+    FROM inbox WHERE kind = 'message' AND payload = '{}';
+  INSERT OR IGNORE INTO private_quote_window (start_at, end_at, id_missing)
+    SELECT created_at, MAX(created_at, COALESCE(closed_at, created_at)) + 1000, 1
+    FROM outbox WHERE transient = 1;
+  INSERT OR IGNORE INTO private_quote_id (id)
+    SELECT l.id FROM line_message l JOIN outbox o ON o.id = l.outbox_id WHERE o.transient = 1;
+  DELETE FROM line_message WHERE outbox_id IN (SELECT id FROM outbox WHERE transient = 1);
+
+  -- A legacy digest may have outlived its turn and inbox row. Only quotes we can prove safe may cross this cutoff.
+  UPDATE forget SET quote_rewrites_before = MAX(COALESCE(quote_rewrites_before, 0), CAST(unixepoch('subsec') * 1000 AS INTEGER))
+    WHERE EXISTS (SELECT 1 FROM quote_rewrite WHERE text IS NULL);
+  DELETE FROM quote_rewrite WHERE text IS NULL;
+  ${DROP_PRIVATE_INBOX_QUOTES};
   `,
 ];
 

@@ -5,12 +5,14 @@ import { CHANNEL_API_TIMEOUT_MS, CHANNEL_RETRY_MS, disabledChannel, plainText, s
 
 const Chat = z.object({ id: z.number().int(), type: z.string() });
 const Sender = z.object({ language_code: z.string().optional() }).optional().catch(undefined);
+const MessageId = z.number().int().positive();
 const QuotedMessage = z.object({
+  message_id: MessageId.optional().catch(undefined),
   text: z.string(),
   date: z.number().int().positive().max(Math.floor(Number.MAX_SAFE_INTEGER / 1000)),
 }).optional().catch(undefined);
 const Message = z.looseObject({
-  message_id: z.number().int().optional(),
+  message_id: MessageId.optional().catch(undefined),
   date: z.number(),
   chat: Chat,
   from: Sender,
@@ -51,8 +53,19 @@ function toEvent(u: Update, now: EpochMs): TelegramEvent | null {
     }
     const text = m.text ?? `[sent a ${MEDIA.find((k) => k in m) ?? "message"}]`;
     const quoted = m.reply_to_message;
-    const quote = quoted && { kind: "text" as const, text: quoted.text, at: (quoted.date * 1000) as EpochMs };
-    return { ...source, event: { kind: "message", text, ...(edited ? { edited: true as const } : {}), ...(quote ? { quote } : {}) } };
+    const quote = quoted && {
+      kind: "text" as const, text: quoted.text, at: (quoted.date * 1000) as EpochMs,
+      ...(quoted.message_id === undefined ? {} : { id: String(quoted.message_id) }),
+    };
+    return {
+      ...source,
+      event: {
+        kind: "message", text,
+        ...(m.message_id === undefined ? {} : { messageId: String(m.message_id) }),
+        ...(edited ? { edited: true } : {}),
+        ...(quote ? { quote } : {}),
+      },
+    };
   }
   const member = u.my_chat_member;
   if (member && member.chat.type === "private") {
@@ -75,6 +88,7 @@ function supportedLanguage(code: string | undefined): Language | undefined {
   }
 }
 
+const Sent = z.object({ result: z.object({ message_id: MessageId }) });
 const SendError = z.object({
   description: z.string().optional(),
   parameters: z.object({ retry_after: z.number().optional(), migrate_to_chat_id: z.number().int().negative().optional() }).optional(),
@@ -133,7 +147,11 @@ export function telegramChannel(secrets: { botToken: string; webhookSecret: stri
         }),
         signal: AbortSignal.timeout(timeoutMs),
       });
-      if (res.ok) return { kind: "sent", via: "push" };
+      if (res.ok) {
+        const sent = Sent.safeParse(await res.json().catch(() => null)).data;
+        const providerMessages = sent && [{ id: String(sent.result.message_id), position: 0 }];
+        return { kind: "sent", via: "push", ...(providerMessages && { providerMessages }) };
+      }
       const body: unknown = await res.json().catch(() => null);
       const detail = `${res.status} ${JSON.stringify(body)}`;
       if (res.status === 403) return { kind: "recipient_gone" };

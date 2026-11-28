@@ -105,8 +105,8 @@ import {
 } from "./tasks";
 import type { AdmissionChange, AdmissionCommit } from "./admission";
 import { coveredByForget, laterCutoff, newForgetCode, providerOrder, quoteAfterForget, type Claim, type ForgetCommand, type ForgetState, type ProviderOrder } from "./forget";
-import { correctSlug, correctText, correctTracked, jsonStrings, type Correction, type CorrectionSpan } from "./correct";
-import { ROUTINE_OUTBOX } from "./schema";
+import { clipCorrectedCopy, correctSlug, correctText, correctTracked, jsonStrings, legacyAgentSpans, legacyNoteSpans, type Correction, type CorrectionSpan } from "./correct";
+import { DROP_PRIVATE_INBOX_QUOTES, privateQuoteMatch, ROUTINE_OUTBOX } from "./schema";
 import { TURN, type Asked, type Batch, type BoxReplyBackfill, type BoxSession, type BoxSessionSeen, type InboxItem, type Outbound, type SeqTurn, type TurnCommit, type TurnRow } from "./turn";
 
 const REMINDER_WORDS = "kind = 'reminder' AND bookkeeping = 0";
@@ -619,21 +619,53 @@ export class AgentStore {
       if (privacy) return this.privacy(envelope, privacy, now);
       const event = envelope.event;
       const safe = event.kind === "message" && event.quote?.kind === "text"
-        ? { ...event, quote: this.incomingQuote(event.quote, forget) } : event;
+        ? { ...event, quote: this.incomingQuote(event.quote, forget, now) } : event;
       const stored = this.insertInbox(envelope.key, safe, envelope.receivedAt, now);
       if (stored === "inserted" && event.kind === "message") this.tellHeld(event.reply, now);
       return stored;
     });
   }
 
-  private incomingQuote(quote: Extract<MessageQuote, { kind: "text" }>, forget: ForgetState): MessageQuote | undefined {
-    if (!quoteAfterForget(quote.at, forget)) return undefined;
-    const rewrite = this.sql.exec<{ text: string | null }>("SELECT text FROM quote_rewrite WHERE digest = ?", quoteDigest(quote.text)).toArray()[0];
-    if (rewrite?.text === null) return undefined;
+  private privateQuote(id: string | undefined, at: EpochMs): boolean {
+    return this.sql.exec(
+      `SELECT 1 FROM (SELECT ? AS id, ? AS at) q WHERE ${privateQuoteMatch("q.id", "q.at")}`, id ?? null, at,
+    ).toArray().length > 0;
+  }
+
+  private incomingQuote(quote: Extract<MessageQuote, { kind: "text" }>, forget: ForgetState, now: EpochMs): MessageQuote | undefined {
+    if (!quoteAfterForget(quote.at, forget) || this.privateQuote(quote.id, quote.at)) return undefined;
+    if (quote.at <= now && this.sql.exec(
+      "SELECT 1 FROM outbox WHERE status = 'sending' AND transient = 1 AND created_at <= ? LIMIT 1", quote.at + 999,
+    ).toArray().length > 0) return undefined;
     const cutoff = this.sql.exec<{ quote_rewrites_before: number | null }>("SELECT quote_rewrites_before FROM forget").one().quote_rewrites_before;
-    // Provider copies predate a correction, and may contain text the local post-correction history no longer has.
-    if (cutoff === null || quote.at > cutoff) return quote;
-    return rewrite ? { ...quote, text: rewrite.text } : undefined;
+    if (cutoff === null) return quote;
+
+    if (quote.id !== undefined) {
+      const sent = this.sql.exec<{ texts: string }>(
+        "SELECT texts FROM outbox WHERE telegram_message_id = ? AND status = 'sent' AND transient = 0 ORDER BY created_at DESC LIMIT 1", quote.id,
+      ).toArray()[0];
+      if (sent) {
+        const text = plainText(fromJson<string[]>(sent.texts).join("\n\n"));
+        return text ? { ...quote, text } : undefined;
+      }
+    }
+    if (quote.at > cutoff) return quote;
+    const rewrite = this.sql.exec<{ text: string }>(
+      "SELECT text FROM quote_rewrite WHERE digest = ? AND text IS NOT NULL", quoteDigest(quote.text),
+    ).toArray()[0];
+    if (rewrite) return { ...quote, text: rewrite.text };
+
+    const copies = this.sql.exec<{ texts: string }>(
+      `SELECT texts FROM outbox WHERE status = 'sent' AND transient = 0
+       AND closed_at >= ? AND created_at <= ?`, quote.at, quote.at + 999,
+    );
+    for (const { texts } of copies) {
+      if (plainText(fromJson<string[]>(texts).join("\n\n")) === quote.text) return quote;
+    }
+    const personCopy = this.sql.exec(
+      "SELECT 1 FROM turn WHERE role = 'person' AND transient = 0 AND at = ? AND text = ? LIMIT 1", quote.at, quote.text,
+    ).toArray().length > 0;
+    return personCopy ? quote : undefined;
   }
 
   private insertInbox(key: EventKey, event: AgentEvent, receivedAt: EpochMs, readyAt: EpochMs): "inserted" | "duplicate" {
@@ -654,6 +686,11 @@ export class AgentStore {
     if (!agent) return null;
     return this.tx(() => {
       this.expireCatchUp("processing", now);
+      const interrupted = this.sql.exec(
+        `INSERT OR IGNORE INTO private_quote_window (start_at, end_at, id_missing)
+         SELECT created_at, MAX(created_at, ?), 1 FROM outbox WHERE status = 'sending' AND transient = 1`, now,
+      ).rowsWritten;
+      if (interrupted > 0) this.sql.exec(DROP_PRIVATE_INBOX_QUOTES);
       const inFlight = this.sql
         .exec<InboxCols>("SELECT event_key, payload, attempts, received_at, catch_up FROM inbox WHERE status = 'processing' ORDER BY seq")
         .toArray()
@@ -771,14 +808,15 @@ export class AgentStore {
     const item = toInboxItem(r);
     const e = item.event;
     if (e.kind !== "message" || e.quote === undefined) return item;
-    const quote = e.quote.kind === "reference" ? this.lineMessageQuote(e.quote.id) : e.quote;
+    const quote = e.quote.kind === "text" ? e.quote : this.lineMessageQuote(e.quote.id);
     return { ...item, event: { ...e, quote: quote && quoteAfterForget(quote.at, this.forget()) ? quote : undefined } };
   }
 
   private lineMessageQuote(id: string) {
     const r = this.sql
       .exec<{ texts: string; position: number; created_at: EpochMs }>(
-        `SELECT o.texts, l.position, l.created_at FROM line_message l JOIN outbox o ON o.id = l.outbox_id WHERE l.id = ?`,
+        `SELECT o.texts, l.position, l.created_at FROM line_message l JOIN outbox o ON o.id = l.outbox_id WHERE l.id = ? AND o.transient = 0
+         AND NOT EXISTS (SELECT 1 FROM private_quote_id WHERE id = l.id)`,
         id,
       )
       .toArray()[0];
@@ -1075,10 +1113,12 @@ export class AgentStore {
         this.sql.exec("UPDATE agent SET status = ?, status_at = ?", commit.reachability.status, commit.reachability.at);
       }
       if (commit.transient) {
-        this.blockQuotes([
-          ...commit.turns.filter((turn) => turn.role === "person").map((turn) => turn.text),
-          ...(commit.outbound ? [plainText(commit.outbound.texts.join("\n\n"))] : []),
-        ]);
+        const messages = this.sql.exec<{ at: number; id: string | null }>(
+          `SELECT received_at AS at, json_extract(payload, '$.messageId') AS id FROM inbox
+           WHERE kind = 'message' AND event_key IN (SELECT value FROM json_each(?))`, JSON.stringify(commit.batchKeys),
+        );
+        for (const { at, id } of messages) this.blockQuoteWindow(Math.min(at, now), Math.max(at, now), id === null ? [] : [id]);
+        this.sql.exec(DROP_PRIVATE_INBOX_QUOTES);
       }
       if (commit.outbound) {
         const o = commit.outbound;
@@ -1112,15 +1152,11 @@ export class AgentStore {
     });
   }
 
-  private blockQuotes(texts: readonly string[]): void {
-    for (const text of new Set(texts)) {
-      this.sql.exec("INSERT INTO quote_rewrite (digest) VALUES (?) ON CONFLICT (digest) DO UPDATE SET text = NULL, expires_at = NULL", quoteDigest(text));
-      this.sql.exec("UPDATE quote_rewrite SET text = NULL, expires_at = NULL WHERE text = ?", text);
-    }
+  private blockQuoteWindow(start: number, end: number, ids: readonly string[]): void {
+    for (const id of ids) this.sql.exec("INSERT OR IGNORE INTO private_quote_id (id) VALUES (?)", id);
     this.sql.exec(
-      `UPDATE inbox SET payload = json_remove(payload, '$.quote')
-       WHERE CASE WHEN json_valid(payload) THEN json_extract(payload, '$.quote.text') END IN (SELECT value FROM json_each(?))`,
-      JSON.stringify(texts),
+      "INSERT OR IGNORE INTO private_quote_window (start_at, end_at, id_missing) VALUES (?, ?, ?)",
+      start, end, ids.length === 0 ? 1 : 0,
     );
   }
 
@@ -1138,7 +1174,11 @@ export class AgentStore {
     const spans = {
       person: Infinity, send: TURN.maxTextChars, late: TURN.maxLateNoticeChars, plan: TASKS.maxPlanChars, erase: Infinity,
     } satisfies Record<CorrectionSpan["kind"], number>;
-    const rewrite = (text: string, kind: CorrectionSpan["kind"]) => replace(text, spans[kind]);
+    const rewrite = (record: boolean) => (text: string, kind: CorrectionSpan["kind"]): string => {
+      if (!record) return replace(text, spans[kind]);
+      const next = correctText(text, c);
+      return next !== text && next.length > spans[kind] ? clipCorrectedCopy(next, spans[kind]) : next;
+    };
 
     const updates: (() => void)[] = [];
     const quoteRewrites = new Map<string, string>();
@@ -1180,68 +1220,76 @@ export class AgentStore {
       return v;
     });
 
-    const turns = this.sql.exec<{ seq: number; role: TurnRow["role"]; text: string; transient: number; correction_spans: string | null; legacy_plan: number }>(
-      `SELECT t.seq, t.role, t.text, t.transient, t.correction_spans,
+    const legacyParts = new Map<string, readonly CorrectionSpan[]>();
+    const partKey = (eventKey: string, text: string) => JSON.stringify([eventKey, text]);
+    const turns = this.sql.exec<{
+      seq: number; role: TurnRow["role"]; text: string; event_key: string; transient: number;
+      correction_spans: string | null; legacy_plan: number; pending: number;
+    }>(
+      `SELECT t.seq, t.role, t.text, t.event_key, t.transient, t.correction_spans,
          CASE WHEN t.correction_spans IS NULL AND t.role = 'agent' THEN EXISTS (
            SELECT 1 FROM proposal p JOIN outbox o ON o.id = p.outbox_id
-           WHERE o.event_key = t.event_key AND o.created_at = t.at AND NOT EXISTS (
-             SELECT 1 FROM turn later WHERE later.role = 'agent' AND later.event_key = t.event_key AND later.at = t.at AND later.seq > t.seq
-           )
-         ) ELSE 0 END AS legacy_plan
-       FROM turn t
-       WHERE t.correction_spans IS NOT NULL OR (
-         t.role = 'person' AND EXISTS (
-           SELECT 1 FROM inbox WHERE inbox.event_key = t.event_key AND inbox.kind = 'message'
-             AND json_extract(inbox.payload, '$.redacted') IS NULL
+           WHERE o.event_key = t.event_key AND p.text = t.text
+         ) ELSE 0 END AS legacy_plan,
+         EXISTS (SELECT 1 FROM outbox o WHERE o.event_key = t.event_key AND o.status IN ('pending', 'sending')) AS pending
+       FROM turn t LEFT JOIN inbox i ON i.event_key = t.event_key
+       WHERE t.correction_spans IS NOT NULL OR t.role IN ('agent', 'note') OR (
+         t.role = 'person' AND (
+           (i.kind = 'message' AND json_extract(i.payload, '$.redacted') IS NULL) OR
+           (i.event_key IS NULL AND t.text NOT GLOB '[[]tapped Accept on plan *]' AND
+             t.text NOT IN ('[agreed to the privacy notice]', '[chose to use their key as a backup]'))
          )
-       ) OR (
-         t.role = 'agent' AND t.event_key NOT GLOB 'wake:*' AND t.event_key NOT GLOB 'checkin:*'
-       )`,
+       ) ORDER BY t.seq`,
     );
     for (const row of turns) {
-      // Legacy reminder and check-in replies can have a code-written prefix without recorded boundaries.
-      const legacyKind = row.role === "person" ? "person" : row.legacy_plan || row.text.length > TURN.maxTextChars ? "plan" : "send";
-      const parts: readonly CorrectionSpan[] = row.correction_spans === null
-        ? [{ kind: legacyKind, start: 0, length: row.text.length }]
-        : fromJson<CorrectionSpan[]>(row.correction_spans);
-      const next = correctTracked(row.text, parts, rewrite);
+      let parts: readonly CorrectionSpan[];
+      if (row.correction_spans !== null) {
+        parts = fromJson<CorrectionSpan[]>(row.correction_spans);
+      } else if (row.role === "person") {
+        parts = [{ kind: "person", start: 0, length: row.text.length }];
+      } else {
+        parts = row.role === "note" ? legacyNoteSpans(row.text, row.event_key) : legacyAgentSpans(row.text, row.event_key, row.legacy_plan !== 0);
+        legacyParts.set(partKey(row.event_key, row.text), parts);
+      }
+      const next = correctTracked(row.text, parts, rewrite(row.pending === 0));
       if (next === null) updates.push(() => this.sql.exec("DELETE FROM turn WHERE seq = ?", row.seq));
       else if (next.text !== row.text) {
-        if (row.transient) updates.push(() => this.blockQuotes([next.text]));
-        else if (row.role === "person") rewriteQuote(row.text, next.text);
+        if (!row.transient && row.role === "person") rewriteQuote(row.text, next.text);
         updates.push(() => this.sql.exec(
           "UPDATE turn SET text = ?, correction_spans = ? WHERE seq = ?", next.text, JSON.stringify(next.spans), row.seq,
         ));
       }
     }
 
-    for (const row of this.sql.exec<{ id: string; texts: string; transient: number; correction_spans: string | null; event_key: string; created_at: number; line_quote: number }>(
-      `SELECT o.id, o.texts, o.transient, o.correction_spans, o.event_key, o.created_at,
-         EXISTS (SELECT 1 FROM line_message WHERE outbox_id = o.id) AS line_quote
-       FROM outbox o WHERE o.correction_spans IS NOT NULL OR o.trigger_kind = 'message'
-         OR EXISTS (SELECT 1 FROM line_message WHERE outbox_id = o.id)`,
+    for (const row of this.sql.exec<{
+      id: string; texts: string; transient: number; correction_spans: string | null; event_key: string; status: OutboxView["status"];
+    }>(
+      `SELECT id, texts, transient, correction_spans, event_key, status FROM outbox
+       WHERE correction_spans IS NOT NULL OR (privacy IS NULL AND trigger_kind IN ('message', 'choice', 'wakeup', 'checkin', 'lifecycle'))`,
     )) {
       const original = fromJson<string[]>(row.texts);
       const parts = row.correction_spans === null ? null : fromJson<CorrectionSpan[][]>(row.correction_spans);
+      const edit = rewrite(row.status === "sent" || row.status === "dropped");
       const revised = original.map((text, i) => {
-        if (parts !== null) return correctTracked(text, parts[i], rewrite);
+        if (parts !== null) return correctTracked(text, parts[i], edit);
         if (correctText(text, c) === text) return { text, spans: [] };
-        const legacy = this.sql.exec(
-          `SELECT 1 FROM turn WHERE event_key = ? AND at = ? AND role = 'agent' AND text = ?
-           AND event_key NOT GLOB 'wake:*' AND event_key NOT GLOB 'checkin:*' LIMIT 1`, row.event_key, row.created_at, text,
-        ).toArray().length > 0;
-        if (legacy) return correctTracked(text, [{ kind: "send", start: 0, length: text.length }], rewrite);
-        return row.line_quote ? null : { text, spans: [] };
+        const legacy = legacyParts.get(partKey(row.event_key, text));
+        if (legacy !== undefined) return correctTracked(text, legacy, edit);
+        const lead = Object.values(NOTICES).find((n) => text.startsWith(n.catchUp + "\n"));
+        if (lead) {
+          const start = lead.catchUp.length + 1;
+          const rest = legacyParts.get(partKey(row.event_key, text.slice(start)));
+          if (rest) return correctTracked(text, rest.map((span) => ({ ...span, start: span.start + start })), edit);
+        }
+        return null;
       });
       const next = revised.filter((part) => part !== null);
       const texts = JSON.stringify(next.map((part) => part.text));
       if (texts === row.texts) continue;
-      if (next.length === original.length) {
-        const before = plainText(original.join("\n\n"));
-        const after = plainText(next.map((part) => part.text).join("\n\n"));
-        if (row.transient) updates.push(() => this.blockQuotes([after]));
-        else rewriteQuote(before, after);
-      } else {
+      if (!row.transient && next.length > 0) {
+        rewriteQuote(plainText(original.join("\n\n")), plainText(next.map((part) => part.text).join("\n\n")));
+      }
+      if (next.length !== original.length) {
         updates.push(() => {
           let position = 0;
           for (const [previous, part] of revised.entries()) {
@@ -1840,12 +1888,21 @@ export class AgentStore {
         ).rowsWritten > 0;
         if (done) this.sql.exec("DELETE FROM saved_item");
       }
-      const marked = this.sql.exec<{ transient: number }>(
-        "UPDATE outbox SET status = 'sent', via = ?, closed_at = ? WHERE id = ? AND status = 'sending' RETURNING transient", via, now, id,
+      const marked = this.sql.exec<{ transient: number; created_at: number }>(
+        "UPDATE outbox SET status = 'sent', via = ?, closed_at = ? WHERE id = ? AND status = 'sending' RETURNING transient, created_at", via, now, id,
       ).toArray()[0];
-      if (marked?.transient === 0) {
-        for (const m of providerMessages) {
-          this.sql.exec("INSERT OR IGNORE INTO line_message (id, outbox_id, position, created_at) VALUES (?, ?, ?, ?)", m.id, id, m.position, now);
+      if (marked?.transient === 1) {
+        this.blockQuoteWindow(marked.created_at, Math.max(marked.created_at, now), providerMessages.map((m) => m.id));
+        this.sql.exec(DROP_PRIVATE_INBOX_QUOTES);
+      } else if (marked && providerMessages.length > 0) {
+        const channel = this.agent()?.identity.channel;
+        if (channel === "telegram") {
+          this.sql.exec("UPDATE outbox SET telegram_message_id = ? WHERE id = ?", providerMessages[0].id, id);
+        }
+        if (channel === "line") {
+          for (const m of providerMessages) {
+            this.sql.exec("INSERT OR IGNORE INTO line_message (id, outbox_id, position, created_at) VALUES (?, ?, ?, ?)", m.id, id, m.position, now);
+          }
         }
       }
       this.sql.exec("UPDATE outbox SET reply_token = NULL, reply_expires = NULL WHERE id = ? AND saved_item IS NOT NULL", id);
@@ -1857,6 +1914,17 @@ export class AgentStore {
    * Each delivery write names the state it expects the row in: `pending` before a send, `sending` after one. A row a forget
    * dropped meanwhile is in neither, so a late result can't put it back in the queue or block the channel.
    */
+  blockUnconfirmedQuote(id: OutboxId, now: EpochMs): void {
+    this.tx(() => {
+      const row = this.sql.exec<{ created_at: number }>(
+        "SELECT created_at FROM outbox WHERE id = ? AND status = 'sending' AND transient = 1", id,
+      ).toArray()[0];
+      if (!row) return;
+      this.blockQuoteWindow(row.created_at, Math.max(row.created_at, now), []);
+      this.sql.exec(DROP_PRIVATE_INBOX_QUOTES);
+    });
+  }
+
   reschedule(id: OutboxId, readyAt: EpochMs, expect: "pending" | "sending"): void {
     this.sql.exec("UPDATE outbox SET status = 'pending', ready_at = ? WHERE id = ? AND status = ?", readyAt, id, expect);
   }
@@ -2640,7 +2708,7 @@ export class AgentStore {
     this.sql.exec("UPDATE memory SET summary = '', through_turn_seq = 0, compaction_failures = 0, compaction_retry_at = 0");
     this.sql.exec("DELETE FROM inbox WHERE kind IN ('wakeup', 'checkin')");
     this.sql.exec("UPDATE inbox SET payload = '{}' WHERE status IN ('done', 'failed')");
-    this.sql.exec("UPDATE outbox SET texts = '[]', correction_spans = NULL, choice = NULL, reply_token = NULL, reply_expires = NULL, event_key = 'forgotten' WHERE status IN ('sent', 'dropped')");
+    this.sql.exec("UPDATE outbox SET texts = '[]', correction_spans = NULL, choice = NULL, reply_token = NULL, reply_expires = NULL, telegram_message_id = NULL, event_key = 'forgotten' WHERE status IN ('sent', 'dropped')");
     this.sql.exec("DELETE FROM line_message WHERE outbox_id IN (SELECT id FROM outbox WHERE status IN ('sent', 'dropped'))");
     this.sql.exec("DELETE FROM wakeup WHERE origin != 'person'");
     this.sql.exec("DELETE FROM proposal");
@@ -2799,6 +2867,8 @@ export class AgentStore {
          WHERE CASE WHEN json_valid(payload) THEN json_type(payload, '$.quote') END IS NOT NULL`,
       );
       this.sql.exec("DELETE FROM quote_rewrite");
+      this.sql.exec("DELETE FROM private_quote_id");
+      this.sql.exec("DELETE FROM private_quote_window");
       this.sql.exec("DELETE FROM box_session");
       if (checkin && mayspend(this.admission())) this.insertWakeup(checkin, "system", now);
       const reply = r.reply_token !== null && r.reply_expires !== null && r.reply_expires > now ? { token: r.reply_token, expiresAt: r.reply_expires } : undefined;

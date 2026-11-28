@@ -791,6 +791,12 @@ export function stripeChange(kit: BillingKit, o: StripeSubscriptionOpts & { read
 
 export function rewindQuoteRewrites(sql: SqlStorage): void {
   sql.exec(`
+    DROP TABLE private_quote_id;
+    DROP TABLE private_quote_window;
+    DROP INDEX turn_event_key;
+    DROP INDEX outbox_event_key;
+    DROP INDEX outbox_telegram_message;
+    ALTER TABLE outbox DROP COLUMN telegram_message_id;
     DROP TABLE quote_rewrite;
     ALTER TABLE outbox DROP COLUMN transient;
     ALTER TABLE forget DROP COLUMN quote_rewrites_before;

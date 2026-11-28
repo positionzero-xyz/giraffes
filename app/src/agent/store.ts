@@ -1058,10 +1058,20 @@ export class AgentStore {
    * Saves a turn only while its batch is still claimed: a forget that began during the turn closed the batch's rows, so
    * the turn's result is dropped whole. False when it was.
    */
-  commitTurn(commit: TurnCommit, logs: readonly LogRow[], now: EpochMs, box: Box | null = null, seen: BoxSessionSeen | null = null): boolean {
+  commitTurn(commit: TurnCommit, logs: readonly LogRow[], now: EpochMs, box: Box | null = null, boxSeen: BoxSessionSeen | null = null): boolean {
     const [firstKey] = commit.batchKeys;
     return this.tx(() => {
       if (!this.stillClaimed(commit.batchKeys)) return false;
+      const privateMessages = commit.transient ? this.sql.exec<{ key: EventKey; at: number; id: string | null; edited: number | null }>(
+        `SELECT event_key AS key, received_at AS at, json_extract(payload, '$.messageId') AS id, json_extract(payload, '$.edited') AS edited
+         FROM inbox WHERE kind = 'message' AND event_key IN (SELECT value FROM json_each(?))`, JSON.stringify(commit.batchKeys),
+      ).toArray() : [];
+      const privateEdits = new Set(privateMessages.filter((m) => m.edited === 1).map((m) => m.key));
+      const seen = privateEdits.size === 0 ? boxSeen : null;
+      if (privateEdits.size > 0) {
+        // Resuming a box session could carry the edit forward even without a turn row.
+        this.sql.exec("DELETE FROM box_session");
+      }
       if (box) this.writeBox(box);
       const outboxId = crypto.randomUUID() as OutboxId;
       const tasks = this.applyTasks(commit.tasks, commit.trigger, commit.outbound ? outboxId : null, now);
@@ -1070,6 +1080,7 @@ export class AgentStore {
       const previous = seen ? this.boxSession() : null;
       const replyBackfill: BoxReplyBackfill[] = previous && previous.id === seen?.id ? previous.replyBackfill.filter((r) => r.seq > seenSeq) : [];
       for (const t of commit.turns) {
+        if (t.role === "person" && privateEdits.has(t.eventKey)) continue;
         const { seq } = this.sql
           .exec<{ seq: number }>(
             "INSERT INTO turn (role, text, at, event_key, transient, correction_spans) VALUES (?, ?, ?, ?, ?, ?) RETURNING seq",
@@ -1116,11 +1127,7 @@ export class AgentStore {
         this.sql.exec("UPDATE agent SET status = ?, status_at = ?", commit.reachability.status, commit.reachability.at);
       }
       if (commit.transient) {
-        const messages = this.sql.exec<{ at: number; id: string | null }>(
-          `SELECT received_at AS at, json_extract(payload, '$.messageId') AS id FROM inbox
-           WHERE kind = 'message' AND event_key IN (SELECT value FROM json_each(?))`, JSON.stringify(commit.batchKeys),
-        );
-        for (const { at, id } of messages) this.blockQuoteWindow(Math.min(at, now), Math.max(at, now), id === null ? [] : [id]);
+        for (const { at, id } of privateMessages) this.blockQuoteWindow(Math.min(at, now), Math.max(at, now), id === null ? [] : [id]);
         this.sql.exec(
           `DELETE FROM inbox WHERE status = 'pending' AND kind = 'message' AND json_extract(payload, '$.edited') = 1
            AND json_extract(payload, '$.messageId') IN (SELECT id FROM private_quote_id)`,

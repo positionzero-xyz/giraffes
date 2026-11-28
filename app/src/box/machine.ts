@@ -1,7 +1,7 @@
 import type { EpochMs, Language } from "../domain";
 import { NOTICES } from "../notices";
 import type { BoxHostKind } from "./host";
-import type { BoxName } from "./names";
+import type { BoxName, BoxSetup } from "./names";
 
 export const BOX = {
   pollEveryMs: 30_000,
@@ -42,6 +42,7 @@ export type Box = {
   readonly name: BoxName;
   readonly host: BoxHostKind;
   readonly url: string;
+  readonly setup: BoxSetup | null;
   readonly stateAt: EpochMs;
   /** Set while the person's plan doesn't allow a box; the box is reclaimed then unless the plan allows one again. */
   readonly retireAt: EpochMs | null;
@@ -111,8 +112,8 @@ const GONE: Readonly<Record<ReclaimReason, BoxSay>> = { unused: "reclaimed", fai
 export const goneMessage = (b: Reclaiming, lang: Language) => boxMessage(GONE[b.reason], lang, null);
 
 function to(b: Box, status: BoxStatus, now: EpochMs): Box {
-  const { name, host, url, retireAt, image, ensureAt } = b;
-  return { name, host, url, stateAt: status.state === b.state ? b.stateAt : now, retireAt, image, ensureAt, ...status };
+  const { name, host, url, setup, retireAt, image, ensureAt } = b;
+  return { name, host, url, setup, stateAt: status.state === b.state ? b.stateAt : now, retireAt, image, ensureAt, ...status };
 }
 
 const provisioning = (attempts: number, retryAt: EpochMs): BoxStatus => ({ state: "provisioning", attempts, retryAt });
@@ -137,8 +138,8 @@ function reclaimAfterLink(reclaimAt: EpochMs, now: EpochMs): EpochMs {
 }
 
 /** `image` is what provisioning will ensure the box with. */
-export function newBox(name: BoxName, host: BoxHostKind, url: string, image: string | null, now: EpochMs): Box {
-  return { name, host, url, stateAt: now, retireAt: null, image, ensureAt: null, ...provisioning(0, now) };
+export function newBox(name: BoxName, host: BoxHostKind, url: string, setup: BoxSetup | null, image: string | null, now: EpochMs): Box {
+  return { name, host, url, setup, stateAt: now, retireAt: null, image, ensureAt: null, ...provisioning(0, now) };
 }
 
 const isLive = (b: Box): b is Live => b.state === "signed_out" || b.state === "signed_in";

@@ -11,7 +11,7 @@ import { Agent } from "../src/agent/agent";
 import { MIGRATIONS } from "../src/agent/schema";
 import type { StripeReply } from "../src/billing/stripe";
 import { loadConfig, type Env } from "../src/config";
-import type { AgentKey, EpochMs } from "../src/domain";
+import { personAgentKey, type AgentKey, type EpochMs } from "../src/domain";
 import { NOTICES } from "../src/notices";
 import {
   billingOn,
@@ -34,6 +34,8 @@ import {
   type BillingKit,
   turn,
   type MemoryLedger,
+  ticketOpens,
+  type FakeBox,
 } from "./testkit";
 
 const NOTICE = NOTICES.en;
@@ -45,7 +47,7 @@ const LINK = /^https:\/\/([a-z0-9-]+)\.box\.test\/signin#t=(\d+)\.([A-Za-z0-9_-]
 
 describe("names and secrets", () => {
   test("the box token and the sign-in ticket match the contract's test vector", async () => {
-    const token = await boxToken("test-secret-0123456789abcdef", "gbox-0123456789ab" as BoxName);
+    const token = await boxToken("test-secret-0123456789abcdef", "gbox-0123456789ab" as BoxName, null);
     expect(token).toBe("b-UiaAiUIgin1zs4CJbKAY68m8rphXVQwWrWHSMO2U4");
     expect(await signinTicket(token, 1790000000000 as EpochMs)).toBe("1790000000000.AA1PzFmYf_4obmGHsfd0634YPiMbVDnmjYWbmYI62kM");
   });
@@ -675,12 +677,12 @@ describe("box client", () => {
   });
 });
 
-async function linkIn(text: string, user: string, sentAt: EpochMs) {
+/** `valid`: the link's ticket opens the box under the key the box holds. */
+async function linkIn(text: string, user: string, sentAt: EpochMs, box: FakeBox) {
   const m = text.match(LINK);
   if (!m) throw new Error(`no sign-in link in ${JSON.stringify(text)}`);
-  const [, name, exp, mac] = m;
-  const expected = await signinTicket(await boxToken(BOX_SECRET, name as BoxName), Number(exp) as EpochMs);
-  return { name, exp: Number(exp), valid: expected === `${exp}.${mac}`, expiresInMs: Number(exp) - sentAt, user };
+  const [link, name, exp] = m;
+  return { name, exp: Number(exp), valid: await ticketOpens(link, box.keys, sentAt), expiresInMs: Number(exp) - sentAt, user };
 }
 
 describe("a turn on the person's own Claude Code session", () => {
@@ -975,7 +977,7 @@ describe("connecting a Claude plan", () => {
 
     const [setup, link, ...rest] = await c.received();
     expect([setup, rest]).toEqual([say("setting_up"), []]);
-    const l = await linkIn(link, "ann", local("2099-11-04T10:00"));
+    const l = await linkIn(link, "ann", local("2099-11-04T10:00"), box);
     expect({ name: l.name, valid: l.valid, expiresInMs: l.expiresInMs }).toEqual({ name: await box.nameOf("ann"), valid: true, expiresInMs: 30 * 60_000 });
     expect((await c.snapshot()).box).toEqual({ host: "fly", state: "signed_out" });
     expect(ledger.boxes.get("p:dev:ann")).toEqual({ name: await box.nameOf("ann"), host: "fly" });
@@ -1002,7 +1004,7 @@ describe("connecting a Claude plan", () => {
 
     const sent = await c.received();
     expect(sent).toHaveLength(1);
-    expect((await linkIn(sent[0], "bo", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect((await linkIn(sent[0], "bo", local("2099-11-04T10:00"), box)).valid).toBe(true);
     expect(box.ensureCalls).toHaveLength(2);
     expect(box.created.size).toBe(1);
   });
@@ -1036,7 +1038,7 @@ describe("connecting a Claude plan", () => {
     await c.say("/claude");
     const [again, link] = await c.received();
     expect(again).toBe(say("setting_up"));
-    expect((await linkIn(link, "di", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect((await linkIn(link, "di", local("2099-11-04T10:00"), box)).valid).toBe(true);
     expect(ledger.boxes.has("p:dev:di")).toBe(true);
   });
 
@@ -1219,7 +1221,7 @@ describe("connecting a Claude plan", () => {
     expect(await c.received()).toEqual(["Hello from your own plan."]);
     expect(box.parses).toEqual([
       {
-        authorization: `Bearer ${await boxToken(BOX_SECRET, await box.nameOf("fin"))}`,
+        authorization: `Bearer ${box.keys.get(await box.nameOf("fin"))}`,
         user: expect.stringContaining("Person: hello"),
         agent: {
           append: expect.stringContaining("You are Giraffe"),
@@ -1277,7 +1279,7 @@ describe("connecting a Claude plan", () => {
     expect(rest).toEqual([]);
     expect(notice.startsWith(say("signed_out_link").split("\n")[0])).toBe(true);
     expect(notice).not.toMatch(/answering/);
-    expect((await linkIn(notice, "gus", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect((await linkIn(notice, "gus", local("2099-11-04T10:00"), box)).valid).toBe(true);
     expect((await c.snapshot()).box?.state).toBe("signed_out");
 
     await c.say("again");
@@ -1457,7 +1459,7 @@ describe("connecting a Claude plan", () => {
 
     const [notice, ...rest] = await c.received();
     expect(notice.startsWith(say("signed_out_backup").split("\n")[0])).toBe(true);
-    expect((await linkIn(notice, "hob", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect((await linkIn(notice, "hob", local("2099-11-04T10:00"), box)).valid).toBe(true);
     expect(rest).toEqual(["From your key."]);
   });
 
@@ -1888,6 +1890,35 @@ describe("confirming disk deletion on automatic reclaim", () => {
 
   const hour = 60 * 60_000;
 
+  test("account erase backs off when its static box never answers", async () => {
+    const user = "erase-dead-static";
+    const host = staticHost({ url: "http://static.box.test", appPrefix: "gbox-" });
+    const requests: string[] = [];
+    const client = boxClient(async (url) => {
+      requests.push(new URL(url).pathname);
+      throw new TypeError("box unreachable");
+    });
+    const onlyFor = personAgentKey({ channel: "dev", channelUserId: user });
+    const deps = { host, client, secret: BOX_SECRET, onlyFor, maxBoxes: 10 };
+    const person = await startReclaim(user, null, deps, { signedIn: true });
+    const { c } = person;
+    const startedAt = c.clock.now();
+
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erasure confirmation");
+    await c.tap(confirm.data);
+    expect(requests).toEqual(["/health"]);
+    expect(await c.received()).toEqual([ACCOUNT_COPY.en.confirm]);
+
+    await driveRetirement(person, deps, startedAt + 2 * hour, true);
+    const afterTwoHours = requests.length;
+    await driveRetirement(person, deps, startedAt + 3 * hour, true);
+    expect(requests.length, "box requests over three hours").toBe(10);
+    expect(requests.length - afterTwoHours, "box requests in the third hour").toBe(1);
+    expect(await c.received()).toEqual([]);
+  });
+
   test.each([
     {
       language: "en", channel: undefined,
@@ -2118,7 +2149,12 @@ describe("confirming disk deletion on automatic reclaim", () => {
     expect(await slot()).not.toBeNull();
   });
 
-  test.each([false, true])("removal after setup fails on the last alarm step frees the slot (restart: %s)", async (restart) => {
+  test.each([
+    { who: "person", restart: false },
+    { who: "person", restart: true },
+    { who: "operator", restart: false },
+    { who: "operator", restart: true },
+  ] as const)("removal by the $who after setup fails on the last alarm step frees the slot (restart: $restart)", async ({ who, restart }) => {
     let advanceClock = (_ms: number) => {};
     let tries = 0;
     const fly = flyReclaim({
@@ -2130,21 +2166,33 @@ describe("confirming disk deletion on automatic reclaim", () => {
         throw new Error("Fly timed out");
       },
     });
-    const person = await startReclaim("remove-after-last-step-" + restart, null, fly.deps);
+    const person = await startReclaim(`remove-after-last-step-${who}-${restart}`, null, fly.deps);
     const { c, ledger } = person;
     advanceClock = (ms) => c.clock.set((c.clock.now() + ms) as EpochMs);
     await c.alarm();
     expect(tries).toBe(3);
     expect((await c.snapshot()).box?.state).toBe("reclaiming");
     expect(fly.boxRequests).toEqual([]);
+    expect(fly.destructive()).toEqual([]);
 
-    await c.say("/claude remove");
-    expect(await c.received()).toEqual([say("removing")]);
+    if (who === "operator") {
+      await c.remove();
+    } else {
+      await c.say("/claude remove");
+      expect(await c.received()).toEqual([say("removing")]);
+    }
     await driveRetirement(person, fly.deps, c.clock.now() + 2 * 60_000, restart);
     expect(fly.destructive()).toEqual(["DELETE /v1/apps/" + app + "/machines/machine_1", volumeDelete, appDelete]);
-    expect(await c.received()).toEqual([say("removed")]);
+    const diskCheck = fly.requests.indexOf(volumeList, fly.requests.indexOf(volumeDelete) + 1);
+    expect(diskCheck).toBeGreaterThan(fly.requests.indexOf(volumeDelete));
+    expect(diskCheck).toBeLessThan(fly.requests.indexOf(appDelete));
+    expect(await c.received()).toEqual(who === "operator" ? [] : [say("removed")]);
     expect((await c.snapshot()).box).toBeNull();
     expect(ledger.boxes.has(c.agent)).toBe(false);
+    if (who === "person") {
+      await c.say("/claude");
+      expect(await c.received()).toEqual([say("setting_up")]);
+    }
   });
 
   test("a saved retirement from before the failed-setup flag still requires a wipe", async () => {
@@ -2155,7 +2203,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
     const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
     await runInDurableObject(stub, (_agent, state) => {
       state.storage.kv.put("box:retirement", {
-        kind: "locate", box: { name: app, host: "fly", url: deps.host.urlOf(app), incarnation: null },
+        kind: "locate", box: { name: app, host: "fly", url: deps.host.urlOf(app), setup: null, incarnation: null },
       } satisfies EraseBox);
     });
 
@@ -2483,6 +2531,7 @@ describe("a box row written by the code before reclaim reasons", () => {
       );
       sql.exec(MIGRATIONS[MIGRATIONS.findIndex((m) => m.includes("CASE state WHEN 'failed' THEN 'reclaiming'"))]);
       sql.exec("ALTER TABLE box ADD COLUMN volume TEXT");
+      sql.exec("ALTER TABLE box ADD COLUMN setup TEXT");
     });
 
     await c.alarm();
@@ -2539,7 +2588,7 @@ describe("reclaiming a box nobody signed in to", () => {
     await c.say("/claude");
     const [again, link] = await c.received();
     expect(again).toBe(say("setting_up"));
-    expect((await linkIn(link, "lea", local("2099-11-06T10:00"))).valid).toBe(true);
+    expect((await linkIn(link, "lea", local("2099-11-06T10:00"), box)).valid).toBe(true);
     expect(ledger.boxes.has("p:dev:lea")).toBe(true);
   });
 

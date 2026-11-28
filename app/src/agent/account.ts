@@ -1,7 +1,7 @@
 import type { AgentKey, EpochMs, ForgetEpoch, Identity, InviteCode, Language, OutboxId, ReplyHandle } from "../domain";
 import type { CheckoutId } from "../billing/stripe";
 import type { SubscriptionId } from "../billing/plan";
-import type { BoxName } from "../box/names";
+import type { BoxName, BoxSetup } from "../box/names";
 import type { BoxHostKind, FlyDiskRetirement } from "../box/host";
 
 export const ACCOUNT_CHALLENGE_MS = 15 * 60_000;
@@ -21,6 +21,8 @@ export type EraseBoxReference = {
   readonly name: BoxName;
   readonly host: BoxHostKind;
   readonly url: string | null;
+  /** Absent in records saved before setups existed, which were all made for name-only keys. */
+  readonly setup: BoxSetup | null;
   readonly incarnation: string | null;
   /** Setup began after every sign-in link for this name and its grace ran out, so no link opened it. Older records may have served the person. */
   readonly neverServed?: true;

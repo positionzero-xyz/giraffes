@@ -651,6 +651,9 @@ export const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE box ADD COLUMN setup TEXT;
   `,
+  `
+  ALTER TABLE wakeup ADD COLUMN time_zone TEXT;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

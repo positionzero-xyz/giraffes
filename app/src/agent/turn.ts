@@ -99,6 +99,10 @@ const ActionSchema = z.discriminatedUnion("type", [
       .enum(REPEATS)
       .nullish()
       .describe("Only for a routine the person asked for: daily, weekdays (Monday to Friday) or weekly (the weekday of at). Omit for a one-off."),
+    timeZone: z.string().nullable()
+      .describe("IANA zone of at, such as Europe/London. Omit unless the person specified a zone for this reminder.")
+      .transform((zone) => zone && /^[A-Za-z]/.test(zone) ? parseTimeZone(zone) : null)
+      .optional(),
   }),
   z.object({ type: z.literal("cancel_wakeup"), key: Slug }),
   z.object({ type: z.literal("remember"), note: z.string().min(1).describe(atMostBytes(TURN.maxNoteBytes)) }),
@@ -120,7 +124,7 @@ const TaskOpSchema = z.object({
 });
 
 const AGENT_ACTIONS: Readonly<Partial<Record<z.infer<typeof ActionSchema>["type"], string>>> = {
-  schedule_wakeup: "Schedule a reminder, or a routine the person asked for, in their local time.",
+  schedule_wakeup: "Schedule a reminder or a routine the person asked for.",
   cancel_wakeup: "Cancel a pending wake-up by its key. Cancelling a routine's key ends the routine.",
   remember: "Keep a durable note about the person that will matter in a week.",
   set_locale: "Set the person's IANA time zone and the language of code-written notices.",
@@ -133,8 +137,8 @@ type ObjectSchema = JsonSchema & { readonly properties: Record<string, unknown>;
 
 // Plain JSON Schema, not the strict-mode form the parse routes need: an optional field stays optional for a tool call.
 function toolSchema(o: z.ZodObject): ObjectSchema {
-  const { $schema: _, ...schema } = z.toJSONSchema(o) as ObjectSchema;
-  return schema;
+  const { $schema: _, ...schema } = z.toJSONSchema(o, { io: "input" }) as ObjectSchema;
+  return { ...schema, additionalProperties: false };
 }
 
 const TASK_TOOL = "task";
@@ -265,8 +269,9 @@ function renderEvent(e: AgentEvent, tz: TimeZone, askForLateNotice: boolean): st
           : "The person chose to use their own key as a backup.";
     case "wakeup": {
       const asked = e.origin === "person" ? " The person asked for this reminder." : "";
+      const zone = e.timeZone ? ` ${e.timeZone}` : "";
       const repeats = e.repeat ? ` It repeats ${e.repeat.every} at ${e.repeat.anchor.slice(11)}, and the next one is already scheduled.` : "";
-      return `Your wake-up "${e.key}" fired: ${e.note}. Due ${human(e.dueAt, tz)}.${asked}${repeats}${lateLine(e, tz, askForLateNotice)}`;
+      return `Your wake-up "${e.key}" fired: ${e.note}. Due ${human(e.dueAt, e.timeZone ?? tz)}${zone}.${asked}${repeats}${lateLine(e, e.timeZone ?? tz, askForLateNotice)}`;
     }
     case "checkin":
       return `Daily check-in.${lateLine(e, tz, askForLateNotice)}`;
@@ -279,8 +284,9 @@ function renderPending(w: PendingWakeup, tz: TimeZone): string {
   switch (w.kind) {
     case "reminder": {
       const asked = w.origin === "person" ? " (asked for by the person)" : "";
+      const zone = w.timeZone ? ` ${w.timeZone}` : "";
       const repeats = w.repeat ? ` · repeats ${w.repeat.every}` : "";
-      return `- ${w.key} · ${human(w.dueAt, tz)}${repeats} · ${w.note}${asked}`;
+      return `- ${w.key} · ${human(w.dueAt, w.timeZone ?? tz)}${zone}${repeats} · ${w.note}${asked}`;
     }
     case "checkin":
       return `- daily check-in at ${human(w.dueAt, tz)}`;
@@ -649,7 +655,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
       case "schedule_wakeup": {
         const origin = wakeupOrigin(first.kind, a.asked);
         const note = fitBytes(a.note, TURN.maxNoteBytes, actionLabel(a));
-        const admission = admitReminder({ key: a.key, at: a.at, note, origin, repeat: a.repeat ?? null }, { now: view.now, tz: view.tz, pending });
+        const admission = admitReminder({ key: a.key, at: a.at, note, origin, repeat: a.repeat ?? null, timeZone: a.timeZone ?? undefined }, { now: view.now, tz: view.tz, pending });
         if (admission.ok) {
           adds.set(admission.wakeup.key, { ...admission.wakeup, task: taskOf(view, tasks, a.task) });
           pending.set(admission.wakeup.key, admission.wakeup);
@@ -701,7 +707,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
     view.tz === given.tz
       ? []
       : [...pending.values()]
-          .filter((w) => !adds.has(w.key))
+          .filter((w) => !adds.has(w.key) && (w.kind === "checkin" || w.timeZone === undefined))
           .map((w) => ({ key: w.key, dueAt: retime(w, given.tz, view.tz, view.now, view.checkinLocal) }));
 
   const agentTexts = [...sends];

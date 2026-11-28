@@ -298,6 +298,7 @@ describe("replies after a forget", () => {
       const completedMigration = MIGRATIONS.findIndex((m) => m.includes("ADD COLUMN completed_at"));
       storage.sql.exec("ALTER TABLE forget DROP COLUMN completed_at");
       storage.sql.exec("ALTER TABLE box DROP COLUMN setup");
+      storage.sql.exec("ALTER TABLE wakeup DROP COLUMN time_zone");
       storage.sql.exec("UPDATE forget SET cutoff_at = ?, cutoff_seq = NULL", forgetDate * 1000);
       storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(completedMigration));
       const before = Date.now();

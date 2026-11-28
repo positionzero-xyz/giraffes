@@ -34,7 +34,7 @@ export type PendingWakeup = {
   readonly note: string;
   readonly dueAt: EpochMs;
 } & (
-  | { readonly kind: "reminder"; readonly origin: "person" | "agent"; readonly task: TaskId | null; readonly bookkeeping: boolean; readonly repeat: Repeat | null }
+  | { readonly kind: "reminder"; readonly origin: "person" | "agent"; readonly task: TaskId | null; readonly bookkeeping: boolean; readonly repeat: Repeat | null; readonly timeZone?: TimeZone }
   | { readonly kind: "checkin"; readonly origin: "system" }
 );
 
@@ -55,7 +55,7 @@ export type ReminderAdmission =
   | { readonly ok: false; readonly reason: ReminderRejection };
 
 export function admitReminder(
-  req: { readonly key: string; readonly at: string; readonly note: string; readonly origin: "person" | "agent"; readonly repeat: Repeat["every"] | null },
+  req: { readonly key: string; readonly at: string; readonly note: string; readonly origin: "person" | "agent"; readonly repeat: Repeat["every"] | null; readonly timeZone?: TimeZone },
   ctx: { readonly now: EpochMs; readonly tz: TimeZone; readonly pending: ReadonlyMap<WakeupKey, NewWakeup> },
 ): ReminderAdmission {
   const key = parseWakeupKey(req.key);
@@ -63,13 +63,13 @@ export function admitReminder(
   if (key === CHECKIN_KEY) return { ok: false, reason: "reserved_key" };
   const at = parseLocalDateTime(req.at);
   if (at === null) return { ok: false, reason: "bad_time" };
-  const dueAt = fromLocal(at, ctx.tz);
+  const dueAt = fromLocal(at, req.timeZone ?? ctx.tz);
   const earliest = req.origin === "person" ? ctx.now - (ctx.now % MINUTE_MS) : ctx.now + SCHEDULE.agentMinLeadMs;
   if (dueAt < earliest) return { ok: false, reason: "past" };
   if (dueAt > ctx.now + SCHEDULE.maxHorizonMs) return { ok: false, reason: "too_far" };
   if (ctx.pending.has(key)) return { ok: false, reason: "duplicate" };
   const repeat = req.repeat === null ? null : { every: req.repeat, anchor: at };
-  return { ok: true, wakeup: { key, kind: "reminder", origin: req.origin, note: req.note, dueAt, bookkeeping: false, repeat } };
+  return { ok: true, wakeup: { key, kind: "reminder", origin: req.origin, note: req.note, dueAt, bookkeeping: false, repeat, ...(req.timeZone && { timeZone: req.timeZone }) } };
 }
 
 export function nextOccurrence(r: Repeat, after: EpochMs, tz: TimeZone): EpochMs {
@@ -100,7 +100,7 @@ export function checkinWakeup(after: EpochMs, tz: TimeZone, checkinLocal: TimeOf
   };
 }
 
-/** A reminder keeps its local wall time in the new zone; the check-in moves to its next local time there. */
+/** Retime a wake-up that follows the person's zone. */
 export function retime(w: NewWakeup, from: TimeZone, to: TimeZone, now: EpochMs, checkinLocal: TimeOfDay): EpochMs {
   return w.kind === "checkin" ? checkinWakeup(now, to, checkinLocal).dueAt : fromLocal(toLocal(w.dueAt, from), to);
 }
@@ -151,8 +151,13 @@ export function planFiring(
             task: w.task,
             bookkeeping: w.bookkeeping,
             repeat: w.repeat,
+            ...(w.timeZone && { timeZone: w.timeZone }),
           },
-          next: w.repeat && { key: w.key, kind: "reminder", origin: w.origin, note: w.note, dueAt: nextOccurrence(w.repeat, now, tz), bookkeeping: false, repeat: w.repeat },
+          next: w.repeat && {
+            key: w.key, kind: "reminder", origin: w.origin, note: w.note,
+            dueAt: nextOccurrence(w.repeat, now, w.timeZone ?? tz),
+            bookkeeping: false, repeat: w.repeat, ...(w.timeZone && { timeZone: w.timeZone }),
+          },
         });
         break;
       case "checkin": {

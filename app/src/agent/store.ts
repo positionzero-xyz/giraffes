@@ -25,7 +25,7 @@ import { dueAt, type Box, type BoxState, type ReclaimReason } from "../box/machi
 import { commandOf } from "./commands";
 import { REMINDER_ITEM, renderSavedPage, snapshotSavedItems, savedPageNotice, type SavedCursor, type SavedPage } from "./saved-items";
 import { FORGET_TEXT, type Backups, type Deleted, type Receipt } from "./forget-text";
-import type { BoxName } from "../box/names";
+import type { BoxName, BoxSetup } from "../box/names";
 import {
   assertNever,
   buttonData,
@@ -345,6 +345,7 @@ type BoxCols = {
   name: BoxName;
   host: BoxHostKind;
   url: string;
+  setup: BoxSetup | null;
   state: BoxState;
   state_at: EpochMs;
   link_sent_at: EpochMs | null;
@@ -466,7 +467,7 @@ function toInboxItem(r: InboxCols): InboxItem {
 }
 
 function toBox(r: BoxCols): Box {
-  const base = { name: r.name, host: r.host, url: r.url, stateAt: r.state_at, retireAt: r.retire_at, image: r.image, ensureAt: r.ensure_at };
+  const base = { name: r.name, host: r.host, url: r.url, setup: r.setup, stateAt: r.state_at, retireAt: r.retire_at, image: r.image, ensureAt: r.ensure_at };
   switch (r.state) {
     case "provisioning":
       return { ...base, state: r.state, attempts: r.attempts, retryAt: r.next_at ?? r.state_at };
@@ -1196,7 +1197,7 @@ export class AgentStore {
   box(): Box | null {
     const r = this.sql
       .exec<BoxCols>(
-        "SELECT name, host, url, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at, reclaim_reason, retire_at, image, ensure_at FROM box",
+        "SELECT name, host, url, setup, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at, reclaim_reason, retire_at, image, ensure_at FROM box",
       )
       .toArray()[0];
     return r ? toBox(r) : null;
@@ -1206,16 +1207,17 @@ export class AgentStore {
     const out = b.state === "signed_out" ? b : null;
     this.sql.exec("UPDATE agent SET claude_plan_at = COALESCE(claude_plan_at, ?) WHERE NOT EXISTS (SELECT 1 FROM box)", b.stateAt);
     this.sql.exec(
-      `INSERT INTO box (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at,
+      `INSERT INTO box (one, name, host, url, setup, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at,
          reclaim_reason, retire_at, image, ensure_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (one) DO UPDATE SET name = excluded.name, host = excluded.host, url = excluded.url, state = excluded.state,
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (one) DO UPDATE SET name = excluded.name, host = excluded.host, url = excluded.url, setup = excluded.setup, state = excluded.state,
          state_at = excluded.state_at, link_sent_at = excluded.link_sent_at, signin_poll_until = excluded.signin_poll_until,
          attempts = excluded.attempts, next_at = excluded.next_at, poll_at = excluded.poll_at, reclaim_at = excluded.reclaim_at,
          reclaim_reason = excluded.reclaim_reason, retire_at = excluded.retire_at, image = excluded.image, ensure_at = excluded.ensure_at`,
       b.name,
       b.host,
       b.url,
+      b.setup,
       b.state,
       b.stateAt,
       out?.linkSentAt ?? null,

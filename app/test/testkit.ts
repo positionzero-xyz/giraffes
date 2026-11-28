@@ -812,6 +812,7 @@ export function rewindForgetCommandSchema(sql: SqlStorage): void {
     ALTER TABLE outbox DROP COLUMN privacy;
     DROP TABLE forget;
     ALTER TABLE box DROP COLUMN volume;
+    ALTER TABLE box DROP COLUMN setup;
     DROP TABLE IF EXISTS line_message;
   `);
   const foundation = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE forget ("));

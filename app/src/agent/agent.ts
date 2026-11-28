@@ -42,7 +42,7 @@ import {
   type Probe,
   type ProbeStep,
 } from "../box/machine";
-import { boxSessionOwner, boxToken, signinTicket, signinUrl, type BoxName, type BoxToken } from "../box/names";
+import { boxSessionOwner, boxToken, newBoxSetup, signinTicket, signinUrl, type BoxName, type BoxToken } from "../box/names";
 import { CHANNEL_RETRY_MS, makeChannels, whileWorking, type ChannelRegistry } from "../channels/channel";
 import { commandOf, type Command } from "./commands";
 import { loadConfig, OWN_CAP_RANGE_USD, type BillingConfig, type BoxConfig, type Env, type OperatorChat } from "../config";
@@ -550,7 +550,7 @@ export class Agent extends DurableObject<Env> {
       let current = this.#erasure();
       if (current?.kind === "starting") {
         const stored = this.#store.box();
-        const box = stored && { name: stored.name, host: stored.host, url: stored.url, incarnation: this.#store.boxVolume() };
+        const box = stored && { name: stored.name, host: stored.host, url: stored.url, setup: stored.setup, incarnation: this.#store.boxVolume() };
         current = {
           ...current, kind: "preparing", box, checkouts: this.#store.checkoutIds(),
           startedAt: this.#deps.clock.now(), diagnosedAt: this.#deps.clock.now(),
@@ -729,8 +729,9 @@ export class Agent extends DurableObject<Env> {
     if (registered && registered.deleted_at !== null && (!stored || stored.name === registered.name)) {
       return { kind: "reclaimed", host: registered.host };
     }
+    // A claim with no box row never ran a setup's ensure, so no machine holds a setup's key.
     const reference: EraseBoxReference | null = stored ?? (registered && registered.deleted_at === null
-      ? { name: registered.name, host: registered.host, url: null, incarnation: null }
+      ? { name: registered.name, host: registered.host, url: null, setup: null, incarnation: null }
       : null);
     if (!reference) return { kind: "none" };
     return this.#resolveAccountBox(person, reference);
@@ -776,7 +777,7 @@ export class Agent extends DurableObject<Env> {
       }
       case "wipe-static":
       case "wipe-fly": {
-        const token = await boxToken(deps.secret, box.name);
+        const token = await boxToken(deps.secret, box.name, box.setup);
         const fallback = step.kind === "wipe-fly"
           ? { kind: "relocate", box, target: step.target, resume: "wipe-fly", wipeFailures: step.wipeFailures, wipeFailedAt: step.wipeFailedAt } satisfies EraseBox
           : step;
@@ -1663,7 +1664,7 @@ export class Agent extends DurableObject<Env> {
     if (!planAllowsBox(this.#plan(view.now).kind)) return this.#boxReply(view, agent, null, { box: null, say: "not_in_plan" });
     const current = this.#store.box();
     if (current?.state === "signed_out") {
-      const health = await deps.client.health(current.url, await boxToken(deps.secret, current.name));
+      const health = await deps.client.health(current.url, await boxToken(deps.secret, current.name, current.setup));
       if (health.kind === "up" && health.signedIn) return this.#boxReply(view, agent, deps, onConnected(current, this.#deps.clock.now()));
     }
     const now = this.#deps.clock.now();
@@ -1678,7 +1679,8 @@ export class Agent extends DurableObject<Env> {
       return this.#boxReply(view, agent, null, { box: null, say: "busy" });
     }
     if (claim === "full") return this.#boxReply(view, agent, deps, { box: null, say: "full" });
-    return this.#boxReply(view, agent, deps, { box: newBox(name, deps.host.kind, deps.host.urlOf(name), deps.host.image, now), say: "setting_up" });
+    const setup = deps.host.kind === "static" ? null : newBoxSetup();
+    return this.#boxReply(view, agent, deps, { box: newBox(name, deps.host.kind, deps.host.urlOf(name), setup, deps.host.image, now), say: "setting_up" });
   }
 
   /** The person takes their plan away: its box is removed, if there is one, and from then on their key needs no yes. */
@@ -1702,7 +1704,7 @@ export class Agent extends DurableObject<Env> {
     if (say === "retiring" && box.retireAt !== null) return boxMessage(say, a.language, null, longDate(box.retireAt, a.tz, a.language));
     if (!needsLink(say)) return boxMessage(say, a.language, null);
     const exp = (this.#deps.clock.now() + BOX.ticketForMs) as EpochMs;
-    const ticket = await signinTicket(await boxToken(deps.secret, box.name), exp);
+    const ticket = await signinTicket(await boxToken(deps.secret, box.name, box.setup), exp);
     return boxMessage(say, a.language, signinUrl(box.url, ticket));
   }
 
@@ -1760,7 +1762,7 @@ export class Agent extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       if (this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) === undefined) {
         this.ctx.storage.kv.put(BOX_RETIREMENT, this.#resolveAccountBox(this.#agent().key, {
-          name: box.name, host: box.host, url: box.url, incarnation: this.#store.boxVolume(), neverServed: true,
+          name: box.name, host: box.host, url: box.url, setup: box.setup, incarnation: this.#store.boxVolume(), neverServed: true,
         }));
       }
       this.#store.applyBox(box, message, [], now);
@@ -1774,7 +1776,7 @@ export class Agent extends DurableObject<Env> {
     if (!sharedDevBox) {
       const epoch = (this.#store.forget().epoch + 1) as ForgetEpoch;
       let progress = this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) ?? this.#resolveAccountBox(person, {
-        name: box.name, host: box.host, url: box.url, incarnation: this.#store.boxVolume(),
+        name: box.name, host: box.host, url: box.url, setup: box.setup, incarnation: this.#store.boxVolume(),
       });
       while ("box" in progress) {
         this.ctx.storage.kv.put(BOX_RETIREMENT, progress);
@@ -1797,14 +1799,14 @@ export class Agent extends DurableObject<Env> {
   }
 
   async #ensure(deps: BoxDeps, step: EnsureStep): Promise<void> {
-    const ensured = await deps.host.ensure(step.box.name, await boxToken(deps.secret, step.box.name));
+    const ensured = await deps.host.ensure(step.box.name, await boxToken(deps.secret, step.box.name, step.box.setup));
     if (!ensured.ok) return diagnostic("box_ensure_failed");
     this.#store.applyBox(afterEnsure(step, deps.host.image), null, [], this.#deps.clock.now());
     this.#store.setBoxVolume(step.box.name, null);
   }
 
   async #probe(deps: BoxDeps, step: ProbeStep): Promise<Probe> {
-    const token = await boxToken(deps.secret, step.box.name);
+    const token = await boxToken(deps.secret, step.box.name, step.box.setup);
     if (step.kind === "provision") {
       const ensured = await deps.host.ensure(step.box.name, token);
       if (!ensured.ok) return { kind: "down", retryable: ensured.retryable, detail: ensured.detail };
@@ -1837,7 +1839,7 @@ export class Agent extends DurableObject<Env> {
     if (!boxServes(deps, agent) || box?.state !== "signed_in") return { kind: "moved_on", transient: false, told: false };
     const startedAt = this.#deps.clock.now();
     if (startedAt < this.#skipBoxUntil && this.#backupKeyCanServe(startedAt, purpose)) return { kind: "moved_on", transient: true, told: false };
-    const token = await boxToken(deps.secret, box.name);
+    const token = await boxToken(deps.secret, box.name, box.setup);
     const sessionOwner = await boxSessionOwner(deps.secret, agent);
     let volume = this.#store.boxVolume();
     if (volume === null) {
@@ -2038,7 +2040,7 @@ export class Agent extends DurableObject<Env> {
     if (!box) return { volume: null };
     if (!boxServes(deps, this.#agent().key)) return null;
     if (box.state === "provisioning" || box.state === "reclaiming") return null;
-    const token = await boxToken(deps.secret, box.name);
+    const token = await boxToken(deps.secret, box.name, box.setup);
     let volume = this.#store.boxVolume();
     if (volume === null) {
       const health = await deps.client.health(box.url, token);

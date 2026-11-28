@@ -1,5 +1,5 @@
 import { FLY_API, FLY_TIMEOUT_MS, FlyVolumesReply, flyAuthorization, flyHost, type FlyConfig } from "../src/box/fly.ts";
-import { boxToken, signinTicket, type BoxName } from "../src/box/names.ts";
+import { boxToken, newBoxSetup, signinTicket, type BoxName } from "../src/box/names.ts";
 import type { EpochMs } from "../src/domain.ts";
 
 const HEALTH_WAIT_MS = 5 * 60_000;
@@ -40,7 +40,7 @@ const host = flyHost(cfg, fetch, (step, outcome) => {
   console.log(`[${elapsed()}] ${step}: ${outcome}`);
   if (outcome !== "exists") changed.push(`${step} ${outcome}`);
 });
-const token = await boxToken(cfg.secret, name);
+const token = await boxToken(cfg.secret, name, newBoxSetup());
 const url = host.urlOf(name);
 const auth = { authorization: `Bearer ${token}` };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

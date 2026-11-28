@@ -16,6 +16,7 @@ export type Notices = {
   readonly tooManyActions: string;
   readonly checkinReserved: string;
   readonly cancelNotFound: string;
+  readonly correctionNotMade: string;
   readonly badZone: string;
   readonly lateFallback: (dueLocal: string) => string;
   readonly monthlyLimit: string;
@@ -164,6 +165,7 @@ const en: Notices = {
   tooManyActions: "(That was more than I can do in one message, so I skipped some of it.)",
   checkinReserved: "(The daily check-in can't be set or cancelled like a reminder.)",
   cancelNotFound: "(I couldn't find that reminder, so nothing was cancelled.)",
+  correctionNotMade: "(I couldn't make that correction, so what I saved is unchanged.)",
   badZone: "(I couldn't find that time zone, so I kept the one you had.)",
   lateFallback: (dueLocal) => `Sorry, this is late. It was due at ${dueLocal}.`,
   monthlyLimit: "I've reached my usage limit for this month, so I can't help until it resets on the 1st.",
@@ -360,6 +362,7 @@ const th: Notices = {
   tooManyActions: "(ทำทั้งหมดในข้อความเดียวไม่ได้ เลยข้ามบางส่วนไปค่ะ)",
   checkinReserved: "(การทักทายประจำวันตั้งหรือยกเลิกแบบเตือนทั่วไปไม่ได้ค่ะ)",
   cancelNotFound: "(ไม่เจอเตือนนั้น เลยไม่ได้ยกเลิกอะไรค่ะ)",
+  correctionNotMade: "(แก้ข้อมูลนั้นไม่ได้ สิ่งที่บันทึกไว้ยังเหมือนเดิมค่ะ)",
   badZone: "(ไม่รู้จักเขตเวลานั้น เลยยังใช้เขตเวลาเดิมอยู่ค่ะ)",
   lateFallback: (dueLocal) => `ขอโทษที่ช้านะคะ เรื่องนี้ควรถึงตอน ${dueLocal}`,
   monthlyLimit: "เดือนนี้ใช้งานครบโควตาแล้วค่ะ จะช่วยได้อีกครั้งเมื่อขึ้นเดือนใหม่วันที่ 1",

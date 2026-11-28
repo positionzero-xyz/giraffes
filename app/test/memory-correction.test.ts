@@ -138,7 +138,7 @@ describe("a correction", () => {
     await later(c, "Hello.");
     await sql(c, "UPDATE memory SET summary = 'The person keeps fox entries.'");
 
-    expect(await later(c, "The name has changed.")).toEqual(["Okay."]);
+    expect(await later(c, "The name has changed.")).toEqual(["Okay.\n(I couldn't make that correction, so what I saved is unchanged.)"]);
     expect(await sql(c, "SELECT summary FROM memory")).toEqual([{ summary: "The person keeps fox entries." }]);
   });
 
@@ -198,10 +198,12 @@ describe("a correction", () => {
     const visible = await later(c, "Use the new label.");
     const notice = "(I couldn't find that time zone, so I kept the one you had.)";
 
+    const refused = replacement === "region" ? "" : "\n(I couldn't make that correction, so what I saved is unchanged.)";
+
     expect(visible.join("\n")).toContain(notice);
-    expect(await sql(c, "SELECT text FROM turn WHERE role = 'note'")).toEqual([{ text: notice }]);
+    expect(await sql(c, "SELECT text FROM turn WHERE role = 'note'")).toEqual([{ text: notice + refused }]);
     const label = replacement === "region" ? replacement : "time zone";
-    expect(visible).toEqual(["The label was " + label + ".\n" + notice]);
+    expect(visible).toEqual(["The label was " + label + ".\n" + notice + refused]);
     expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: "My label is " + label + "." }]);
   });
 
@@ -280,12 +282,39 @@ describe("a correction", () => {
     ]);
     const c = await devChat("correct-refused", { model, at: "2099-11-04T10:00" });
     expect(await later(c, `My sister ${WRONG} lives in Hat Yai. Remind me at noon to make tea.`)).toEqual(["Noted."]);
-    expect(await later(c, "Actually that's not right.")).toEqual(["Okay."]);
+    expect(await later(c, "Actually that's not right.")).toEqual(["Okay.\n(I couldn't make that correction, so what I saved is unchanged.)"]);
     await c.advanceTo("2099-11-04T12:01");
     expect(await c.received()).toEqual(["Tea time."]);
 
     expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: `Sister ${WRONG} lives in a flat in Hat Yai.` }]);
     expect(await holding(c.agent, RIGHT)).toEqual([]);
+  });
+});
+
+describe("a short word", () => {
+  test("is corrected with the words next to it, and a bare short word tells the person nothing changed", async () => {
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: "Nickname is Jo." }, send("Noted.")] }),
+      turn({ actions: [correct("Jo", "Joe"), send("Got it, Joe.")] }),
+      turn({ actions: [correct("Nickname is Jo", "Nickname is Joe"), send("Got it, Joe.")] }),
+    ]);
+    const c = await devChat("correct-short", { model, at: "2099-11-04T10:00" });
+    expect(await later(c, "Call me Jo.")).toEqual(["Noted."]);
+    expect(await later(c, "Sorry, it is Joe, not Jo.")).toEqual(["Got it, Joe.\n(I couldn't make that correction, so what I saved is unchanged.)"]);
+    expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: "Nickname is Jo." }]);
+    expect(await later(c, "It's Joe.")).toEqual(["Got it, Joe."]);
+    expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: "Nickname is Joe." }]);
+  });
+
+  test("a Thai person hears in Thai that a refused correction changed nothing", async () => {
+    const model = scripted([
+      turn({ actions: [{ type: "set_locale", timeZone: "Asia/Bangkok", language: "th" }, { type: "remember", note: "แพ้ปู" }, send("รับทราบค่ะ")] }),
+      turn({ actions: [correct("ปู", "กุ้ง"), send("แก้แล้วค่ะ")] }),
+    ]);
+    const c = await devChat("correct-short-th", { model, at: "2099-11-04T10:00" });
+    expect(await later(c, "ฉันแพ้ปู")).toEqual(["รับทราบค่ะ"]);
+    expect(await later(c, "ไม่ใช่ปู แพ้กุ้งค่ะ")).toEqual(["แก้แล้วค่ะ\n(แก้ข้อมูลนั้นไม่ได้ สิ่งที่บันทึกไว้ยังเหมือนเดิมค่ะ)"]);
+    expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: "แพ้ปู" }]);
   });
 });
 

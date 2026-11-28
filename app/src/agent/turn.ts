@@ -106,7 +106,7 @@ const ActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("remember"), note: z.string().min(1).describe(atMostBytes(TURN.maxNoteBytes)) }),
   z.object({
     type: z.literal("correct"),
-    wrong: z.string().describe("The wrong words as one line from your memory, pending wake-ups or open tasks"),
+    wrong: z.string().describe("The wrong words as one line from your memory, pending wake-ups or open tasks, at least 3 characters. For a shorter word, include the words next to it exactly as saved"),
     right: z.string().describe(`The words that replace them, on one line. ${atMostBytes(TURN.maxCorrectionBytes)}`),
   }),
   z.object({ type: z.literal("quiet") }),
@@ -717,7 +717,10 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
         const checked = checkCorrection(a, saved, TURN.maxCorrectionBytes);
         if (first.kind !== "message") reject("correct", "tool_refused", false);
         else if (checked.ok) corrections.push(checked.correction);
-        else reject("correct", checked.why === "malformed" ? "tool_refused" : "not_pending", false);
+        else {
+          reject("correct", checked.why === "malformed" ? "tool_refused" : "not_pending", false);
+          addNotice(t.correctionNotMade);
+        }
         break;
       }
       case "quiet":

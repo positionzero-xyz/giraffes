@@ -26,6 +26,18 @@ describe("the words a correction replaces", () => {
     expect(checkCorrection(fix("in", "at"), ["Works in Lyon."], 300)).toEqual({ ok: false, why: "malformed" });
   });
 
+  test("a short name or Thai word is corrected when the words next to it come along", () => {
+    const cases: [string, string, string, string][] = [
+      ["Nickname is Jo", "Nickname is Joe", "Nickname is Jo.", "Nickname is Joe."],
+      ["แพ้ปู", "แพ้กุ้ง", "แพ้ปู", "แพ้กุ้ง"],
+      ["ชื่อเล่นนก", "ชื่อเล่นหนู", "ชื่อเล่นนก ทำงานที่สีลม", "ชื่อเล่นหนู ทำงานที่สีลม"],
+    ];
+    for (const [wrong, right, saved, after] of cases) {
+      expect(checkCorrection(fix(wrong, right), [saved], 300)).toEqual({ ok: true, correction: fix(wrong, right) });
+      expect(correctText(saved, fix(wrong, right))).toBe(after);
+    }
+  });
+
   test("symbols in either side are literal", () => {
     expect(correctText("uses C++ (v2) daily", fix("C++ (v2)", "C# $1 [v3]"))).toBe("uses C# $1 [v3] daily");
     expect(correctText('a "quoted" \\ path', fix('"quoted" \\', "plain"))).toBe("a plain path");

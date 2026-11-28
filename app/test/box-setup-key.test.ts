@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
-import { ACCOUNT_COPY } from "../src/agent/account";
+import { ACCOUNT_COPY, type EraseBox } from "../src/agent/account";
 import type { Agent } from "../src/agent/agent";
 import { boxClient } from "../src/box/client";
 import { flyHost, type FlyConfig } from "../src/box/fly";
@@ -8,7 +8,7 @@ import { HOST_OK } from "../src/box/host";
 import { boxMessage, type BoxSay } from "../src/box/machine";
 import { boxToken, signinTicket, type BoxName, type BoxSetup, type BoxToken } from "../src/box/names";
 import type { EpochMs } from "../src/domain";
-import { BOX_SECRET, chat, devChat, fakeBox, memoryLedger, scripted, ticketOpens, type DevChat, type FakeBox } from "./testkit";
+import { BOX_SECRET, chat, devChat, fakeBox, local, memoryLedger, scripted, ticketOpens, type DevChat, type FakeBox } from "./testkit";
 
 const say = (s: BoxSay) => boxMessage(s, "en", null).text;
 const at = (hm: string) => `2099-11-04T${hm}`;
@@ -175,6 +175,23 @@ describe("a box made before setups existed", () => {
     expect(receipt).not.toContain(ACCOUNT_COPY.en.deletedUnwipedBox);
     expect(receipt).not.toContain(ACCOUNT_COPY.en.reclaimedBox);
   });
+
+  test("a saved failed-setup record keeps the signed-in disk and beta slot while the box is unreachable", async () => {
+    const { c, fly, ledger } = await legacyBoxInSetup("setup-legacy-retirement");
+    await c.advanceTo(at("10:28"));
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+    await agentStorage(c, (state) => {
+      const retirement = state.storage.kv.get<EraseBox>("box:retirement");
+      if (retirement?.kind !== "relocate" || retirement.resume !== "wipe-fly") throw new Error("missing wipe retry");
+      expect(retirement.box.setup).toBeNull();
+      // The previous Worker marked every failed setup, including boxes with name-only keys.
+      state.storage.kv.put("box:retirement", { ...retirement, box: { ...retirement.box, neverServed: true }, wipeFailures: 1 });
+    });
+
+    await c.advanceTo(at("11:30"));
+    expect({ diskDeleted: fly.diskDeleted(), slotHeld: ledger.boxes.has(c.agent) })
+      .toEqual({ diskDeleted: false, slotHeld: true });
+  });
 });
 
 const flyConfig: FlyConfig = {
@@ -263,6 +280,23 @@ async function start(user: string) {
   const c = await devChat(user, { model: scripted([chat("Hi."), chat("Hi again.")]), at: at("10:00"), ledger, box: fly.deps });
   await c.say("hello");
   await c.received();
+  return { c, fly, ledger };
+}
+
+async function legacyBoxInSetup(user: string) {
+  const { c, fly, ledger } = await start(user);
+  fly.box.reachable = false;
+  await c.say("/claude");
+  expect((await c.received()).at(-1)).toBe(say("setting_up"));
+  expect((await c.snapshot()).box?.state).toBe("provisioning");
+
+  const name = await fly.deps.host.nameFor(c.agent);
+  const key = await boxToken(BOX_SECRET, name, null);
+  await agentStorage(c, (state) => state.storage.sql.exec("UPDATE box SET setup = NULL"));
+  fly.box.key = key;
+  const link = new URL("/signin", fly.deps.host.urlOf(name));
+  link.hash = "t=" + await signinTicket(key, local(at("10:30")));
+  expect(await fly.signInWith(link.toString(), c.clock.now()), "an older name-only link opens the box").toBe(true);
   return { c, fly, ledger };
 }
 

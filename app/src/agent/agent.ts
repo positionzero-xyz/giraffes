@@ -785,7 +785,7 @@ export class Agent extends DurableObject<Env> {
           if (fallback.kind !== "relocate") return fallback;
           const now = this.#deps.clock.now();
           const wipeFailedAt = eraseAccount ? (fallback.wipeFailedAt ?? now) : undefined;
-          const wipeFailures = box.neverServed === true ? (fallback.wipeFailures ?? 0) + 1 : undefined;
+          const wipeFailures = box.neverServed === true && box.setup != null ? (fallback.wipeFailures ?? 0) + 1 : undefined;
           if ((wipeFailures !== undefined && wipeFailures >= FAILED_SETUP_MAX_WIPE_ATTEMPTS) ||
             (wipeFailedAt !== undefined && now - wipeFailedAt >= ACCOUNT_WIPE_GRACE_MS)) {
             return { kind: "remove-volume", box, target: fallback.target, wipeSkipped: true };

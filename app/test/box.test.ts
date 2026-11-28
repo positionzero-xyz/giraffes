@@ -2203,6 +2203,179 @@ describe("confirming disk deletion on automatic reclaim", () => {
   });
 });
 
+describe("a sign-in link sent for the box before a replacement", () => {
+  const FLY_LINK = /https:\/\/[a-z0-9-]+\.fly\.dev\/signin#t=((\d+)\.[A-Za-z0-9_-]+)/;
+
+  /** One Fly app at a time under one name, as a replacement box reuses its predecessor's name. */
+  function replaceableFly() {
+    const requests: string[] = [];
+    const box = { name: "", appExists: false, volume: "destroyed", incarnation: "", reachable: true, signedIn: false };
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method ?? "GET";
+      requests.push(`${method} ${path}`);
+      const [, name, rest = ""] = /^\/v1\/apps(?:\/([^/]+))?(\/.*)?$/.exec(path) ?? [];
+      if (!name) return Response.json({ apps: box.appExists ? [{ name: box.name }] : [] });
+      if (rest === "" && method === "DELETE") {
+        box.appExists = false;
+        return new Response(null, { status: 202 });
+      }
+      if (rest === "") return box.appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      if (rest === "/volumes" && method === "GET") {
+        return box.appExists
+          ? Response.json([{ id: "vol_1", state: box.volume, attached_machine_id: box.volume === "created" ? "machine_1" : null }])
+          : new Response(null, { status: 404 });
+      }
+      if (rest === "/volumes/vol_1" && method === "DELETE") {
+        box.volume = "destroyed";
+        return new Response(null, { status: 202 });
+      }
+      if (rest === "/machines/machine_1" && method === "DELETE") return new Response(null, { status: 202 });
+      return new Response(null, { status: 500 });
+    });
+    const ensure: typeof host.ensure = async (name) => {
+      box.name = name;
+      if (!box.appExists) Object.assign(box, { appExists: true, volume: "created", incarnation: crypto.randomUUID(), signedIn: false });
+      return HOST_OK;
+    };
+    const client = boxClient(async (url, init) => {
+      const path = new URL(url).pathname;
+      requests.push(`box ${path}`);
+      if (!box.reachable || !box.appExists) return new Response(null, { status: 503 });
+      if (path === "/health") return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "oauth" : "none", box: box.incarnation });
+      const erase = path === "/erase" ? JSON.parse(String(init?.body)) : null;
+      if (erase?.scope !== "account" || erase.box !== box.incarnation) return new Response(null, { status: 412 });
+      requests.push("box wipe");
+      box.signedIn = false;
+      return Response.json({ scope: "account", box: box.incarnation, floor: erase.epoch });
+    });
+    const unwipedDelete = () => [`DELETE /v1/apps/${box.name}/machines/machine_1`, `DELETE /v1/apps/${box.name}/volumes/vol_1`, `DELETE /v1/apps/${box.name}`];
+    return {
+      box, requests, unwipedDelete,
+      deps: { host: { ...host, ensure }, client, secret: BOX_SECRET, onlyFor: null, maxBoxes: 10 },
+      destructive: () => requests.filter((r) => r === "box wipe" || r.startsWith("DELETE")),
+      wipeThenDelete: () => ["box wipe", ...unwipedDelete()],
+    };
+  }
+
+  /** The first box sends its link at 10:00 and is wiped and removed at 10:01; its replacement starts at `replaceAt` and never answers Giraffe's setup check. */
+  async function replacementInSetup(user: string, replaceAt: string) {
+    const fly = replaceableFly();
+    const ledger = memoryLedger();
+    const c = await devChat(user, { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", ledger, box: fly.deps });
+    await c.say("hello");
+    await c.received();
+    await c.say("/claude");
+    const link = FLY_LINK.exec((await c.received()).join("\n"));
+    if (!link) throw new Error("the first box sent no sign-in link");
+    const [, ticket, expires] = link;
+    expect(Number(expires)).toBe(local("2099-11-04T10:30"));
+    await c.advanceTo("2099-11-04T10:01");
+    await c.say("/claude remove");
+    await c.advanceTo("2099-11-04T10:04");
+    expect(fly.destructive()).toEqual(fly.wipeThenDelete());
+    expect((await c.snapshot()).box).toBeNull();
+
+    await c.advanceTo(replaceAt);
+    fly.box.reachable = false;
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("removing"), say("removed"), say("setting_up")]);
+    expect((await c.snapshot()).box?.state).toBe("provisioning");
+    const replacementTicket = await signinTicket(await boxToken(BOX_SECRET, fly.box.name as BoxName), Number(expires) as EpochMs);
+    expect(replacementTicket, "the old link opens the replacement").toBe(ticket);
+    fly.requests.length = 0;
+    return { c, fly, ledger };
+  }
+
+  test.each([
+    { by: "person", replaceAt: "10:05", removeAt: "10:05", checkAt: "10:25" },
+    { by: "person", replaceAt: "10:20", removeAt: "10:40", checkAt: "11:00" },
+    { by: "operator", replaceAt: "10:05", removeAt: "10:07", checkAt: "10:27" },
+  ] as const)(
+    "removal by the $by at $removeAt keeps the disk of a replacement set up at $replaceAt until the box is wiped",
+    async ({ by, replaceAt, removeAt, checkAt }) => {
+      const { c, fly, ledger } = await replacementInSetup(`old-link-${by}-${removeAt.replace(":", "")}`, `2099-11-04T${replaceAt}`);
+      fly.box.signedIn = true;
+      await c.advanceTo(`2099-11-04T${removeAt}`);
+      expect((await c.snapshot()).box?.state).toBe("provisioning");
+      const mark = fly.requests.length;
+      if (by === "operator") {
+        await c.remove();
+      } else {
+        await c.say("/claude remove");
+        expect(await c.received()).toEqual([say("removing")]);
+      }
+
+      await c.advanceTo(`2099-11-04T${checkAt}`);
+      expect(fly.destructive()).toEqual([]);
+      expect(fly.requests.slice(mark).filter((r) => r === "box /health").length).toBeGreaterThan(3);
+      expect((await c.snapshot()).box?.state).toBe("reclaiming");
+      expect(ledger.boxes.has(c.agent)).toBe(true);
+
+      fly.box.reachable = true;
+      await c.advanceTo("2099-11-04T12:00");
+      expect(fly.destructive()).toEqual(fly.wipeThenDelete());
+      expect(fly.box.signedIn).toBe(false);
+      expect((await c.snapshot()).box).toBeNull();
+      expect(ledger.boxes.has(c.agent)).toBe(false);
+      expect(await c.received()).toEqual(by === "operator" ? [] : [say("removed")]);
+    },
+  );
+
+  test("a replacement whose setup fails while an earlier link could have signed it in keeps its disk until the box is wiped", async () => {
+    const { c, fly, ledger } = await replacementInSetup("old-link-failed-setup", "2099-11-04T10:15");
+    fly.box.signedIn = true;
+
+    await c.advanceTo("2099-11-04T10:33");
+    expect((await c.snapshot()).box?.state, "setup still tries after the old link and its grace ran out").toBe("provisioning");
+    await c.advanceTo("2099-11-04T11:00");
+    expect(fly.destructive()).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+    expect(fly.requests.filter((r) => r === "box /health").length).toBeGreaterThan(BOX.maxProvisionAttempts + 3);
+    expect(ledger.boxes.has(c.agent)).toBe(true);
+
+    fly.box.reachable = true;
+    await c.advanceTo("2099-11-04T12:30");
+    expect(fly.destructive()).toEqual(fly.wipeThenDelete());
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+    expect(await c.received()).toEqual([say("setup_failed")]);
+  });
+
+  test("a replacement set up once the old link and its grace ran out is deleted without a wipe after three tries", async () => {
+    const { c, fly, ledger } = await replacementInSetup("old-link-expired", "2099-11-04T10:32");
+
+    await c.say("/claude remove");
+    expect(await c.received()).toEqual([say("removing")]);
+    await c.advanceTo("2099-11-04T10:35");
+
+    expect(fly.destructive()).toEqual(fly.unwipedDelete());
+    expect(fly.requests.filter((r) => r === "box /health")).toHaveLength(3);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+    expect(await c.received()).toEqual([say("removed")]);
+  });
+
+  test("an account erase keeps no record of the last sign-in link while it waits for the box", async () => {
+    const fly = replaceableFly();
+    const c = await devChat("old-link-erase", { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", ledger: memoryLedger(), box: fly.deps });
+    await c.say("hello");
+    await c.say("/claude");
+    expect((await c.received()).join("\n")).toMatch(FLY_LINK);
+    fly.box.reachable = false;
+
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erasure confirmation");
+    await c.tap(confirm.data);
+    await c.advanceTo("2099-11-04T10:05");
+
+    expect(fly.destructive()).toEqual([]);
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+    expect(await runInDurableObject(stub, async (_, { storage }) => [...(await storage.list()).keys()])).toEqual([ERASE_JOB]);
+  });
+});
+
 describe("retiring a box the plan no longer allows", () => {
   const retiring = (until: string) => boxMessage("retiring", "en", null, until).text;
   const subscribe = async (kit: BillingKit, user: string, plan: "standard" | "included") => {

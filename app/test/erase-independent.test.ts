@@ -71,7 +71,7 @@ test("legacy disk and machine without a disks field retire the known live volume
     }
     return path === appPath(name) ? owned() : Response.json(live);
   });
-  expect(await host.retireWipedDisk(name, { disk: "known", machine: "machine" } as FlyDiskRetirement)).toEqual({ ok: true });
+  expect(await host.retireWipedDisk(name, { disk: "known", machine: "machine" } as FlyDiskRetirement)).toEqual({ ok: true, diskDeleteAccepted: true });
   expect(calls).toEqual([appPath(name) + "/machines/machine", volumePath(name) + "/known"]);
 });
 
@@ -90,7 +90,7 @@ test.each(["health", "wipe"])("disappearance at %s and early duplicate alarms ad
   }, { [phase]: () => { vanished = true; return false; } });
   name = person.name;
   await person.chat.tap(await register(person));
-  const nextAt = person.chat.clock.now() + 60_000;
+  const nextAt = person.chat.clock.now() + 15_000;
   expect(reads).toBe(2);
   expect(await jobOf(person)).toMatchObject({ job: { box: { kind: "relocate" }, nextAt }, alarm: nextAt });
   person.chat.clock.set((nextAt - 1) as EpochMs);
@@ -226,7 +226,7 @@ test("new live volume after known disk retirement holds the app", async () => {
   });
   const target = await host.retirementTarget(name);
   if (!target.ok) throw Error("target lookup");
-  expect(await host.retireWipedDisk(name, target.target)).toEqual({ ok: true });
+  expect(await host.retireWipedDisk(name, target.target)).toEqual({ ok: true, diskDeleteAccepted: true });
   live = [vol("late-extra", null)];
   const before = requests.length;
   expect(await host.removeRetiredApp(name)).toMatchObject({ ok: false, retryable: true });

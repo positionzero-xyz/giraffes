@@ -410,12 +410,6 @@ export function renderBoxTurn(
   };
 }
 
-/** A turn that isn't the person's own chat, such as a group's, runs in a session of its own that nothing records. */
-export function oneOffBoxTurn(prompt: PromptParts): BoxTurnPrompt {
-  const parts = { ...prompt, sentThrough: 0 };
-  return { append: AGENT_SYSTEM, session: null, turn: parts, fresh: parts };
-}
-
 export type NewTurn = TurnRow & TrackedText & {
   readonly eventKey: EventKey;
   readonly boxView?: { readonly kind: "input" } | { readonly kind: "reply"; readonly notice: string | null };

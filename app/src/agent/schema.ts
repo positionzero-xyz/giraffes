@@ -653,6 +653,10 @@ const REPLY_QUOTE_MIGRATIONS = [
   `,
 ];
 
+const BOX_SETUP_MIGRATION = `
+  ALTER TABLE box ADD COLUMN setup TEXT;
+`;
+
 // A Telegram date covers its whole second. A LINE quote supplies an id and no date.
 export function privateQuoteMatch(id: string, at: string): string {
   return `EXISTS (SELECT 1 FROM private_quote_id WHERE id = ${id})
@@ -672,6 +676,7 @@ export const DROP_PRIVATE_INBOX_QUOTES = `
 export const MIGRATIONS: readonly string[] = [
   ...SHARED_MIGRATIONS,
   ...REPLY_QUOTE_MIGRATIONS,
+  BOX_SETUP_MIGRATION,
   `
   ALTER TABLE turn ADD COLUMN transient INTEGER NOT NULL DEFAULT 0 CHECK (transient IN (0, 1));
   `,
@@ -746,9 +751,18 @@ export function migrate(storage: DurableObjectStorage): void {
   if (version > shared && version <= afterQuotes &&
       sql.exec("SELECT 1 FROM pragma_table_info('turn') WHERE name = 'transient'").toArray().length > 0 &&
       sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'line_message'").toArray().length === 0) {
-    version += REPLY_QUOTE_MIGRATIONS.length;
+    version += REPLY_QUOTE_MIGRATIONS.length + 1;
     storage.transactionSync(() => {
       for (const migration of REPLY_QUOTE_MIGRATIONS) sql.exec(migration);
+      sql.exec(BOX_SETUP_MIGRATION);
+      record(version);
+    });
+  } else if (version > afterQuotes && version < MIGRATIONS.length &&
+      sql.exec("SELECT 1 FROM pragma_table_info('box') WHERE name = 'setup'").toArray().length === 0) {
+    // The PR already applied this version's correction migration before main added box.setup.
+    version++;
+    storage.transactionSync(() => {
+      sql.exec(BOX_SETUP_MIGRATION);
       record(version);
     });
   }

@@ -217,18 +217,6 @@ test("a turn runs on their OpenCode Go key, is reserved and charged to their own
 
 `/key` later shows the key, this month's spend against its limit and a replacement link; `/key cap <dollars>`, `/key remove` and `/key backup on|off` change it. While the person has their Claude plan's box, in any state, or had one that a reclaim removed, the key answers only after they said yes: they are asked once, with a button, and asked again when a reclaim removes the box. `/claude remove` takes the plan away, and from then on the key answers without asking. A key pasted into the chat never reaches the inbox as written: `enqueue` replaces it with `<a key, removed>`, and code answers with a fresh link and advice to revoke it.
 
-## Call site 10: a group's call runs on its owner's access
-
-Groups arrive in week 3. The seam exists now: a group DO asks its owner's DO to serve the call, naming the ownership version it was told.
-
-```ts
-const owner = env.AGENT.get(env.AGENT.idFromName(group.owner));
-const served = await owner.serve({ group: group.key, ownershipVersion, purpose: "turn", system: GROUP_SYSTEM, prompt: renderGroup(view) });
-// { kind: "not_owner" } unless the owner's DO recorded this group at that version; otherwise the same Served union.
-```
-
-The owner's key, cap and fault notices stay with the owner's DO.
-
 ## Querying across users
 
 Every log row lands in D1 (`app/src/ledger/migrations`). The MVP gates are views over it. Nobody is a participant until the operator sets the beta's start in `beta`:

@@ -2,6 +2,8 @@ import type { AgentKey, Brand, EpochMs } from "../domain";
 
 export type BoxName = Brand<string, "BoxName">;
 export type BoxToken = Brand<string, "BoxToken">;
+/** Random per box setup, so a replacement under the same name has another key and an earlier link can't open it. */
+export type BoxSetup = Brand<string, "BoxSetup">;
 export type SigninTicket = Brand<string, "SigninTicket">;
 
 const utf8 = new TextEncoder();
@@ -29,8 +31,11 @@ export async function boxSessionOwner(secret: string, agent: AgentKey): Promise<
   return hex(await hmac(secret, `session-owner:${agent}`)).slice(0, 32);
 }
 
-export async function boxToken(secret: string, name: BoxName): Promise<BoxToken> {
-  return base64url(await hmac(secret, `box:${name}`)) as BoxToken;
+export const newBoxSetup = (): BoxSetup => hex(crypto.getRandomValues(new Uint8Array(16))) as BoxSetup;
+
+/** A null setup is a box made before setups existed, or the static box, whose key the operator installed. */
+export async function boxToken(secret: string, name: BoxName, setup: BoxSetup | null): Promise<BoxToken> {
+  return base64url(await hmac(secret, setup ? `box:${name}:${setup}` : `box:${name}`)) as BoxToken;
 }
 
 export async function signinTicket(token: BoxToken, exp: EpochMs): Promise<SigninTicket> {

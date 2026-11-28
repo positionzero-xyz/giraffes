@@ -12,7 +12,7 @@ import type { Agent, AgentSnapshot, BillingDeps, BoxDeps } from "../src/agent/ag
 import type { TurnOutput } from "../src/agent/turn";
 import { boxClient } from "../src/box/client";
 import type { BoxHost, FlyBoxRetirement, HostResult } from "../src/box/host";
-import { boxName, type BoxName } from "../src/box/names";
+import { boxName, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
 import type { ChannelAdapter } from "../src/channels/channel";
 import type { AdmissionMode } from "../src/agent/admission";
 import { eventKey, parseChoice, personAgentKey, type AgentKey, type ChannelEvent, type EpochMs, type Identity, type LocalDateTime, type MicroUsd, type ProviderMessageReference } from "../src/domain";
@@ -22,7 +22,7 @@ import type { QuotaReading } from "../src/policy/quota";
 import { DEFAULT_TIME_ZONE, fromLocal, toLocal } from "../src/policy/time";
 import { devLane, DEV_URL_SCRIPTED, type IncludedConfig, type KeysConfig } from "../src/access/access";
 import { seal } from "../src/access/key";
-import { AgentStore } from "../src/agent/store";
+import { AgentStore, MESSAGE_QUIET_WINDOW_MS } from "../src/agent/store";
 import { MIGRATIONS } from "../src/agent/schema";
 import { connect, SecretKey, type Fetch, type ProviderTimeouts, type SchemaMode } from "../src/model/client";
 import { defaultModelOf, PROVIDERS, type ProviderId } from "../src/model/providers";
@@ -174,6 +174,7 @@ export async function giveKey(
       null,
       [],
       0 as EpochMs,
+      "background",
     );
     if (!saved) throw new Error("giveKey: the key wasn't saved");
     if (k.backup !== undefined) store.setBackup(k.backup, 0 as EpochMs, store.keyRevision());
@@ -247,7 +248,7 @@ export type DevChat = {
   readonly model: ScriptedModel;
   readonly clock: FakeClock;
   readonly channel: ScriptedChannel;
-  post(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<Response>;
+  post(text: string, opts?: { readonly id?: string; readonly at?: EpochMs; readonly advanceClock?: boolean }): Promise<Response>;
   say(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<void>;
   /** The person taps a button whose data is `data`, such as "a:1.1". */
   tap(data: string): Promise<void>;
@@ -261,6 +262,12 @@ export type DevChat = {
   snapshot(): Promise<AgentSnapshot>;
   logs<S extends LogRow["stream"]>(stream: S): Extract<LogRow, { stream: S }>[];
 };
+
+export function advancePastQuietWindow(clock: FakeClock, text: string, at: EpochMs): void {
+  if (text.trimStart().startsWith("/")) return;
+  const start = (at + MESSAGE_QUIET_WINDOW_MS) as EpochMs;
+  if (start > clock.now()) clock.set(start);
+}
 
 let messageIds = 0;
 
@@ -305,6 +312,7 @@ export async function devChat(
   const keyOf = (id: string) => (identity.channel === "line" ? eventKey.line(id) : eventKey.telegram(++messageIds));
   let seen = 0;
   const nextAlarm = () => runInDurableObject(stub, (_agent, state) => state.storage.getAlarm());
+  const pastQuietWindow = (text: string, at: EpochMs) => advancePastQuietWindow(clock, text, at);
 
   const chat: DevChat = {
     agent: personAgentKey(identity),
@@ -312,15 +320,25 @@ export async function devChat(
     clock,
     channel,
     async post(text, o = {}) {
-      const body = { user, text, id: o.id ?? `m${++messageIds}`, at: o.at ?? clock.now() };
-      if (identity.channel === "dev") return SELF.fetch("https://agent.test/webhook/dev", { method: "POST", body: JSON.stringify(body) });
-      const at = body.at as EpochMs;
-      await stub.enqueue({ agent: personAgentKey(identity), identity, key: keyOf(body.id), receivedAt: at, event: { kind: "message", text } });
-      return new Response("ok");
+      const at = o.at ?? clock.now();
+      const body = { user, text, id: o.id ?? `m${++messageIds}`, at };
+      const res = identity.channel === "dev"
+        ? await SELF.fetch("https://agent.test/webhook/dev", { method: "POST", body: JSON.stringify(body) })
+        : (await stub.enqueue({ agent: personAgentKey(identity), identity, key: keyOf(body.id), receivedAt: at, event: { kind: "message", text } }), new Response("ok"));
+      if ((o.advanceClock ?? true) && !text.trimStart().startsWith("/")) {
+        const before = clock.now();
+        pastQuietWindow(text, at);
+        if (clock.now() !== before) {
+          await runInDurableObject(stub, (agent, state) => state.waitUntil(agent.alarm()));
+        }
+      }
+      return res;
     },
     async say(text, o) {
+      const at = o?.at ?? clock.now();
       const res = await chat.post(text, o);
       if (!res.ok) throw new Error(`webhook answered ${res.status}`);
+      pastQuietWindow(text, at);
       await chat.settle();
     },
     async tap(data) {
@@ -331,7 +349,9 @@ export async function devChat(
     async event(e) {
       const id = `e${++messageIds}`;
       const key = identity.channel === "dev" ? eventKey.dev(id) : keyOf(id);
-      await stub.enqueue({ agent: personAgentKey(identity), identity, key, receivedAt: clock.now(), event: e });
+      const at = clock.now();
+      await stub.enqueue({ agent: personAgentKey(identity), identity, key, receivedAt: at, event: e });
+      if (e.kind === "message") pastQuietWindow(e.text, at);
       await chat.settle();
     },
     async remove() {
@@ -434,6 +454,14 @@ export type FakeBox = {
   readonly ensureCalls: string[];
   /** The image each `ensure` put on its machine. */
   readonly ensuredWith: string[];
+  /** The key each `ensure` put in its machine's BOX_TOKEN. */
+  readonly ensuredKeys: string[];
+  /** The key each live box holds. A call under any other key is answered 401, as the real box does. */
+  readonly keys: Map<string, string>;
+  /** Calls the box answered 401 because they carried another key. */
+  readonly refusedKeys: string[];
+  /** The person opens a sign-in link on the box: true when the box accepts its ticket and signs them in. */
+  signInWith(link: string, now: EpochMs): Promise<boolean>;
   /** BOX_IMAGE as the host sees it; changing it stands for a deploy with a new image. */
   image: string;
   readonly destroyCalls: string[];
@@ -463,6 +491,15 @@ export type FakeBox = {
   nameOf(user: string): Promise<BoxName>;
 };
 
+/** The box's own ticket check: the ticket in a sign-in link opens a box only under the key that box holds, and only before it expires. */
+export async function ticketOpens(link: string, keys: ReadonlyMap<string, string>, now: EpochMs): Promise<boolean> {
+  const url = new URL(link);
+  const key = keys.get(url.hostname.split(".")[0]);
+  const ticket = url.hash.replace(/^#t=/, "");
+  const exp = Number(ticket.split(".")[0]);
+  return key !== undefined && Number.isSafeInteger(exp) && now < exp && ticket === (await signinTicket(key as BoxToken, exp as EpochMs));
+}
+
 /** A BoxHost and the box's HTTP server behind the real box client, wired through a fake fetch. */
 export function fakeBox(
   opts: {
@@ -481,6 +518,14 @@ export function fakeBox(
     created: new Set<string>(),
     ensureCalls: [] as string[],
     ensuredWith: [] as string[],
+    ensuredKeys: [] as string[],
+    keys: new Map<string, string>(),
+    refusedKeys: [] as string[],
+    async signInWith(link: string, now: EpochMs): Promise<boolean> {
+      const opened = await ticketOpens(link, box.keys, now);
+      if (opened) box.signedIn = true;
+      return opened;
+    },
     image: "registry.test/box:1",
     destroyCalls: [] as string[],
     healthCalls: [] as string[],
@@ -505,7 +550,7 @@ export function fakeBox(
     },
     nameFor: (agent) => boxName(BOX_SECRET, "gbox-", agent),
     urlOf: (name) => `https://${name}.box.test`,
-    async ensure(name): Promise<HostResult> {
+    async ensure(name, token): Promise<HostResult> {
       box.ensureCalls.push(name);
       const step = steps.shift() ?? "ok";
       if (step === "die") {
@@ -515,6 +560,8 @@ export function fakeBox(
       if (step !== "ok") return { ok: false, ...step };
       box.created.add(name);
       box.ensuredWith.push(box.image);
+      box.ensuredKeys.push(token);
+      box.keys.set(name, token);
       return { ok: true };
     },
     async destroy(name): Promise<HostResult> {
@@ -522,6 +569,7 @@ export function fakeBox(
       const step = destroySteps.shift() ?? "ok";
       if (step === "fail") return { ok: false, retryable: true, detail: "DELETE /apps: 503" };
       box.created.delete(name);
+      box.keys.delete(name);
       if (step === "die") throw new Error("the host step died after destroying the app");
       return { ok: true };
     },
@@ -549,6 +597,11 @@ export function fakeBox(
     if (url.pathname === "/health") box.healthCalls.push(name);
     if (!box.created.has(name) || !box.reachable) throw new TypeError("fetch failed: no such host");
     const authorization = new Headers(init?.headers).get("authorization");
+    const key = box.keys.get(name);
+    if (key !== undefined && authorization !== `Bearer ${key}`) {
+      box.refusedKeys.push(`${init?.method ?? "GET"} ${url.pathname}`);
+      return Response.json({ error: "unauthorized" }, { status: 401 });
+    }
     if (url.pathname === "/health") {
       return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test", box: retiring.get(name) ?? opts.volume });
     }
@@ -568,6 +621,7 @@ export function fakeBox(
       }
       if (request.scope !== "account" || request.box !== retiring.get(name)) return new Response(null, { status: 412 });
       wiped.add(name);
+      box.sessions.clear();
       return Response.json({ box: request.box, scope: "account", floor: request.epoch });
     }
     if (url.pathname === "/agent/once" && box.ignoresSession) return Response.json({ error: "not_found" }, { status: 404 });
@@ -814,6 +868,7 @@ export function rewindForgetCommandSchema(sql: SqlStorage): void {
     ALTER TABLE outbox DROP COLUMN privacy;
     DROP TABLE forget;
     ALTER TABLE box DROP COLUMN volume;
+    ALTER TABLE box DROP COLUMN setup;
     DROP TABLE IF EXISTS line_message;
   `);
   const foundation = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE forget ("));

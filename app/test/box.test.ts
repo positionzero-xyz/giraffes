@@ -1,14 +1,17 @@
 import { env as testEnv, runInDurableObject } from "cloudflare:test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import { boxClient } from "../src/box/client";
 import { flyHost, machineConfig, type FlyConfig } from "../src/box/fly";
-import type { Fetch } from "../src/box/host";
-import { BOX, boxMessage, type BoxSay } from "../src/box/machine";
-import { boxName, boxSessionOwner, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
+import { HOST_OK, staticHost, type Fetch } from "../src/box/host";
+import { BOX, boxMessage, type BoxSay, type ReclaimReason } from "../src/box/machine";
+import { boxName, boxSessionOwner, boxToken, newBoxSetup, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
+import { ACCOUNT_COPY, ERASE_JOB, type EraseBox, type Erasure } from "../src/agent/account";
+import { Agent } from "../src/agent/agent";
 import { MIGRATIONS } from "../src/agent/schema";
+import type { StripeReply } from "../src/billing/stripe";
 import { loadConfig, type Env } from "../src/config";
-import type { AgentKey, EpochMs } from "../src/domain";
+import { personAgentKey, type AgentKey, type EpochMs } from "../src/domain";
 import { NOTICES } from "../src/notices";
 import {
   billingOn,
@@ -31,6 +34,9 @@ import {
   type BillingKit,
   turn,
   type MemoryLedger,
+  ticketOpens,
+  type BoxReplyStep,
+  type FakeBox,
 } from "./testkit";
 
 const NOTICE = NOTICES.en;
@@ -42,7 +48,7 @@ const LINK = /^https:\/\/([a-z0-9-]+)\.box\.test\/signin#t=(\d+)\.([A-Za-z0-9_-]
 
 describe("names and secrets", () => {
   test("the box token and the sign-in ticket match the contract's test vector", async () => {
-    const token = await boxToken("test-secret-0123456789abcdef", "gbox-0123456789ab" as BoxName);
+    const token = await boxToken("test-secret-0123456789abcdef", "gbox-0123456789ab" as BoxName, null);
     expect(token).toBe("b-UiaAiUIgin1zs4CJbKAY68m8rphXVQwWrWHSMO2U4");
     expect(await signinTicket(token, 1790000000000 as EpochMs)).toBe("1790000000000.AA1PzFmYf_4obmGHsfd0634YPiMbVDnmjYWbmYI62kM");
   });
@@ -240,7 +246,7 @@ describe("fly host", () => {
     const found = await host.retirementTarget(app);
     expect(found).toEqual({ ok: true, target: { disk: "vol_1", machine: "machine_1", disks: ["vol_1"] } });
     if (!found.ok) throw new Error(found.detail);
-    expect(await host.retireWipedDisk(app, found.target)).toMatchObject({ ok: false, retryable: true });
+    expect(await host.retireWipedDisk(app, found.target)).toMatchObject({ ok: false, retryable: true, diskDeleteAccepted: true });
     expect(requests).toContain(`DELETE /v1/apps/${app}/volumes/vol_1`);
     expect(requests).not.toContain(`DELETE /v1/apps/${app}`);
     volumeLive = false;
@@ -248,6 +254,30 @@ describe("fly host", () => {
     expect(await host.removeRetiredApp(app)).toEqual({ ok: true });
     expect(requests).toContain(`DELETE /v1/apps/${app}`);
     expect(requests).toContain("GET /v1/apps");
+  });
+
+  test("an app deletion cannot finish while Fly still lists a live volume after deletion", async () => {
+    let appExists = true;
+    let volumeState = "destroyed";
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      if (path === `/v1/apps/${app}`) {
+        if (init?.method === "DELETE") {
+          appExists = false;
+          volumeState = "created";
+          return new Response(null, { status: 202 });
+        }
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (path === "/v1/apps") return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      if (path === `/v1/apps/${app}/volumes`) return Response.json([{ id: "vol_1", state: volumeState }]);
+      return new Response(null, { status: 500 });
+    });
+
+    expect(await host.removeRetiredApp(app)).toMatchObject({ ok: false, retryable: true, detail: "box volumes remain live" });
+    expect(await host.removeRetiredApp(app)).toMatchObject({ ok: false, retryable: true, detail: "box volumes remain live" });
+    volumeState = "destroyed";
+    expect(await host.removeRetiredApp(app)).toEqual({ ok: true });
   });
 
   test("retirement destroys an app with no volume instead of waiting for a mount", async () => {
@@ -297,7 +327,7 @@ describe("fly host", () => {
     const found = await host.retirementTarget(app);
     expect(found).toEqual({ ok: true, target: { disk: null, machine: null, disks: ["vol_old"] } });
     if (!found.ok) throw new Error(found.detail);
-    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true });
+    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true, diskDeleteAccepted: true });
     expect(deletes).toEqual([`/v1/apps/${app}/volumes/vol_old`]);
   });
 
@@ -648,12 +678,12 @@ describe("box client", () => {
   });
 });
 
-async function linkIn(text: string, user: string, sentAt: EpochMs) {
+/** `valid`: the link's ticket opens the box under the key the box holds. */
+async function linkIn(text: string, user: string, sentAt: EpochMs, box: FakeBox) {
   const m = text.match(LINK);
   if (!m) throw new Error(`no sign-in link in ${JSON.stringify(text)}`);
-  const [, name, exp, mac] = m;
-  const expected = await signinTicket(await boxToken(BOX_SECRET, name as BoxName), Number(exp) as EpochMs);
-  return { name, exp: Number(exp), valid: expected === `${exp}.${mac}`, expiresInMs: Number(exp) - sentAt, user };
+  const [link, name, exp] = m;
+  return { name, exp: Number(exp), valid: await ticketOpens(link, box.keys, sentAt), expiresInMs: Number(exp) - sentAt, user };
 }
 
 describe("a turn on the person's own Claude Code session", () => {
@@ -664,6 +694,99 @@ describe("a turn on the person's own Claude Code session", () => {
     await c.received();
     return { box, c };
   }
+
+  const quietReply = (): BoxReplyStep => ({ kind: "reply", step: turn({ actions: [quiet()] }) });
+
+  async function planProposed(user: string) {
+    const { box, c } = await signedIn(user, "2099-11-04T08:00");
+    box.replies.push(
+      { kind: "reply", step: turn({ actions: [send("Morning! The long weekend is close, so I sketched a trip.")], tasks: [propose(TRIP, TITLE, PLAN)] }) },
+      quietReply(),
+      quietReply(),
+      quietReply(),
+      quietReply(),
+      quietReply(),
+    );
+    await c.advanceTo("2099-11-04T09:00");
+    expect(c.channel.delivered.at(-1)).toMatchObject({
+      text: `Morning! The long weekend is close, so I sketched a trip.\n${PLAN}`,
+      button: { label: NOTICE.acceptButton, data: "a:1.1" },
+    });
+    await c.received();
+    return c;
+  }
+
+  test("a box notice produced by an alarm waits for quiet hours", async () => {
+    const box = fakeBox({ signedIn: true });
+    box.reachable = false;
+    const c = await devChat("quiet-box", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up")]);
+
+    box.reachable = true;
+    c.clock.set(local("2099-11-04T23:00"));
+    await c.alarm();
+
+    const connected = () => c.channel.delivered.filter((d) => d.text === say("connected")).map((d) => d.at);
+    expect(connected()).toEqual([]);
+    await c.advanceTo("2099-11-05T08:00");
+    expect(connected()).toEqual([local("2099-11-05T08:00")]);
+  });
+
+  test("a notice answering /claude goes out during quiet hours while the alarm's connected notice waits", async () => {
+    const box = fakeBox({ signedIn: true });
+    box.reachable = false;
+    const c = await devChat("quiet-box-answer", { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("Hi");
+    await c.received();
+    await giveKey(c.agent);
+
+    c.clock.set(local("2099-11-04T23:00"));
+    await c.say("/claude");
+
+    expect(await c.received()).toEqual([say("setting_up"), NOTICE.backupAsk("OpenCode Go")]);
+    box.reachable = true;
+    await c.alarm();
+    const connected = () => c.channel.delivered.filter((d) => d.text === say("connected")).map((d) => d.at);
+    expect(connected()).toEqual([]);
+    await c.advanceTo("2099-11-05T08:00");
+    expect(connected()).toEqual([local("2099-11-05T08:00")]);
+  });
+
+  test("an alarm notice is not dropped or counted when the day's unasked cap is already used", async () => {
+    const box = fakeBox({ signedIn: true });
+    box.reachable = false;
+    const model = scripted([
+      turn({ actions: [
+        schedule("cap-one", "2099-11-04T11:00", "One", false),
+        schedule("cap-two", "2099-11-04T12:00", "Two", false),
+        schedule("cap-three", "2099-11-04T13:00", "Three", false),
+        send("Watching."),
+      ] }),
+      chat("One."),
+      chat("Two."),
+      chat("Three."),
+    ]);
+    const c = await devChat("quiet-box-cap", { model, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("Watch these for me");
+    expect(await c.received()).toEqual(["Watching."]);
+    await c.advanceTo("2099-11-04T15:00");
+    expect(await c.received()).toEqual(["One.", "Two.", "Three."]);
+    expect((await c.snapshot()).unaskedSentToday).toBe(3);
+    const unaskedRows = c.logs("unasked").length;
+
+    c.clock.set(local("2099-11-04T23:00"));
+    await c.say("/claude");
+    await c.received();
+    box.reachable = true;
+    await c.alarm();
+
+    const connected = () => c.channel.delivered.filter((d) => d.text === say("connected")).map((d) => d.at);
+    expect(connected()).toEqual([]);
+    await c.advanceTo("2099-11-05T08:00");
+    expect(connected()).toEqual([local("2099-11-05T08:00")]);
+    expect(c.logs("unasked")).toHaveLength(unaskedRows);
+  });
 
   test("its tool calls are applied like any turn's actions: the reminder is pending, the note kept, and the reply sent", async () => {
     const { box, c } = await signedIn("agt");
@@ -843,6 +966,36 @@ describe("a turn on the person's own Claude Code session", () => {
     expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "task_followup"]]);
   });
 
+  test("an Accept tap 47 hours after the plan still completes it", async () => {
+    const c = await planProposed("tap-47");
+
+    await c.advanceTo("2099-11-06T08:00");
+    await c.tap("a:1.1");
+
+    expect(await c.received()).toEqual([NOTICE.planAccepted(TITLE)]);
+    expect((await c.snapshot()).tasks[0].status).toBe("completed");
+  });
+
+  test("an Accept tap 49 hours after the plan leaves it open", async () => {
+    const c = await planProposed("tap-49");
+
+    await c.advanceTo("2099-11-06T10:00");
+    await c.tap("a:1.1");
+
+    expect(await c.received()).toEqual([NOTICE.planChanged]);
+    expect((await c.snapshot()).tasks[0].status).toBe("open");
+  });
+
+  test("an Accept tap days later leaves the plan open", async () => {
+    const c = await planProposed("late-plan");
+
+    await c.advanceTo("2099-11-07T10:00");
+    await c.tap("a:1.1");
+
+    expect(await c.received()).toEqual([NOTICE.planChanged]);
+    expect((await c.snapshot()).tasks[0].status).toBe("open");
+  });
+
   test("a box check-in that names an open task is a follow-up on it and changes nothing else", async () => {
     const { box, c } = await signedIn("about", "2099-11-04T08:00");
     box.replies.push({ kind: "reply", step: turn({ actions: [send("Noted, a weekend in Chiang Mai.")], tasks: [openTask(TRIP, TITLE, "plan")] }) });
@@ -948,7 +1101,7 @@ describe("connecting a Claude plan", () => {
 
     const [setup, link, ...rest] = await c.received();
     expect([setup, rest]).toEqual([say("setting_up"), []]);
-    const l = await linkIn(link, "ann", local("2099-11-04T10:00"));
+    const l = await linkIn(link, "ann", local("2099-11-04T10:00"), box);
     expect({ name: l.name, valid: l.valid, expiresInMs: l.expiresInMs }).toEqual({ name: await box.nameOf("ann"), valid: true, expiresInMs: 30 * 60_000 });
     expect((await c.snapshot()).box).toEqual({ host: "fly", state: "signed_out" });
     expect(ledger.boxes.get("p:dev:ann")).toEqual({ name: await box.nameOf("ann"), host: "fly" });
@@ -975,7 +1128,7 @@ describe("connecting a Claude plan", () => {
 
     const sent = await c.received();
     expect(sent).toHaveLength(1);
-    expect((await linkIn(sent[0], "bo", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect((await linkIn(sent[0], "bo", local("2099-11-04T10:00"), box)).valid).toBe(true);
     expect(box.ensureCalls).toHaveLength(2);
     expect(box.created.size).toBe(1);
   });
@@ -996,25 +1149,26 @@ describe("connecting a Claude plan", () => {
     expect((await c.snapshot()).box).toBeNull();
   });
 
-  test("a provisioning failure that can't be retried is removed at once, and the next /claude starts over", async () => {
+  test("a provisioning failure with no app frees the slot, and the next /claude starts over", async () => {
     const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }] });
     const ledger = memoryLedger();
     const c = await devChat("di", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger });
 
     await c.say("/claude");
     expect(await c.received()).toEqual([say("setting_up"), say("setup_failed")]);
-    expect(box.destroyCalls).toEqual([await box.nameOf("di")]);
+    expect(box.destroyCalls).toEqual([]);
     expect(ledger.boxes.has("p:dev:di")).toBe(false);
 
     await c.say("/claude");
     const [again, link] = await c.received();
     expect(again).toBe(say("setting_up"));
-    expect((await linkIn(link, "di", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect((await linkIn(link, "di", local("2099-11-04T10:00"), box)).valid).toBe(true);
     expect(ledger.boxes.has("p:dev:di")).toBe(true);
   });
 
   test("/claude while a failed box is still being removed says to try again in a few minutes", async () => {
     const box = fakeBox({ host: [{ retryable: false, detail: "POST /apps: 400" }], destroy: ["fail"] });
+    box.created.add(await box.nameOf("dot"));
     const c = await devChat("dot", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
 
     await c.say("/claude");
@@ -1191,7 +1345,7 @@ describe("connecting a Claude plan", () => {
     expect(await c.received()).toEqual(["Hello from your own plan."]);
     expect(box.parses).toEqual([
       {
-        authorization: `Bearer ${await boxToken(BOX_SECRET, await box.nameOf("fin"))}`,
+        authorization: `Bearer ${box.keys.get(await box.nameOf("fin"))}`,
         user: expect.stringContaining("Person: hello"),
         agent: {
           append: expect.stringContaining("You are Giraffe"),
@@ -1249,7 +1403,7 @@ describe("connecting a Claude plan", () => {
     expect(rest).toEqual([]);
     expect(notice.startsWith(say("signed_out_link").split("\n")[0])).toBe(true);
     expect(notice).not.toMatch(/answering/);
-    expect((await linkIn(notice, "gus", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect((await linkIn(notice, "gus", local("2099-11-04T10:00"), box)).valid).toBe(true);
     expect((await c.snapshot()).box?.state).toBe("signed_out");
 
     await c.say("again");
@@ -1429,7 +1583,7 @@ describe("connecting a Claude plan", () => {
 
     const [notice, ...rest] = await c.received();
     expect(notice.startsWith(say("signed_out_backup").split("\n")[0])).toBe(true);
-    expect((await linkIn(notice, "hob", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect((await linkIn(notice, "hob", local("2099-11-04T10:00"), box)).valid).toBe(true);
     expect(rest).toEqual(["From your key."]);
   });
 
@@ -1533,6 +1687,694 @@ describe("connecting a Claude plan", () => {
   });
 });
 
+describe("confirming disk deletion on automatic reclaim", () => {
+  async function startReclaim(
+    user: string, reason: ReclaimReason | null, box: NonNullable<Parameters<typeof devChat>[1]["box"]>,
+    opts: { signedIn?: true; channel?: "line" } = {},
+  ) {
+    const ledger = memoryLedger();
+    const c = await devChat(user, { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", ledger, box, channel: opts.channel });
+    await c.say("hello");
+    await c.received();
+    const now = c.clock.now();
+    const name = box.host.kind === "fly" ? app : await box.host.nameFor(c.agent);
+    await ledger.claimBox({ agent: c.agent, name, host: box.host.kind, at: now, max: 10 });
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+    const stateName = opts.signedIn ? "signed_in" : reason === null ? "provisioning" : "reclaiming";
+    await runInDurableObject(stub, (_agent, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO box (one, name, host, url, setup, state, state_at, attempts, next_at, reclaim_reason)
+         VALUES (1, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        name, box.host.kind, box.host.urlOf(name), box.host.kind === "fly" ? newBoxSetup() : null, stateName, now, opts.signedIn ? null : now, reason,
+      );
+    });
+    return { c, ledger, stub };
+  }
+
+  function flyReclaim({
+    machine, boxFailure, relistAfterAppDelete = false, keepVolumeAfterDelete = !relistAfterAppDelete, createApp,
+  }: {
+    machine: string | null;
+    boxFailure?: "health" | "erase";
+    relistAfterAppDelete?: boolean;
+    keepVolumeAfterDelete?: boolean;
+    createApp?: () => Response;
+  }) {
+    const requests: string[] = [];
+    const boxRequests: string[] = [];
+    let appExists = true;
+    let volumeState = "created";
+    let volumeListDown = false;
+    const incarnation = crypto.randomUUID();
+    const host = flyHost(flyConfig, async (url, init) => {
+      const path = new URL(url).pathname;
+      const method = init?.method;
+      requests.push(`${method} ${path}`);
+      if (path === "/v1/apps" && method === "POST" && createApp) return createApp();
+      if (path === "/v1/apps") return Response.json({ apps: appExists ? [{ name: app }] : [] });
+      if (path === `/v1/apps/${app}`) {
+        if (method === "DELETE") {
+          appExists = false;
+          if (relistAfterAppDelete) volumeState = "created";
+          return new Response(null, { status: 202 });
+        }
+        return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
+      }
+      if (method === "GET" && path === `/v1/apps/${app}/volumes`) {
+        if (volumeListDown) {
+          volumeListDown = false;
+          return new Response(null, { status: 500 });
+        }
+        return Response.json([{ id: "vol_1", state: volumeState, attached_machine_id: machine }]);
+      }
+      if (method === "DELETE" && (path.endsWith("/volumes/vol_1") || path.endsWith("/machines/machine_1"))) {
+        if (path.endsWith("/volumes/vol_1") && !keepVolumeAfterDelete) volumeState = "destroyed";
+        return new Response(null, { status: 202 });
+      }
+      return new Response(null, { status: 500 });
+    });
+    const client = boxClient(async (url, init) => {
+      const path = new URL(url).pathname;
+      boxRequests.push(path);
+      if (boxFailure === "health") return new Response(null, { status: 503 });
+      if (path === "/health") return Response.json({ ok: true, signedIn: false, authMethod: "none", box: incarnation });
+      if (path === "/erase") {
+        if (boxFailure === "erase") return new Response(null, { status: 412 });
+        const payload = JSON.parse(String(init?.body));
+        if (payload.scope === "account" && payload.box === incarnation) {
+          requests.push("box wipe");
+          return Response.json({ scope: "account", box: incarnation, floor: payload.epoch });
+        }
+      }
+      return new Response(null, { status: 500 });
+    });
+    return {
+      deps: { host, client, secret: BOX_SECRET, onlyFor: null, maxBoxes: 10 },
+      requests, boxRequests,
+      destructive: () => requests.filter((request) => request === "box wipe" || request.startsWith("DELETE")),
+      confirmVolumeGone: () => { volumeState = "destroyed"; },
+      failNextVolumeList: () => { volumeListDown = true; },
+      restoreBox: () => { boxFailure = undefined; },
+    };
+  }
+
+  const volumeList = `GET /v1/apps/${app}/volumes`;
+  const volumeDelete = `DELETE /v1/apps/${app}/volumes/vol_1`;
+  const appDelete = `DELETE /v1/apps/${app}`;
+  test.each([
+    { reason: "retired", notice: say("retired"), machine: "machine_1" },
+    { reason: "unused", notice: say("reclaimed"), machine: "machine_1" },
+    { reason: "failed", notice: say("setup_failed"), machine: null },
+  ] satisfies { reason: ReclaimReason; notice: string; machine: string | null }[])("keeps a $reason box reserved while its volume is still live", async ({ reason, notice, machine }) => {
+    const { deps, destructive, confirmVolumeGone } = flyReclaim({ machine });
+    const { c, ledger } = await startReclaim(`reclaim-${reason}`, reason, deps);
+    await c.alarm();
+
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+    expect(ledger.boxes.has(c.agent)).toBe(true);
+    const firstDeletes = machine ? ["box wipe", `DELETE /v1/apps/${app}/machines/${machine}`, volumeDelete] : [volumeDelete];
+    expect(destructive()).toEqual(firstDeletes);
+
+    await c.advanceTo("2099-11-04T10:01");
+    expect(await c.received()).toEqual([]);
+    expect(ledger.boxes.has(c.agent)).toBe(true);
+    expect(destructive().filter((request) => request === volumeDelete).length).toBeGreaterThan(1);
+    expect(destructive()).not.toContain(appDelete);
+
+    confirmVolumeGone();
+    await c.advanceTo("2099-11-04T10:03");
+    expect(await c.received()).toEqual([notice]);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+    expect(destructive().filter((request) => request === "box wipe")).toHaveLength(machine ? 1 : 0);
+    expect(destructive().at(-1)).toBe(appDelete);
+  });
+
+  test.each<"health" | "erase">(["health", "erase"])(
+    "a failed setup with permanent %s failure skips the wipe after three tries and waits for disk confirmation",
+    async (boxFailure) => {
+      const { deps, requests, boxRequests, destructive, confirmVolumeGone } = flyReclaim({
+        machine: "machine_1", boxFailure, relistAfterAppDelete: true,
+      });
+      const { c, ledger } = await startReclaim(`reclaim-failed-${boxFailure}`, "failed", deps);
+
+      await c.alarm();
+      expect(destructive()).toEqual([]);
+      await c.advanceTo("2099-11-04T10:01");
+      expect(destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
+      const failedPath = `/${boxFailure}`;
+      expect(boxRequests.filter((path) => path === failedPath)).toHaveLength(3);
+      expect(requests.at(-1)).toBe(volumeList);
+      expect(await c.received()).toEqual([]);
+      expect((await c.snapshot()).box?.state).toBe("reclaiming");
+      expect(ledger.boxes.has(c.agent)).toBe(true);
+
+      confirmVolumeGone();
+      await c.advanceTo("2099-11-04T10:03");
+      expect(requests.at(-1)).toBe(volumeList);
+      expect(await c.received()).toEqual([say("setup_failed")]);
+      expect((await c.snapshot()).box).toBeNull();
+      expect(ledger.boxes.has(c.agent)).toBe(false);
+      await c.advanceTo("2099-11-04T11:00");
+      expect(await c.received()).toEqual([]);
+      expect(boxRequests.filter((path) => path === failedPath)).toHaveLength(3);
+    },
+  );
+
+  async function failedSetupInRetryWindow(user: string) {
+    const fly = flyReclaim({ machine: "machine_1", boxFailure: "health", keepVolumeAfterDelete: false });
+    const { c, ledger } = await startReclaim(user, "failed", fly.deps);
+    await c.alarm();
+    expect(fly.boxRequests).toEqual(["/health"]);
+    expect(fly.destructive()).toEqual([]);
+    expect(await c.received()).toEqual([]);
+    return { ...fly, c, ledger };
+  }
+
+  test.each([false, true])("/claude remove during failed setup cleanup frees the slot (restart: %s)", async (restart) => {
+    const { c, ledger, deps, boxRequests, destructive } = await failedSetupInRetryWindow(`failed-remove-${restart}`);
+
+    await c.say("/claude remove");
+    expect(await c.received()).toEqual([say("removing")]);
+    if (restart) {
+      const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+      await runInDurableObject(stub, async (_agent, state) => {
+        const fresh = new Agent(state, testEnv);
+        fresh.withDeps({
+          admission: "open", clock: c.clock, ledger, box: deps,
+          channels: { dev: c.channel, line: c.channel, telegram: c.channel },
+        });
+        for (let retry = 0; retry < 2; retry++) {
+          const due = await state.storage.getAlarm();
+          if (due === null) throw new Error("missing cleanup retry alarm");
+          c.clock.set(due as EpochMs);
+          await fresh.alarm();
+        }
+      });
+    } else {
+      await c.advanceTo("2099-11-04T10:01");
+    }
+
+    expect(destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
+    expect(boxRequests).toEqual(["/health", "/health", "/health"]);
+    expect(await c.received()).toEqual([say("removed")]);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up")]);
+  });
+
+  test("operator removal during failed setup cleanup frees the slot", async () => {
+    const { c, ledger, boxRequests, destructive } = await failedSetupInRetryWindow("failed-operator-remove");
+
+    await c.remove();
+    await c.advanceTo("2099-11-04T10:01");
+
+    expect(destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
+    expect(boxRequests).toEqual(["/health", "/health", "/health"]);
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+  });
+
+  test("/erase during failed setup cleanup sends a receipt after the disk and app go", async () => {
+    const { c, boxRequests, requests, destructive } = await failedSetupInRetryWindow("failed-account-erase");
+    await testEnv.LEDGER.prepare("INSERT INTO boxes (agent_key, name, host, created_at) VALUES (?, ?, 'fly', ?)")
+      .bind(c.agent, app, c.clock.now()).run();
+
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erasure confirmation");
+    await c.tap(confirm.data);
+    expect(destructive()).toEqual([]);
+    expect((await c.received()).every((text) => !text.includes(ACCOUNT_COPY.en.receipt))).toBe(true);
+
+    await c.advanceTo("2099-11-04T10:03");
+
+    expect(destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
+    const diskCheck = requests.indexOf(volumeList, requests.indexOf(volumeDelete) + 1);
+    expect(diskCheck).toBeGreaterThan(requests.indexOf(volumeDelete));
+    expect(diskCheck).toBeLessThan(requests.indexOf(appDelete));
+    expect(boxRequests).toEqual(["/health", "/health", "/health"]);
+    const receipt = await c.received();
+    expect(receipt).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
+    expect(receipt[0]).toContain(ACCOUNT_COPY.en.deletedUnwipedBox);
+    expect(await testEnv.LEDGER.prepare("SELECT name FROM boxes WHERE name = ?").bind(app).first()).toBeNull();
+  });
+
+  test.each(["person", "operator"])("removal by the %s while setup is still retrying frees the slot", async (who) => {
+    const fly = flyReclaim({ machine: "machine_1", boxFailure: "health", keepVolumeAfterDelete: false });
+    const deps = { ...fly.deps, host: { ...fly.deps.host, ensure: async () => HOST_OK } };
+    const { c, ledger, stub } = await startReclaim(`remove-retrying-${who}`, null, deps);
+    await c.alarm();
+    expect(fly.boxRequests).toEqual(["/health"]);
+    expect((await c.snapshot()).box?.state).toBe("provisioning");
+
+    if (who === "operator") {
+      await c.remove();
+    } else {
+      await c.say("/claude remove");
+      expect(await c.received()).toEqual([say("removing")]);
+    }
+    await c.advanceTo("2099-11-04T10:03");
+
+    expect(fly.destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
+    const diskCheck = fly.requests.indexOf(volumeList, fly.requests.indexOf(volumeDelete) + 1);
+    expect(diskCheck).toBeGreaterThan(fly.requests.indexOf(volumeDelete));
+    expect(diskCheck).toBeLessThan(fly.requests.indexOf(appDelete));
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+    expect(await c.received()).toEqual(who === "operator" ? [] : [say("removed")]);
+
+    if (who === "operator") {
+      await runInDurableObject(stub, (_, { storage }) => { storage.sql.exec("DELETE FROM admission"); });
+      await c.say("hello");
+    }
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up")]);
+    expect((await c.snapshot()).box?.state).toBe("provisioning");
+    expect(ledger.boxes.has(c.agent)).toBe(true);
+  });
+
+  async function driveRetirement(
+    { c, stub, ledger }: Awaited<ReturnType<typeof startReclaim>>,
+    box: NonNullable<Parameters<typeof devChat>[1]["box"]>,
+    until: number,
+    restart = false,
+    billing?: BillingKit["deps"],
+  ) {
+    const attempts: number[] = [];
+    for (;;) {
+      const due = await runInDurableObject(stub, (_, { storage }) => storage.getAlarm());
+      if (due === null || due > until) return attempts;
+      if (attempts.length === 250) throw new Error("too many cleanup alarms");
+      c.clock.set(Math.max(due, c.clock.now()) as EpochMs);
+      attempts.push(c.clock.now());
+      if (!restart) {
+        await c.alarm();
+        continue;
+      }
+      await runInDurableObject(stub, async (_, state) => {
+        const fresh = new Agent(state, testEnv);
+        fresh.withDeps({
+          admission: "open", clock: c.clock, ledger, box, ...(billing ? { billing } : {}),
+          channels: { dev: c.channel, line: c.channel, telegram: c.channel },
+        });
+        await fresh.alarm();
+      });
+    }
+  }
+
+  async function eraseDeadRemovedBox(user: string, keepVolumeAfterDelete = false, subscribed = false) {
+    const fly = flyReclaim({ machine: "machine_1", boxFailure: "health", keepVolumeAfterDelete });
+    const person = await startReclaim(user, "removed", fly.deps);
+    const { c } = person;
+    const startedAt = c.clock.now();
+    await c.alarm();
+    expect(fly.boxRequests).toEqual(["/health"]);
+    expect(fly.destructive()).toEqual([]);
+    await testEnv.LEDGER.prepare("INSERT INTO boxes (agent_key, name, host, created_at) VALUES (?, ?, 'fly', ?)")
+      .bind(c.agent, app, startedAt).run();
+    if (subscribed) {
+      await testEnv.LEDGER.prepare("INSERT INTO billing_subscription (id, owner_key, plan, status, seats, updated_at) VALUES (?, ?, 'standard', 'active', 1, 1)")
+        .bind("sub_" + user, c.agent).run();
+    }
+
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erasure confirmation");
+    await c.tap(confirm.data);
+    await c.received();
+    return {
+      ...person, ...fly, startedAt,
+      slot: () => testEnv.LEDGER.prepare("SELECT name FROM boxes WHERE name = ?").bind(app).first(),
+    };
+  }
+
+  const hour = 60 * 60_000;
+
+  test("account erase backs off when its static box never answers", async () => {
+    const user = "erase-dead-static";
+    const host = staticHost({ url: "http://static.box.test", appPrefix: "gbox-" });
+    const requests: string[] = [];
+    const client = boxClient(async (url) => {
+      requests.push(new URL(url).pathname);
+      throw new TypeError("box unreachable");
+    });
+    const onlyFor = personAgentKey({ channel: "dev", channelUserId: user });
+    const deps = { host, client, secret: BOX_SECRET, onlyFor, maxBoxes: 10 };
+    const person = await startReclaim(user, null, deps, { signedIn: true });
+    const { c } = person;
+    const startedAt = c.clock.now();
+
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erasure confirmation");
+    await c.tap(confirm.data);
+    expect(requests).toEqual(["/health"]);
+    expect(await c.received()).toEqual([ACCOUNT_COPY.en.confirm]);
+
+    await driveRetirement(person, deps, startedAt + 2 * hour, true);
+    const afterTwoHours = requests.length;
+    await driveRetirement(person, deps, startedAt + 3 * hour, true);
+    expect(requests.length, "box requests over three hours").toBe(10);
+    expect(requests.length - afterTwoHours, "box requests in the third hour").toBe(1);
+    expect(await c.received()).toEqual([]);
+  });
+
+  test.each([
+    {
+      language: "en", channel: undefined,
+      disclosure: "Giraffe deleted your box and its disk while erasing your account. Giraffe could not verify a disk wipe.",
+    },
+    {
+      language: "th", channel: "line",
+      disclosure: "Giraffe ลบกล่องของคุณพร้อมดิสก์ระหว่างการลบบัญชีนี้ Giraffe ไม่สามารถยืนยันได้ว่าข้อมูลบนดิสก์ถูกลบแล้ว",
+    },
+  ] as const)("direct erase of a used, never-removed dead box sends the $language receipt", async ({ language, channel, disclosure }) => {
+    const { deps, destructive } = flyReclaim({ machine: "machine_1", boxFailure: "health", keepVolumeAfterDelete: false });
+    const person = await startReclaim(`erase-dead-direct-${language}`, null, deps, { signedIn: true, channel });
+    const { c } = person;
+    const startedAt = c.clock.now();
+    const copy = ACCOUNT_COPY[language];
+    await testEnv.LEDGER.prepare("INSERT INTO boxes (agent_key, name, host, created_at) VALUES (?, ?, 'fly', ?)")
+      .bind(c.agent, app, startedAt).run();
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erasure confirmation");
+    await c.tap(confirm.data);
+    await c.received();
+
+    await driveRetirement(person, deps, startedAt + hour - 1, true);
+    expect(destructive()).toEqual([]);
+    expect(await c.received()).toEqual([]);
+
+    await driveRetirement(person, deps, startedAt + hour, true);
+    expect(destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
+    expect(await c.received()).toEqual([expect.stringContaining(`${copy.receipt}\n\n${disclosure}\n\n${copy.flyCopies}`)]);
+  });
+
+  test("erasing a dead box keeps the earlier wording when the disk disappears before cleanup", async () => {
+    const fly = flyReclaim({ machine: "machine_1", boxFailure: "health" });
+    const person = await startReclaim("erase-dead-disk-gone", null, fly.deps, { signedIn: true });
+    const { c } = person;
+    const startedAt = c.clock.now();
+    await testEnv.LEDGER.prepare("INSERT INTO boxes (agent_key, name, host, created_at) VALUES (?, ?, 'fly', ?)")
+      .bind(c.agent, app, startedAt).run();
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erasure confirmation");
+    await c.tap(confirm.data);
+    await c.received();
+
+    await driveRetirement(person, fly.deps, startedAt + hour - 1, true);
+    expect(fly.destructive()).toEqual([]);
+    vi.spyOn(fly.deps.client, "health").mockImplementationOnce(async () => {
+      fly.confirmVolumeGone();
+      return { kind: "unavailable", detail: "box offline" };
+    });
+    await driveRetirement(person, fly.deps, startedAt + hour, true);
+
+    expect(fly.destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, appDelete]);
+    const { reclaimedBox, flyCopies } = ACCOUNT_COPY.en;
+    expect(await c.received()).toEqual([expect.stringContaining(`${reclaimedBox}\n\n${flyCopies}`)]);
+    expect(await testEnv.LEDGER.prepare("SELECT name FROM boxes WHERE name = ?").bind(app).first()).toBeNull();
+  });
+
+  test.each([false, true])("a dead removed box finishes erasure after one hour without claiming a wipe (restart: %s)", async (restart) => {
+    const person = await eraseDeadRemovedBox("erase-dead-removed-" + restart);
+    const { c, deps, startedAt, destructive, requests, boxRequests, slot } = person;
+    const tries = [
+      startedAt,
+      ...await driveRetirement(person, deps, startedAt + 10 * 60_000),
+      ...await driveRetirement(person, deps, startedAt + hour - 1, restart),
+      startedAt + hour,
+    ];
+    expect(Math.max(...tries.slice(1).map((at, i) => at - tries[i]))).toBeLessThanOrEqual(10 * 60_000);
+    expect(destructive()).toEqual([]);
+    expect(await c.received()).toEqual([]);
+    expect(await slot()).not.toBeNull();
+
+    await driveRetirement(person, deps, startedAt + hour, restart);
+    expect(destructive()).toEqual(["DELETE /v1/apps/" + app + "/machines/machine_1", volumeDelete, appDelete]);
+    const diskCheck = requests.indexOf(volumeList, requests.indexOf(volumeDelete) + 1);
+    expect(diskCheck).toBeGreaterThan(requests.indexOf(volumeDelete));
+    expect(diskCheck).toBeLessThan(requests.indexOf(appDelete));
+    expect(boxRequests.length).toBeLessThanOrEqual(13);
+    const receipts = await c.received();
+    expect(receipts).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
+    expect(receipts[0]).toContain(ACCOUNT_COPY.en.deletedUnwipedBox);
+    expect(await slot()).toBeNull();
+  });
+
+  test.each([20, 40])("a box that comes back at minute %i of the erase grace period is wiped within ten minutes", async (minute) => {
+    const person = await eraseDeadRemovedBox("erase-recovered-removed-" + minute);
+    const { c, deps, startedAt, destructive, restoreBox, slot } = person;
+    const attempts = await driveRetirement(person, deps, startedAt + minute * 60_000);
+    expect(destructive()).toEqual([]);
+    restoreBox();
+    await driveRetirement(person, deps, startedAt + (minute + 10) * 60_000);
+    expect(destructive()[0]).toBe("box wipe");
+    expect(destructive().at(-1)).toBe(appDelete);
+    const receipts = await c.received();
+    expect(receipts).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
+    expect(receipts[0]).not.toContain("could not verify a disk wipe");
+    expect(await slot()).toBeNull();
+    expect(attempts.slice(0, 4).map((at) => (at - startedAt) / 1000)).toEqual([15, 45, 105, 225]);
+  });
+
+  test("a disk that keeps listing after a dead box is erased holds the slot and backs off", async () => {
+    const person = await eraseDeadRemovedBox("erase-dead-disk-stays", true);
+    const { c, deps, startedAt, destructive, slot } = person;
+    await driveRetirement(person, deps, startedAt + hour);
+    expect(destructive()).toContain(volumeDelete);
+    expect(await c.received()).toEqual([]);
+    expect(await slot()).not.toBeNull();
+
+    const attempts = await driveRetirement(person, deps, startedAt + 6 * hour, true);
+    expect(attempts.slice(0, 3).map((at) => (at - startedAt - hour) / 1000)).toEqual([15, 45, 105]);
+    expect(await c.received()).toEqual([]);
+    expect(await slot()).not.toBeNull();
+    expect(destructive()).not.toContain(appDelete);
+    expect(destructive().filter((request) => request === volumeDelete).length).toBeGreaterThan(1);
+    expect(attempts.length).toBeLessThan(12);
+    expect(attempts.at(-1)! - attempts.at(-2)!).toBe(hour);
+  });
+
+  async function expectErasedWithinAMinuteOfTheHour(person: Awaited<ReturnType<typeof eraseDeadRemovedBox>>, restart: boolean) {
+    const { c, deps, startedAt, destructive, slot } = person;
+    await driveRetirement(person, deps, startedAt + hour + 60_000, restart);
+    expect(destructive().at(-1)).toBe(appDelete);
+    const receipts = await c.received();
+    expect(receipts).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
+    expect(receipts[0]).toContain(ACCOUNT_COPY.en.deletedUnwipedBox);
+    expect(await slot()).toBeNull();
+  }
+
+  test.each([false, true])("a disk delete that fails once after the hour is retried within seconds (restart: %s)", async (restart) => {
+    const person = await eraseDeadRemovedBox("erase-disk-fails-once-" + restart, true);
+    const { c, deps, startedAt, destructive, confirmVolumeGone, slot } = person;
+    await driveRetirement(person, deps, startedAt + hour, restart);
+    expect(destructive()).toContain(volumeDelete);
+    expect(destructive()).not.toContain(appDelete);
+    expect(await c.received()).toEqual([]);
+    expect(await slot()).not.toBeNull();
+
+    confirmVolumeGone();
+    await expectErasedWithinAMinuteOfTheHour(person, restart);
+  });
+
+  test.each([false, true])("a Fly check that fails once at the end of the hour is retried within seconds (restart: %s)", async (restart) => {
+    const person = await eraseDeadRemovedBox("erase-check-fails-once-" + restart);
+    const { c, deps, startedAt, destructive, failNextVolumeList, slot } = person;
+    await driveRetirement(person, deps, startedAt + hour - 1, restart);
+    failNextVolumeList();
+    await driveRetirement(person, deps, startedAt + hour, restart);
+    expect(destructive()).toEqual([]);
+    expect(await c.received()).toEqual([]);
+    expect(await slot()).not.toBeNull();
+
+    await expectErasedWithinAMinuteOfTheHour(person, restart);
+  });
+
+  async function eraseWhileStripeIsDown(user: string) {
+    let stripeDown = true;
+    const kit = billingOn();
+    const closeSubscription = async (): Promise<StripeReply<{ readonly retained: boolean }>> =>
+      stripeDown ? { ok: false, status: 500, detail: "stripe 500" } : { ok: true, value: { retained: false } };
+    const person = await eraseDeadRemovedBox(user, true, true);
+    const billing = { ...kit.deps, stripe: { ...kit.stripe, closeSubscription } };
+    return {
+      ...person,
+      drive: (until: number) => driveRetirement(person, person.deps, until, true, billing),
+      restoreStripe: () => { stripeDown = false; },
+    };
+  }
+
+  /** What the previous build saved here: tries counted across the wipe deadline, and a one-minute alarm for billing. */
+  async function saveAsPreviousBuild({ stub, c }: Awaited<ReturnType<typeof eraseWhileStripeIsDown>>, attempts: number, boxNextAt: number) {
+    await runInDurableObject(stub, async (_, { storage }) => {
+      const job = storage.kv.get<Extract<Erasure, { kind: "cleaning" }>>(ERASE_JOB);
+      expect(job?.billing.kind).toBe("pending");
+      const nextAt = c.clock.now() + 60_000;
+      storage.kv.put(ERASE_JOB, { ...job, boxRetry: { attempts, nextAt: boxNextAt }, nextAt });
+      await storage.setAlarm(nextAt);
+    });
+  }
+
+  test("an erase the previous build saved after the hour tries the disk again within a minute once billing clears", async () => {
+    const person = await eraseWhileStripeIsDown("erase-previous-build-after-hour");
+    const { c, startedAt, destructive, confirmVolumeGone, restoreStripe, drive, slot } = person;
+    await drive(startedAt + hour);
+    expect(destructive()).toContain(volumeDelete);
+    await saveAsPreviousBuild(person, 9, startedAt + 2 * hour);
+
+    confirmVolumeGone();
+    restoreStripe();
+    await drive(startedAt + hour + 60_000);
+    expect(destructive().at(-1)).toBe(appDelete);
+    expect(await c.received()).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
+    expect(await slot()).toBeNull();
+  });
+
+  test("an erase the previous build saved after the hour, whose disk never goes, holds the slot and backs off to hourly", async () => {
+    const person = await eraseWhileStripeIsDown("erase-previous-build-disk-stays");
+    const { c, startedAt, destructive, restoreStripe, drive, slot } = person;
+    await drive(startedAt + hour);
+    await saveAsPreviousBuild(person, 9, startedAt + 2 * hour);
+    restoreStripe();
+
+    const attempts = await drive(startedAt + 8 * hour);
+    expect(attempts.slice(0, 4).map((at) => (at - startedAt - hour) / 1000)).toEqual([60, 75, 105, 165]);
+    expect(attempts.at(-1)! - attempts.at(-2)!).toBe(hour);
+    expect(await c.received()).toEqual([]);
+    expect(await slot()).not.toBeNull();
+    expect(destructive()).not.toContain(appDelete);
+  });
+
+  test("an erase the previous build saved during the hour keeps tries ten minutes apart and deletes nothing early", async () => {
+    const person = await eraseWhileStripeIsDown("erase-previous-build-in-hour");
+    const { c, startedAt, destructive, restoreStripe, drive, slot } = person;
+    await drive(startedAt + 40 * 60_000);
+    await saveAsPreviousBuild(person, 8, startedAt + hour);
+    restoreStripe();
+
+    const savedAt = c.clock.now();
+    const tries = [savedAt, ...await drive(startedAt + hour - 1), startedAt + hour];
+    expect(Math.max(...tries.slice(1).map((at, i) => at - tries[i]))).toBeLessThanOrEqual(10 * 60_000);
+    expect(destructive()).toEqual([]);
+
+    const after = await drive(startedAt + 8 * hour);
+    expect(destructive()).toContain(volumeDelete);
+    expect(destructive()).not.toContain(appDelete);
+    expect(after.at(-1)! - after.at(-2)!).toBe(hour);
+    expect(await c.received()).toEqual([]);
+    expect(await slot()).not.toBeNull();
+  });
+
+  test.each([
+    { who: "person", restart: false },
+    { who: "person", restart: true },
+    { who: "operator", restart: false },
+    { who: "operator", restart: true },
+  ] as const)("removal by the $who after setup fails on the last alarm step frees the slot (restart: $restart)", async ({ who, restart }) => {
+    let advanceClock = (_ms: number) => {};
+    let tries = 0;
+    const fly = flyReclaim({
+      machine: "machine_1", boxFailure: "health", keepVolumeAfterDelete: false,
+      createApp: () => {
+        tries++;
+        if (tries === 3) return new Response(null, { status: 403 });
+        advanceClock(tries === 1 ? 16_000 : 31_000);
+        throw new Error("Fly timed out");
+      },
+    });
+    const person = await startReclaim(`remove-after-last-step-${who}-${restart}`, null, fly.deps);
+    const { c, ledger } = person;
+    advanceClock = (ms) => c.clock.set((c.clock.now() + ms) as EpochMs);
+    await c.alarm();
+    expect(tries).toBe(3);
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+    expect(fly.boxRequests).toEqual([]);
+    expect(fly.destructive()).toEqual([]);
+
+    if (who === "operator") {
+      await c.remove();
+    } else {
+      await c.say("/claude remove");
+      expect(await c.received()).toEqual([say("removing")]);
+    }
+    await driveRetirement(person, fly.deps, c.clock.now() + 2 * 60_000, restart);
+    expect(fly.destructive()).toEqual(["DELETE /v1/apps/" + app + "/machines/machine_1", volumeDelete, appDelete]);
+    const diskCheck = fly.requests.indexOf(volumeList, fly.requests.indexOf(volumeDelete) + 1);
+    expect(diskCheck).toBeGreaterThan(fly.requests.indexOf(volumeDelete));
+    expect(diskCheck).toBeLessThan(fly.requests.indexOf(appDelete));
+    expect(await c.received()).toEqual(who === "operator" ? [] : [say("removed")]);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+    if (who === "person") {
+      await c.say("/claude");
+      expect(await c.received()).toEqual([say("setting_up")]);
+    }
+  });
+
+  test("a saved retirement from before the failed-setup flag still requires a wipe", async () => {
+    const { deps, boxRequests, destructive } = flyReclaim({
+      machine: "machine_1", boxFailure: "health", keepVolumeAfterDelete: false,
+    });
+    const { c, ledger } = await startReclaim("legacy-failed-reclaim", "failed", deps);
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (_agent, state) => {
+      state.storage.kv.put("box:retirement", {
+        kind: "locate", box: { name: app, host: "fly", url: deps.host.urlOf(app), setup: null, incarnation: null },
+      } satisfies EraseBox);
+    });
+
+    await c.alarm();
+    await c.advanceTo("2099-11-04T10:03");
+
+    expect(boxRequests.length).toBeGreaterThan(3);
+    expect(destructive()).toEqual([]);
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+    expect(ledger.boxes.has(c.agent)).toBe(true);
+  });
+
+  test("a lapsed box with permanent health failure keeps its slot without deleting anything", async () => {
+    const { deps, boxRequests, destructive } = flyReclaim({ machine: "machine_1", boxFailure: "health" });
+    const { c, ledger } = await startReclaim("reclaim-lapsed-dead", "retired", deps);
+    await c.alarm();
+    await c.advanceTo("2099-11-05T12:00");
+
+    expect(boxRequests.filter((path) => path === "/health").length).toBeGreaterThan(3);
+    expect(destructive()).toEqual([]);
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+    expect(ledger.boxes.has(c.agent)).toBe(true);
+  });
+
+  test.each([
+    { reason: "retired", notice: say("retired") },
+    { reason: "unused", notice: say("reclaimed") },
+    { reason: "failed", notice: say("setup_failed") },
+  ] satisfies { reason: ReclaimReason; notice: string }[])("releases a $reason slot for an ownerless shared box without touching the box", async ({ reason, notice }) => {
+    const requests: string[] = [];
+    const host = staticHost({ url: "http://static.box.test", appPrefix: "gbox-" });
+    const client = boxClient(async (url) => {
+      requests.push(url);
+      return new Response(null, { status: 503 });
+    });
+    const { c, ledger } = await startReclaim(`reclaim-shared-${reason}`, reason, { host, client, secret: BOX_SECRET, onlyFor: null, maxBoxes: 10 });
+
+    await c.alarm();
+    expect(requests).toEqual([]);
+    expect(await c.received()).toEqual([notice]);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+  });
+});
+
 describe("retiring a box the plan no longer allows", () => {
   const retiring = (until: string) => boxMessage("retiring", "en", null, until).text;
   const subscribe = async (kit: BillingKit, user: string, plan: "standard" | "included") => {
@@ -1545,6 +2387,7 @@ describe("retiring a box the plan no longer allows", () => {
     const c = await devChat("uma", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps, ledger, billing: billingOn({ TRIAL_DAYS: "1" }).deps });
     await c.say("/claude");
     expect(await c.received()).toEqual([say("setting_up"), say("connected")]);
+    box.sessions.add("plan-session");
     box.replies.push({ kind: "reply", step: quietCheckin() });
 
     await c.advanceTo("2099-11-05T11:00");
@@ -1554,10 +2397,12 @@ describe("retiring a box the plan no longer allows", () => {
 
     await c.advanceTo("2099-11-19T10:59");
     expect(box.destroyCalls).toEqual([]);
+    expect(box.sessions.has("plan-session")).toBe(true);
     await c.advanceTo("2099-11-19T11:00");
 
     expect(await c.received()).toEqual([say("retired")]);
     expect(box.destroyCalls).toEqual([await box.nameOf("uma")]);
+    expect(box.sessions.size).toBe(0);
     expect(ledger.boxes.has("p:dev:uma")).toBe(false);
     expect((await c.snapshot()).box).toBeNull();
   });
@@ -1624,6 +2469,8 @@ describe("a box row written by the code before reclaim reasons", () => {
         local("2099-11-04T09:00"),
       );
       sql.exec(MIGRATIONS[MIGRATIONS.findIndex((m) => m.includes("CASE state WHEN 'failed' THEN 'reclaiming'"))]);
+      sql.exec("ALTER TABLE box ADD COLUMN volume TEXT");
+      sql.exec("ALTER TABLE box ADD COLUMN setup TEXT");
     });
 
     await c.alarm();
@@ -1680,7 +2527,7 @@ describe("reclaiming a box nobody signed in to", () => {
     await c.say("/claude");
     const [again, link] = await c.received();
     expect(again).toBe(say("setting_up"));
-    expect((await linkIn(link, "lea", local("2099-11-06T10:00"))).valid).toBe(true);
+    expect((await linkIn(link, "lea", local("2099-11-06T10:00"), box)).valid).toBe(true);
     expect(ledger.boxes.has("p:dev:lea")).toBe(true);
   });
 

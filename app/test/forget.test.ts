@@ -113,13 +113,14 @@ describe("work that began before a forget can't save or send after it", () => {
 
     await c.post("where do I live again?", { at: t });
     await until(() => model.calls.length === 1);
-    await c.post("what's the weather tomorrow?", { at: (t + 5000) as EpochMs });
+    await c.post("what's the weather tomorrow?", { at: (t + 5000) as EpochMs, advanceClock: false });
     const { op } = await begin(c, { at: (t + 1000) as EpochMs, seq: null });
     model.release();
     await c.settle();
     expect(await c.received()).toEqual([]);
 
     await end(c, op);
+    c.clock.set((t + 7000) as EpochMs);
     await c.settle();
     expect(await c.received()).toEqual(["Tomorrow looks sunny."]);
     expect(model.calls[1].user).not.toContain("where do I live");
@@ -287,21 +288,6 @@ describe("no request that carries the person's words starts after a forget begin
     expect(seen).toEqual(["https://api.line.me/v2/bot/message/reply"]);
     expect(sent).toEqual({ kind: "fenced" });
   });
-
-  test("the person's messages wait in their Durable Object, and nobody else's group is served from it, while a forget is open", async () => {
-    const model = scripted([chat("Hi.")]);
-    const c = await devChat("fence-serve", { model, at: "2099-11-04T10:00" });
-    await c.say("hello");
-    const group = "g:telegram:-100" as AgentKey;
-    await runInDurableObject<Agent, void>(stubOf(c.agent), (a) => a.recordGroup(group, 1));
-    await begin(c);
-
-    const served = await runInDurableObject<Agent, unknown>(stubOf(c.agent), (a) =>
-      a.serve({ group, ownershipVersion: 1, purpose: "turn", system: "s", prompt: { sections: [] } as never }),
-    );
-    expect(served).toMatchObject({ kind: "no_access" });
-    expect(model.calls).toHaveLength(1);
-  });
 });
 
 describe("branches that tell the person something", () => {
@@ -377,7 +363,7 @@ describe("branches that tell the person something", () => {
     await c.received();
     const { op } = await begin(c);
     await runInDurableObject<Agent, void>(stubOf(c.agent), (_a, state) =>
-      new AgentStore(state.storage).notifyOnce("plan", eventKey.billing("plan"), { texts: ["Your plan changed."], note: "Your plan changed." }, c.clock.now()),
+      new AgentStore(state.storage).notifyOnce("plan", eventKey.billing("plan"), { texts: ["Your plan changed."], note: "Your plan changed." }, c.clock.now(), "background"),
     );
     await c.settle();
     const alarm = await nextAlarm(c);
@@ -477,6 +463,7 @@ describe("the provider cutoff", () => {
     const c = await devChat("Ucutoffline", { model: scripted([chat("Got it."), chat("Hello again!")]), channel: "line", at: "2099-11-04T10:00" });
     const t0 = c.clock.now();
     expect(await enqueue(lineEnvelope(c, "seen-before", t0))).toBe("queued");
+    c.clock.set((c.clock.now() + 2000) as EpochMs);
     await c.settle();
     await c.received();
 
@@ -494,6 +481,7 @@ describe("the provider cutoff", () => {
     expect(await stored(c, "line:seen-before")).toBe(0);
 
     expect(await enqueue(lineEnvelope(c, "after", cutoff + 1))).toBe("queued");
+    c.clock.set((c.clock.now() + 2000) as EpochMs);
     await c.settle();
     expect(await c.received()).toEqual(["Hello again!"]);
   });

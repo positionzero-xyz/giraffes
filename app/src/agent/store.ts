@@ -27,7 +27,7 @@ import { dueAt, type Box, type BoxState, type ReclaimReason } from "../box/machi
 import { commandOf } from "./commands";
 import { REMINDER_ITEM, renderSavedPage, snapshotSavedItems, savedPageNotice, type SavedCursor, type SavedPage } from "./saved-items";
 import { FORGET_TEXT, type Backups, type Deleted, type Receipt } from "./forget-text";
-import type { BoxName } from "../box/names";
+import type { BoxName, BoxSetup } from "../box/names";
 import {
   assertNever,
   buttonData,
@@ -88,6 +88,7 @@ import type { KeyFault, SchemaMode } from "../model/client";
 import type { Auth, ModelRef, ProviderId } from "../model/providers";
 import type { CallPurpose } from "../model/routes";
 import { SCHEDULE, type Firing, type NewWakeup, type PendingWakeup } from "../policy/schedule";
+import { quietUntil } from "../policy/outreach";
 import { DEFAULT_TIME_ZONE, fromLocal, toLocal } from "../policy/time";
 import type { MonthSpend, SpendScope } from "../policy/spend";
 import type { Sealed, StoredKey } from "../access/key";
@@ -134,6 +135,10 @@ export type AgentRow = {
 
 export type RateEventKind = "feedback" | "invite";
 
+/** `answer`: the notice answers the person's own action in this handling. `background`: an alarm or background job produced it. */
+export type NoticeTrigger = "answer" | "background";
+export type OutboxTriggerKind = AgentEventKind | "background";
+
 type SavedReference = SavedCursor & { readonly snapshot: string | null };
 
 export type OutboxRow = Omit<OutboundMessage, "texts"> & {
@@ -142,7 +147,7 @@ export type OutboxRow = Omit<OutboundMessage, "texts"> & {
   readonly privacy: Privacy | null;
   readonly epoch: ForgetEpoch | null;
   readonly inDoubt: boolean;
-  readonly triggerKind: AgentEventKind;
+  readonly triggerKind: OutboxTriggerKind;
   readonly admittedDay: LocalDate | null;
   readonly routine: boolean;
   readonly attempts: number;
@@ -228,6 +233,27 @@ type AdmissionCols = {
 };
 type InboxCols = { event_key: EventKey; payload: string; attempts: number; received_at: EpochMs; catch_up: NonNullable<InboxItem["catchUp"]> | null };
 type QueuedInboxCols = InboxCols & { seq: number; kind: AgentEventKind; ready_at: EpochMs };
+type BatchRowsPlan =
+  | { readonly kind: "claim"; readonly rows: readonly QueuedInboxCols[]; readonly catchUp: boolean }
+  | { readonly kind: "wait"; readonly at: EpochMs }
+  | { readonly kind: "none" };
+
+export const MESSAGE_QUIET_WINDOW_MS = 2_000;
+export const MESSAGE_WAIT_CEILING_MS = 6_000;
+
+type WaitingPlainMessage = { readonly receivedAt: EpochMs; readonly readyAt: EpochMs };
+export type PlainMessageStart = { readonly kind: "start" } | { readonly kind: "wait"; readonly at: EpochMs };
+
+export function plainMessageStart(messages: readonly WaitingPlainMessage[], now: EpochMs, canGrow = true): PlainMessageStart {
+  if (messages.length === 0) return { kind: "start" };
+  const first = messages[0];
+  const newest = messages[messages.length - 1];
+  const quietAt = newest.receivedAt + MESSAGE_QUIET_WINDOW_MS;
+  const ceilingAt = first.receivedAt + MESSAGE_WAIT_CEILING_MS;
+  const readyAt = Math.max(...messages.map((m) => m.readyAt));
+  const startAt = Math.max(readyAt, canGrow ? Math.min(quietAt, ceilingAt) : 0) as EpochMs;
+  return startAt <= now ? { kind: "start" } : { kind: "wait", at: startAt };
+}
 
 const CATCH_UP_WINDOW_MS = 24 * 60 * 60_000;
 const WAITING_FOR_ACCESS = `status = 'done' AND catch_up = 'earlier' AND received_at >= ?
@@ -248,7 +274,7 @@ const WAKEUP_COLS = "id, key, kind, origin, note, due_at, task_id, bookkeeping, 
 type OutboxCols = {
   id: OutboxId;
   event_key: EventKey;
-  trigger_kind: AgentEventKind;
+  trigger_kind: OutboxTriggerKind;
   intent: Intent;
   texts: string;
   reply_token: string | null;
@@ -365,6 +391,7 @@ type BoxCols = {
   name: BoxName;
   host: BoxHostKind;
   url: string;
+  setup: BoxSetup | null;
   state: BoxState;
   state_at: EpochMs;
   link_sent_at: EpochMs | null;
@@ -490,7 +517,7 @@ function toInboxItem(r: InboxCols): InboxItem {
 }
 
 function toBox(r: BoxCols): Box {
-  const base = { name: r.name, host: r.host, url: r.url, stateAt: r.state_at, retireAt: r.retire_at, image: r.image, ensureAt: r.ensure_at };
+  const base = { name: r.name, host: r.host, url: r.url, setup: r.setup, stateAt: r.state_at, retireAt: r.retire_at, image: r.image, ensureAt: r.ensure_at };
   switch (r.state) {
     case "provisioning":
       return { ...base, state: r.state, attempts: r.attempts, retryAt: r.next_at ?? r.state_at };
@@ -761,10 +788,17 @@ export class AgentStore {
 
   private nextBatch(now: EpochMs, catchUpBudget: string | null): Batch | null {
     this.expireCatchUp("pending", now);
+    const plan = this.planBatchRows(now, catchUpBudget);
+    return plan.kind === "claim" ? this.claimRows(plan.rows, plan.catchUp) : null;
+  }
+
+  private planBatchRows(now: EpochMs, catchUpBudget: string | null): BatchRowsPlan {
     const retry = this.sql.exec<QueuedInboxCols>(
       "SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox WHERE status = 'pending' AND catch_up IS NOT NULL ORDER BY seq",
     ).toArray();
-    if (retry.length > 0) return retry[0].ready_at <= now ? this.claimRows(retry, true) : null;
+    if (retry.length > 0) {
+      return retry[0].ready_at <= now ? { kind: "claim", rows: retry, catchUp: true } : { kind: "wait", at: retry[0].ready_at };
+    }
 
     const ready = this.sql
       .exec<QueuedInboxCols>(
@@ -774,11 +808,6 @@ export class AgentStore {
       )
       .toArray();
     const [head] = ready;
-    const joins = (r: QueuedInboxCols) => r.kind === "message" && r.ready_at <= now && commandOf(fromJson<AgentEvent>(r.payload)) === null;
-    if (head && head.ready_at > now) return null;
-    if (head && !joins(head)) return this.claimRows([head], false);
-    const end = ready.findIndex((r) => !joins(r));
-    const messages = end === -1 ? ready : ready.slice(0, end);
     const earlier = catchUpBudget !== null
       ? this.sql.exec<QueuedInboxCols>(
         `SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox
@@ -787,9 +816,22 @@ export class AgentStore {
         catchUpBudget,
       ).toArray()
       : [];
-    return earlier.length > 0
-      ? this.claimRows([...earlier, ...messages].sort((a, b) => a.seq - b.seq), true)
-      : this.claimRows(messages.slice(0, TURN.maxBatchMessages), false);
+    if (!head) return earlier.length > 0 ? { kind: "claim", rows: earlier, catchUp: true } : { kind: "none" };
+    const joins = (r: QueuedInboxCols) => {
+      if (r.kind !== "message" || r.ready_at > now) return false;
+      const event = fromJson<AgentEvent>(r.payload);
+      return commandOf(event) === null && !(event.kind === "message" && event.text.trimStart().startsWith("/"));
+    };
+    if (head.ready_at > now) return { kind: "wait", at: head.ready_at };
+    if (!joins(head)) return { kind: "claim", rows: [head], catchUp: false };
+    const end = ready.findIndex((r) => !joins(r));
+    const messages = end === -1 ? ready : ready.slice(0, end);
+    const rows = earlier.length > 0
+      ? [...earlier, ...messages].sort((a, b) => a.seq - b.seq)
+      : messages.slice(0, TURN.maxBatchMessages);
+    const canGrow = earlier.length === 0 && end === -1 && messages.length < TURN.maxBatchMessages;
+    const start = plainMessageStart(rows.map((r) => ({ receivedAt: r.received_at, readyAt: r.ready_at })), now, canGrow);
+    return start.kind === "wait" ? start : { kind: "claim", rows, catchUp: earlier.length > 0 };
   }
 
   private claimRows(rows: readonly QueuedInboxCols[], catchUp: boolean): Batch | null {
@@ -991,13 +1033,15 @@ export class AgentStore {
     const ids = batch.items.flatMap((i) => (i.event.kind === "choice" && i.event.choice.kind === "accept" ? [i.event.choice.proposal] : []));
     if (ids.length === 0) return [];
     return this.sql
-      .exec<{ id: ProposalId; task_id: TaskId; version: number; status: ProposalStatus; task_status: TaskStatus }>(
-        `SELECT p.id, p.task_id, p.version, p.status, t.status AS task_status FROM proposal p JOIN task t ON t.id = p.task_id
+      .exec<{ id: ProposalId; task_id: TaskId; version: number; status: ProposalStatus; task_status: TaskStatus; sent_at: EpochMs | null }>(
+        `SELECT p.id, p.task_id, p.version, p.status, t.status AS task_status,
+                CASE WHEN o.status = 'sent' THEN o.closed_at ELSE NULL END AS sent_at
+         FROM proposal p JOIN task t ON t.id = p.task_id LEFT JOIN outbox o ON o.id = p.outbox_id
          WHERE p.id IN (${placeholders(ids.length)})`,
         ...ids,
       )
       .toArray()
-      .map((r) => ({ id: r.id, task: r.task_id, version: r.version, status: r.status, taskStatus: r.task_status }));
+      .map((r) => ({ id: r.id, task: r.task_id, version: r.version, status: r.status, taskStatus: r.task_status, sentAt: r.sent_at }));
   }
 
   tasks(): readonly TaskSnapshot[] {
@@ -1123,7 +1167,7 @@ export class AgentStore {
       if (commit.outbound) {
         const o = commit.outbound;
         const choice = o.choice === "accept_pending" ? tasks.proposal : o.choice === "consent" ? choiceToken({ kind: "consent" }) : null;
-        this.insertOutbox(outboxId, firstKey, { ...o, taskId: o.link && tasks.resolve(o.link), choice }, now, commit.transient);
+        this.insertOutbox(outboxId, firstKey, { ...o, taskId: o.link && tasks.resolve(o.link), choice }, now, { transient: commit.transient });
       }
       this.sql.exec(
         `UPDATE inbox SET status = 'done', outcome = ?, finished_at = ?, catch_up = ?, catch_up_budget = ?,
@@ -1465,9 +1509,10 @@ export class AgentStore {
   private insertOutbox(
     id: OutboxId,
     key: EventKey,
-    out: Asked & Pick<Outbound, "texts" | "triggerKind" | "reply" | "replyOnly"> & Partial<Pick<Outbound, "spans">> & { readonly taskId: TaskId | null; readonly choice: string | null },
+    out: Asked & Pick<Outbound, "texts" | "reply" | "replyOnly"> & Partial<Pick<Outbound, "spans">> &
+      { readonly triggerKind: OutboxTriggerKind; readonly taskId: TaskId | null; readonly choice: string | null },
     now: EpochMs,
-    transient = false,
+    { readyAt = now, transient = false }: { readonly readyAt?: EpochMs; readonly transient?: boolean } = {},
   ): void {
     this.sql.exec(
       `INSERT INTO outbox (id, event_key, trigger_kind, intent, texts, reply_token, reply_expires, ready_at, created_at, task_id, purpose, choice, reply_only, correction_spans, transient)
@@ -1479,7 +1524,7 @@ export class AgentStore {
       JSON.stringify(out.texts),
       out.reply?.token ?? null,
       out.reply?.expiresAt ?? null,
-      now,
+      readyAt,
       now,
       out.taskId,
       out.intent === "unasked" ? out.purpose : null,
@@ -1493,7 +1538,7 @@ export class AgentStore {
   box(): Box | null {
     const r = this.sql
       .exec<BoxCols>(
-        "SELECT name, host, url, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at, reclaim_reason, retire_at, image, ensure_at FROM box",
+        "SELECT name, host, url, setup, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at, reclaim_reason, retire_at, image, ensure_at FROM box",
       )
       .toArray()[0];
     return r ? toBox(r) : null;
@@ -1503,16 +1548,17 @@ export class AgentStore {
     const out = b.state === "signed_out" ? b : null;
     this.sql.exec("UPDATE agent SET claude_plan_at = COALESCE(claude_plan_at, ?) WHERE NOT EXISTS (SELECT 1 FROM box)", b.stateAt);
     this.sql.exec(
-      `INSERT INTO box (one, name, host, url, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at,
+      `INSERT INTO box (one, name, host, url, setup, state, state_at, link_sent_at, signin_poll_until, attempts, next_at, poll_at, reclaim_at,
          reclaim_reason, retire_at, image, ensure_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (one) DO UPDATE SET name = excluded.name, host = excluded.host, url = excluded.url, state = excluded.state,
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (one) DO UPDATE SET name = excluded.name, host = excluded.host, url = excluded.url, setup = excluded.setup, state = excluded.state,
          state_at = excluded.state_at, link_sent_at = excluded.link_sent_at, signin_poll_until = excluded.signin_poll_until,
          attempts = excluded.attempts, next_at = excluded.next_at, poll_at = excluded.poll_at, reclaim_at = excluded.reclaim_at,
          reclaim_reason = excluded.reclaim_reason, retire_at = excluded.retire_at, image = excluded.image, ensure_at = excluded.ensure_at`,
       b.name,
       b.host,
       b.url,
+      b.setup,
       b.state,
       b.stateAt,
       out?.linkSentAt ?? null,
@@ -1528,10 +1574,10 @@ export class AgentStore {
     );
   }
 
-  applyBox(b: Box, message: NoteMessage | null, logs: readonly LogRow[], now: EpochMs): void {
+  applyBox(b: Box, message: NoteMessage | null, logs: readonly LogRow[], now: EpochMs, noticeTrigger: NoticeTrigger): void {
     this.tx(() => {
       this.writeBox(b);
-      if (message) this.insertMessage(eventKey.box(b.name), message, now);
+      if (message) this.insertMessage(eventKey.box(b.name), message, now, noticeTrigger);
       this.insertLogs(logs, now);
     });
   }
@@ -1561,20 +1607,23 @@ export class AgentStore {
     this.sql.exec("UPDATE agent SET claude_plan_at = NULL");
   }
 
-  removeBox(name: BoxName, message: NoteMessage | null, now: EpochMs): void {
+  removeBox(name: BoxName, message: NoteMessage | null, now: EpochMs, noticeTrigger: NoticeTrigger): void {
     this.tx(() => {
       this.sql.exec("DELETE FROM box WHERE name = ?", name);
-      if (message) this.insertMessage(eventKey.box(name), message, now);
+      if (message) this.insertMessage(eventKey.box(name), message, now, noticeTrigger);
     });
   }
 
-  private insertMessage(key: EventKey, message: NoteMessage, now: EpochMs, choice: string | null = null): void {
+  private insertMessage(key: EventKey, message: NoteMessage, now: EpochMs, noticeTrigger: NoticeTrigger, choice: string | null = null): void {
     this.sql.exec("INSERT INTO turn (role, text, at, event_key) VALUES ('note', ?, ?, ?)", message.note, now, key);
+    const tz = this.agent()?.tz ?? DEFAULT_TIME_ZONE;
+    const readyAt = noticeTrigger === "background" ? quietUntil(now, tz) ?? now : now;
     this.insertOutbox(
       crypto.randomUUID() as OutboxId,
       key,
-      { texts: message.texts, intent: "requested", triggerKind: "message", replyOnly: false, taskId: null, choice },
+      { texts: message.texts, intent: "requested", triggerKind: noticeTrigger === "background" ? "background" : "message", replyOnly: false, taskId: null, choice },
       now,
+      { readyAt },
     );
   }
 
@@ -1590,7 +1639,7 @@ export class AgentStore {
     };
   }
 
-  applyStanding(s: Standing, message: { readonly key: EventKey; readonly message: NoteMessage } | null, now: EpochMs): void {
+  applyStanding(s: Standing, message: { readonly key: EventKey; readonly message: NoteMessage } | null, now: EpochMs, noticeTrigger: NoticeTrigger): void {
     this.tx(() => {
       this.sql.exec(
         `INSERT INTO plan (one, own_subscription, own_plan, seat_subscription, seat_owner, updated_at)
@@ -1603,15 +1652,15 @@ export class AgentStore {
         s.seat?.owner ?? null,
         now,
       );
-      if (message && this.agent()) this.insertMessage(message.key, message.message, now);
+      if (message && this.agent()) this.insertMessage(message.key, message.message, now, noticeTrigger);
     });
   }
 
   /** Tells the person `message` unless `once` was already told, marking it like a handled Stripe event. */
-  notifyOnce(once: string, key: EventKey, message: NoteMessage | null, now: EpochMs): void {
+  notifyOnce(once: string, key: EventKey, message: NoteMessage | null, now: EpochMs, noticeTrigger: NoticeTrigger): void {
     this.tx(() => {
       if (this.billingEventSeen(once)) return;
-      if (message && this.agent()) this.insertMessage(key, message, now);
+      if (message && this.agent()) this.insertMessage(key, message, now, noticeTrigger);
       this.billingEventDone(once, now);
     });
   }
@@ -1667,7 +1716,7 @@ export class AgentStore {
   finishBillingAlertAttempt(settlement: BillingAlertSettlement, now: EpochMs): void {
     this.tx(() => {
       const { text, subscriptionIds, kind } = settlement;
-      if (text && this.agent()) this.insertMessage(eventKey.billing("duplicate"), { texts: [text], note: text }, now);
+      if (text && this.agent()) this.insertMessage(eventKey.billing("duplicate"), { texts: [text], note: text }, now, "background");
       const readyAt = kind === "sent" ? null : kind === "migrated" ? now : now + settlement.delayMs;
       const notified = text ? (kind === "unavailable" ? 2 : 1) : 0;
       this.sql.exec(`UPDATE billing_alert SET ready_at = ?, notified = max(notified, ?), closed_as = ?,
@@ -2033,6 +2082,7 @@ export class AgentStore {
     message: { readonly key: EventKey; readonly message: NoteMessage } | null,
     logs: readonly LogRow[],
     now: EpochMs,
+    noticeTrigger: NoticeTrigger,
     ticket: string | null = null,
   ): boolean {
     return this.tx(() => {
@@ -2060,7 +2110,7 @@ export class AgentStore {
         revision,
         k.connectedAt,
       );
-      if (message) this.insertMessage(message.key, message.message, now);
+      if (message) this.insertMessage(message.key, message.message, now, noticeTrigger);
       this.insertLogs(logs, now);
       return true;
     });
@@ -2133,7 +2183,7 @@ export class AgentStore {
   }
 
   /** Asks the backup question once per key, or `again` when the plan's box went away; true when this call asked. */
-  askBackup(message: NoteMessage, choice: string, key: EventKey, now: EpochMs, expectRevision: number, again: boolean = false): boolean {
+  askBackup(message: NoteMessage, choice: string, key: EventKey, now: EpochMs, noticeTrigger: NoticeTrigger, expectRevision: number, again: boolean = false): boolean {
     return this.tx(() => {
       const asked =
         this.sql.exec(
@@ -2142,7 +2192,7 @@ export class AgentStore {
           expectRevision,
           again ? 1 : 0,
         ).rowsWritten > 0;
-      if (asked) this.insertMessage(key, message, now, choice);
+      if (asked) this.insertMessage(key, message, now, noticeTrigger, choice);
       return asked;
     });
   }
@@ -2158,6 +2208,7 @@ export class AgentStore {
     notice: { readonly key: EventKey; readonly message: NoteMessage } | null,
     today: LocalDate,
     now: EpochMs,
+    noticeTrigger: NoticeTrigger,
     expectRevision: number,
     under: string | null = null,
   ): "stale" | "rested" | "told" {
@@ -2174,7 +2225,7 @@ export class AgentStore {
         under,
         expectRevision,
       );
-      if (tell) this.insertMessage(notice.key, notice.message, now);
+      if (tell) this.insertMessage(notice.key, notice.message, now, noticeTrigger);
       return tell ? "told" : "rested";
     });
   }
@@ -2375,18 +2426,6 @@ export class AgentStore {
     });
   }
 
-  recordGroup(group: AgentKey, version: number): void {
-    this.sql.exec(
-      "INSERT INTO owned_group (group_key, version) VALUES (?, ?) ON CONFLICT (group_key) DO UPDATE SET version = excluded.version",
-      group,
-      version,
-    );
-  }
-
-  ownsGroup(group: AgentKey, version: number): boolean {
-    return this.sql.exec("SELECT 1 FROM owned_group WHERE group_key = ? AND version = ?", group, version).toArray().length > 0;
-  }
-
   compactionInput(): CompactionInput {
     const memory = this.sql.exec<{ summary: string; through_turn_seq: number }>("SELECT summary, through_turn_seq FROM memory").one();
     const through = memory.through_turn_seq;
@@ -2485,7 +2524,18 @@ export class AgentStore {
     this.sql.exec("UPDATE log_flush SET failures = failures + 1, retry_at = ?", now + backoff);
   }
 
-  readiness(now: EpochMs): {
+  private inboxReadyAt(now: EpochMs, catchUpBudget: string | null): EpochMs | null {
+    const head = this.sql.exec<QueuedInboxCols & { readonly status: string }>(
+      `SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up, status FROM inbox
+       WHERE status IN ('pending', 'processing') ORDER BY catch_up IS NOT NULL DESC, seq LIMIT 1`,
+    ).toArray()[0];
+    if (!head) return null;
+    if (head.status !== "pending") return head.ready_at;
+    const plan = this.planBatchRows(now, catchUpBudget);
+    return plan.kind === "wait" ? plan.at : head.ready_at;
+  }
+
+  readiness(now: EpochMs, catchUpBudget: string | null = null): {
     readonly inboxReadyAt: EpochMs | null;
     readonly channelEventWaiting: boolean;
     readonly earliestWakeups: readonly { readonly origin: WakeupOrigin; readonly dueAt: EpochMs }[];
@@ -2505,7 +2555,7 @@ export class AgentStore {
       )
       .one();
     return {
-      inboxReadyAt: min("SELECT (SELECT ready_at FROM inbox WHERE status IN ('pending', 'processing') ORDER BY catch_up IS NOT NULL DESC, seq LIMIT 1) AS t"),
+      inboxReadyAt: this.inboxReadyAt(now, catchUpBudget),
       channelEventWaiting: this.channelEventWaiting(),
       earliestWakeups: this.sql
         .exec<{ origin: WakeupOrigin; due_at: EpochMs }>(

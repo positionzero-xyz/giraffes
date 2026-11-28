@@ -1,11 +1,13 @@
 import type { AgentKey, EpochMs, ForgetEpoch, Identity, InviteCode, Language, OutboxId, ReplyHandle } from "../domain";
 import type { CheckoutId } from "../billing/stripe";
 import type { SubscriptionId } from "../billing/plan";
-import type { BoxName } from "../box/names";
+import type { BoxName, BoxSetup } from "../box/names";
 import type { BoxHostKind, FlyDiskRetirement } from "../box/host";
 
 export const ACCOUNT_CHALLENGE_MS = 15 * 60_000;
 export const ACCOUNT_RETRY_MS = 60_000;
+export const ACCOUNT_WIPE_GRACE_MS = 60 * 60_000;
+export const ACCOUNT_WIPE_RETRY_MAX_MS = 10 * 60_000;
 export const ACCOUNT_RECEIPT_MS = 24 * 60 * 60_000;
 export const ERASE_DIAGNOSTIC_MS = 24 * 60 * 60_000;
 export const ERASE_CHALLENGE = "account:erase-confirmation";
@@ -19,7 +21,11 @@ export type EraseBoxReference = {
   readonly name: BoxName;
   readonly host: BoxHostKind;
   readonly url: string | null;
+  /** Absent in records saved before setups existed, which were all made for name-only keys. */
+  readonly setup: BoxSetup | null;
   readonly incarnation: string | null;
+  /** The box was still in setup under its own setup's key, so no sign-in link could open it. Older records may have served the person. */
+  readonly neverServed?: true;
 };
 
 export type EraseBoxTarget = EraseBoxReference & { readonly url: string };
@@ -27,7 +33,7 @@ export type EraseBoxTarget = EraseBoxReference & { readonly url: string };
 export type EraseBox =
   | { readonly kind: "none" }
   | { readonly kind: "unverified"; readonly box: EraseBoxReference }
-  | { readonly kind: "wiped" | "reclaimed"; readonly host: BoxHostKind }
+  | EraseBoxReceipt
   /**
    * Box state invariants:
    * - App absence needs app-level evidence: a 404 on the app plus a successful org app list that
@@ -43,11 +49,18 @@ export type EraseBox =
     readonly kind: "relocate";
     readonly box: EraseBoxTarget;
     readonly target: FlyDiskRetirement;
-    readonly resume: "wipe-fly" | "remove-volume" | "remove-app";
-  }
+  } & (
+    | { readonly resume: "wipe-fly"; readonly wipeFailures?: number; readonly wipeFailedAt?: EpochMs }
+    | ({ readonly resume: "remove-volume" | "remove-app" } & EraseDiskRemoval)
+  )
   | { readonly kind: "locate" | "wipe-static"; readonly box: EraseBoxTarget }
-  | { readonly kind: "wipe-fly"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement; readonly verify?: boolean }
-  | { readonly kind: "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement };
+  | { readonly kind: "wipe-fly"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement; readonly verify?: boolean; readonly wipeFailures?: number; readonly wipeFailedAt?: EpochMs }
+  | ({ readonly kind: "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement } & EraseDiskRemoval);
+
+type EraseDiskRemoval = {
+  readonly wipeSkipped?: true;
+  readonly diskDeleteAccepted?: true;
+};
 
 export type EraseBilling =
   | { readonly kind: "pending"; readonly checkouts: readonly CheckoutId[]; readonly subscriptions: readonly SubscriptionId[]; readonly endedSubscription: boolean; readonly stripeRetained: boolean }
@@ -57,7 +70,10 @@ type EraseLedger =
   | { readonly kind: "sweep" | "detach"; readonly invitees: readonly AgentKey[]; readonly members: readonly AgentKey[] }
   | { readonly kind: "done" };
 
-type EraseBoxReceipt = { readonly kind: "wiped" | "reclaimed"; readonly host: BoxHostKind };
+// Older deployments must be able to finish a job that has already retired its box.
+type EraseBoxReceipt =
+  | { readonly kind: "wiped"; readonly host: BoxHostKind }
+  | { readonly kind: "reclaimed"; readonly host: BoxHostKind; readonly deletedWithoutWipe?: true };
 
 type ErasureIdentity = {
   readonly id: OutboxId;
@@ -74,7 +90,15 @@ type ErasureIdentity = {
 export type Erasure = ErasureIdentity & (
   | { readonly kind: "starting" }
   | { readonly kind: "preparing"; readonly checkouts: readonly CheckoutId[]; readonly box: EraseBoxTarget | null }
-  | { readonly kind: "cleaning"; readonly ledger: EraseLedger; readonly billing: EraseBilling; readonly box: EraseBox; readonly boxLedgerKey: string | null }
+  | {
+    readonly kind: "cleaning";
+    readonly ledger: EraseLedger;
+    readonly billing: EraseBilling;
+    readonly box: EraseBox;
+    readonly boxLedgerKey: string | null;
+    /** Without `waitingFor` it was saved by a build that kept counting tries past the wipe deadline. */
+    readonly boxRetry?: { readonly waitingFor?: "box-wipe" | "disk-delete"; readonly attempts: number; readonly nextAt: EpochMs };
+  }
   | { readonly kind: "receipt"; readonly expiresAt: EpochMs; readonly attempted: boolean; readonly box: EraseBoxReceipt | null; readonly endedSubscription: boolean; readonly stripeRetained: boolean }
 );
 
@@ -98,6 +122,7 @@ export const ACCOUNT_COPY = {
     startButton: "Start",
     receipt: "Giraffe stopped and deleted your live Giraffe data. Cloudflare restore copies can remain for up to 30 days. Your chat and AI providers may keep copies under their own policies.",
     reclaimedBox: "Your box was removed earlier. Giraffe could not verify a disk wipe.",
+    deletedUnwipedBox: "Giraffe deleted your box and its disk while erasing your account. Giraffe could not verify a disk wipe.",
     flyCopies: "Fly may retain older disk copies for up to 60 days after removal.",
     subscriptionEnded: "Any Giraffe subscriptions you owned have ended.",
     stripeRecords: "If you requested a payment link, Stripe may keep checkout records and historical chat account references, even if you didn’t pay. Stripe may also keep required payment records.",
@@ -112,6 +137,7 @@ export const ACCOUNT_COPY = {
     startButton: "เริ่ม",
     receipt: "Giraffe หยุดทำงานและลบข้อมูลบัญชีที่ใช้งานอยู่แล้ว ข้อมูลสำหรับกู้คืนของ Cloudflare อาจคงอยู่ได้ถึง 30 วัน ผู้ให้บริการแชตและ AI อาจเก็บข้อมูลตามนโยบายของตน",
     reclaimedBox: "กล่องของคุณถูกนำออกไปก่อนหน้านี้ Giraffe ไม่สามารถยืนยันได้ว่าข้อมูลบนดิสก์ถูกลบแล้ว",
+    deletedUnwipedBox: "Giraffe ลบกล่องของคุณพร้อมดิสก์ระหว่างการลบบัญชีนี้ Giraffe ไม่สามารถยืนยันได้ว่าข้อมูลบนดิสก์ถูกลบแล้ว",
     flyCopies: "Fly อาจเก็บสำเนาดิสก์เดิมไว้ถึง 60 วันหลังจากนำกล่องออก",
     subscriptionEnded: "แพ็กเกจ Giraffe แบบชำระเงินที่คุณเป็นเจ้าของสิ้นสุดแล้ว",
     stripeRecords: "หากคุณเคยขอลิงก์ชำระเงิน Stripe อาจเก็บบันทึกการเปิดหน้าชำระเงินและข้อมูลอ้างอิงบัญชีแชตเดิม แม้ว่าคุณจะไม่ได้ชำระเงิน และอาจเก็บบันทึกการชำระเงินที่จำเป็น",

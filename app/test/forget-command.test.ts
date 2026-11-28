@@ -14,6 +14,7 @@ import { eventKey, personAgentKey, type AgentKey, type EpochMs, type Identity, t
 import { connect } from "../src/model/client";
 import { scriptedConnect, type ScriptStep } from "../src/model/scripted";
 import {
+  advancePastQuietWindow,
   chat,
   devChat,
   fakeBox,
@@ -105,6 +106,7 @@ describe("replies after a forget", () => {
           reply_to_message: { chat: privateChat, date, text },
         },
       })).status).toBe(200);
+      advancePastQuietWindow(c.clock, "What did you mean by this?", c.clock.now());
       await c.settle();
       return model.calls.at(-1)?.user;
     };
@@ -284,6 +286,7 @@ describe("replies after a forget", () => {
       rewindQuoteRewrites(storage.sql);
       storage.sql.exec(`
         ALTER TABLE forget DROP COLUMN completed_at;
+        ALTER TABLE box DROP COLUMN setup;
         ALTER TABLE outbox DROP COLUMN correction_spans;
         ALTER TABLE turn DROP COLUMN correction_spans;
         ALTER TABLE turn DROP COLUMN transient;
@@ -307,6 +310,7 @@ describe("replies after a forget", () => {
           reply_to_message: { chat: privateChat, date, text },
         },
       })).status).toBe(200);
+      advancePastQuietWindow(c.clock, "What was this list?", c.clock.now());
       await c.settle();
       return model.calls.at(-1)?.user;
     };

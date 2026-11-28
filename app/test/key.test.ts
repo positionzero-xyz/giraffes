@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
 import { draftKey, KEY_REMOVED, redactSecrets } from "../src/access/key";
-import { AgentStore } from "../src/agent/store";
+import { AgentStore, MESSAGE_QUIET_WINDOW_MS } from "../src/agent/store";
 import { eventKey, type AgentKey, type EpochMs, type LocalDate, type MicroUsd } from "../src/domain";
 import { NOTICES } from "../src/notices";
 import worker from "../src/worker";
@@ -74,16 +74,16 @@ describe("entering a key on the page", () => {
     expect((await submit(await keyLink(c))).status).toBe(200);
     await c.settle();
     await c.received();
-    c.clock.set((local("2099-11-04T23:00") - 500) as EpochMs);
+    c.clock.set((local("2099-11-04T23:00") - 500 - MESSAGE_QUIET_WINDOW_MS) as EpochMs);
     await c.say("Help me plan dinner.");
     const [refused] = await c.received();
     expect(refused).toContain("try the key again after 2099-11-05 00:00");
     expect(refused).not.toContain("answer requests");
-    c.clock.set((local("2099-11-05T00:00") - 1000) as EpochMs);
+    c.clock.set((local("2099-11-05T00:00") - 1000 - MESSAGE_QUIET_WINDOW_MS) as EpochMs);
     await c.say("Can we use pumpkin?");
     expect(await c.received()).toEqual([refused]);
     expect(provider.seen).toHaveLength(2);
-    c.clock.set(local("2099-11-05T00:00"));
+    c.clock.set((local("2099-11-05T00:00") - MESSAGE_QUIET_WINDOW_MS) as EpochMs);
     await c.say("How should I cook the pumpkin?");
     expect((await c.received())[0]).toContain("try the key again after 2099-11-05 02:00");
     c.clock.set(local("2099-11-05T01:59"));
@@ -105,7 +105,7 @@ describe("entering a key on the page", () => {
     await c.settle();
     await c.received();
     await c.say("ช่วยคิดเมนูมื้อเย็นหน่อยค่ะ");
-    expect((await c.received())[0]).toContain("ลองใช้ key นี้อีกครั้งได้หลัง 2099-11-05 00:00");
+    expect((await c.received())[0]).toContain("ลองใช้ key นี้อีกครั้งได้หลัง 2099-11-05 00:01");
   });
 
   test.each(["pending", "processing"] as const)("catch-up expiry applies to %s batches after backoff", async (status) => {
@@ -205,13 +205,17 @@ describe("entering a key on the page", () => {
     provider.steps.push(
       PROBE_OK,
       { kind: "call", run: async () => {
-        expect((await c.post("How much is a train ticket?")).status).toBe(200);
+        const sentAt = c.clock.now();
+        c.clock.set((sentAt + MESSAGE_QUIET_WINDOW_MS) as EpochMs);
+        expect((await c.post("How much is a train ticket?", { at: sentAt })).status).toBe(200);
         return reply("I can't check live exchange rates.");
       } },
       reply("It depends on the route."),
     );
 
-    await c.post(request);
+    const firstSentAt = c.clock.now();
+    c.clock.set((firstSentAt + MESSAGE_QUIET_WINDOW_MS) as EpochMs);
+    await c.post(request, { at: firstSentAt });
     await noticeStarted.promise;
     try {
       expect((await submit(ticket)).status).toBe(200);
@@ -220,6 +224,7 @@ describe("entering a key on the page", () => {
     } finally {
       repeatQueued.resolve();
     }
+    c.clock.set((c.clock.now() + 2 * MESSAGE_QUIET_WINDOW_MS) as EpochMs);
     await c.settle();
 
     expect(await c.received()).toEqual([

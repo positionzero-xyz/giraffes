@@ -208,6 +208,27 @@ type AdmissionCols = {
 };
 type InboxCols = { event_key: EventKey; payload: string; attempts: number; received_at: EpochMs; catch_up: NonNullable<InboxItem["catchUp"]> | null };
 type QueuedInboxCols = InboxCols & { seq: number; kind: AgentEventKind; ready_at: EpochMs };
+type BatchRowsPlan =
+  | { readonly kind: "claim"; readonly rows: readonly QueuedInboxCols[]; readonly catchUp: boolean }
+  | { readonly kind: "wait"; readonly at: EpochMs }
+  | { readonly kind: "none" };
+
+export const MESSAGE_QUIET_WINDOW_MS = 2_000;
+export const MESSAGE_WAIT_CEILING_MS = 6_000;
+
+type WaitingPlainMessage = { readonly receivedAt: EpochMs; readonly readyAt: EpochMs };
+export type PlainMessageStart = { readonly kind: "start" } | { readonly kind: "wait"; readonly at: EpochMs };
+
+export function plainMessageStart(messages: readonly WaitingPlainMessage[], now: EpochMs, canGrow = true): PlainMessageStart {
+  if (messages.length === 0) return { kind: "start" };
+  const first = messages[0];
+  const newest = messages[messages.length - 1];
+  const quietAt = newest.receivedAt + MESSAGE_QUIET_WINDOW_MS;
+  const ceilingAt = first.receivedAt + MESSAGE_WAIT_CEILING_MS;
+  const readyAt = Math.max(...messages.map((m) => m.readyAt));
+  const startAt = Math.max(readyAt, canGrow ? Math.min(quietAt, ceilingAt) : 0) as EpochMs;
+  return startAt <= now ? { kind: "start" } : { kind: "wait", at: startAt };
+}
 
 const CATCH_UP_WINDOW_MS = 24 * 60 * 60_000;
 const WAITING_FOR_ACCESS = `status = 'done' AND catch_up = 'earlier' AND received_at >= ?
@@ -691,10 +712,17 @@ export class AgentStore {
 
   private nextBatch(now: EpochMs, catchUpBudget: string | null): Batch | null {
     this.expireCatchUp("pending", now);
+    const plan = this.planBatchRows(now, catchUpBudget);
+    return plan.kind === "claim" ? this.claimRows(plan.rows, plan.catchUp) : null;
+  }
+
+  private planBatchRows(now: EpochMs, catchUpBudget: string | null): BatchRowsPlan {
     const retry = this.sql.exec<QueuedInboxCols>(
       "SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox WHERE status = 'pending' AND catch_up IS NOT NULL ORDER BY seq",
     ).toArray();
-    if (retry.length > 0) return retry[0].ready_at <= now ? this.claimRows(retry, true) : null;
+    if (retry.length > 0) {
+      return retry[0].ready_at <= now ? { kind: "claim", rows: retry, catchUp: true } : { kind: "wait", at: retry[0].ready_at };
+    }
 
     const ready = this.sql
       .exec<QueuedInboxCols>(
@@ -704,11 +732,6 @@ export class AgentStore {
       )
       .toArray();
     const [head] = ready;
-    const joins = (r: QueuedInboxCols) => r.kind === "message" && r.ready_at <= now && commandOf(fromJson<AgentEvent>(r.payload)) === null;
-    if (head && head.ready_at > now) return null;
-    if (head && !joins(head)) return this.claimRows([head], false);
-    const end = ready.findIndex((r) => !joins(r));
-    const messages = end === -1 ? ready : ready.slice(0, end);
     const earlier = catchUpBudget !== null
       ? this.sql.exec<QueuedInboxCols>(
         `SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up FROM inbox
@@ -717,9 +740,22 @@ export class AgentStore {
         catchUpBudget,
       ).toArray()
       : [];
-    return earlier.length > 0
-      ? this.claimRows([...earlier, ...messages].sort((a, b) => a.seq - b.seq), true)
-      : this.claimRows(messages.slice(0, TURN.maxBatchMessages), false);
+    if (!head) return earlier.length > 0 ? { kind: "claim", rows: earlier, catchUp: true } : { kind: "none" };
+    const joins = (r: QueuedInboxCols) => {
+      if (r.kind !== "message" || r.ready_at > now) return false;
+      const event = fromJson<AgentEvent>(r.payload);
+      return commandOf(event) === null && !(event.kind === "message" && event.text.trimStart().startsWith("/"));
+    };
+    if (head.ready_at > now) return { kind: "wait", at: head.ready_at };
+    if (!joins(head)) return { kind: "claim", rows: [head], catchUp: false };
+    const end = ready.findIndex((r) => !joins(r));
+    const messages = end === -1 ? ready : ready.slice(0, end);
+    const rows = earlier.length > 0
+      ? [...earlier, ...messages].sort((a, b) => a.seq - b.seq)
+      : messages.slice(0, TURN.maxBatchMessages);
+    const canGrow = earlier.length === 0 && end === -1 && messages.length < TURN.maxBatchMessages;
+    const start = plainMessageStart(rows.map((r) => ({ receivedAt: r.received_at, readyAt: r.ready_at })), now, canGrow);
+    return start.kind === "wait" ? start : { kind: "claim", rows, catchUp: earlier.length > 0 };
   }
 
   private claimRows(rows: readonly QueuedInboxCols[], catchUp: boolean): Batch | null {
@@ -2161,7 +2197,18 @@ export class AgentStore {
     this.sql.exec("UPDATE log_flush SET failures = failures + 1, retry_at = ?", now + backoff);
   }
 
-  readiness(now: EpochMs): {
+  private inboxReadyAt(now: EpochMs, catchUpBudget: string | null): EpochMs | null {
+    const head = this.sql.exec<QueuedInboxCols & { readonly status: string }>(
+      `SELECT seq, event_key, kind, payload, attempts, received_at, ready_at, catch_up, status FROM inbox
+       WHERE status IN ('pending', 'processing') ORDER BY catch_up IS NOT NULL DESC, seq LIMIT 1`,
+    ).toArray()[0];
+    if (!head) return null;
+    if (head.status !== "pending") return head.ready_at;
+    const plan = this.planBatchRows(now, catchUpBudget);
+    return plan.kind === "wait" ? plan.at : head.ready_at;
+  }
+
+  readiness(now: EpochMs, catchUpBudget: string | null = null): {
     readonly inboxReadyAt: EpochMs | null;
     readonly channelEventWaiting: boolean;
     readonly earliestWakeups: readonly { readonly origin: WakeupOrigin; readonly dueAt: EpochMs }[];
@@ -2181,7 +2228,7 @@ export class AgentStore {
       )
       .one();
     return {
-      inboxReadyAt: min("SELECT (SELECT ready_at FROM inbox WHERE status IN ('pending', 'processing') ORDER BY catch_up IS NOT NULL DESC, seq LIMIT 1) AS t"),
+      inboxReadyAt: this.inboxReadyAt(now, catchUpBudget),
       channelEventWaiting: this.channelEventWaiting(),
       earliestWakeups: this.sql
         .exec<{ origin: WakeupOrigin; due_at: EpochMs }>(

@@ -7,7 +7,7 @@ import type { CheckoutId, StripeReply } from "../src/billing/stripe";
 import { parseInviteCode, personAgentKey, type EpochMs } from "../src/domain";
 import { type SubscriptionId } from "../src/billing/plan";
 import { d1Ledger } from "../src/ledger/ledger";
-import { billingOn, chat, devChat, fakeBox, hold, postTelegramUpdate, scripted } from "./testkit";
+import { advancePastQuietWindow, billingOn, chat, devChat, fakeBox, hold, postTelegramUpdate, scripted } from "./testkit";
 
 test("a confirmed account erase clears private state and requires a fresh decision to return", async () => {
   const model = scripted([chat("A private reply.")]);
@@ -118,6 +118,7 @@ test("a Telegram reply in a restarted account omits a quote from before the eras
       reply_to_message: { chat: privateChat, date: originalDate, text: oldText },
     },
   })).status).toBe(200);
+  advancePastQuietWindow(c.clock, "What did you mean by this?", c.clock.now());
   await c.settle();
   expect(model.calls[2].user).toContain("Person: What did you mean by this?");
   expect(model.calls[2].user).not.toContain(oldText);

@@ -1089,6 +1089,7 @@ export class Agent extends DurableObject<Env> {
       if (!box) return;
       this.#store.forgetClaudePlan();
       const retiring = onRemove(box, now).box;
+      if (box.host === "fly" && box.state === "provisioning") this.#saveNeverServedRetirement(box);
       if (retiring !== box) this.#store.applyBox(retiring, null, [], now);
     });
     await this.#armNoLaterThan(now);
@@ -1682,11 +1683,16 @@ export class Agent extends DurableObject<Env> {
 
   /** The person takes their plan away: its box is removed, if there is one, and from then on their key needs no yes. */
   #claudeRemove(view: TurnView, agent: AgentKey): void {
-    this.#store.forgetClaudePlan();
-    const current = this.#store.box();
-    const t = current ? onRemove(current, this.#deps.clock.now()) : { box: null, say: "removed" as const };
-    const m = boxMessage(t.say, view.language, null);
-    this.#commit(planWithoutModel(view, { kind: "command", text: m.text, note: m.note }), view, agent, { kind: "none" }, t.box);
+    this.ctx.storage.transactionSync(() => {
+      this.#store.forgetClaudePlan();
+      const current = this.#store.box();
+      const t = current ? onRemove(current, this.#deps.clock.now()) : { box: null, say: "removed" as const };
+      const m = boxMessage(t.say, view.language, null);
+      this.#commit(planWithoutModel(view, { kind: "command", text: m.text, note: m.note }), view, agent, { kind: "none" }, t.box);
+      if (current?.host === "fly" && current.state === "provisioning" && this.#store.box()?.state === "reclaiming") {
+        this.#saveNeverServedRetirement(current);
+      }
+    });
   }
 
   async #boxReply(view: TurnView, agent: AgentKey, deps: BoxDeps | null, t: { readonly box: Box | null; readonly say: BoxSay }): Promise<void> {
@@ -1757,13 +1763,16 @@ export class Agent extends DurableObject<Env> {
       return;
     }
     this.ctx.storage.transactionSync(() => {
-      if (this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) === undefined) {
-        this.ctx.storage.kv.put(BOX_RETIREMENT, this.#resolveAccountBox(this.#agent().key, {
-          name: box.name, host: box.host, url: box.url, incarnation: this.#store.boxVolume(), neverServed: true,
-        }));
-      }
+      this.#saveNeverServedRetirement(box);
       this.#store.applyBox(box, message, [], now);
     });
+  }
+
+  #saveNeverServedRetirement(box: Box): void {
+    if (this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) !== undefined) return;
+    this.ctx.storage.kv.put(BOX_RETIREMENT, this.#resolveAccountBox(this.#agent().key, {
+      name: box.name, host: box.host, url: box.url, incarnation: this.#store.boxVolume(), neverServed: true,
+    }));
   }
 
   async #reclaim(box: Extract<Box, { state: "reclaiming" }>): Promise<void> {

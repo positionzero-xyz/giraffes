@@ -176,7 +176,7 @@ describe("agent tools", () => {
   test("each tool asks for exactly what the turn schema requires, with optional fields left optional and no type field", () => {
     const schedule = AGENT_TOOLS.find((t) => t.name === "schedule_wakeup")?.inputSchema as { required: string[]; properties: Record<string, unknown> };
     expect(schedule.required).toEqual(["key", "at", "note", "asked", "task"]);
-    expect(Object.keys(schedule.properties)).toEqual(["key", "at", "note", "asked", "task", "repeat"]);
+    expect(Object.keys(schedule.properties)).toEqual(["key", "at", "note", "asked", "task", "repeat", "timeZone"]);
     expect(AGENT_TOOLS.map((t) => [t.name, (t.inputSchema as { required: string[] }).required])).toEqual([
       ["schedule_wakeup", ["key", "at", "note", "asked", "task"]],
       ["cancel_wakeup", ["key"]],

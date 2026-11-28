@@ -805,7 +805,7 @@ export function stripeChange(kit: BillingKit, o: StripeSubscriptionOpts & { read
   return postStripe(subscriptionEvent(o));
 }
 
-/** Takes the forget command's columns back out, so a test can run the migrations again from an older schema version. */
+/** Restore the original forget table and remove the later columns used by migration fixtures. */
 export function rewindForgetCommandSchema(sql: SqlStorage): void {
   sql.exec(`
     ALTER TABLE outbox DROP COLUMN epoch;
@@ -813,6 +813,7 @@ export function rewindForgetCommandSchema(sql: SqlStorage): void {
     DROP TABLE forget;
     ALTER TABLE box DROP COLUMN volume;
     ALTER TABLE box DROP COLUMN setup;
+    ALTER TABLE wakeup DROP COLUMN time_zone;
     DROP TABLE IF EXISTS line_message;
   `);
   const foundation = MIGRATIONS.findIndex((migration) => migration.includes("CREATE TABLE forget ("));

@@ -118,6 +118,7 @@ export type AgentEvent =
       /** True only for a check code scheduled itself, never the model. */
       readonly bookkeeping: boolean;
       readonly repeat: Repeat | null;
+      readonly timeZone?: TimeZone;
     }
   | { readonly kind: "checkin"; readonly day: LocalDate; readonly dueAt: EpochMs; readonly firedAt: EpochMs };
 

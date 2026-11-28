@@ -754,6 +754,73 @@ describe("time zone and language", () => {
   const london = (s: string) => fromLocal(s as LocalDateTime, LONDON);
   const locale = (timeZone: string, language: string) => ({ type: "set_locale", timeZone, language });
 
+  test("a London routine still fires at 9 am London time after a move and across daylight saving time", async () => {
+    const model = scripted([
+      turn({ actions: [
+        { ...routine("standup", "2099-03-28T09:00", "London standup", "daily"), timeZone: "Europe/London" },
+        { ...schedule("lunch", "2099-03-28T14:00", "Lunch"), timeZone: "+01:00" },
+      ] }),
+      turn({ actions: [locale("Asia/Tokyo", "en")] }),
+      chat("Lunch time."),
+      chat("London standup."),
+      turn({ actions: [quiet()] }),
+      chat("London standup again."),
+    ]);
+    const c = await devChat("london-routine", { model, at: "2099-03-28T09:30" });
+    const reminders = async () => Object.fromEntries((await c.snapshot()).pendingWakeups
+      .filter((w) => w.kind === "reminder").map((w) => [w.key, wall(w.dueAt)]));
+
+    await c.say("Remind me every day at 9 am London time for standup, and at 2 pm here for lunch today.");
+    expect(await reminders()).toEqual({ standup: "2099-03-28T16:00", lunch: "2099-03-28T14:00" });
+    await c.say("I've moved to Tokyo.");
+    expect((await c.snapshot()).agent?.tz).toBe("Asia/Tokyo");
+    expect(await reminders()).toEqual({ standup: "2099-03-28T16:00", lunch: "2099-03-28T12:00" });
+
+    await c.advanceTo("2099-03-28T15:59");
+    expect(await c.received()).toEqual(["Lunch time."]);
+    await c.advanceTo("2099-03-28T16:00");
+    expect(await c.received()).toEqual(["London standup."]);
+    expect(await reminders()).toEqual({ standup: "2099-03-29T15:00" });
+    await c.advanceTo("2099-03-29T15:00");
+    expect(await c.received()).toEqual(["London standup again."]);
+    expect(c.channel.delivered.slice(1).map((d) => toLocal(d.at, LONDON))).toEqual(["2099-03-28T09:00", "2099-03-29T09:00"]);
+    expect(await reminders()).toEqual({ standup: "2099-03-30T15:00" });
+    model.assertDone();
+  });
+
+  test("reminders saved before reminder time zones still fire at the same times after upgrade", async () => {
+    const model = scripted([
+      turn({ actions: [schedule("call", "2099-11-04T11:00", "Call the clinic"), routine("stretch", "2099-11-04T11:30", "Stretch", "daily")] }),
+      chat("Call the clinic."),
+      chat("Stretch time."),
+      turn({ actions: [{ ...schedule("standup", "2099-11-04T09:00", "Standup"), timeZone: "Europe/London" }] }),
+      chat("Standup time."),
+    ]);
+    const c = await devChat("reminder-zone-upgrade", { model, at: "2099-11-04T10:00" });
+    await c.say("Remind me to call the clinic at 11 and stretch every day at 11:30.");
+    const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (_agent, { storage }) => {
+      const before = MIGRATIONS.findIndex((m) => m.includes("ALTER TABLE box ADD COLUMN setup")) + 1;
+      if (MIGRATIONS.length > before) storage.sql.exec("ALTER TABLE wakeup DROP COLUMN time_zone");
+      storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(before));
+      migrate(storage);
+    });
+
+    await c.advanceTo("2099-11-04T10:59");
+    expect(await c.received()).toEqual([]);
+    await c.advanceTo("2099-11-04T11:30");
+    expect(c.channel.delivered.map((d) => [d.text, wall(d.at)])).toEqual([
+      ["Call the clinic.", "2099-11-04T11:00"],
+      ["Stretch time.", "2099-11-04T11:30"],
+    ]);
+    expect(wall((await c.snapshot()).pendingWakeups.find((w) => w.key === "stretch")!.dueAt)).toBe("2099-11-05T11:30");
+    await c.say("Remind me about standup at 9 am London time today.");
+    await c.advanceTo("2099-11-04T16:00");
+    expect(c.channel.delivered.map((d) => d.text)).toEqual(["Call the clinic.", "Stretch time.", "Standup time."]);
+    expect(wall(c.channel.delivered[2].at)).toBe("2099-11-04T16:00");
+    model.assertDone();
+  });
+
   test("a person in London gets the check-in at 09:00, quiet hours and reminders on London time", async () => {
     const model = scripted([
       turn({ actions: [schedule("dentist", "2099-11-05T15:00", "Dentist"), send("Set for 3pm.")] }),

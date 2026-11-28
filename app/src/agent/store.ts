@@ -223,8 +223,9 @@ type WakeupCols = {
   bookkeeping: number;
   repeat: Repeat["every"] | null;
   repeat_anchor: LocalDateTime | null;
+  time_zone: TimeZone | null;
 };
-const WAKEUP_COLS = "id, key, kind, origin, note, due_at, task_id, bookkeeping, repeat, repeat_anchor";
+const WAKEUP_COLS = "id, key, kind, origin, note, due_at, task_id, bookkeeping, repeat, repeat_anchor, time_zone";
 type OutboxCols = {
   id: OutboxId;
   event_key: EventKey;
@@ -459,7 +460,7 @@ function toWakeup(r: WakeupCols): PendingWakeup {
   const base = { id: r.id, key: r.key, note: r.note, dueAt: r.due_at };
   if (r.kind === "checkin") return { ...base, kind: "checkin", origin: "system" };
   const repeat = r.repeat && r.repeat_anchor ? { every: r.repeat, anchor: r.repeat_anchor } : null;
-  return { ...base, kind: "reminder", origin: r.origin === "person" ? "person" : "agent", task: r.task_id, bookkeeping: r.bookkeeping === 1, repeat };
+  return { ...base, kind: "reminder", origin: r.origin === "person" ? "person" : "agent", task: r.task_id, bookkeeping: r.bookkeeping === 1, repeat, ...(r.time_zone && { timeZone: r.time_zone }) };
 }
 
 function toInboxItem(r: InboxCols): InboxItem {
@@ -1388,8 +1389,8 @@ export class AgentStore {
 
   private insertWakeup(w: NewWakeup, createdBy: string, now: EpochMs, task: TaskId | null = null): void {
     this.sql.exec(
-      `INSERT OR IGNORE INTO wakeup (key, kind, origin, note, due_at, created_at, created_by, task_id, bookkeeping, repeat, repeat_anchor)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO wakeup (key, kind, origin, note, due_at, created_at, created_by, task_id, bookkeeping, repeat, repeat_anchor, time_zone)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       w.key,
       w.kind,
       w.origin,
@@ -1401,6 +1402,7 @@ export class AgentStore {
       w.kind === "reminder" && w.bookkeeping ? 1 : 0,
       w.kind === "reminder" && w.repeat ? w.repeat.every : null,
       w.kind === "reminder" && w.repeat ? w.repeat.anchor : null,
+      w.kind === "reminder" ? w.timeZone ?? null : null,
     );
   }
 
@@ -2422,14 +2424,16 @@ export class AgentStore {
     return true;
   }
 
-  /** A setting goes back to its default. A new time zone keeps each kept reminder at its wall time, as moving zones does. */
+  /** A setting goes back to its default. Reminders that follow the person's zone keep their wall time. */
   private resetSetting(setting: number): void {
     const a = this.agent();
     if (!a) return;
     if (setting === 1) this.sql.exec("UPDATE agent SET language = ?", CHANNEL_LANGUAGE[a.identity.channel]);
     if (setting === 3) this.sql.exec("UPDATE agent SET checkin_local = ?", SCHEDULE.defaultCheckinLocal);
     if (setting !== 2 || a.tz === DEFAULT_TIME_ZONE) return;
-    for (const w of this.sql.exec<{ id: number; due_at: EpochMs }>("SELECT id, due_at FROM wakeup WHERE status = 'pending' AND kind = 'reminder'").toArray()) {
+    for (const w of this.sql.exec<{ id: number; due_at: EpochMs }>(
+      "SELECT id, due_at FROM wakeup WHERE status = 'pending' AND kind = 'reminder' AND time_zone IS NULL",
+    ).toArray()) {
       this.sql.exec("UPDATE wakeup SET due_at = ? WHERE id = ?", fromLocal(toLocal(w.due_at, a.tz), DEFAULT_TIME_ZONE), w.id);
     }
     this.sql.exec("UPDATE agent SET tz = ?", DEFAULT_TIME_ZONE);

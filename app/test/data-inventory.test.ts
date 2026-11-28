@@ -59,7 +59,7 @@ const durable = {
   task: { saved: "ref kind title status opened_at touched_at closed_at", identity: "id cause_key" },
   task_fact: { saved: "kind ref detail completes person_decision cause_kind cause_at at", identity: "id task_id cause_key" },
   turn: { chat: "text", identity: "event_key", operational: "seq role at" },
-  wakeup: { saved: "key note due_at status repeat repeat_anchor", identity: "id task_id created_by", operational: "kind origin created_at closed_at bookkeeping" },
+  wakeup: { saved: "key note due_at status repeat repeat_anchor time_zone", identity: "id task_id created_by", operational: "kind origin created_at closed_at bookkeeping" },
 } satisfies Record<string, Classification>;
 
 const d1 = {
@@ -170,7 +170,7 @@ const inbox = {
   lifecycle: { kind: "operational", change: "operational", at: "operational", reply: "secret", code: "secret" },
   choice: { kind: "operational", choice: "identity", at: "operational", reply: "secret", epoch: "operational" },
   wakeup: { kind: "operational", wakeupId: "identity", key: "saved", origin: "operational", note: "saved", dueAt: "saved",
-    firedAt: "operational", task: "identity", bookkeeping: "operational", repeat: "saved" },
+    firedAt: "operational", task: "identity", bookkeeping: "operational", repeat: "saved", timeZone: "saved" },
   checkin: { kind: "operational", day: "operational", dueAt: "operational", firedAt: "operational" },
 } satisfies { [K in AgentEvent["kind"]]: Fields<Extract<AgentEvent, { kind: K }>> };
 const quote = {

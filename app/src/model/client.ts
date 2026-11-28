@@ -371,7 +371,7 @@ const SCHEMAS = new WeakMap<z.ZodType, JsonSchema>();
 export function jsonSchemaOf(schema: z.ZodType): JsonSchema {
   const cached = SCHEMAS.get(schema);
   if (cached) return cached;
-  const made = normalize(z.toJSONSchema(schema)) as JsonSchema;
+  const made = normalize(z.toJSONSchema(schema, { io: "input" })) as JsonSchema;
   SCHEMAS.set(schema, made);
   return made;
 }

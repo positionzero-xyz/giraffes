@@ -298,6 +298,7 @@ describe("replies after a forget", () => {
       const completedMigration = MIGRATIONS.findIndex((m) => m.includes("ADD COLUMN completed_at"));
       storage.sql.exec("ALTER TABLE forget DROP COLUMN completed_at");
       storage.sql.exec("ALTER TABLE box DROP COLUMN setup");
+      storage.sql.exec("ALTER TABLE wakeup DROP COLUMN time_zone");
       storage.sql.exec("UPDATE forget SET cutoff_at = ?, cutoff_seq = NULL", forgetDate * 1000);
       storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(completedMigration));
       const before = Date.now();
@@ -612,6 +613,32 @@ describe("/forget lists every saved item and deletes only what the person picks"
     expect(await sql(c, "SELECT tz, checkin_local FROM agent")).toEqual([{ tz: "Asia/Bangkok", checkin_local: "09:00" }]);
     expect(await sql(c, "SELECT due_at FROM wakeup WHERE key = 'dentist'")).toEqual([{ due_at: local("2099-11-10T09:00") }]);
     expect(await sql(c, "SELECT due_at FROM wakeup WHERE key = 'daily-checkin'")).toEqual([{ due_at: local("2099-11-05T09:00") }]);
+  });
+
+  test("a reminder with its own time zone is listed in that zone and stays put through a time zone reset", async () => {
+    const model = scripted([
+      turn({ actions: [
+        { type: "set_locale", timeZone: "Europe/London", language: "en" },
+        { ...schedule("ny-call", "2099-11-10T08:00", "Call New York"), timeZone: "America/New_York" },
+        schedule("dentist", "2099-11-10T09:00", "Dentist at 9"),
+        send("Done."),
+      ] }),
+    ]);
+    const c = await devChat("pick-own-zone", { model, at: "2099-11-04T10:00" });
+    await say(c, "I'm in London now. Call New York at 8 their time on the 10th, and the dentist at 9");
+    const [before] = await sql<{ due_at: EpochMs }>(c, "SELECT due_at FROM wakeup WHERE key = 'ny-call'");
+    const page = (await say(c, "/forget"))[0];
+    const items = page.split(/\n(?=\d+\. )/);
+    const ny = items.find((i) => i.includes("Call New York"))!;
+    const dentist = items.find((i) => i.includes("Dentist at 9"))!;
+    expect(ny).toContain("Due: 2099-11-10T08:00 America/New_York");
+    expect(ny).not.toContain("Due in the default time zone");
+    expect(dentist).toContain("Due in the default time zone: 2099-11-10T09:00 Asia/Bangkok");
+
+    const numbers = page.split("\n").flatMap((l) => (/^\d+\. Setting$/.test(l) ? [Number(l.split(".")[0])] : []));
+    await say(c, `/forget ${codeOf(page)} ${numbers[1]}`);
+    expect(await sql(c, "SELECT tz FROM agent")).toEqual([{ tz: "Asia/Bangkok" }]);
+    expect(await sql(c, "SELECT due_at FROM wakeup WHERE key = 'ny-call'")).toEqual([before]);
   });
 
   test("a kept routine renews on its schedule, and a deleted one never fires again", async () => {

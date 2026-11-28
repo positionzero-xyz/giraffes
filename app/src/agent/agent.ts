@@ -34,6 +34,7 @@ import {
   onPlan,
   onRemove,
   onSignedOut,
+  reclaimBackoff,
   type Box,
   type BoxSay,
   type BoxState,
@@ -87,7 +88,7 @@ import { ADMISSION, inviteIn, planAdmission, type AdmissionAnswer, type Admissio
 import { COMPACTION, compactionCommit, planCompaction } from "./compaction";
 import { COMPACTION_SYSTEM, TURN_SYSTEM } from "./prompt";
 import {
-  ACCOUNT_COPY, ACCOUNT_RECEIPT_MS, ACCOUNT_RETRY_MS, ERASE_CHALLENGE, ERASE_DIAGNOSTIC_MS, ERASE_JOB, START_CHALLENGE,
+  ACCOUNT_COPY, ACCOUNT_RECEIPT_MS, ACCOUNT_RETRY_MS, ACCOUNT_WIPE_GRACE_MS, ERASE_CHALLENGE, ERASE_DIAGNOSTIC_MS, ERASE_JOB, START_CHALLENGE,
   digestChallenge, newAccountChallenge, type AccountChallenge, type EraseBilling, type EraseBox,
   type EraseBoxReference, type EraseBoxTarget, type Erasure, type StartChallenge,
 } from "./account";
@@ -604,18 +605,14 @@ export class Agent extends DurableObject<Env> {
         this.ctx.storage.kv.put(ERASE_JOB, current);
       }
       while (current.box.kind !== "none" && current.box.kind !== "wiped" && current.box.kind !== "reclaimed") {
-        const box = await this.#retireBoxStep(current);
-        if (box.kind === "relocate") {
-          current = this.#noteEraseHold({ ...current, box }, this.#eraseBoxHoldCode({ ...current, box }));
-          this.ctx.storage.kv.put(ERASE_JOB, current);
-          await this.#retryErasure(ACCOUNT_RETRY_MS);
-          return;
+        const now = this.#deps.clock.now();
+        if (current.boxRetry && now < current.boxRetry.nextAt) {
+          const delay = current.boxRetry.nextAt - now;
+          return await this.#retryErasure(current.billing.kind === "pending" ? Math.min(delay, ACCOUNT_RETRY_MS) : delay);
         }
-        if (box === current.box) {
-          current = this.#noteEraseHold(current, this.#eraseBoxHoldCode(current));
-          this.ctx.storage.kv.put(ERASE_JOB, current);
-          await this.#retryErasure(box.kind === "unverified" && current.billing.kind === "done" ? ACCOUNT_RECEIPT_MS : ACCOUNT_RETRY_MS);
-          return;
+        const box = await this.#retireBoxStep({ ...current, eraseAccount: true });
+        if (box.kind === "relocate" || box === current.box) {
+          return await this.#holdEraseBox({ ...current, box });
         }
         current = { ...current, box };
         this.ctx.storage.kv.put(ERASE_JOB, current);
@@ -643,6 +640,25 @@ export class Agent extends DurableObject<Env> {
       if (held?.kind === "cleaning") this.ctx.storage.kv.put(ERASE_JOB, this.#noteEraseHold(held, "erase_failed"));
       await this.#retryErasure();
     }
+  }
+
+  async #holdEraseBox(job: Extract<Erasure, { kind: "cleaning" }>): Promise<void> {
+    const { box } = job;
+    const now = this.#deps.clock.now();
+    const wipeDeadline = "wipeFailedAt" in box && box.wipeFailedAt !== undefined
+      ? box.wipeFailedAt + ACCOUNT_WIPE_GRACE_MS : null;
+    const removingDisk = (box.kind === "remove-volume" || box.kind === "remove-app" ||
+      (box.kind === "relocate" && box.resume !== "wipe-fly")) &&
+      (box.target?.disk != null || (box.target?.disks?.length ?? 0) > 0);
+    let delay = box.kind === "unverified" && job.billing.kind === "done" ? ACCOUNT_RECEIPT_MS : ACCOUNT_RETRY_MS;
+    if (wipeDeadline !== null || removingDisk) {
+      const attempts = job.boxRetry?.attempts ?? 0;
+      delay = reclaimBackoff(attempts);
+      if (wipeDeadline !== null && wipeDeadline > now) delay = Math.min(delay, wipeDeadline - now);
+      job = { ...job, boxRetry: { attempts: attempts + 1, nextAt: (now + delay) as EpochMs } };
+      if (job.billing.kind === "pending") delay = Math.min(delay, ACCOUNT_RETRY_MS);
+    }
+    await this.#retryErasure(delay, this.#noteEraseHold(job, this.#eraseBoxHoldCode(job)));
   }
 
   /** At most one operator diagnostic a day per stuck erasure; the value is its age in hours. */
@@ -716,8 +732,8 @@ export class Agent extends DurableObject<Env> {
     return this.#resolveAccountBox(person, reference);
   }
 
-  async #retireBoxStep({ person, epoch, box: step }: {
-    readonly person: AgentKey; readonly epoch: ForgetEpoch; readonly box: EraseBox;
+  async #retireBoxStep({ person, epoch, box: step, eraseAccount }: {
+    readonly person: AgentKey; readonly epoch: ForgetEpoch; readonly box: EraseBox; readonly eraseAccount?: true;
   }): Promise<EraseBox> {
     const deps = this.#deps.box;
     if (!("box" in step)) return step;
@@ -751,21 +767,25 @@ export class Agent extends DurableObject<Env> {
             : { kind: "remove-app", box, target: step.target, wipeSkipped: step.wipeSkipped };
         }
         return step.resume === "wipe-fly"
-          ? { kind: "wipe-fly", box, target: step.target, verify: true, wipeFailures: step.wipeFailures }
+          ? { kind: "wipe-fly", box, target: step.target, verify: true, wipeFailures: step.wipeFailures, wipeFailedAt: step.wipeFailedAt }
           : { kind: step.resume, box, target: step.target, wipeSkipped: step.wipeSkipped };
       }
       case "wipe-static":
       case "wipe-fly": {
         const token = await boxToken(deps.secret, box.name);
         const fallback = step.kind === "wipe-fly"
-          ? { kind: "relocate", box, target: step.target, resume: "wipe-fly", wipeFailures: step.wipeFailures } satisfies EraseBox
+          ? { kind: "relocate", box, target: step.target, resume: "wipe-fly", wipeFailures: step.wipeFailures, wipeFailedAt: step.wipeFailedAt } satisfies EraseBox
           : step;
         const failedWipe = (): EraseBox => {
-          if (box.neverServed !== true || fallback.kind !== "relocate") return fallback;
-          const wipeFailures = (fallback.wipeFailures ?? 0) + 1;
-          return wipeFailures >= FAILED_SETUP_MAX_WIPE_ATTEMPTS
-            ? { kind: "remove-volume", box, target: fallback.target, wipeSkipped: true }
-            : { ...fallback, wipeFailures };
+          if (fallback.kind !== "relocate") return fallback;
+          const now = this.#deps.clock.now();
+          const wipeFailedAt = eraseAccount ? (fallback.wipeFailedAt ?? now) : undefined;
+          const wipeFailures = box.neverServed === true ? (fallback.wipeFailures ?? 0) + 1 : undefined;
+          if ((wipeFailures !== undefined && wipeFailures >= FAILED_SETUP_MAX_WIPE_ATTEMPTS) ||
+            (wipeFailedAt !== undefined && now - wipeFailedAt >= ACCOUNT_WIPE_GRACE_MS)) {
+            return { kind: "remove-volume", box, target: fallback.target, wipeSkipped: true };
+          }
+          return { ...fallback, wipeFailures, wipeFailedAt };
         };
         if (!box.incarnation) {
           const health = await deps.client.health(box.url, token);
@@ -846,9 +866,8 @@ export class Agent extends DurableObject<Env> {
     });
   }
 
-  async #retryErasure(delay = ACCOUNT_RETRY_MS): Promise<void> {
+  async #retryErasure(delay = ACCOUNT_RETRY_MS, job = this.#erasure()): Promise<void> {
     const now = this.#deps.clock.now();
-    const job = this.#erasure();
     if (job) this.ctx.storage.kv.put(ERASE_JOB, { ...job, nextAt: (now + delay) as EpochMs });
     await this.ctx.storage.setAlarm(now + delay);
   }
@@ -1706,7 +1725,7 @@ export class Agent extends DurableObject<Env> {
       const step = stored && beginStep(stored, this.#deps.clock.now());
       if (!step) return;
       if (step.kind === "reclaim") {
-        this.#store.applyBox(step.box, null, [], this.#deps.clock.now());
+        this.#saveBoxStep(step.box, null);
         await this.#reclaim(step.box);
         return;
       }
@@ -1718,8 +1737,24 @@ export class Agent extends DurableObject<Env> {
       }
       const probe = await this.#probe(deps, step);
       const t = afterProbe(step, probe, this.#deps.clock.now());
-      this.#store.applyBox(t.box, await this.#outboxMessage(deps, t.box, t.say), [], this.#deps.clock.now());
+      this.#saveBoxStep(t.box, await this.#outboxMessage(deps, t.box, t.say));
     }
+  }
+
+  #saveBoxStep(box: Box, message: NoteMessage | null): void {
+    const now = this.#deps.clock.now();
+    if (box.state !== "reclaiming" || box.reason !== "failed") {
+      this.#store.applyBox(box, message, [], now);
+      return;
+    }
+    this.ctx.storage.transactionSync(() => {
+      if (this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) === undefined) {
+        this.ctx.storage.kv.put(BOX_RETIREMENT, this.#resolveAccountBox(this.#agent().key, {
+          name: box.name, host: box.host, url: box.url, incarnation: this.#store.boxVolume(), neverServed: true,
+        }));
+      }
+      this.#store.applyBox(box, message, [], now);
+    });
   }
 
   async #reclaim(box: Extract<Box, { state: "reclaiming" }>): Promise<void> {
@@ -1730,7 +1765,6 @@ export class Agent extends DurableObject<Env> {
       const epoch = (this.#store.forget().epoch + 1) as ForgetEpoch;
       let progress = this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) ?? this.#resolveAccountBox(person, {
         name: box.name, host: box.host, url: box.url, incarnation: this.#store.boxVolume(),
-        ...(box.reason === "failed" ? { neverServed: true } : {}),
       });
       while ("box" in progress) {
         this.ctx.storage.kv.put(BOX_RETIREMENT, progress);

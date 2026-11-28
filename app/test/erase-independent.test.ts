@@ -90,7 +90,7 @@ test.each(["health", "wipe"])("disappearance at %s and early duplicate alarms ad
   }, { [phase]: () => { vanished = true; return false; } });
   name = person.name;
   await person.chat.tap(await register(person));
-  const nextAt = person.chat.clock.now() + 60_000;
+  const nextAt = person.chat.clock.now() + 15_000;
   expect(reads).toBe(2);
   expect(await jobOf(person)).toMatchObject({ job: { box: { kind: "relocate" }, nextAt }, alarm: nextAt });
   person.chat.clock.set((nextAt - 1) as EpochMs);

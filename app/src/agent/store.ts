@@ -2094,18 +2094,6 @@ export class AgentStore {
     });
   }
 
-  recordGroup(group: AgentKey, version: number): void {
-    this.sql.exec(
-      "INSERT INTO owned_group (group_key, version) VALUES (?, ?) ON CONFLICT (group_key) DO UPDATE SET version = excluded.version",
-      group,
-      version,
-    );
-  }
-
-  ownsGroup(group: AgentKey, version: number): boolean {
-    return this.sql.exec("SELECT 1 FROM owned_group WHERE group_key = ? AND version = ?", group, version).toArray().length > 0;
-  }
-
   compactionInput(): CompactionInput {
     const memory = this.sql.exec<{ summary: string; through_turn_seq: number }>("SELECT summary, through_turn_seq FROM memory").one();
     const through = memory.through_turn_seq;

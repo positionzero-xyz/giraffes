@@ -414,28 +414,6 @@ describe("operator transitions", () => {
   });
 });
 
-describe("a group's calls run on its owner's access", () => {
-  const prompt = { sections: [{ title: "New", keep: ["Person: hi from the group"], trim: [], dropRank: 0 }] };
-  const group = "g:telegram:-100123" as AgentKey;
-
-  test("a group the owner's DO hasn't recorded at that ownership version is refused before anything is spent", async () => {
-    const provider = fakeProvider([reply("For the group.")]);
-    const c = await devChat("jan", { model: null, provider, at: "2099-11-04T10:00" });
-    await c.say("hi");
-    await giveKey(c.agent);
-    const owner = env.AGENT.get(env.AGENT.idFromName(c.agent));
-
-    expect(await owner.serve({ group, ownershipVersion: 1, purpose: "turn", system: "s", prompt })).toEqual({ kind: "not_owner" });
-    await owner.recordGroup(group, 2);
-    expect(await owner.serve({ group, ownershipVersion: 1, purpose: "turn", system: "s", prompt })).toEqual({ kind: "not_owner" });
-    expect(provider.seen).toHaveLength(0);
-
-    const served = await owner.serve({ group, ownershipVersion: 2, purpose: "turn", system: "s", prompt });
-    expect(served).toMatchObject({ kind: "ok", value: { actions: [{ type: "send", text: "For the group." }] }, call: { lane: "key" } });
-    expect((await c.snapshot()).access.spentMicro.byok).toBeGreaterThan(0);
-  });
-});
-
 describe("the dev lane", () => {
   test("a scripted dev run without a script has no access, and one with a script answers", async () => {
     const stub = env.AGENT.get(env.AGENT.idFromName("p:dev:kit" as AgentKey));

@@ -45,7 +45,7 @@ While a turn awaits the model, the only operations that can interleave are an in
 | `spend_month` + `reservation` | metered spend per scope (`byok`, the person's own key; `included`, our quota) and month | reserved spend is `SUM(reservation)`, never stored; a reservation names the DO instance that made it |
 | `model_key` (0 or 1 row) | the person's own key, sealed, with its provider, base URL, model, schema mode, cap, backup answer and fault state | a fault rests the key until `rest_until`; `told_on` is the local date of the last notice; `unreadable_under` names the secrets that failed to open it |
 | `key_revision` (1 row) + `key_ticket` | the access revision, and one-time links to the key page | every save and removal bumps the revision; a ticket stores only its nonce's hash and moves `issued → validating → saved/failed` |
-| `owned_group` | groups this person owns, with their ownership version | a group's call is served only at the version recorded here |
+| `owned_group` | group ownership versions | unused; the schema stays unchanged for existing objects |
 | `log_outbox` + `log_flush` | log rows not yet in D1, and their backoff | written in the same transaction as the fact they record |
 | `box` (0 or 1 row) | the person's box and its state | `next_at` is the next provisioning attempt or sign-in poll, and null in any other state |
 
@@ -161,8 +161,6 @@ A reminder the person asked for may be for the current minute, and it fires on t
 
 **Compaction folds only what it saw.** A page takes whole turns, oldest first, then whole notes, until the compaction route's byte budget (the smallest among the person's lanes, less the system prompt and any inlined schema) is full, and folds through the last turn it sent. It never cuts a turn's text. A turn bigger than an empty page is folded as a placeholder line, `[long message on <date>, <n> bytes, not summarized]`, and its row is kept, outside every turn prompt, until a later page can take it whole; only rows the model saw whole are deleted.
 
-**A group's calls run on its owner's access.** `serve` answers only a group the owner's DO has recorded at the ownership version the group names; any other is refused before anything is reserved. Groups arrive in week 3, which wires the recording.
-
 ## Spend
 
 Only metered lanes reserve: a person's own key (`byok`) and our included tier (`included`). The box reserves nothing, since the person's flat plan pays. `estimate()` is an upper bound on one attempt's bill. It counts the prompt's UTF-8 bytes plus 4,000 tokens for framing and the schema, prices all of it at the dearer of the input and cache-write rates, adds the route's full output budget, and adds the provider's fee (OpenRouter's 5.5%). A cost the provider reports wins over our card.
@@ -182,7 +180,7 @@ Each attempt settles in its own transaction, with its `model_call` row, the mome
 | over the cap, so not sent | $0 | `refused_user_cap` |
 | the instance died mid-call | the estimate, charged by `recover()` | `recovered_after_crash` |
 
-`recover()` settles only reservations another instance made, so a group's call served while this instance drains is left alone.
+`recover()` settles only reservations another instance made.
 
 Every provider attempt has a timeout through `AbortSignal` that covers the headers and the body: 60 s for a turn or a compaction, 20 s for the key page's probe. A timeout is `in_doubt`, since the provider may have run and billed it, and the batch backs off like any unavailable model, so a stalled endpoint can't hold the person's drain. An endpoint that answers without usage is charged at the estimate, so a person's own cap binds on an endpoint that never reports what it used.
 

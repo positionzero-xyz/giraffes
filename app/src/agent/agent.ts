@@ -76,9 +76,8 @@ import { d1Ledger, modelCallRow, type Ledger, type LogRow, type UnaskedStatus } 
 import { NOTICES, type KeyPageError } from "../notices";
 import { scripted, scriptedConnect, type ScriptedModel, type ScriptStep } from "../model/scripted";
 import { connect, type Connect } from "../model/client";
-import type { PromptParts } from "../model/prompt";
 import { PROVIDERS } from "../model/providers";
-import { routeFor, type CallPurpose, type Purpose } from "../model/routes";
+import { routeFor, type CallPurpose } from "../model/routes";
 import { estimate, fits } from "../policy/spend";
 import { admitUnasked, OUTREACH, type UnaskedVerdict } from "../policy/outreach";
 import { inLineReserve, type QuotaReading } from "../policy/quota";
@@ -174,15 +173,6 @@ export type BillingDeps = {
 };
 
 const STAFF: Seat = { cohort: "staff", half: null, code: null, inviter: null };
-
-/** A model call a group asks its owner to serve; the group names the ownership version it was told. */
-export type ServeRequest = {
-  readonly group: AgentKey;
-  readonly ownershipVersion: number;
-  readonly purpose: Purpose;
-  readonly system: string;
-  readonly prompt: PromptParts;
-};
 
 export type ConnectResult = { readonly ok: true; readonly provider: string; readonly model: string } | { readonly ok: false; readonly error: KeyPageError };
 
@@ -980,21 +970,6 @@ export class Agent extends DurableObject<Env> {
     };
   }
 
-  async serve(req: ServeRequest): Promise<Served<Purpose> | { readonly kind: "not_owner" }> {
-    return this.#trackAccountRpc(this.#serve(req));
-  }
-
-  async #serve(req: ServeRequest): Promise<Served<Purpose> | { readonly kind: "not_owner" }> {
-    if (this.#erasure()) return { kind: "not_owner" };
-    if (!this.#store.ownsGroup(req.group, req.ownershipVersion)) return { kind: "not_owner" };
-    const refused = { kind: "no_access", why: "nothing", told: false, notice: null, waitForConnection: false } as const;
-    const claim = this.#store.claim();
-    if (!claim) return refused;
-    const plan = await this.#planNow(this.#agent().key, this.#deps.clock.now());
-    if (plan.kind === "lapsed") return refused;
-    return this.#access().call({ purpose: req.purpose, system: req.system, prompt: req.prompt, plan, claim });
-  }
-
   /**
    * The key page's submission. The ticket moves to validating before any provider call, so a repeat submission gets the
    * stored outcome instead of a second probe, and the save is refused if the access revision moved since the link went out.
@@ -1072,11 +1047,6 @@ export class Agent extends DurableObject<Env> {
     if (!k || k.backup || (k.backupAskedAt !== null && !again) || !a || !this.#store.claudePlan()) return;
     const text = NOTICES[a.language].backupAsk(PROVIDERS[k.provider].label);
     this.#store.askBackup({ texts: [text], note: text }, choiceToken({ kind: "backup", revision: k.revision }), eventKey.access(`backup:${now}`), now, k.revision, again);
-  }
-
-  async recordGroup(group: AgentKey, version: number): Promise<void> {
-    if (this.#erasure()) return;
-    this.#store.recordGroup(group, version);
   }
 
   async remove(): Promise<void> {

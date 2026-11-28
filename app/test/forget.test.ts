@@ -288,21 +288,6 @@ describe("no request that carries the person's words starts after a forget begin
     expect(seen).toEqual(["https://api.line.me/v2/bot/message/reply"]);
     expect(sent).toEqual({ kind: "fenced" });
   });
-
-  test("the person's messages wait in their Durable Object, and nobody else's group is served from it, while a forget is open", async () => {
-    const model = scripted([chat("Hi.")]);
-    const c = await devChat("fence-serve", { model, at: "2099-11-04T10:00" });
-    await c.say("hello");
-    const group = "g:telegram:-100" as AgentKey;
-    await runInDurableObject<Agent, void>(stubOf(c.agent), (a) => a.recordGroup(group, 1));
-    await begin(c);
-
-    const served = await runInDurableObject<Agent, unknown>(stubOf(c.agent), (a) =>
-      a.serve({ group, ownershipVersion: 1, purpose: "turn", system: "s", prompt: { sections: [] } as never }),
-    );
-    expect(served).toMatchObject({ kind: "no_access" });
-    expect(model.calls).toHaveLength(1);
-  });
 });
 
 describe("branches that tell the person something", () => {

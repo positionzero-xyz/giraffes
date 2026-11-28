@@ -644,6 +644,9 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX line_message_outbox ON line_message (outbox_id);
   `,
+  `
+  ALTER TABLE forget ADD COLUMN completed_at INTEGER;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

@@ -9,7 +9,12 @@ export type ProviderOrder = { readonly at: EpochMs; readonly seq: number | null 
 /** Work holds the epoch it started under; `live()` is false once a forget began after it, or while one is open. */
 export type Claim = { readonly epoch: ForgetEpoch; readonly live: () => boolean };
 
-export type ForgetState = { readonly epoch: ForgetEpoch; readonly op: string | null; readonly cutoff: ProviderOrder | null };
+export type ForgetState = {
+  readonly epoch: ForgetEpoch;
+  readonly op: string | null;
+  readonly cutoff: ProviderOrder | null;
+  readonly completedAt: EpochMs | null;
+};
 
 /**
  * The provider's own place for an event, read from the fields each channel fills in: LINE's signed event time, Telegram's
@@ -34,6 +39,11 @@ export function coveredByForget(e: InboundEnvelope, state: ForgetState): boolean
   if (e.event.kind === "choice" && (e.event.epoch ?? 0) !== state.epoch) return true;
   const order = providerOrder(e);
   return order !== null && state.cutoff !== null && atOrBefore(order, state.cutoff);
+}
+
+/** Quotes have no update ID to order them within the cutoff's second. Older inbox rows may have no quote date. */
+export function quoteAfterForget(at: EpochMs, state: ForgetState): boolean {
+  return Number.isSafeInteger(at) && at > Math.max(state.cutoff?.at ?? 0, state.completedAt ?? 0);
 }
 
 export function laterCutoff(a: ProviderOrder | null, b: ProviderOrder): ProviderOrder {

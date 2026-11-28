@@ -5,15 +5,17 @@ import { CHANNEL_API_TIMEOUT_MS, CHANNEL_RETRY_MS, disabledChannel, plainText, s
 
 const Chat = z.object({ id: z.number().int(), type: z.string() });
 const Sender = z.object({ language_code: z.string().optional() }).optional().catch(undefined);
-const QuotedMessage = z.looseObject({ text: z.string().optional() });
+const QuotedMessage = z.object({
+  text: z.string(),
+  date: z.number().int().positive().max(Math.floor(Number.MAX_SAFE_INTEGER / 1000)),
+}).optional().catch(undefined);
 const Message = z.looseObject({
   message_id: z.number().int().optional(),
   date: z.number(),
-  edit_date: z.number().optional(),
   chat: Chat,
   from: Sender,
   text: z.string().optional(),
-  reply_to_message: QuotedMessage.optional(),
+  reply_to_message: QuotedMessage,
 });
 const Update = z.object({
   update_id: z.number().int(),
@@ -41,15 +43,15 @@ function toEvent(u: Update, now: EpochMs): TelegramEvent | null {
   const edited = u.edited_message !== undefined;
   const m = u.message ?? u.edited_message;
   if (m && m.chat.type === "private") {
-    const at = ((edited ? (m.edit_date ?? m.date) : m.date) * 1000) as EpochMs;
+    const at = (m.date * 1000) as EpochMs;
     const source = { chatId: m.chat.id, at, languageCode: m.from?.language_code };
     if (!edited && (m.text === "/start" || m.text?.startsWith("/start "))) {
       const code = parseInviteCode(m.text.slice("/start".length));
       return { ...source, event: code ? { kind: "lifecycle", change: "follow", at, code } : { kind: "lifecycle", change: "follow", at } };
     }
     const text = m.text ?? `[sent a ${MEDIA.find((k) => k in m) ?? "message"}]`;
-    const quoted = m.reply_to_message?.text;
-    const quote = quoted === undefined ? undefined : { kind: "text" as const, text: quoted };
+    const quoted = m.reply_to_message;
+    const quote = quoted && { kind: "text" as const, text: quoted.text, at: (quoted.date * 1000) as EpochMs };
     return { ...source, event: { kind: "message", text, ...(edited ? { edited: true as const } : {}), ...(quote ? { quote } : {}) } };
   }
   const member = u.my_chat_member;

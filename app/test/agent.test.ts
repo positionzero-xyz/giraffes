@@ -61,7 +61,7 @@ describe("conversation", () => {
     const model = scripted([chat("Moved it to 5.")]);
     const c = await devChat("quote-telegram", { model, at: "2099-11-04T10:00", channel: "telegram" });
 
-    await c.event({ kind: "message", text: "move this to 5", quote: { kind: "text", text: "I'll remind you at 4." } });
+    await c.event({ kind: "message", text: "move this to 5", quote: { kind: "text", text: "I'll remind you at 4.", at: local("2099-11-04T09:59") } });
 
     expect(model.calls[0].user).toContain('Person: move this to 5\nEarlier message being replied to (context, not a request): "I\'ll remind you at 4."');
     expect(model.calls[0].system).toContain("text marked as an earlier message being replied to");
@@ -1268,6 +1268,42 @@ describe("reachability", () => {
     const after = await c.snapshot();
     expect(after.agent?.status).toBe("active");
     expect(after.pendingWakeups.map((w) => [w.kind, wall(w.dueAt)])).toEqual([["checkin", "2099-11-06T09:00"]]);
+    model.assertDone();
+  });
+
+  test("a Telegram edit after a block does not resume delivery until a new message", async () => {
+    const user = 10509;
+    const model = scripted([chat("Hi!"), chat("Edited."), chat("Welcome back!")]);
+    const c = await devChat(String(user), { model, at: "2099-11-04T10:00", channel: "telegram" });
+    const originalDate = c.clock.now() / 1000;
+    const privateChat = { id: user, type: "private" };
+    await c.say("Hi");
+    expect(await c.received()).toEqual(["Hi!"]);
+
+    await c.advanceTo("2099-11-04T10:01");
+    expect((await postTelegramUpdate({
+      update_id: 10_509,
+      my_chat_member: { date: c.clock.now() / 1000, chat: privateChat, new_chat_member: { status: "kicked" } },
+    })).status).toBe(200);
+    await c.settle();
+    expect((await c.snapshot()).agent?.status).toBe("blocked");
+
+    await c.advanceTo("2099-11-04T10:02");
+    expect((await postTelegramUpdate({
+      update_id: 10_510,
+      edited_message: { chat: privateChat, date: originalDate, edit_date: c.clock.now() / 1000, text: "Hello!" },
+    })).status).toBe(200);
+    await c.settle();
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).agent?.status).toBe("blocked");
+
+    expect((await postTelegramUpdate({
+      update_id: 10_511,
+      message: { chat: privateChat, date: c.clock.now() / 1000, text: "Are you there?" },
+    })).status).toBe(200);
+    await c.settle();
+    expect(await c.received()).toEqual(["Welcome back!"]);
+    expect((await c.snapshot()).agent?.status).toBe("active");
     model.assertDone();
   });
 

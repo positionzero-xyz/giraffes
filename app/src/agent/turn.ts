@@ -549,8 +549,11 @@ function lifecycleEffects(view: TurnView): Pick<TurnCommit, "reachability" | "en
   switch (e.kind) {
     case "message":
     case "choice": {
-      const at = Math.max(...view.batch.items.map((i) => i.receivedAt)) as EpochMs;
-      return view.status === "blocked" && at >= view.statusAt ? reachable(at) : none;
+      if (view.status !== "blocked") return none;
+      const at = Math.max(...view.batch.items
+        .filter(({ event }) => event.kind !== "message" || !event.edited)
+        .map(({ receivedAt }) => receivedAt)) as EpochMs;
+      return at >= view.statusAt ? reachable(at) : none;
     }
     case "lifecycle":
       if (e.at < view.statusAt) return none;

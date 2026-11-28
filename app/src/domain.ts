@@ -71,7 +71,7 @@ export type ProviderMessageReference = { readonly id: string; readonly position:
 /** A message the person pointed at. A reference is resolved to text before the model sees it; an unresolved one is not shown. */
 export type MessageQuote =
   | { readonly kind: "reference"; readonly id: string }
-  | { readonly kind: "text"; readonly text: string };
+  | { readonly kind: "text"; readonly text: string; readonly at: EpochMs };
 
 export type ChannelEvent =
   /** `redacted`: code removed what looked like an API key before the message was stored. */

@@ -98,7 +98,7 @@ import {
   type UnaskedPurpose,
 } from "./tasks";
 import type { AdmissionChange, AdmissionCommit } from "./admission";
-import { coveredByForget, laterCutoff, newForgetCode, providerOrder, type Claim, type ForgetCommand, type ForgetState, type ProviderOrder } from "./forget";
+import { coveredByForget, laterCutoff, newForgetCode, providerOrder, quoteAfterForget, type Claim, type ForgetCommand, type ForgetState, type ProviderOrder } from "./forget";
 import { ROUTINE_OUTBOX } from "./schema";
 import { TURN, type Asked, type Batch, type BoxReplyBackfill, type BoxSession, type BoxSessionSeen, type InboxItem, type Outbound, type SeqTurn, type TurnCommit, type TurnRow } from "./turn";
 
@@ -559,7 +559,8 @@ export class AgentStore {
     privacy: ForgetCommand | null = null,
   ): "inserted" | "duplicate" | "stale" {
     return this.tx(() => {
-      if (coveredByForget(envelope, this.forget())) return "stale";
+      const forget = this.forget();
+      if (coveredByForget(envelope, forget)) return "stale";
       if (envelope.event.kind === "message") {
         this.sql.exec(
           `INSERT INTO plan (one, trial_ends_at, updated_at) VALUES (1, ?, ?)
@@ -592,8 +593,11 @@ export class AgentStore {
         }
       }
       if (privacy) return this.privacy(envelope, privacy, now);
-      const stored = this.insertInbox(envelope.key, envelope.event, envelope.receivedAt, now);
-      if (stored === "inserted" && envelope.event.kind === "message") this.tellHeld(envelope.event.reply, now);
+      const event = envelope.event;
+      const safe = event.kind === "message" && event.quote?.kind === "text" && !quoteAfterForget(event.quote.at, forget)
+        ? { ...event, quote: undefined } : event;
+      const stored = this.insertInbox(envelope.key, safe, envelope.receivedAt, now);
+      if (stored === "inserted" && event.kind === "message") this.tellHeld(event.reply, now);
       return stored;
     });
   }
@@ -732,19 +736,20 @@ export class AgentStore {
   private inboxItem(r: InboxCols): InboxItem {
     const item = toInboxItem(r);
     const e = item.event;
-    if (e.kind !== "message" || e.quote?.kind !== "reference") return item;
-    const text = this.lineMessageText(e.quote.id);
-    return text === null ? item : { ...item, event: { ...e, quote: { kind: "text", text } } };
+    if (e.kind !== "message" || e.quote === undefined) return item;
+    const quote = e.quote.kind === "reference" ? this.lineMessageQuote(e.quote.id) : e.quote;
+    return { ...item, event: { ...e, quote: quote && quoteAfterForget(quote.at, this.forget()) ? quote : undefined } };
   }
 
-  private lineMessageText(id: string): string | null {
+  private lineMessageQuote(id: string) {
     const r = this.sql
-      .exec<{ texts: string; position: number }>(
-        `SELECT o.texts, l.position FROM line_message l JOIN outbox o ON o.id = l.outbox_id WHERE l.id = ?`,
+      .exec<{ texts: string; position: number; created_at: EpochMs }>(
+        `SELECT o.texts, l.position, l.created_at FROM line_message l JOIN outbox o ON o.id = l.outbox_id WHERE l.id = ?`,
         id,
       )
       .toArray()[0];
-    return r ? (fromJson<string[]>(r.texts)[r.position] ?? null) : null;
+    const text = r && fromJson<string[]>(r.texts)[r.position];
+    return text === undefined ? undefined : { kind: "text" as const, text, at: r.created_at };
   }
 
   releaseBatch(keys: readonly EventKey[], readyAt: EpochMs, logs: readonly LogRow[], now: EpochMs): void {
@@ -2195,9 +2200,11 @@ export class AgentStore {
 
   forget(): ForgetState {
     const r = this.sql
-      .exec<{ epoch: ForgetEpoch; op: string | null; cutoff_at: EpochMs | null; cutoff_seq: number | null }>("SELECT epoch, op, cutoff_at, cutoff_seq FROM forget")
+      .exec<{ epoch: ForgetEpoch; op: string | null; cutoff_at: EpochMs | null; cutoff_seq: number | null; completed_at: EpochMs | null }>(
+        "SELECT epoch, op, cutoff_at, cutoff_seq, completed_at FROM forget",
+      )
       .one();
-    return { epoch: r.epoch, op: r.op, cutoff: r.cutoff_at === null ? null : { at: r.cutoff_at, seq: r.cutoff_seq } };
+    return { epoch: r.epoch, op: r.op, cutoff: r.cutoff_at === null ? null : { at: r.cutoff_at, seq: r.cutoff_seq }, completedAt: r.completed_at };
   }
 
   /** True while no forget is open and none began since `epoch`. */
@@ -2256,7 +2263,7 @@ export class AgentStore {
     const cutoff = laterCutoff(f.cutoff, trigger);
     this.sql.exec("UPDATE forget SET epoch = ?, op = ?, opened_at = ?, cutoff_at = ?, cutoff_seq = ?", epoch, op, now, cutoff.at, cutoff.seq);
     const agent = this.agent();
-    const next: ForgetState = { epoch, op, cutoff };
+    const next: ForgetState = { ...f, epoch, op, cutoff };
     const covered = this.sql
       .exec<{ event_key: EventKey; payload: string; received_at: EpochMs }>("SELECT event_key, payload, received_at FROM inbox WHERE status = 'pending'")
       .toArray()
@@ -2365,6 +2372,7 @@ export class AgentStore {
     this.sql.exec("DELETE FROM inbox WHERE kind IN ('wakeup', 'checkin')");
     this.sql.exec("UPDATE inbox SET payload = '{}' WHERE status IN ('done', 'failed')");
     this.sql.exec("UPDATE outbox SET texts = '[]', choice = NULL, reply_token = NULL, reply_expires = NULL, event_key = 'forgotten' WHERE status IN ('sent', 'dropped')");
+    this.sql.exec("DELETE FROM line_message WHERE outbox_id IN (SELECT id FROM outbox WHERE status IN ('sent', 'dropped'))");
     this.sql.exec("DELETE FROM wakeup WHERE origin != 'person'");
     this.sql.exec("DELETE FROM proposal");
     this.sql.exec("DELETE FROM box_session");
@@ -2513,8 +2521,9 @@ export class AgentStore {
       const receipt: Receipt = { deleted: fromJson<Deleted[]>(r.deleted), backups };
       this.sql.exec(
         `UPDATE forget SET op = NULL, opened_at = NULL, phase = NULL, code = NULL, listed = 0, deleted = '[]', retry_at = NULL, attempts = 0,
-           notice_at = NULL, notices = 0, held_told_at = NULL, reply_token = NULL, reply_expires = NULL, receipt = ?`,
+           notice_at = NULL, notices = 0, held_told_at = NULL, reply_token = NULL, reply_expires = NULL, receipt = ?, completed_at = MAX(COALESCE(completed_at, 0), ?)`,
         JSON.stringify(receipt),
+        now,
       );
       this.sql.exec("DELETE FROM box_session");
       if (checkin && mayspend(this.admission())) this.insertWakeup(checkin, "system", now);

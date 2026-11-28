@@ -3,7 +3,7 @@ import { expect, test } from "vitest";
 import { logSchema } from "../src/ledger/ledger";
 import { erasePersonLedger, personLedgerTables } from "../src/ledger/erase";
 import { personAgentKey } from "../src/domain";
-import type { AgentEvent, TaskFact } from "../src/domain";
+import type { AgentEvent, MessageQuote, TaskFact } from "../src/domain";
 import type { BoxReplyBackfill } from "../src/agent/turn";
 
 type Classification = {
@@ -26,7 +26,7 @@ const durable = {
   checkout_session: { identity: "id event_key", operational: "created_at closed" },
   forget: {
     secret: "code reply_token reply_expires", identity: "op",
-    operational: "one epoch opened_at cutoff_at cutoff_seq phase listed deleted retry_at attempts notice_at notices held_told_at receipt",
+    operational: "one epoch opened_at cutoff_at cutoff_seq completed_at phase listed deleted retry_at attempts notice_at notices held_told_at receipt",
   },
   inbox: { chat: "payload", identity: "event_key", operational: "seq kind received_at ready_at status attempts outcome finished_at catch_up catch_up_budget" },
   key_revision: { operational: "one revision" },
@@ -173,6 +173,10 @@ const inbox = {
     firedAt: "operational", task: "identity", bookkeeping: "operational", repeat: "saved" },
   checkin: { kind: "operational", day: "operational", dueAt: "operational", firedAt: "operational" },
 } satisfies { [K in AgentEvent["kind"]]: Fields<Extract<AgentEvent, { kind: K }>> };
+const quote = {
+  reference: { kind: "operational", id: "identity" },
+  text: { kind: "operational", text: "chat", at: "operational" },
+} satisfies { [K in MessageQuote["kind"]]: Fields<Extract<MessageQuote, { kind: K }>> };
 const fact = { kind: "saved", ref: "saved", detail: "saved", cause: "saved" } satisfies Fields<TaskFact>;
 const backfill = { seq: "identity", notice: "chat" } satisfies Fields<BoxReplyBackfill>;
 
@@ -193,5 +197,5 @@ test("diagnostic payload fields are explicitly classified and stored chat payloa
   expect(Object.fromEntries(logSchema.options.map((v) => [v.shape.stream.value, Object.keys(v.shape).sort()]))).toEqual(
     Object.fromEntries(Object.entries(fields).map(([stream, extra]) => [stream, `${common} ${extra}`.split(" ").sort()])),
   );
-  expect([inbox.message.text, fact.detail, backfill.notice]).toEqual(["chat", "saved", "chat"]);
+  expect([inbox.message.text, quote.text.text, fact.detail, backfill.notice]).toEqual(["chat", "chat", "saved", "chat"]);
 });

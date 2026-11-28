@@ -388,13 +388,13 @@ describe("Telegram webhook", () => {
         envelope("tg:20", {
           kind: "message",
           text: "move this to 5",
-          quote: { kind: "text", text: "I'll remind you at 4." },
+          quote: { kind: "text", text: "I'll remind you at 4.", at: (DATE - 100) * 1000 },
         }),
       ],
     });
   });
 
-  test("an edited private message becomes a correction at its edit time", async () => {
+  test("an edited private message becomes a correction dated to the original message", async () => {
     const update = {
       update_id: 21,
       edited_message: { message_id: 43, date: DATE - 100, edit_date: DATE, chat: privateChat, from, text: "actually, make it 5" },
@@ -405,7 +405,20 @@ describe("Telegram webhook", () => {
     expect(received).toEqual({
       kind: "accepted",
       ignored: 0,
-      envelopes: [envelope("tg:21", { kind: "message", text: "actually, make it 5", edited: true })],
+      envelopes: [{ ...envelope("tg:21", { kind: "message", text: "actually, make it 5", edited: true }), receivedAt: (DATE - 100) * 1000 }],
+    });
+  });
+
+  test.each([undefined, "yesterday", 1e20])("an uncomparable quote date (%s) leaves the person's text intact", async (date) => {
+    const update = {
+      update_id: 23,
+      message: { date: DATE, chat: privateChat, from, text: "what was this?", reply_to_message: { date, text: "Old text." } },
+    };
+
+    expect(await telegram().receive(tgWebhook(update))).toEqual({
+      kind: "accepted",
+      ignored: 0,
+      envelopes: [envelope("tg:23", { kind: "message", text: "what was this?" })],
     });
   });
 
@@ -420,7 +433,7 @@ describe("Telegram webhook", () => {
     expect(received).toEqual({
       kind: "accepted",
       ignored: 0,
-      envelopes: [envelope("tg:22", { kind: "message", text: "/start", edited: true })],
+      envelopes: [{ ...envelope("tg:22", { kind: "message", text: "/start", edited: true }), receivedAt: (DATE - 100) * 1000 }],
     });
   });
 

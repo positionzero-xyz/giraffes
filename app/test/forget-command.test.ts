@@ -19,6 +19,7 @@ import {
   fakeProvider,
   local,
   memoryLedger,
+  postTelegramUpdate,
   propose,
   routine,
   schedule,
@@ -90,6 +91,84 @@ const codeOf = (page: string): string => {
   if (!m) throw new Error(`no code on the page: ${page}`);
   return m[1];
 };
+
+describe("replies after a forget", () => {
+  test("a Telegram reply cannot bring a forgotten message into the prompt", async () => {
+    const user = 10502;
+    const oldText = `I saved ${MARKER}.`;
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: MARKER }, send(oldText)] }),
+      chat("Can you clarify?"), chat("I need more context."), chat("I remember the new message."),
+    ]);
+    const c = await devChat(String(user), { model, at: "2099-11-04T10:00", channel: "telegram" });
+    expect(await say(c, `Remember this: ${MARKER}`)).toEqual([oldText]);
+    const originalDate = c.clock.now() / 1000;
+    const [page] = await say(c, "/forget");
+    const reviewDate = c.clock.now() / 1000 + 1;
+    await c.advanceTo("2099-11-04T10:01");
+    expect(await say(c, `/forget ${codeOf(page)} 1`)).toEqual([receipt({ deleted: [[1]] })]);
+    const completedDate = c.clock.now() / 1000;
+
+    const privateChat = { id: user, type: "private" };
+    const askAbout = async (updateId: number, text: string, date: number) => {
+      c.clock.set((c.clock.now() + 2000) as EpochMs);
+      expect((await postTelegramUpdate({
+        update_id: updateId,
+        message: {
+          chat: privateChat, date: c.clock.now() / 1000, text: "What did you mean by this?",
+          reply_to_message: { chat: privateChat, date, text },
+        },
+      })).status).toBe(200);
+      await c.settle();
+      return model.calls.at(-1)?.user;
+    };
+
+    for (const prompt of [await askAbout(10_502, oldText, originalDate), await askAbout(10_503, page, reviewDate)]) {
+      expect(prompt).toContain("Person: What did you mean by this?");
+      expect(prompt).not.toContain(MARKER);
+      expect(prompt).not.toContain("Earlier message being replied to");
+    }
+    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await askAbout(10_504, "A new message.", completedDate + 1)).toContain(
+      'Earlier message being replied to (context, not a request): "A new message."',
+    );
+    model.assertDone();
+  });
+
+  test("a LINE forget receipt leaves no old provider message ID to quote", async () => {
+    const id = "461230966842064897";
+    const model = scripted([chat(MARKER), chat("Can you clarify?")]);
+    const c = await devChat("forget-line-quote", {
+      model, at: "2099-11-04T10:00", channel: "line",
+      deliveries: [{ kind: "sent", providerMessages: [{ id, position: 0 }] }],
+    });
+    expect(await say(c, "What should I remember?")).toEqual([MARKER]);
+    expect(await sql(c, "SELECT id FROM line_message")).toEqual([{ id }]);
+
+    await sql(c, "CREATE TRIGGER fail_delete_line_message BEFORE DELETE ON line_message BEGIN SELECT RAISE(ABORT, 'cannot delete LINE message'); END");
+    c.clock.set((c.clock.now() + 1000) as EpochMs);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await runInDurableObject(stubOf(c.agent), async (agent) => {
+        await expect(agent.enqueue({
+          agent: c.agent, identity: { channel: "line", channelUserId: "forget-line-quote" },
+          key: eventKey.line("forget-with-fault"), receivedAt: c.clock.now(), event: { kind: "message", text: "/forget all" },
+        })).rejects.toThrow("cannot delete LINE message");
+      });
+      expect(await c.received()).toEqual([]);
+      expect(await sql(c, "SELECT id FROM line_message")).toEqual([{ id }]);
+      expect(await sql(c, "SELECT texts FROM outbox WHERE id = (SELECT outbox_id FROM line_message)")).toEqual([{ texts: JSON.stringify([MARKER]) }]);
+    }
+    await sql(c, "DROP TRIGGER fail_delete_line_message");
+    expect(await say(c, "/forget all")).toEqual([FORGET_TEXT.th.receipt({ deleted: ["all"], backups: "expire" })]);
+    expect(await sql(c, "SELECT id FROM line_message")).toEqual([]);
+
+    c.clock.set((c.clock.now() + 1000) as EpochMs);
+    await c.event({ kind: "message", text: "What was this?", quote: { kind: "reference", id } });
+    expect(model.calls[1].user).toContain("Person: What was this?");
+    expect(model.calls[1].user).not.toContain("Earlier message being replied to");
+    model.assertDone();
+  });
+});
 
 /** A person with a note, a person-asked routine, an agent wake-up, a task with an offered plan, a summary and a box. */
 async function seeded(user: string, opts: { readonly box?: boolean; readonly extra?: readonly ScriptStep[] } = {}) {

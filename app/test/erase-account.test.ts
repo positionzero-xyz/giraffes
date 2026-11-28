@@ -7,7 +7,7 @@ import type { CheckoutId, StripeReply } from "../src/billing/stripe";
 import { parseInviteCode, personAgentKey, type EpochMs } from "../src/domain";
 import { type SubscriptionId } from "../src/billing/plan";
 import { d1Ledger } from "../src/ledger/ledger";
-import { billingOn, chat, devChat, fakeBox, hold, scripted } from "./testkit";
+import { billingOn, chat, devChat, fakeBox, hold, postTelegramUpdate, scripted } from "./testkit";
 
 test("a confirmed account erase clears private state and requires a fresh decision to return", async () => {
   const model = scripted([chat("A private reply.")]);
@@ -83,6 +83,45 @@ test("an old model reply and messages while deletion is pending never reach the 
   expect(c.channel.delivered.some(({ text }) => text.includes("late private reply"))).toBe(false);
   expect((await c.snapshot()).turns).toEqual([]);
   expect((await c.snapshot()).agent).toBeNull();
+});
+
+test("a Telegram reply in a restarted account omits a quote from before the erase", async () => {
+  const user = 10510;
+  const oldText = "Your old private fact.";
+  const model = scripted([chat(oldText), chat("Welcome back."), chat("Can you clarify?")]);
+  const c = await devChat(String(user), { model, at: "2099-11-04T10:00", channel: "telegram" });
+  await c.say("Tell me my private fact.");
+  expect(await c.received()).toEqual([oldText]);
+  const originalDate = c.clock.now() / 1000;
+  const stub = env.AGENT.get(env.AGENT.idFromName(c.agent));
+  await runInDurableObject(stub, (agent) => agent.withDeps({ firstContactConsent: true }));
+
+  await c.advanceTo("2099-11-04T10:01");
+  await c.say("/erase");
+  const erase = c.channel.delivered.at(-1)?.button;
+  if (!erase) throw new Error("erase confirmation is missing");
+  await c.tap(erase.data);
+  expect((await c.snapshot()).agent).toBeNull();
+
+  await c.advanceTo("2099-11-04T10:02");
+  await c.say("Start again.");
+  const start = c.channel.delivered.at(-1)?.button;
+  if (!start) throw new Error("fresh consent is missing");
+  await c.tap(start.data);
+  await c.advanceTo("2099-11-04T10:03");
+
+  const privateChat = { id: user, type: "private" };
+  expect((await postTelegramUpdate({
+    update_id: 10_520,
+    message: {
+      chat: privateChat, date: c.clock.now() / 1000, text: "What did you mean by this?",
+      reply_to_message: { chat: privateChat, date: originalDate, text: oldText },
+    },
+  })).status).toBe(200);
+  await c.settle();
+  expect(model.calls[2].user).toContain("Person: What did you mean by this?");
+  expect(model.calls[2].user).not.toContain(oldText);
+  model.assertDone();
 });
 
 test("an old image erases the workspace but leaves sign-in, so account erasure stays pending", async () => {

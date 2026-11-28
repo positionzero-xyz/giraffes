@@ -22,7 +22,7 @@ export type EraseBoxReference = {
   readonly host: BoxHostKind;
   readonly url: string | null;
   readonly incarnation: string | null;
-  /** Setup never offered a sign-in link. Older records may have served the person. */
+  /** Setup began after every sign-in link for this name and its grace ran out, so no link opened it. Older records may have served the person. */
   readonly neverServed?: true;
 };
 

@@ -1089,7 +1089,7 @@ export class Agent extends DurableObject<Env> {
       if (!box) return;
       this.#store.forgetClaudePlan();
       const retiring = onRemove(box, now).box;
-      if (box.host === "fly" && box.state === "provisioning") this.#saveNeverServedRetirement(box);
+      if (box.host === "fly" && box.state === "provisioning") this.#saveNeverServedRetirement(box, box.stateAt);
       if (retiring !== box) this.#store.applyBox(retiring, null, [], now);
     });
     await this.#armNoLaterThan(now);
@@ -1690,7 +1690,7 @@ export class Agent extends DurableObject<Env> {
       const m = boxMessage(t.say, view.language, null);
       this.#commit(planWithoutModel(view, { kind: "command", text: m.text, note: m.note }), view, agent, { kind: "none" }, t.box);
       if (current?.host === "fly" && current.state === "provisioning" && this.#store.box()?.state === "reclaiming") {
-        this.#saveNeverServedRetirement(current);
+        this.#saveNeverServedRetirement(current, current.stateAt);
       }
     });
   }
@@ -1707,6 +1707,7 @@ export class Agent extends DurableObject<Env> {
     if (say === "retiring" && box.retireAt !== null) return boxMessage(say, a.language, null, longDate(box.retireAt, a.tz, a.language));
     if (!needsLink(say)) return boxMessage(say, a.language, null);
     const exp = (this.#deps.clock.now() + BOX.ticketForMs) as EpochMs;
+    this.#store.noteBoxLink(exp);
     const ticket = await signinTicket(await boxToken(deps.secret, box.name), exp);
     return boxMessage(say, a.language, signinUrl(box.url, ticket));
   }
@@ -1740,7 +1741,7 @@ export class Agent extends DurableObject<Env> {
       const step = stored && beginStep(stored, this.#deps.clock.now());
       if (!step) return;
       if (step.kind === "reclaim") {
-        this.#saveBoxStep(step.box, null);
+        this.#saveBoxStep(stored, step.box, null);
         await this.#reclaim(step.box);
         return;
       }
@@ -1752,24 +1753,32 @@ export class Agent extends DurableObject<Env> {
       }
       const probe = await this.#probe(deps, step);
       const t = afterProbe(step, probe, this.#deps.clock.now());
-      this.#saveBoxStep(t.box, await this.#outboxMessage(deps, t.box, t.say));
+      this.#saveBoxStep(step.box, t.box, await this.#outboxMessage(deps, t.box, t.say));
     }
   }
 
-  #saveBoxStep(box: Box, message: NoteMessage | null): void {
+  /** `before` is the box as the step found it, which still holds when its setup started. */
+  #saveBoxStep(before: Box, box: Box, message: NoteMessage | null): void {
     const now = this.#deps.clock.now();
     if (box.state !== "reclaiming" || box.reason !== "failed") {
       this.#store.applyBox(box, message, [], now);
       return;
     }
     this.ctx.storage.transactionSync(() => {
-      this.#saveNeverServedRetirement(box);
+      this.#saveNeverServedRetirement(box, before.state === "provisioning" ? before.stateAt : null);
       this.#store.applyBox(box, message, [], now);
     });
   }
 
-  #saveNeverServedRetirement(box: Box): void {
+  /**
+   * Any sign-in link sent for this box's name opens it, and a sign-in made in time outlives the link. So only a box
+   * whose setup began after every such link and its grace ran out is known never to have served the person. A null
+   * `setupAt` is a setup start no longer known.
+   */
+  #saveNeverServedRetirement(box: Box, setupAt: EpochMs | null): void {
     if (this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) !== undefined) return;
+    const linkExpiresAt = this.#store.boxLinkExpiresAt();
+    if (linkExpiresAt !== null && (setupAt === null || linkExpiresAt + BOX.signinGraceMs > setupAt)) return;
     this.ctx.storage.kv.put(BOX_RETIREMENT, this.#resolveAccountBox(this.#agent().key, {
       name: box.name, host: box.host, url: box.url, incarnation: this.#store.boxVolume(), neverServed: true,
     }));

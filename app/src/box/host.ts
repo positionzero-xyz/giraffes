@@ -28,7 +28,7 @@ export interface FlyBoxRetirement {
   retirementTarget(name: BoxName): Promise<{ readonly ok: true; readonly target: FlyDiskRetirement } | HostFailure>;
   /** Re-read ownership and the saved identity without choosing a replacement volume. */
   retirementRecheck(name: BoxName, target: FlyDiskRetirement): Promise<FlyRetirementCheck>;
-  /** Run after the identified disk has acknowledged an account wipe. */
+  /** Retire the identified disk after a wipe or when the caller has established no wipe is needed. */
   retireWipedDisk(name: BoxName, target: FlyDiskRetirement): Promise<HostResult>;
   /** Run after the caller has durably recorded the disk retirement proof. */
   removeRetiredApp(name: BoxName): Promise<HostResult>;

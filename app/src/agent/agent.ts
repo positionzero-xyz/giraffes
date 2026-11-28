@@ -40,7 +40,6 @@ import {
   type EnsureStep,
   type Probe,
   type ProbeStep,
-  type Step,
 } from "../box/machine";
 import { boxSessionOwner, boxToken, signinTicket, signinUrl, type BoxName, type BoxToken } from "../box/names";
 import { CHANNEL_RETRY_MS, makeChannels, whileWorking, type ChannelRegistry } from "../channels/channel";
@@ -133,6 +132,7 @@ const MODEL_RETRY_BASE_MS = 30_000;
 const NO_COST = 0 as MicroUsd;
 const BOX_STEPS_PER_DRAIN = 3;
 const BOX_RETIREMENT = "box:retirement";
+const FAILED_SETUP_MAX_WIPE_ATTEMPTS = 3;
 const KEY_TICKET_MS = 15 * 60_000;
 const KEY_LINK_NOTE = "<key link>";
 const BILLING_ALERT_REFUSED_MS = 300_000;
@@ -748,21 +748,28 @@ export class Agent extends DurableObject<Env> {
           // A disk that disappears before the box acknowledged a wipe never becomes a wiped box.
           return step.resume === "wipe-fly"
             ? { kind: "reclaimed", host: "fly" }
-            : { kind: "remove-app", box, target: step.target };
+            : { kind: "remove-app", box, target: step.target, wipeSkipped: step.wipeSkipped };
         }
         return step.resume === "wipe-fly"
-          ? { kind: "wipe-fly", box, target: step.target, verify: true }
-          : { kind: step.resume, box, target: step.target };
+          ? { kind: "wipe-fly", box, target: step.target, verify: true, wipeFailures: step.wipeFailures }
+          : { kind: step.resume, box, target: step.target, wipeSkipped: step.wipeSkipped };
       }
       case "wipe-static":
       case "wipe-fly": {
         const token = await boxToken(deps.secret, box.name);
         const fallback = step.kind === "wipe-fly"
-          ? { kind: "relocate" as const, box, target: step.target, resume: "wipe-fly" as const }
+          ? { kind: "relocate", box, target: step.target, resume: "wipe-fly", wipeFailures: step.wipeFailures } satisfies EraseBox
           : step;
+        const failedWipe = (): EraseBox => {
+          if (box.neverServed !== true || fallback.kind !== "relocate") return fallback;
+          const wipeFailures = (fallback.wipeFailures ?? 0) + 1;
+          return wipeFailures >= FAILED_SETUP_MAX_WIPE_ATTEMPTS
+            ? { kind: "remove-volume", box, target: fallback.target, wipeSkipped: true }
+            : { ...fallback, wipeFailures };
+        };
         if (!box.incarnation) {
           const health = await deps.client.health(box.url, token);
-          if (health.kind !== "up" || !health.box) return fallback;
+          if (health.kind !== "up" || !health.box) return failedWipe();
           return { ...step, box: { ...box, incarnation: health.box } };
         }
         if (step.kind === "wipe-fly" && step.verify !== false) {
@@ -774,26 +781,25 @@ export class Agent extends DurableObject<Env> {
         }
         const incarnation = box.incarnation;
         const wipe = await deps.client.erase(box.url, token, { scope: "account", box: incarnation, epoch });
-        if (wipe.kind !== "erased" || wipe.scope !== "account" || wipe.box !== incarnation || wipe.floor < epoch) return fallback;
+        if (wipe.kind !== "erased" || wipe.scope !== "account" || wipe.box !== incarnation || wipe.floor < epoch) return failedWipe();
         return step.kind === "wipe-fly" ? { kind: "remove-volume", box, target: step.target } : { kind: "wiped", host: "static" };
       }
       case "remove-volume": {
         const retired = await fly?.retireWipedDisk(box.name, step.target);
         if (retired?.ok) return { ...step, kind: "remove-app" };
         return retired && !retired.ok && retired.missing
-          ? { kind: "relocate", box, target: step.target, resume: "remove-volume" }
+          ? { kind: "relocate", box, target: step.target, resume: "remove-volume", wipeSkipped: step.wipeSkipped }
           : step;
       }
       case "remove-app": {
         const removed = await fly?.removeRetiredApp(box.name);
         if (removed?.ok) {
-          // No disk ever acknowledged a wipe, so deletion is not a wiped outcome.
-          return step.target.disk === null
+          return step.target.disk === null || step.wipeSkipped
             ? { kind: "reclaimed", host: "fly" }
             : { kind: "wiped", host: "fly" };
         }
         return removed && !removed.ok && removed.missing
-          ? { kind: "relocate", box, target: step.target, resume: "remove-app" }
+          ? { kind: "relocate", box, target: step.target, resume: "remove-app", wipeSkipped: step.wipeSkipped }
           : step;
       }
     }
@@ -1699,17 +1705,13 @@ export class Agent extends DurableObject<Env> {
       const stored = this.#store.box();
       const step = stored && beginStep(stored, this.#deps.clock.now());
       if (!step) return;
-      if (step.kind === "reclaim" && step.box.reason === "removed") {
+      if (step.kind === "reclaim") {
         this.#store.applyBox(step.box, null, [], this.#deps.clock.now());
-        await this.#retireRemovedBox(step.box);
+        await this.#reclaim(step.box);
         return;
       }
       if (!deps) return;
       this.#store.applyBox(step.box, null, [], this.#deps.clock.now());
-      if (step.kind === "reclaim") {
-        await this.#reclaim(deps, step);
-        continue;
-      }
       if (step.kind === "ensure") {
         await this.#ensure(deps, step);
         continue;
@@ -1720,40 +1722,34 @@ export class Agent extends DurableObject<Env> {
     }
   }
 
-  async #retireRemovedBox(box: Extract<Box, { state: "reclaiming" }>): Promise<void> {
+  async #reclaim(box: Extract<Box, { state: "reclaiming" }>): Promise<void> {
     const { key: person, language } = this.#agent();
-    const epoch = (this.#store.forget().epoch + 1) as ForgetEpoch;
-    let progress = this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) ?? this.#resolveAccountBox(person, {
-      name: box.name, host: box.host, url: box.url, incarnation: this.#store.boxVolume(),
-    });
-    while ("box" in progress) {
-      this.ctx.storage.kv.put(BOX_RETIREMENT, progress);
-      const next = await this.#retireBoxStep({ person, epoch, box: progress });
-      if (next === progress || next.kind === "relocate") {
-        this.ctx.storage.kv.put(BOX_RETIREMENT, next);
-        return diagnostic("box_reclaim_failed");
+    const deps = this.#deps.box;
+    const sharedDevBox = box.reason !== "removed" && box.host === "static" && deps?.host.kind === "static" && deps.onlyFor === null;
+    if (!sharedDevBox) {
+      const epoch = (this.#store.forget().epoch + 1) as ForgetEpoch;
+      let progress = this.ctx.storage.kv.get<EraseBox>(BOX_RETIREMENT) ?? this.#resolveAccountBox(person, {
+        name: box.name, host: box.host, url: box.url, incarnation: this.#store.boxVolume(),
+        ...(box.reason === "failed" ? { neverServed: true } : {}),
+      });
+      while ("box" in progress) {
+        this.ctx.storage.kv.put(BOX_RETIREMENT, progress);
+        const next = await this.#retireBoxStep({ person, epoch, box: progress });
+        if (next === progress || next.kind === "relocate") {
+          this.ctx.storage.kv.put(BOX_RETIREMENT, next);
+          return diagnostic("box_reclaim_failed");
+        }
+        progress = next;
       }
-      progress = next;
+      this.ctx.storage.kv.put(BOX_RETIREMENT, progress);
     }
-    this.ctx.storage.kv.put(BOX_RETIREMENT, progress);
     await this.#deps.ledger.releaseBox(person, this.#deps.clock.now());
     const notice = mayspend(this.#store.admission()) ? goneMessage(box, language) : null;
     this.ctx.storage.transactionSync(() => {
       this.#store.removeBox(box.name, notice && { texts: [notice.text], note: notice.note }, this.#deps.clock.now());
       this.ctx.storage.kv.delete(BOX_RETIREMENT);
     });
-  }
-
-  async #reclaim(deps: BoxDeps, step: Extract<Step, { kind: "reclaim" }>): Promise<void> {
-    const destroyed = await deps.host.destroy(step.box.name);
-    if (!destroyed.ok) {
-      diagnostic("box_reclaim_failed");
-      return;
-    }
-    await this.#deps.ledger.releaseBox(this.#agent().key, this.#deps.clock.now());
-    const m = goneMessage(step.box, this.#agent().language);
-    this.#store.removeBox(step.box.name, { texts: [m.text], note: m.note }, this.#deps.clock.now());
-    this.#askBackupIfDue(this.#deps.clock.now(), true);
+    if (box.reason !== "removed") this.#askBackupIfDue(this.#deps.clock.now(), true);
   }
 
   async #ensure(deps: BoxDeps, step: EnsureStep): Promise<void> {

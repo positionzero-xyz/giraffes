@@ -120,6 +120,14 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
     return listed.ok ? read(listed, RetirementVolumes, `GET ${path}`) : listed;
   }
 
+  async function verifyRetiredVolumes(name: BoxName): Promise<HostResult> {
+    const volumes = await retirementVolumes(name);
+    if (failed(volumes)) return volumes.missing ? HOST_OK : volumes;
+    return volumes.some((v) => !GONE_VOLUME.has(v.state))
+      ? fail(true, "box volumes remain live")
+      : HOST_OK;
+  }
+
   /** App names the org token can see. Only a successful read proves an app is absent. */
   async function appNames(): Promise<readonly string[] | HostFailure> {
     const path = `/apps?org_slug=${encodeURIComponent(cfg.org)}`;
@@ -337,8 +345,8 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       const volumes = await retirementVolumes(name);
       if (failed(volumes)) return volumes;
       const disks = target.disks ?? (target.disk ? [target.disk] : []);
-      // Only the disk whose wipe was proven may be deleted. A persisted target from an older
-      // revision may list extra live volumes; hold rather than promote them to trusted.
+      // A persisted target from an older revision may list extra live volumes.
+      // Only the saved mounted disk is authorized for deletion.
       if (target.disk !== null && disks.some((id) => id !== target.disk)) {
         return fail(true, "retirement target includes an unproven disk");
       }
@@ -379,7 +387,7 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
     },
     async removeRetiredApp(name) {
       const owned = await ownership(name);
-      if (failed(owned)) return owned.missing ? HOST_OK : owned;
+      if (failed(owned)) return owned.missing ? verifyRetiredVolumes(name) : owned;
       const before = await retirementVolumes(name);
       if (failed(before)) return before.missing ? fail(true, "app disappeared before retirement") : before;
       if (before.some((v) => !GONE_VOLUME.has(v.state))) return fail(true, "unexpected live volume remains");
@@ -392,11 +400,7 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       const names = await appNames();
       if (failed(names)) return fail(true, names.detail);
       if (names.includes(name)) return fail(true, "box app remains live");
-      const volumes = await retirementVolumes(name);
-      if (failed(volumes)) return volumes.missing ? HOST_OK : volumes;
-      return volumes.some((v) => !GONE_VOLUME.has(v.state))
-        ? fail(true, "box volumes remain live")
-        : HOST_OK;
+      return verifyRetiredVolumes(name);
     },
   };
 }

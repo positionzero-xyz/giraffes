@@ -550,6 +550,7 @@ export function fakeBox(
       }
       if (request.scope !== "account" || request.box !== retiring.get(name)) return new Response(null, { status: 412 });
       wiped.add(name);
+      box.sessions.clear();
       return Response.json({ box: request.box, scope: "account", floor: request.epoch });
     }
     if (url.pathname === "/agent/once" && box.ignoresSession) return Response.json({ error: "not_found" }, { status: 404 });

@@ -19,8 +19,9 @@ chat ──► Worker ──► Agent DO ──(HTTPS, bearer)──► box  htt
 
 - `BOX_SECRET` is one Worker secret. Every per-box value derives from it.
 - Box name: `BOX_APP_PREFIX` + the first 16 hex characters of `HMAC-SHA256(BOX_SECRET, "name:" + agentKey)`. Fly app names are global, so the prefix is ours, and the HMAC keeps names from being guessed from chat ids. On the `static` host every person shares the one box, which holds one `BOX_TOKEN`, so its name is fixed: `BOX_APP_PREFIX` + `static`.
-- Box token: `base64url(HMAC-SHA256(BOX_SECRET, "box:" + name))`. The Worker recomputes it. The box receives it once, in the `BOX_TOKEN` environment variable.
-- Sign-in ticket: `exp + "." + base64url(HMAC-SHA256(boxToken, "signin:" + exp))`, where `exp` is epoch milliseconds. The box accepts it while `now < exp`. The Worker issues it for 30 minutes.
+- Box setup: 32 random hex characters the Worker picks each time it creates a Fly box, and keeps on the box row and in any retirement or erase record for that box. A box removed and set up again keeps its name but gets a new setup.
+- Box token: `base64url(HMAC-SHA256(BOX_SECRET, "box:" + name + ":" + setup))`. The Worker recomputes it. The box receives it once, in the `BOX_TOKEN` environment variable. A box with no setup uses `base64url(HMAC-SHA256(BOX_SECRET, "box:" + name))`: the static box, whose `BOX_TOKEN` the operator sets, and every Fly box created before setups existed.
+- Sign-in ticket: `exp + "." + base64url(HMAC-SHA256(boxToken, "signin:" + exp))`, where `exp` is epoch milliseconds. The box accepts it while `now < exp`. The Worker issues it for 30 minutes. Because the ticket is made under the box token, a link sent for one setup can't sign anyone in on a later setup with the same name.
 
 Test vector (both sides test against it):
 
@@ -28,9 +29,15 @@ Test vector (both sides test against it):
 |---|---|
 | `BOX_SECRET` | `test-secret-0123456789abcdef` |
 | name | `gbox-0123456789ab` |
-| box token | `b-UiaAiUIgin1zs4CJbKAY68m8rphXVQwWrWHSMO2U4` |
 | `exp` | `1790000000000` |
-| ticket | `1790000000000.AA1PzFmYf_4obmGHsfd0634YPiMbVDnmjYWbmYI62kM` |
+| box token, no setup | `b-UiaAiUIgin1zs4CJbKAY68m8rphXVQwWrWHSMO2U4` |
+| ticket, no setup | `1790000000000.AA1PzFmYf_4obmGHsfd0634YPiMbVDnmjYWbmYI62kM` |
+| setup A | `0123456789abcdef0123456789abcdef` |
+| box token, setup A | `bR54N2ECmvOaNzfY-MAjNxSljEJGcUg37IULiGJPpi8` |
+| ticket, setup A | `1790000000000.T6Ty05be-BVM7-7t9NXFwNCUZlI68iyM7O8VM10Devk` |
+| setup B | `fedcba9876543210fedcba9876543210` |
+| box token, setup B | `J40cGlSG0gN_Bw99CZFSVR1lVtOYKgclss21zN1q_E0` |
+| ticket, setup B | `1790000000000.MhnaR5m2CD5RkekfV0cb1V7zX9d7VF2XogHH-wJLrBk` |
 
 ## Box HTTP contract
 

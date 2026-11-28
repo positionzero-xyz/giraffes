@@ -34,6 +34,8 @@ import {
   type BillingKit,
   turn,
   type MemoryLedger,
+  ticketOpens,
+  type FakeBox,
 } from "./testkit";
 
 const NOTICE = NOTICES.en;
@@ -45,7 +47,7 @@ const LINK = /^https:\/\/([a-z0-9-]+)\.box\.test\/signin#t=(\d+)\.([A-Za-z0-9_-]
 
 describe("names and secrets", () => {
   test("the box token and the sign-in ticket match the contract's test vector", async () => {
-    const token = await boxToken("test-secret-0123456789abcdef", "gbox-0123456789ab" as BoxName);
+    const token = await boxToken("test-secret-0123456789abcdef", "gbox-0123456789ab" as BoxName, null);
     expect(token).toBe("b-UiaAiUIgin1zs4CJbKAY68m8rphXVQwWrWHSMO2U4");
     expect(await signinTicket(token, 1790000000000 as EpochMs)).toBe("1790000000000.AA1PzFmYf_4obmGHsfd0634YPiMbVDnmjYWbmYI62kM");
   });
@@ -675,12 +677,12 @@ describe("box client", () => {
   });
 });
 
-async function linkIn(text: string, user: string, sentAt: EpochMs) {
+/** `valid`: the link's ticket opens the box under the key the box holds. */
+async function linkIn(text: string, user: string, sentAt: EpochMs, box: FakeBox) {
   const m = text.match(LINK);
   if (!m) throw new Error(`no sign-in link in ${JSON.stringify(text)}`);
-  const [, name, exp, mac] = m;
-  const expected = await signinTicket(await boxToken(BOX_SECRET, name as BoxName), Number(exp) as EpochMs);
-  return { name, exp: Number(exp), valid: expected === `${exp}.${mac}`, expiresInMs: Number(exp) - sentAt, user };
+  const [link, name, exp] = m;
+  return { name, exp: Number(exp), valid: await ticketOpens(link, box.keys, sentAt), expiresInMs: Number(exp) - sentAt, user };
 }
 
 describe("a turn on the person's own Claude Code session", () => {
@@ -975,7 +977,7 @@ describe("connecting a Claude plan", () => {
 
     const [setup, link, ...rest] = await c.received();
     expect([setup, rest]).toEqual([say("setting_up"), []]);
-    const l = await linkIn(link, "ann", local("2099-11-04T10:00"));
+    const l = await linkIn(link, "ann", local("2099-11-04T10:00"), box);
     expect({ name: l.name, valid: l.valid, expiresInMs: l.expiresInMs }).toEqual({ name: await box.nameOf("ann"), valid: true, expiresInMs: 30 * 60_000 });
     expect((await c.snapshot()).box).toEqual({ host: "fly", state: "signed_out" });
     expect(ledger.boxes.get("p:dev:ann")).toEqual({ name: await box.nameOf("ann"), host: "fly" });
@@ -1002,7 +1004,7 @@ describe("connecting a Claude plan", () => {
 
     const sent = await c.received();
     expect(sent).toHaveLength(1);
-    expect((await linkIn(sent[0], "bo", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect((await linkIn(sent[0], "bo", local("2099-11-04T10:00"), box)).valid).toBe(true);
     expect(box.ensureCalls).toHaveLength(2);
     expect(box.created.size).toBe(1);
   });
@@ -1036,7 +1038,7 @@ describe("connecting a Claude plan", () => {
     await c.say("/claude");
     const [again, link] = await c.received();
     expect(again).toBe(say("setting_up"));
-    expect((await linkIn(link, "di", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect((await linkIn(link, "di", local("2099-11-04T10:00"), box)).valid).toBe(true);
     expect(ledger.boxes.has("p:dev:di")).toBe(true);
   });
 
@@ -1219,7 +1221,7 @@ describe("connecting a Claude plan", () => {
     expect(await c.received()).toEqual(["Hello from your own plan."]);
     expect(box.parses).toEqual([
       {
-        authorization: `Bearer ${await boxToken(BOX_SECRET, await box.nameOf("fin"))}`,
+        authorization: `Bearer ${box.keys.get(await box.nameOf("fin"))}`,
         user: expect.stringContaining("Person: hello"),
         agent: {
           append: expect.stringContaining("You are Giraffe"),
@@ -1277,7 +1279,7 @@ describe("connecting a Claude plan", () => {
     expect(rest).toEqual([]);
     expect(notice.startsWith(say("signed_out_link").split("\n")[0])).toBe(true);
     expect(notice).not.toMatch(/answering/);
-    expect((await linkIn(notice, "gus", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect((await linkIn(notice, "gus", local("2099-11-04T10:00"), box)).valid).toBe(true);
     expect((await c.snapshot()).box?.state).toBe("signed_out");
 
     await c.say("again");
@@ -1457,7 +1459,7 @@ describe("connecting a Claude plan", () => {
 
     const [notice, ...rest] = await c.received();
     expect(notice.startsWith(say("signed_out_backup").split("\n")[0])).toBe(true);
-    expect((await linkIn(notice, "hob", local("2099-11-04T10:00"))).valid).toBe(true);
+    expect((await linkIn(notice, "hob", local("2099-11-04T10:00"), box)).valid).toBe(true);
     expect(rest).toEqual(["From your key."]);
   });
 
@@ -2167,7 +2169,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
     const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
     await runInDurableObject(stub, (_agent, state) => {
       state.storage.kv.put("box:retirement", {
-        kind: "locate", box: { name: app, host: "fly", url: deps.host.urlOf(app), incarnation: null },
+        kind: "locate", box: { name: app, host: "fly", url: deps.host.urlOf(app), setup: null, incarnation: null },
       } satisfies EraseBox);
     });
 
@@ -2310,6 +2312,7 @@ describe("a box row written by the code before reclaim reasons", () => {
       );
       sql.exec(MIGRATIONS[MIGRATIONS.findIndex((m) => m.includes("CASE state WHEN 'failed' THEN 'reclaiming'"))]);
       sql.exec("ALTER TABLE box ADD COLUMN volume TEXT");
+      sql.exec("ALTER TABLE box ADD COLUMN setup TEXT");
     });
 
     await c.alarm();
@@ -2366,7 +2369,7 @@ describe("reclaiming a box nobody signed in to", () => {
     await c.say("/claude");
     const [again, link] = await c.received();
     expect(again).toBe(say("setting_up"));
-    expect((await linkIn(link, "lea", local("2099-11-06T10:00"))).valid).toBe(true);
+    expect((await linkIn(link, "lea", local("2099-11-06T10:00"), box)).valid).toBe(true);
     expect(ledger.boxes.has("p:dev:lea")).toBe(true);
   });
 

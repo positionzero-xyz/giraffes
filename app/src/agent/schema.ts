@@ -648,6 +648,9 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE forget ADD COLUMN completed_at INTEGER;
   UPDATE forget SET completed_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) WHERE receipt IS NOT NULL AND completed_at IS NULL;
   `,
+  `
+  ALTER TABLE box ADD COLUMN setup TEXT;
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {

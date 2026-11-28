@@ -6,6 +6,7 @@ import type { BoxHostKind, FlyDiskRetirement } from "../box/host";
 
 export const ACCOUNT_CHALLENGE_MS = 15 * 60_000;
 export const ACCOUNT_RETRY_MS = 60_000;
+export const ACCOUNT_WIPE_GRACE_MS = 60 * 60_000;
 export const ACCOUNT_RECEIPT_MS = 24 * 60 * 60_000;
 export const ERASE_DIAGNOSTIC_MS = 24 * 60 * 60_000;
 export const ERASE_CHALLENGE = "account:erase-confirmation";
@@ -20,7 +21,7 @@ export type EraseBoxReference = {
   readonly host: BoxHostKind;
   readonly url: string | null;
   readonly incarnation: string | null;
-  /** Only set when retirement begins for a failed setup. Older records may have served the person. */
+  /** A failed setup never offered a sign-in link. Older records may have served the person. */
   readonly neverServed?: true;
 };
 
@@ -46,11 +47,11 @@ export type EraseBox =
     readonly box: EraseBoxTarget;
     readonly target: FlyDiskRetirement;
   } & (
-    | { readonly resume: "wipe-fly"; readonly wipeFailures?: number }
+    | { readonly resume: "wipe-fly"; readonly wipeFailures?: number; readonly wipeFailedAt?: EpochMs }
     | { readonly resume: "remove-volume" | "remove-app"; readonly wipeSkipped?: true }
   )
   | { readonly kind: "locate" | "wipe-static"; readonly box: EraseBoxTarget }
-  | { readonly kind: "wipe-fly"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement; readonly verify?: boolean; readonly wipeFailures?: number }
+  | { readonly kind: "wipe-fly"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement; readonly verify?: boolean; readonly wipeFailures?: number; readonly wipeFailedAt?: EpochMs }
   | { readonly kind: "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement; readonly wipeSkipped?: true };
 
 export type EraseBilling =
@@ -78,7 +79,14 @@ type ErasureIdentity = {
 export type Erasure = ErasureIdentity & (
   | { readonly kind: "starting" }
   | { readonly kind: "preparing"; readonly checkouts: readonly CheckoutId[]; readonly box: EraseBoxTarget | null }
-  | { readonly kind: "cleaning"; readonly ledger: EraseLedger; readonly billing: EraseBilling; readonly box: EraseBox; readonly boxLedgerKey: string | null }
+  | {
+    readonly kind: "cleaning";
+    readonly ledger: EraseLedger;
+    readonly billing: EraseBilling;
+    readonly box: EraseBox;
+    readonly boxLedgerKey: string | null;
+    readonly boxRetry?: { readonly attempts: number; readonly nextAt: EpochMs };
+  }
   | { readonly kind: "receipt"; readonly expiresAt: EpochMs; readonly attempted: boolean; readonly box: EraseBoxReceipt | null; readonly endedSubscription: boolean; readonly stripeRetained: boolean }
 );
 

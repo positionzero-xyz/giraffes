@@ -121,6 +121,8 @@ const reclaimNow = (b: Box, reason: ReclaimReason, now: EpochMs): Box => to(b, {
 
 const backoff = (attempts: number, maxMs: number) => Math.min(BOX.provisionRetryBaseMs * 2 ** attempts, maxMs);
 
+export const reclaimBackoff = (attempts: number): number => backoff(attempts, BOX.reclaimRetryMaxMs);
+
 function linkSent(b: Box, reclaimAt: EpochMs | null, now: EpochMs): Box {
   return to(
     b,
@@ -184,7 +186,7 @@ export function beginStep(b: Box, now: EpochMs): Step | null {
       return { kind: "poll", box: { ...b, pollAt: b.pollUntil !== null && next <= b.pollUntil ? (next as EpochMs) : null } };
     }
     case "reclaiming": {
-      const retryAt = (now + backoff(b.attempts, BOX.reclaimRetryMaxMs)) as EpochMs;
+      const retryAt = (now + reclaimBackoff(b.attempts)) as EpochMs;
       return { kind: "reclaim", box: { ...b, attempts: b.attempts + 1, retryAt } };
     }
     case "signed_in":

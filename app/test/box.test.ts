@@ -872,6 +872,25 @@ describe("a turn on the person's own Claude Code session", () => {
     expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "task_followup"]]);
   });
 
+  test("an Accept tap days later still completes the plan", async () => {
+    const { box, c } = await signedIn("late-plan", "2099-11-04T08:00");
+    box.replies.push({ kind: "reply", step: turn({ actions: [send("Morning! The long weekend is close, so I sketched a trip.")], tasks: [propose(TRIP, TITLE, PLAN)] }) });
+    await c.advanceTo("2099-11-04T09:00");
+    await c.received();
+    box.replies.push(
+      { kind: "reply", step: turn({ actions: [quiet()] }) },
+      { kind: "reply", step: turn({ actions: [quiet()] }) },
+      { kind: "reply", step: turn({ actions: [quiet()] }) },
+      { kind: "reply", step: chat("Great, I'll remind you on Friday.") },
+    );
+
+    await c.advanceTo("2099-11-07T10:00");
+    await c.tap("a:1.1");
+
+    expect(await c.received()).toEqual([`Great, I'll remind you on Friday.\n${NOTICE.planAccepted(TITLE)}`]);
+    expect((await c.snapshot()).tasks[0].status).toBe("completed");
+  });
+
   test("a box check-in that names an open task is a follow-up on it and changes nothing else", async () => {
     const { box, c } = await signedIn("about", "2099-11-04T08:00");
     box.replies.push({ kind: "reply", step: turn({ actions: [send("Noted, a weekend in Chiang Mai.")], tasks: [openTask(TRIP, TITLE, "plan")] }) });

@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
-import { ACCOUNT_COPY } from "../src/agent/account";
+import { ACCOUNT_COPY, type EraseBox } from "../src/agent/account";
 import type { Agent } from "../src/agent/agent";
 import { boxClient } from "../src/box/client";
 import { flyHost, type FlyConfig } from "../src/box/fly";
@@ -8,7 +8,7 @@ import { HOST_OK } from "../src/box/host";
 import { boxMessage, type BoxSay } from "../src/box/machine";
 import { boxToken, signinTicket, type BoxName, type BoxSetup, type BoxToken } from "../src/box/names";
 import type { EpochMs } from "../src/domain";
-import { BOX_SECRET, chat, devChat, fakeBox, memoryLedger, scripted, ticketOpens, type DevChat, type FakeBox } from "./testkit";
+import { BOX_SECRET, chat, devChat, fakeBox, local, memoryLedger, scripted, ticketOpens, type DevChat, type FakeBox } from "./testkit";
 
 const say = (s: BoxSay) => boxMessage(s, "en", null).text;
 const at = (hm: string) => `2099-11-04T${hm}`;
@@ -175,6 +175,23 @@ describe("a box made before setups existed", () => {
     expect(receipt).not.toContain(ACCOUNT_COPY.en.deletedUnwipedBox);
     expect(receipt).not.toContain(ACCOUNT_COPY.en.reclaimedBox);
   });
+
+  test("a saved failed-setup record keeps the signed-in disk and beta slot while the box is unreachable", async () => {
+    const { c, fly, ledger } = await legacyBoxInSetup("setup-legacy-retirement");
+    await c.advanceTo(at("10:28"));
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+    await agentStorage(c, (state) => {
+      const retirement = state.storage.kv.get<EraseBox>("box:retirement");
+      if (retirement?.kind !== "relocate" || retirement.resume !== "wipe-fly") throw new Error("missing wipe retry");
+      expect(retirement.box.setup).toBeNull();
+      // The previous Worker marked every failed setup, including boxes with name-only keys.
+      state.storage.kv.put("box:retirement", { ...retirement, box: { ...retirement.box, neverServed: true }, wipeFailures: 1 });
+    });
+
+    await c.advanceTo(at("11:30"));
+    expect({ diskDeleted: fly.diskDeleted(), slotHeld: ledger.boxes.has(c.agent) })
+      .toEqual({ diskDeleted: false, slotHeld: true });
+  });
 });
 
 const flyConfig: FlyConfig = {
@@ -266,6 +283,23 @@ async function start(user: string) {
   return { c, fly, ledger };
 }
 
+async function legacyBoxInSetup(user: string) {
+  const { c, fly, ledger } = await start(user);
+  fly.box.reachable = false;
+  await c.say("/claude");
+  expect((await c.received()).at(-1)).toBe(say("setting_up"));
+  expect((await c.snapshot()).box?.state).toBe("provisioning");
+
+  const name = await fly.deps.host.nameFor(c.agent);
+  const key = await boxToken(BOX_SECRET, name, null);
+  await agentStorage(c, (state) => state.storage.sql.exec("UPDATE box SET setup = NULL"));
+  fly.box.key = key;
+  const link = new URL("/signin", fly.deps.host.urlOf(name));
+  link.hash = "t=" + await signinTicket(key, local(at("10:30")));
+  expect(await fly.signInWith(link.toString(), c.clock.now()), "an older name-only link opens the box").toBe(true);
+  return { c, fly, ledger };
+}
+
 async function firstBoxLink(c: DevChat, fly: Fly): Promise<string> {
   fly.box.reachable = true;
   await c.say("/claude");
@@ -299,7 +333,7 @@ async function replacementOpenedWith(c: DevChat, fly: Fly, link: string): Promis
 }
 
 describe("an account erase and a fresh start inside a link's 30 minutes", () => {
-  test("the link from before the erase can't sign the person in on the new box, and /claude remove never deletes a signed-in disk unwiped", async () => {
+  test("the link from before the erase can't sign the person in on the new box, so /claude remove cleans it up without waiting for a wipe", async () => {
     const { c, fly, ledger } = await start("setup-erase-remove");
     const link = await firstBoxLink(c, fly);
     await c.advanceTo(at("10:01"));
@@ -312,12 +346,9 @@ describe("an account erase and a fresh start inside a link's 30 minutes", () => 
     const mark = fly.requests.length;
     await c.say("/claude remove");
     await c.advanceTo(at("10:30"));
-    expect({ opened, unwipedDiskDeleteHoldingSignIn: fly.unwipedDiskDelete(mark) }).toEqual({ opened: false, unwipedDiskDeleteHoldingSignIn: false });
-
-    fly.box.reachable = true;
-    await c.advanceTo(at("12:00"));
-    expect(fly.wipedBeforeDelete(mark), "once it answers, the new box is wiped with its own key before its disk goes").toBe(true);
-    expect(fly.since(mark)).not.toContain("box refused the key");
+    expect({ opened, unwipedDiskDeleteHoldingSignIn: fly.unwipedDiskDelete(mark), diskDeleted: fly.diskDeleted(mark) })
+      .toEqual({ opened: false, unwipedDiskDeleteHoldingSignIn: false, diskDeleted: true });
+    expect((await c.snapshot()).box).toBeNull();
     expect(ledger.boxes.has(c.agent)).toBe(false);
   });
 
@@ -371,4 +402,100 @@ describe("an account erase and a fresh start inside a link's 30 minutes", () => 
     expect(fly.unwipedDiskDelete(mark)).toBe(false);
     expect(fly.since(mark)).not.toContain("box refused the key");
   });
+});
+
+describe("removing a replacement box while its setup still retries", () => {
+  /** The first box sends its link at 10:00 and is wiped and removed at 10:01. At 10:05 a replacement starts that Giraffe can't reach. */
+  async function replacementInSetup(user: string) {
+    const { c, fly, ledger } = await start(user);
+    const link = await firstBoxLink(c, fly);
+    await c.advanceTo(at("10:01"));
+    await c.say("/claude remove");
+    await c.advanceTo(at("10:04"));
+    expect(fly.wipedBeforeDelete(), "the first box was wiped before its disk went").toBe(true);
+    await c.received();
+    await c.advanceTo(at("10:05"));
+    const opened = await replacementOpenedWith(c, fly, link);
+    return { c, fly, ledger, opened };
+  }
+
+  test.for(["person", "operator"] as const)(
+    "removal by the %s deletes a replacement with its own setup after three tries, since the earlier box's live link can't open it",
+    async (by) => {
+      const { c, fly, ledger, opened } = await replacementInSetup(`setup-retry-remove-${by}`);
+      const mark = fly.requests.length;
+      if (by === "operator") {
+        await c.remove();
+      } else {
+        await c.say("/claude remove");
+        expect(await c.received()).toEqual([say("removing")]);
+      }
+      await c.advanceTo(at("10:08"));
+      expect({ opened, unwipedDiskDeleteHoldingSignIn: fly.unwipedDiskDelete(mark), diskDeleted: fly.diskDeleted(mark) })
+        .toEqual({ opened: false, unwipedDiskDeleteHoldingSignIn: false, diskDeleted: true });
+      expect(fly.since(mark).filter((r) => r === "box /health")).toHaveLength(3);
+      expect((await c.snapshot()).box).toBeNull();
+      expect(ledger.boxes.has(c.agent)).toBe(false);
+      expect(await c.received()).toEqual(by === "operator" ? [] : [say("removed")]);
+    },
+  );
+
+  test("a replacement with its own setup that answers again while it is being removed is wiped with its own key before its disk goes", async () => {
+    const { c, fly, ledger, opened } = await replacementInSetup("setup-retry-answers");
+    expect(opened).toBe(false);
+    const mark = fly.requests.length;
+    await c.say("/claude remove");
+    expect(await c.received()).toEqual([say("removing")]);
+    expect(fly.since(mark).filter((r) => r === "box /health"), "the first wipe try found the box down").toHaveLength(1);
+    fly.box.reachable = true;
+    await c.advanceTo(at("10:08"));
+    expect(fly.wipedBeforeDelete(mark)).toBe(true);
+    expect(fly.since(mark)).not.toContain("box refused the key");
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+  });
+
+  test("a replacement with its own setup whose setup fails is deleted without waiting for a wipe, since the earlier box's live link can't open it", async () => {
+    const { c, fly, ledger, opened } = await replacementInSetup("setup-retry-failed");
+    const mark = fly.requests.length;
+    await c.advanceTo(at("11:30"));
+    expect({ opened, unwipedDiskDeleteHoldingSignIn: fly.unwipedDiskDelete(mark), diskDeleted: fly.diskDeleted(mark) })
+      .toEqual({ opened: false, unwipedDiskDeleteHoldingSignIn: false, diskDeleted: true });
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+    expect(await c.received()).toEqual([say("setup_failed")]);
+  });
+
+  test.for(["is removed", "fails its setup"] as const)(
+    "a box an older Worker set up, signed in with a live link that Worker sent for an earlier box, keeps its disk until it is wiped when it %s",
+    async (end) => {
+      const { c, fly, ledger } = await start(`setup-retry-older-${end.replace(/ /g, "-")}`);
+      fly.box.reachable = false;
+      await c.say("/claude");
+      expect((await c.received()).at(-1)).toBe(say("setting_up"));
+      expect((await c.snapshot()).box?.state).toBe("provisioning");
+      const name = fly.box.name as BoxName;
+      const key = await boxToken(BOX_SECRET, name, null);
+      await agentStorage(c, (state) => state.storage.sql.exec("UPDATE box SET setup = NULL"));
+      fly.box.key = key;
+      const olderLink = `${fly.deps.host.urlOf(name)}/signin#t=${await signinTicket(key as BoxToken, (c.clock.now() + 25 * 60_000) as EpochMs)}`;
+      expect(await fly.signInWith(olderLink, c.clock.now()), "the older Worker's name-only link opens it").toBe(true);
+      const mark = fly.requests.length;
+      if (end === "is removed") {
+        await c.say("/claude remove");
+        expect(await c.received()).toEqual([say("removing")]);
+      }
+      await c.advanceTo(at("11:30"));
+      expect(fly.diskDeleted(mark)).toBe(false);
+      expect(ledger.boxes.has(c.agent)).toBe(true);
+
+      fly.box.reachable = true;
+      await c.advanceTo(at("14:00"));
+      expect(fly.wipedBeforeDelete(mark)).toBe(true);
+      expect(fly.unwipedDiskDelete(mark)).toBe(false);
+      expect(fly.since(mark)).not.toContain("box refused the key");
+      expect((await c.snapshot()).box).toBeNull();
+      expect(ledger.boxes.has(c.agent)).toBe(false);
+    },
+  );
 });

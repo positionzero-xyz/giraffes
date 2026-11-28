@@ -3,9 +3,9 @@ import { describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import { boxClient } from "../src/box/client";
 import { flyHost, machineConfig, type FlyConfig } from "../src/box/fly";
-import { staticHost, type Fetch } from "../src/box/host";
+import { HOST_OK, staticHost, type Fetch } from "../src/box/host";
 import { BOX, boxMessage, type BoxSay, type ReclaimReason } from "../src/box/machine";
-import { boxName, boxSessionOwner, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
+import { boxName, boxSessionOwner, boxToken, newBoxSetup, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
 import { ACCOUNT_COPY, ERASE_JOB, type EraseBox, type Erasure } from "../src/agent/account";
 import { Agent } from "../src/agent/agent";
 import { MIGRATIONS } from "../src/agent/schema";
@@ -1579,9 +1579,9 @@ describe("confirming disk deletion on automatic reclaim", () => {
     const stateName = opts.signedIn ? "signed_in" : reason === null ? "provisioning" : "reclaiming";
     await runInDurableObject(stub, (_agent, state) => {
       state.storage.sql.exec(
-        `INSERT INTO box (one, name, host, url, state, state_at, attempts, next_at, reclaim_reason)
-         VALUES (1, ?, ?, ?, ?, ?, 0, ?, ?)`,
-        name, box.host.kind, box.host.urlOf(name), stateName, now, opts.signedIn ? null : now, reason,
+        `INSERT INTO box (one, name, host, url, setup, state, state_at, attempts, next_at, reclaim_reason)
+         VALUES (1, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        name, box.host.kind, box.host.urlOf(name), box.host.kind === "fly" ? newBoxSetup() : null, stateName, now, opts.signedIn ? null : now, reason,
       );
     });
     return { c, ledger, stub };
@@ -1797,6 +1797,40 @@ describe("confirming disk deletion on automatic reclaim", () => {
     expect(receipt).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
     expect(receipt[0]).toContain(ACCOUNT_COPY.en.deletedUnwipedBox);
     expect(await testEnv.LEDGER.prepare("SELECT name FROM boxes WHERE name = ?").bind(app).first()).toBeNull();
+  });
+
+  test.each(["person", "operator"])("removal by the %s while setup is still retrying frees the slot", async (who) => {
+    const fly = flyReclaim({ machine: "machine_1", boxFailure: "health", keepVolumeAfterDelete: false });
+    const deps = { ...fly.deps, host: { ...fly.deps.host, ensure: async () => HOST_OK } };
+    const { c, ledger, stub } = await startReclaim(`remove-retrying-${who}`, null, deps);
+    await c.alarm();
+    expect(fly.boxRequests).toEqual(["/health"]);
+    expect((await c.snapshot()).box?.state).toBe("provisioning");
+
+    if (who === "operator") {
+      await c.remove();
+    } else {
+      await c.say("/claude remove");
+      expect(await c.received()).toEqual([say("removing")]);
+    }
+    await c.advanceTo("2099-11-04T10:03");
+
+    expect(fly.destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
+    const diskCheck = fly.requests.indexOf(volumeList, fly.requests.indexOf(volumeDelete) + 1);
+    expect(diskCheck).toBeGreaterThan(fly.requests.indexOf(volumeDelete));
+    expect(diskCheck).toBeLessThan(fly.requests.indexOf(appDelete));
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+    expect(await c.received()).toEqual(who === "operator" ? [] : [say("removed")]);
+
+    if (who === "operator") {
+      await runInDurableObject(stub, (_, { storage }) => { storage.sql.exec("DELETE FROM admission"); });
+      await c.say("hello");
+    }
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up")]);
+    expect((await c.snapshot()).box?.state).toBe("provisioning");
+    expect(ledger.boxes.has(c.agent)).toBe(true);
   });
 
   async function driveRetirement(

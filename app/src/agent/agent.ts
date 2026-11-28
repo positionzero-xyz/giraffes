@@ -1977,7 +1977,12 @@ export class Agent extends DurableObject<Env> {
       if (erased === null) this.#store.erasePending(f.op, after);
       else {
         const a = this.#agent();
-        if (this.#store.completeForget(f.op, erased.volume, this.#backups(), checkinWakeup(after, a.tz, a.checkinLocal), after)) this.#devSavedPages.clear();
+        try {
+          if (this.#store.completeForget(f.op, erased.volume, this.#backups(), checkinWakeup(after, a.tz, a.checkinLocal), after)) this.#devSavedPages.clear();
+        } catch (err) {
+          this.#store.erasePending(f.op, after);
+          throw err;
+        }
       }
     }
     this.#store.remindIfDue(this.#deps.clock.now());

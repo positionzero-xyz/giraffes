@@ -14,6 +14,7 @@ export type ForgetState = {
   readonly op: string | null;
   readonly cutoff: ProviderOrder | null;
   readonly completedAt: EpochMs | null;
+  readonly finished: boolean;
 };
 
 /**
@@ -43,6 +44,7 @@ export function coveredByForget(e: InboundEnvelope, state: ForgetState): boolean
 
 /** Quotes have no update ID to order them within the cutoff's second. Older inbox rows may have no quote date. */
 export function quoteAfterForget(at: EpochMs, state: ForgetState): boolean {
+  if (state.finished && state.completedAt === null) return false;
   return Number.isSafeInteger(at) && at > Math.max(state.cutoff?.at ?? 0, state.completedAt ?? 0);
 }
 

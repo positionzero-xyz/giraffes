@@ -1271,9 +1271,9 @@ describe("reachability", () => {
     model.assertDone();
   });
 
-  test("a Telegram edit after a block does not resume delivery until a new message", async () => {
+  test("a Telegram edit after a block skips the model call and does not resume delivery until a new message", async () => {
     const user = 10509;
-    const model = scripted([chat("Hi!"), chat("Edited."), chat("Welcome back!")]);
+    const model = scripted([chat("Hi!"), chat("Welcome back!")]);
     const c = await devChat(String(user), { model, at: "2099-11-04T10:00", channel: "telegram" });
     const originalDate = c.clock.now() / 1000;
     const privateChat = { id: user, type: "private" };
@@ -1294,14 +1294,17 @@ describe("reachability", () => {
       edited_message: { chat: privateChat, date: originalDate, edit_date: c.clock.now() / 1000, text: "Hello!" },
     })).status).toBe(200);
     await c.settle();
+    expect(model.calls).toHaveLength(1);
     expect(await c.received()).toEqual([]);
     expect((await c.snapshot()).agent?.status).toBe("blocked");
+    expect((await c.snapshot()).outbox.filter((row) => row.status === "dropped")).toEqual([]);
 
     expect((await postTelegramUpdate({
       update_id: 10_511,
       message: { chat: privateChat, date: c.clock.now() / 1000, text: "Are you there?" },
     })).status).toBe(200);
     await c.settle();
+    expect(model.calls).toHaveLength(2);
     expect(await c.received()).toEqual(["Welcome back!"]);
     expect((await c.snapshot()).agent?.status).toBe("active");
     model.assertDone();

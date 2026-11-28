@@ -761,6 +761,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
 
 export type NoModelReason =
   | { readonly kind: "block" }
+  | { readonly kind: "blocked_edit" }
   | { readonly kind: "ignored" }
   | { readonly kind: "stale_lifecycle" }
   | { readonly kind: "over_cap"; readonly scope: "byok" | "included" | "included_ceiling"; readonly capUsd: string; readonly alreadyToldToday: boolean; readonly catchUpBudget?: string | null }
@@ -775,11 +776,16 @@ export type NoModelReason =
   | { readonly kind: "forget_offer" }
   | { readonly kind: "admission"; readonly commit: AdmissionCommit; readonly text: string | null; readonly consent: boolean };
 
-export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "block" | "stale_lifecycle" }> | null {
+export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "block" | "blocked_edit" | "stale_lifecycle" }> | null {
   const e = trigger(view);
-  if (e.kind !== "lifecycle") return null;
-  if (e.at < view.statusAt) return { kind: "stale_lifecycle" };
-  return e.change === "block" ? { kind: "block" } : null;
+  if (e.kind === "lifecycle") {
+    if (e.at < view.statusAt) return { kind: "stale_lifecycle" };
+    return e.change === "block" ? { kind: "block" } : null;
+  }
+  if (view.status === "blocked" && view.batch.items.every(({ event }) => event.kind === "message" && event.edited === true)) {
+    return { kind: "blocked_edit" };
+  }
+  return null;
 }
 
 /** What the person must do before anyone answers, which a follow needs too: it is the first thing a new person sends. */
@@ -804,7 +810,7 @@ function textWithoutModel(view: TurnView, notice: string | null): string | null 
 export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit {
   const t: Notices = NOTICES[view.language];
   const replyOutsideBeta = why.kind === "command" && !mayspend(view.admission);
-  const keepInHistory = why.kind !== "feedback" && !replyOutsideBeta;
+  const keepInHistory = why.kind !== "feedback" && why.kind !== "blocked_edit" && !replyOutsideBeta;
   const waitForAccess: TurnCommit["waitForAccess"] =
     why.kind === "no_access" && why.waitForConnection ? { kind: "connection" }
     : why.kind === "over_cap" && why.catchUpBudget != null ? { kind: "budget", budget: why.catchUpBudget }
@@ -815,6 +821,7 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
   let note: string | null = null;
   switch (why.kind) {
     case "block":
+    case "blocked_edit":
     case "ignored":
       outcome = "no_model";
       break;

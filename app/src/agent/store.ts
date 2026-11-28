@@ -2200,11 +2200,22 @@ export class AgentStore {
 
   forget(): ForgetState {
     const r = this.sql
-      .exec<{ epoch: ForgetEpoch; op: string | null; cutoff_at: EpochMs | null; cutoff_seq: number | null; completed_at: EpochMs | null }>(
-        "SELECT epoch, op, cutoff_at, cutoff_seq, completed_at FROM forget",
-      )
+      .exec<{
+        epoch: ForgetEpoch;
+        op: string | null;
+        cutoff_at: EpochMs | null;
+        cutoff_seq: number | null;
+        completed_at: EpochMs | null;
+        receipt: string | null;
+      }>("SELECT epoch, op, cutoff_at, cutoff_seq, completed_at, receipt FROM forget")
       .one();
-    return { epoch: r.epoch, op: r.op, cutoff: r.cutoff_at === null ? null : { at: r.cutoff_at, seq: r.cutoff_seq }, completedAt: r.completed_at };
+    return {
+      epoch: r.epoch,
+      op: r.op,
+      cutoff: r.cutoff_at === null ? null : { at: r.cutoff_at, seq: r.cutoff_seq },
+      completedAt: r.completed_at,
+      finished: r.receipt !== null,
+    };
   }
 
   /** True while no forget is open and none began since `epoch`. */
@@ -2524,6 +2535,10 @@ export class AgentStore {
            notice_at = NULL, notices = 0, held_told_at = NULL, reply_token = NULL, reply_expires = NULL, receipt = ?, completed_at = MAX(COALESCE(completed_at, 0), ?)`,
         JSON.stringify(receipt),
         now,
+      );
+      this.sql.exec(
+        `UPDATE inbox SET payload = json_remove(payload, '$.quote')
+         WHERE CASE WHEN json_valid(payload) THEN json_type(payload, '$.quote') END IS NOT NULL`,
       );
       this.sql.exec("DELETE FROM box_session");
       if (checkin && mayspend(this.admission())) this.insertWakeup(checkin, "system", now);

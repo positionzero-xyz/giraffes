@@ -3,7 +3,7 @@ import { z } from "zod";
 import { planAllowsBox, type Plan } from "../billing/plan";
 import type { BoxAgentRequest, SessionUsed } from "../box/client";
 import type { BoxState } from "../box/machine";
-import { AGENT_TOOLS, BoxTurnOutputSchema, oneOffBoxTurn, turnFromAgent, type BoxTurnPrompt } from "../agent/turn";
+import { AGENT_TOOLS, BoxTurnOutputSchema, turnFromAgent, type BoxTurnPrompt } from "../agent/turn";
 import { assertNever, eventKey, mayspend, type AgentKey, type EpochMs, type MicroUsd, type TimeZone } from "../domain";
 import { modelCallRow, type Backend, type ModelCallStatus } from "../ledger/ledger";
 import { NOTICES, type KeyPageError } from "../notices";
@@ -155,10 +155,9 @@ export type CallRequest<P extends Purpose> = {
   readonly system: string;
   readonly prompt: PromptParts;
   readonly plan: Plan;
-  readonly box?: BoxTurnPrompt;
   /** Checked before each lane and before each request a lane sends. */
   readonly claim: Claim;
-};
+} & (P extends "turn" ? { readonly box: BoxTurnPrompt } : { readonly box?: never });
 
 type Next = {
   readonly kind: "next";
@@ -384,14 +383,13 @@ export class ModelAccess {
 
   /** A turn as the person's own Claude Code session; its tool calls and reply become a turn output for the usual checks. */
   async #boxAgent(req: CallRequest<"turn">): Promise<LaneResult<"turn">> {
-    const box = req.box ?? oneOffBoxTurn(req.prompt);
-    const ephemeral = req.box === undefined;
+    const box = req.box;
     const { append, session } = box;
     const route = routeFor({ kind: "box", provider: "claude" }, "turn");
     const turn = this.#fit(route, "strict", { ...req, system: append, prompt: box.turn });
     const fresh = this.#fit(route, "strict", { ...req, system: append, prompt: box.fresh });
     if (turn === null || fresh === null) return { kind: "next", tooLong: true };
-    const answer = await this.deps.box.agent({ model: route.model, append, session, turn: turn.user, fresh: fresh.user, tools: AGENT_TOOLS, ...(ephemeral ? { ephemeral: true } : {}) }, req.claim);
+    const answer = await this.deps.box.agent({ model: route.model, append, session, turn: turn.user, fresh: fresh.user, tools: AGENT_TOOLS }, req.claim);
     if (answer.kind === "fenced") return answer;
     if (answer.kind === "moved_on") return { kind: "next", transient: answer.transient, told: answer.told };
     const output = turnFromAgent(jsonOrNull(answer.reply.text));

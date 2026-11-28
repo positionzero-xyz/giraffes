@@ -5,7 +5,6 @@ import { AGENT_SYSTEM, COMPACTION_SYSTEM } from "../src/agent/prompt";
 import { TURN } from "../src/agent/turn";
 import { routeFor } from "../src/model/routes";
 import { bytesOf } from "../src/model/prompt";
-import type { AgentKey } from "../src/domain";
 import { NOTICES } from "../src/notices";
 import { chat, devChat, fakeBox, fakeProvider, giveKey, local, propose, scripted, send, turn, type FakeBox } from "./testkit";
 
@@ -407,50 +406,6 @@ describe("the Durable Object is the one record of the chat for the box session",
     }
     expect(second.user).not.toContain("Person: are you back?");
     expect(second.user).not.toContain("You: Back on your box.");
-  });
-
-  test("a group turn its owner's box serves runs in a session of its own and leaves the owner's session record alone", async () => {
-    const { box, c } = await boxChat("own");
-    box.replies.push({ kind: "reply", step: chat("Hi.") });
-    await c.say("hello");
-    const [mine] = box.sessions;
-    const owner = env.AGENT.get(env.AGENT.idFromName(c.agent));
-    const group = "g:telegram:-100123" as AgentKey;
-    await owner.recordGroup(group, 1);
-
-    box.replies.push({ kind: "reply", step: chat("For the group.") });
-    const prompt = { sections: [{ title: "New", keep: ["Person: hi from the group"], trim: [], dropRank: 0 }] };
-    expect(await owner.serve({ group, ownershipVersion: 1, purpose: "turn", system: "s", prompt })).toMatchObject({ kind: "ok", call: { lane: "box" } });
-    expect(lastBox(box)).toMatchObject({ session: null, resumed: false, ephemeral: true, once: true, append: AGENT_SYSTEM, user: "## New\nPerson: hi from the group" });
-
-    box.replies.push({ kind: "reply", step: chat("Hi again.") });
-    await c.say("me again");
-    expect(lastBox(box)).toMatchObject({ session: mine, resumed: true });
-    expect(lastBox(box).ephemeral).toBeUndefined();
-    expect(lastBox(box).once).toBeUndefined();
-    expect(lastBox(box).user).not.toContain("hi from the group");
-  });
-
-  test("a group turn its owner's box can't keep out of the owner's session, on an old image, is refused, not answered from that session", async () => {
-    const { box, c } = await boxChat("own-old");
-    box.ignoresSession = true;
-    box.replies.push({ kind: "reply", step: chat("Hi.") });
-    await c.say("hello");
-    const owner = env.AGENT.get(env.AGENT.idFromName(c.agent));
-    const group = "g:telegram:-100456" as AgentKey;
-    await owner.recordGroup(group, 1);
-    const turns = box.parses.length;
-
-    box.replies.push({ kind: "reply", step: chat("For the group.") });
-    const prompt = { sections: [{ title: "New", keep: ["Person: hi from the group"], trim: [], dropRank: 0 }] };
-    expect(await owner.serve({ group, ownershipVersion: 1, purpose: "turn", system: "s", prompt })).toEqual({ kind: "unavailable" });
-    expect(box.parses).toHaveLength(turns);
-    expect(box.replies.splice(0)).toHaveLength(1);
-
-    box.replies.push({ kind: "reply", step: chat("Hi again.") });
-    await c.say("me again");
-    expect((await c.received()).at(-1)).toBe("Hi again.");
-    expect(lastBox(box).user).not.toContain("hi from the group");
   });
 
   test("an old box that ignores the session fields and reports none gets the recent turns once, then only what it hasn't seen", async () => {

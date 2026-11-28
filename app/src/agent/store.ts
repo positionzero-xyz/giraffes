@@ -1066,9 +1066,12 @@ export class AgentStore {
         `SELECT event_key AS key, received_at AS at, json_extract(payload, '$.messageId') AS id, json_extract(payload, '$.edited') AS edited
          FROM inbox WHERE kind = 'message' AND event_key IN (SELECT value FROM json_each(?))`, JSON.stringify(commit.batchKeys),
       ).toArray() : [];
-      const privateEdits = new Set(privateMessages.filter((m) => m.edited === 1).map((m) => m.key));
-      const seen = privateEdits.size === 0 ? boxSeen : null;
-      if (privateEdits.size > 0) {
+      const editedIds = new Set(privateMessages.filter((m) => m.edited === 1).map((m) => m.id));
+      const privateVersions = new Set(privateMessages
+        .filter((m) => m.edited === 1 || (m.id !== null && editedIds.has(m.id)))
+        .map((m) => m.key));
+      const seen = privateVersions.size === 0 ? boxSeen : null;
+      if (privateVersions.size > 0) {
         // Resuming a box session could carry the edit forward even without a turn row.
         this.sql.exec("DELETE FROM box_session");
       }
@@ -1080,7 +1083,7 @@ export class AgentStore {
       const previous = seen ? this.boxSession() : null;
       const replyBackfill: BoxReplyBackfill[] = previous && previous.id === seen?.id ? previous.replyBackfill.filter((r) => r.seq > seenSeq) : [];
       for (const t of commit.turns) {
-        if (t.role === "person" && privateEdits.has(t.eventKey)) continue;
+        if (t.role === "person" && privateVersions.has(t.eventKey)) continue;
         const { seq } = this.sql
           .exec<{ seq: number }>(
             "INSERT INTO turn (role, text, at, event_key, transient, correction_spans) VALUES (?, ?, ?, ?, ?, ?) RETURNING seq",

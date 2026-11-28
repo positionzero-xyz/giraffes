@@ -568,10 +568,14 @@ describe("don't remember", () => {
     expect(model.calls[1].user).toContain(originalText);
     expect(model.calls[1].user).toContain(editedText);
     expect(await c.received()).toEqual(["First turn completed.", "Got it."]);
+    expect.soft(await holding(c.agent, originalText)).toEqual([]);
     expect.soft(await holding(c.agent, editedText)).toEqual([]);
-    expect.soft((await c.snapshot()).turns.map((t) => t.text)).not.toContain(editedText);
+    const history = (await c.snapshot()).turns.map((t) => t.text);
+    expect.soft(history).not.toContain(originalText);
+    expect.soft(history).not.toContain(editedText);
 
     expect(await later(c, "An ordinary follow-up.")).toContain("Ordinary follow-up answered.");
+    expect.soft(model.calls.at(-1)?.user).not.toContain(originalText);
     expect.soft(model.calls.at(-1)?.user).not.toContain(editedText);
 
     await sql(c, `INSERT INTO turn (role, text, at, event_key)

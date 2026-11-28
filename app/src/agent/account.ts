@@ -86,7 +86,8 @@ export type Erasure = ErasureIdentity & (
     readonly billing: EraseBilling;
     readonly box: EraseBox;
     readonly boxLedgerKey: string | null;
-    readonly boxRetry?: { readonly waitingFor: "box-wipe" | "disk-delete"; readonly attempts: number; readonly nextAt: EpochMs };
+    /** Without `waitingFor` it was saved by a build that kept counting tries past the wipe deadline. */
+    readonly boxRetry?: { readonly waitingFor?: "box-wipe" | "disk-delete"; readonly attempts: number; readonly nextAt: EpochMs };
   }
   | { readonly kind: "receipt"; readonly expiresAt: EpochMs; readonly attempted: boolean; readonly box: EraseBoxReceipt | null; readonly endedSubscription: boolean; readonly stripeRetained: boolean }
 );

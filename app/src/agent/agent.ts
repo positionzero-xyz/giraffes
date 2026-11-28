@@ -606,7 +606,7 @@ export class Agent extends DurableObject<Env> {
       }
       while (current.box.kind !== "none" && current.box.kind !== "wiped" && current.box.kind !== "reclaimed") {
         const now = this.#deps.clock.now();
-        if (current.boxRetry && now < current.boxRetry.nextAt) {
+        if (current.boxRetry?.waitingFor !== undefined && now < current.boxRetry.nextAt) {
           const delay = current.boxRetry.nextAt - now;
           return await this.#retryErasure(current.billing.kind === "pending" ? Math.min(delay, ACCOUNT_RETRY_MS) : delay);
         }

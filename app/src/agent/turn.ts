@@ -260,8 +260,11 @@ function lateLine(e: { readonly dueAt: EpochMs; readonly firedAt: EpochMs }, tz:
 
 function renderEvent(e: AgentEvent, tz: TimeZone, askForLateNotice: boolean): string {
   switch (e.kind) {
-    case "message":
-      return `Person: ${e.text}`;
+    case "message": {
+      const quote = e.quote?.kind === "text" ? `\nEarlier message being replied to (context, not a request): ${JSON.stringify(e.quote.text)}` : "";
+      const line = e.edited ? `Person edited their earlier message. Corrected text: ${e.text}` : `Person: ${e.text}`;
+      return `${line}${quote}`;
+    }
     case "lifecycle":
       return e.change === "follow"
         ? "The person just added you (or came back). Greet briefly; say what you can do."
@@ -567,8 +570,11 @@ function lifecycleEffects(view: TurnView): Pick<TurnCommit, "reachability" | "en
   switch (e.kind) {
     case "message":
     case "choice": {
-      const at = Math.max(...view.batch.items.map((i) => i.receivedAt)) as EpochMs;
-      return view.status === "blocked" && at >= view.statusAt ? reachable(at) : none;
+      if (view.status !== "blocked") return none;
+      const at = Math.max(...view.batch.items
+        .filter(({ event }) => event.kind !== "message" || !event.edited)
+        .map(({ receivedAt }) => receivedAt)) as EpochMs;
+      return at >= view.statusAt ? reachable(at) : none;
     }
     case "lifecycle":
       if (e.at < view.statusAt) return none;
@@ -807,6 +813,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
 
 export type NoModelReason =
   | { readonly kind: "block" }
+  | { readonly kind: "blocked_edit" }
   | { readonly kind: "ignored" }
   | { readonly kind: "stale_lifecycle" }
   | { readonly kind: "over_cap"; readonly scope: "byok" | "included" | "included_ceiling"; readonly capUsd: string; readonly alreadyToldToday: boolean; readonly catchUpBudget?: string | null }
@@ -821,11 +828,16 @@ export type NoModelReason =
   | { readonly kind: "forget_offer" }
   | { readonly kind: "admission"; readonly commit: AdmissionCommit; readonly text: string | null; readonly consent: boolean };
 
-export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "block" | "stale_lifecycle" }> | null {
+export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "block" | "blocked_edit" | "stale_lifecycle" }> | null {
   const e = trigger(view);
-  if (e.kind !== "lifecycle") return null;
-  if (e.at < view.statusAt) return { kind: "stale_lifecycle" };
-  return e.change === "block" ? { kind: "block" } : null;
+  if (e.kind === "lifecycle") {
+    if (e.at < view.statusAt) return { kind: "stale_lifecycle" };
+    return e.change === "block" ? { kind: "block" } : null;
+  }
+  if (view.status === "blocked" && view.batch.items.every(({ event }) => event.kind === "message" && event.edited === true)) {
+    return { kind: "blocked_edit" };
+  }
+  return null;
 }
 
 /** What the person must do before anyone answers, which a follow needs too: it is the first thing a new person sends. */
@@ -850,7 +862,7 @@ function textWithoutModel(view: TurnView, notice: string | null): TrackedText | 
 export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit {
   const t: Notices = NOTICES[view.language];
   const replyOutsideBeta = why.kind === "command" && !mayspend(view.admission);
-  const keepInHistory = why.kind !== "feedback" && !replyOutsideBeta;
+  const keepInHistory = why.kind !== "feedback" && why.kind !== "blocked_edit" && !replyOutsideBeta;
   const waitForAccess: TurnCommit["waitForAccess"] =
     why.kind === "no_access" && why.waitForConnection ? { kind: "connection" }
     : why.kind === "over_cap" && why.catchUpBudget != null ? { kind: "budget", budget: why.catchUpBudget }
@@ -861,6 +873,7 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
   let note: string | null = null;
   switch (why.kind) {
     case "block":
+    case "blocked_edit":
     case "ignored":
       outcome = "no_model";
       break;

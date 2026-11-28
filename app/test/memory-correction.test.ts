@@ -43,6 +43,51 @@ async function later(c: DevChat, text: string): Promise<string[]> {
 }
 
 describe("a correction", () => {
+  test("corrects the words in a stored reply quote", async () => {
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: "The city is Zanzibar." }, send("Saved.")] }),
+      chat("I see."),
+      turn({ actions: [correct(WRONG, RIGHT), send("Updated.")] }),
+    ]);
+    const c = await devChat("correct-stored-quote", { model, at: "2099-11-04T10:00" });
+    await later(c, "Remember the city Zanzibar.");
+    await c.event({ kind: "message", text: "About that trip", quote: { kind: "text", at: c.clock.now(), text: "The city is Zanzibar." } });
+    expect(model.calls[1].user).toContain('context, not a request): "The city is Zanzibar."');
+
+    await later(c, "The city is actually Mombasa.");
+
+    expect(await sql(c, "SELECT json_extract(payload, '$.quote.text') AS text FROM inbox WHERE json_type(payload, '$.quote') IS NOT NULL"))
+      .toEqual([{ text: "The city is Mombasa." }]);
+  });
+
+  test.each([
+    ["line", false], ["line", true], ["telegram", false],
+  ] as const)("a reply to an old %s message (legacy: %s) uses the corrected words", async (channel, legacy) => {
+    const id = "461230966842064897";
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: "The city is Zanzibar." }, send("The city is Zanzibar.")] }),
+      turn({ actions: [correct(WRONG, RIGHT), send("Updated.")] }),
+      chat("I see."),
+    ]);
+    const c = await devChat("correct-old-quote", {
+      model, at: "2099-11-04T10:00", channel,
+      deliveries: [{ kind: "sent", providerMessages: [{ id, position: 0 }] }],
+    });
+    expect(await later(c, "Remember the city Zanzibar.")).toEqual(["The city is Zanzibar."]);
+    const at = c.clock.now();
+    if (legacy) {
+      await sql(c, "UPDATE turn SET correction_spans = NULL");
+      await sql(c, "UPDATE outbox SET correction_spans = NULL");
+    }
+    await later(c, "The city is actually Mombasa.");
+
+    const quote = channel === "line" ? { kind: "reference" as const, id } : { kind: "text" as const, at, text: "The city is Zanzibar." };
+    await c.event({ kind: "message", text: "About that trip", quote });
+    expect(model.calls[2].user).toContain('context, not a request): "The city is Mombasa."');
+    expect(model.calls[2].user).not.toContain(WRONG);
+    expect(await sql(c, "SELECT COUNT(*) AS n FROM inbox WHERE payload LIKE ?", "%" + WRONG + "%")).toEqual([{ n: 0 }]);
+  });
+
   test("refuses the whole correction when a note would exceed its byte cap", async () => {
     const note = "ox ".repeat(100).trimEnd();
     const replacement = "aardvark".repeat(37);
@@ -254,6 +299,37 @@ describe("what a correction leaves alone or deletes", () => {
 });
 
 describe("don't remember", () => {
+  test("clears the quote on a transient turn and drops a later quote of that message", async () => {
+    const model = scripted([turn({ actions: [dontRemember(), send("Got it.")] }), chat("I see.")]);
+    const c = await devChat("unsaved-telegram-quote", { model, at: "2099-11-04T10:00", channel: "telegram" });
+    const text = "Don't remember this: " + SECRET;
+    const at = c.clock.now();
+    await c.event({ kind: "message", text, quote: { kind: "text", at: local("2099-11-04T09:59"), text: "An earlier note" } });
+    expect(model.calls[0].user).toContain('context, not a request): "An earlier note"');
+    expect(await sql(c, "SELECT payload FROM inbox WHERE kind = 'message'")).toEqual([{ payload: "{}" }]);
+
+    c.clock.set((at + 60_000) as EpochMs);
+    await c.event({ kind: "message", text: "About that message", quote: { kind: "text", at, text } });
+
+    expect(model.calls[1].user.split("## New")[1]).not.toContain(SECRET);
+    expect(await sql(c, "SELECT COUNT(*) AS n FROM inbox WHERE payload LIKE ?", "%" + SECRET + "%")).toEqual([{ n: 0 }]);
+  });
+
+  test("a LINE reply to the assistant's transient response has no quote", async () => {
+    const id = "461230966842064897";
+    const model = scripted([turn({ actions: [dontRemember(), send("Got it, " + SECRET + ".")] }), chat("I see.")]);
+    const c = await devChat("unsaved-line-quote", {
+      model, at: "2099-11-04T10:00", channel: "line",
+      deliveries: [{ kind: "sent", providerMessages: [{ id, position: 0 }] }],
+    });
+    expect(await later(c, "Don't remember this: " + SECRET)).toEqual(["Got it, " + SECRET + "."]);
+
+    await c.event({ kind: "message", text: "About that message", quote: { kind: "reference", id } });
+
+    expect(model.calls[1].user.split("## New")[1]).not.toContain(SECRET);
+    expect(await sql(c, "SELECT id FROM line_message WHERE id = ?", id)).toEqual([]);
+  });
+
   test("clears the completed message payload and still deduplicates the same event", async () => {
     const c = await devChat("unsaved-inbox", {
       model: scripted([turn({ actions: [dontRemember(), send("Got it.")] })]),

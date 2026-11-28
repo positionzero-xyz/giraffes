@@ -112,6 +112,40 @@ describe("LINE webhook", () => {
       ],
     });
   });
+
+  test("a quoted message id becomes a reference, while a malformed one is ignored", async () => {
+    const quoted = {
+      type: "message",
+      webhookEventId: "Q1",
+      timestamp: T,
+      mode: "active",
+      source: { type: "user", userId: USER },
+      replyToken: "reply-token-q1",
+      message: { id: "3", type: "text", text: "move this to 5", quotedMessageId: "461230966842064897" },
+      deliveryContext: { isRedelivery: false },
+    };
+    const malformed = { ...quoted, webhookEventId: "Q2", message: { ...quoted.message, quotedMessageId: 461230966842064897 } };
+    const body = JSON.stringify({ destination: "Uaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", events: [quoted, malformed] });
+    const signature = createHmac("sha256", LINE_SECRET).update(body).digest("base64");
+
+    const received = await line().receive(lineWebhook(body, signature));
+
+    expect(received).toMatchObject({
+      kind: "accepted",
+      ignored: 1,
+      envelopes: [
+        {
+          key: "line:Q1",
+          event: {
+            kind: "message",
+            text: "move this to 5",
+            quote: { kind: "reference", id: "461230966842064897" },
+            reply: { token: "reply-token-q1", expiresAt: T + 60_000 },
+          },
+        },
+      ],
+    });
+  });
 });
 
 const NOW = 4097563210000 as EpochMs;
@@ -195,6 +229,31 @@ describe("LINE delivery", () => {
     expect(seen.map((s) => s.url)).toEqual(["https://api.line.me/v2/bot/message/reply"]);
     expect(seen[0].body).toEqual({ replyToken: "reply-token-1", messages: [{ type: "text", text: "Done." }, { type: "text", text: "(note)" }] });
     expect(seen[0].headers.get("authorization")).toBe("Bearer line-access-token");
+  });
+
+  test("message ids LINE returns for a reply or push keep the position of the text they carried", async () => {
+    stubFetch((s) =>
+      s.url.endsWith("/reply")
+        ? Response.json({ sentMessages: [{ id: "461230966842064897" }, { id: "461230966842064898" }] })
+        : Response.json({ sentMessages: [{ id: "461230966842064899" }, { id: "461230966842064900" }] }),
+    );
+
+    expect(await line().deliver(outbound({ reply: fresh }), NOW)).toEqual({
+      kind: "sent",
+      via: "reply",
+      providerMessages: [
+        { id: "461230966842064897", position: 0 },
+        { id: "461230966842064898", position: 1 },
+      ],
+    });
+    expect(await line().deliver(outbound(), NOW)).toEqual({
+      kind: "sent",
+      via: "push",
+      providerMessages: [
+        { id: "461230966842064899", position: 0 },
+        { id: "461230966842064900", position: 1 },
+      ],
+    });
   });
 
   test("a failed quota write leaves an accepted reply marked as sent", async () => {
@@ -305,6 +364,77 @@ describe("Telegram webhook", () => {
     for (const [update, expected] of cases) {
       expect(await telegram().receive(tgWebhook(update))).toEqual({ kind: "accepted", envelopes: [expected], ignored: 0 });
     }
+  });
+
+  test("a reply carries the earlier message's text as a quote", async () => {
+    const update = {
+      update_id: 20,
+      message: {
+        message_id: 42,
+        date: DATE,
+        chat: privateChat,
+        from,
+        text: "move this to 5",
+        reply_to_message: { message_id: 41, date: DATE - 100, chat: privateChat, from, text: "I'll remind you at 4." },
+      },
+    };
+
+    const received = await telegram().receive(tgWebhook(update));
+
+    expect(received).toMatchObject({
+      kind: "accepted",
+      ignored: 0,
+      envelopes: [
+        envelope("tg:20", {
+          kind: "message",
+          text: "move this to 5",
+          quote: { kind: "text", text: "I'll remind you at 4.", at: (DATE - 100) * 1000 },
+        }),
+      ],
+    });
+  });
+
+  test("an edited private message becomes a correction dated to the original message", async () => {
+    const update = {
+      update_id: 21,
+      edited_message: { message_id: 43, date: DATE - 100, edit_date: DATE, chat: privateChat, from, text: "actually, make it 5" },
+    };
+
+    const received = await telegram().receive(tgWebhook(update));
+
+    expect(received).toEqual({
+      kind: "accepted",
+      ignored: 0,
+      envelopes: [{ ...envelope("tg:21", { kind: "message", text: "actually, make it 5", edited: true }), receivedAt: (DATE - 100) * 1000 }],
+    });
+  });
+
+  test.each([undefined, "yesterday", 1e20])("an uncomparable quote date (%s) leaves the person's text intact", async (date) => {
+    const update = {
+      update_id: 23,
+      message: { date: DATE, chat: privateChat, from, text: "what was this?", reply_to_message: { date, text: "Old text." } },
+    };
+
+    expect(await telegram().receive(tgWebhook(update))).toEqual({
+      kind: "accepted",
+      ignored: 0,
+      envelopes: [envelope("tg:23", { kind: "message", text: "what was this?" })],
+    });
+  });
+
+  test("editing a message to /start is still a correction, not a new follow", async () => {
+    const update = {
+      update_id: 22,
+      edited_message: { message_id: 44, date: DATE - 100, edit_date: DATE, chat: privateChat, from, text: "/start" },
+    };
+
+    const received = await telegram().receive(tgWebhook(update));
+
+    expect(received).toEqual({
+      kind: "accepted",
+      ignored: 0,
+      envelopes: [{ ...envelope("tg:22", { kind: "message", text: "/start", edited: true }), receivedAt: (DATE - 100) * 1000 }],
+    });
   });
 
   test("a tap on a button in a private chat becomes a choice, and Telegram is told the tap was received", async () => {

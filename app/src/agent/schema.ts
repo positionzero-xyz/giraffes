@@ -2,7 +2,7 @@ export const ROUTINE_OUTBOX = `o.trigger_kind = 'wakeup' AND EXISTS (
   SELECT 1 FROM wakeup WHERE id = CAST(substr(o.event_key, length('wake:') + 1) AS INTEGER) AND repeat IS NOT NULL
 )`;
 
-export const MIGRATIONS: readonly string[] = [
+const SHARED_MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE agent (
     one              INTEGER PRIMARY KEY CHECK (one = 1),
@@ -635,6 +635,27 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE outbox ADD COLUMN privacy TEXT CHECK (privacy IN ('page', 'notice', 'receipt'));
   ALTER TABLE outbox ADD COLUMN epoch INTEGER CHECK ((privacy IS NULL) = (epoch IS NULL));
   `,
+];
+
+const REPLY_QUOTE_MIGRATIONS = [
+  `
+  CREATE TABLE line_message (
+    id          TEXT PRIMARY KEY,
+    outbox_id   TEXT NOT NULL,
+    position    INTEGER NOT NULL CHECK (position >= 0),
+    created_at  INTEGER NOT NULL
+  );
+  CREATE INDEX line_message_outbox ON line_message (outbox_id);
+  `,
+  `
+  ALTER TABLE forget ADD COLUMN completed_at INTEGER;
+  UPDATE forget SET completed_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) WHERE receipt IS NOT NULL AND completed_at IS NULL;
+  `,
+];
+
+export const MIGRATIONS: readonly string[] = [
+  ...SHARED_MIGRATIONS,
+  ...REPLY_QUOTE_MIGRATIONS,
   `
   ALTER TABLE turn ADD COLUMN transient INTEGER NOT NULL DEFAULT 0 CHECK (transient IN (0, 1));
   `,
@@ -642,17 +663,50 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE turn ADD COLUMN correction_spans TEXT;
   ALTER TABLE outbox ADD COLUMN correction_spans TEXT;
   `,
+  `
+  ALTER TABLE outbox ADD COLUMN transient INTEGER NOT NULL DEFAULT 0 CHECK (transient IN (0, 1));
+  UPDATE outbox SET transient = 1 WHERE EXISTS (
+    SELECT 1 FROM turn WHERE turn.event_key = outbox.event_key AND turn.at = outbox.created_at AND transient = 1
+  );
+  ALTER TABLE forget ADD COLUMN quote_rewrites_before INTEGER;
+  UPDATE forget SET quote_rewrites_before = (
+    SELECT MAX(at) FROM (
+      SELECT at FROM turn WHERE transient = 1
+      UNION ALL SELECT received_at FROM inbox WHERE kind = 'message' AND payload = '{}'
+    )
+  );
+  CREATE TABLE quote_rewrite (
+    digest     TEXT PRIMARY KEY,
+    text       TEXT,
+    expires_at INTEGER CHECK ((text IS NULL) = (expires_at IS NULL))
+  );
+  `,
 ];
 
 export function migrate(storage: DurableObjectStorage): void {
   const sql = storage.sql;
   sql.exec("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
   const row = sql.exec<{ v: string }>("SELECT v FROM meta WHERE k = 'schema_version'").toArray()[0];
-  for (let i = row ? Number(row.v) : 0; i < MIGRATIONS.length; i++) {
+  const record = (version: number) =>
+    sql.exec("INSERT INTO meta (k, v) VALUES ('schema_version', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v", String(version));
+  let version = row ? Number(row.v) : 0;
+  const shared = SHARED_MIGRATIONS.length;
+  const afterQuotes = shared + REPLY_QUOTE_MIGRATIONS.length;
+  // These versions were also issued with transient and correction columns in place of the reply-quote migrations.
+  if (version > shared && version <= afterQuotes &&
+      sql.exec("SELECT 1 FROM pragma_table_info('turn') WHERE name = 'transient'").toArray().length > 0 &&
+      sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'line_message'").toArray().length === 0) {
+    version += REPLY_QUOTE_MIGRATIONS.length;
+    storage.transactionSync(() => {
+      for (const migration of REPLY_QUOTE_MIGRATIONS) sql.exec(migration);
+      record(version);
+    });
+  }
+  for (let i = version; i < MIGRATIONS.length; i++) {
     const migration = MIGRATIONS[i];
     storage.transactionSync(() => {
       sql.exec(migration);
-      sql.exec("INSERT INTO meta (k, v) VALUES ('schema_version', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v", String(i + 1));
+      record(i + 1);
     });
   }
 }

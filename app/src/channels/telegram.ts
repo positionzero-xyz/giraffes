@@ -5,9 +5,22 @@ import { CHANNEL_API_TIMEOUT_MS, CHANNEL_RETRY_MS, disabledChannel, plainText, s
 
 const Chat = z.object({ id: z.number().int(), type: z.string() });
 const Sender = z.object({ language_code: z.string().optional() }).optional().catch(undefined);
+const QuotedMessage = z.object({
+  text: z.string(),
+  date: z.number().int().positive().max(Math.floor(Number.MAX_SAFE_INTEGER / 1000)),
+}).optional().catch(undefined);
+const Message = z.looseObject({
+  message_id: z.number().int().optional(),
+  date: z.number(),
+  chat: Chat,
+  from: Sender,
+  text: z.string().optional(),
+  reply_to_message: QuotedMessage,
+});
 const Update = z.object({
   update_id: z.number().int(),
-  message: z.looseObject({ date: z.number(), chat: Chat, from: Sender, text: z.string().optional() }).optional(),
+  message: Message.optional(),
+  edited_message: Message.optional(),
   my_chat_member: z
     .object({ date: z.number(), chat: Chat, from: Sender, new_chat_member: z.object({ status: z.string() }) })
     .optional(),
@@ -27,16 +40,19 @@ function toEvent(u: Update, now: EpochMs): TelegramEvent | null {
     const b = tap.data === undefined ? null : parseButton(tap.data);
     return b ? { chatId: tap.message.chat.id, at: now, event: { kind: "choice", choice: b.choice, at: now, ...(b.epoch === 0 ? {} : { epoch: b.epoch }) }, languageCode: tap.from?.language_code } : null;
   }
-  if (u.message && u.message.chat.type === "private") {
-    const m = u.message;
+  const edited = u.edited_message !== undefined;
+  const m = u.message ?? u.edited_message;
+  if (m && m.chat.type === "private") {
     const at = (m.date * 1000) as EpochMs;
     const source = { chatId: m.chat.id, at, languageCode: m.from?.language_code };
-    if (m.text === "/start" || m.text?.startsWith("/start ")) {
+    if (!edited && (m.text === "/start" || m.text?.startsWith("/start "))) {
       const code = parseInviteCode(m.text.slice("/start".length));
       return { ...source, event: code ? { kind: "lifecycle", change: "follow", at, code } : { kind: "lifecycle", change: "follow", at } };
     }
     const text = m.text ?? `[sent a ${MEDIA.find((k) => k in m) ?? "message"}]`;
-    return { ...source, event: { kind: "message", text } };
+    const quoted = m.reply_to_message;
+    const quote = quoted && { kind: "text" as const, text: quoted.text, at: (quoted.date * 1000) as EpochMs };
+    return { ...source, event: { kind: "message", text, ...(edited ? { edited: true as const } : {}), ...(quote ? { quote } : {}) } };
   }
   const member = u.my_chat_member;
   if (member && member.chat.type === "private") {

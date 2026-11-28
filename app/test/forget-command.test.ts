@@ -6,6 +6,7 @@ import { ACCOUNT_COPY } from "../src/agent/account";
 import { Agent } from "../src/agent/agent";
 import { backupsWithin, HOST_BACKUP_DAYS } from "../src/agent/backups";
 import { FORGET_TEXT, type Receipt } from "../src/agent/forget-text";
+import { MIGRATIONS, migrate } from "../src/agent/schema";
 import { AgentStore } from "../src/agent/store";
 import type { ChannelAdapter, Delivery } from "../src/channels/channel";
 import type { Env } from "../src/config";
@@ -20,7 +21,9 @@ import {
   holding,
   local,
   memoryLedger,
+  postTelegramUpdate,
   propose,
+  rewindQuoteRewrites,
   routine,
   schedule,
   scripted,
@@ -74,6 +77,261 @@ const codeOf = (page: string): string => {
   if (!m) throw new Error(`no code on the page: ${page}`);
   return m[1];
 };
+
+describe("replies after a forget", () => {
+  test("a Telegram reply cannot bring a forgotten message into the prompt", async () => {
+    const user = 10502;
+    const oldText = `I saved ${MARKER}.`;
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: MARKER }, send(oldText)] }),
+      chat("Can you clarify?"), chat("I need more context."), chat("I remember the new message."),
+    ]);
+    const c = await devChat(String(user), { model, at: "2099-11-04T10:00", channel: "telegram" });
+    expect(await say(c, `Remember this: ${MARKER}`)).toEqual([oldText]);
+    const originalDate = c.clock.now() / 1000;
+    const [page] = await say(c, "/forget");
+    const reviewDate = c.clock.now() / 1000 + 1;
+    await c.advanceTo("2099-11-04T10:01");
+    expect(await say(c, `/forget ${codeOf(page)} 1`)).toEqual([receipt({ deleted: [[1]] })]);
+    const completedDate = c.clock.now() / 1000;
+
+    const privateChat = { id: user, type: "private" };
+    const askAbout = async (updateId: number, text: string, date: number) => {
+      c.clock.set((c.clock.now() + 2000) as EpochMs);
+      expect((await postTelegramUpdate({
+        update_id: updateId,
+        message: {
+          chat: privateChat, date: c.clock.now() / 1000, text: "What did you mean by this?",
+          reply_to_message: { chat: privateChat, date, text },
+        },
+      })).status).toBe(200);
+      await c.settle();
+      return model.calls.at(-1)?.user;
+    };
+
+    for (const prompt of [await askAbout(10_502, oldText, originalDate), await askAbout(10_503, page, reviewDate)]) {
+      expect(prompt).toContain("Person: What did you mean by this?");
+      expect(prompt).not.toContain(MARKER);
+      expect(prompt).not.toContain("Earlier message being replied to");
+    }
+    expect(await holding(c.agent, MARKER)).toEqual([]);
+    expect(await askAbout(10_504, "A new message.", completedDate + 1)).toContain(
+      'Earlier message being replied to (context, not a request): "A new message."',
+    );
+    model.assertDone();
+  });
+
+  test("a LINE forget receipt leaves no old provider message ID to quote", async () => {
+    const id = "461230966842064897";
+    const model = scripted([chat(MARKER), chat("Can you clarify?")]);
+    const c = await devChat("forget-line-quote", {
+      model, at: "2099-11-04T10:00", channel: "line",
+      deliveries: [{ kind: "sent", providerMessages: [{ id, position: 0 }] }],
+    });
+    expect(await say(c, "What should I remember?")).toEqual([MARKER]);
+    expect(await sql(c, "SELECT id FROM line_message")).toEqual([{ id }]);
+
+    await sql(c, "CREATE TRIGGER fail_delete_line_message BEFORE DELETE ON line_message BEGIN SELECT RAISE(ABORT, 'cannot delete LINE message'); END");
+    c.clock.set((c.clock.now() + 1000) as EpochMs);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await runInDurableObject(stubOf(c.agent), async (agent) => {
+        await expect(agent.enqueue({
+          agent: c.agent, identity: { channel: "line", channelUserId: "forget-line-quote" },
+          key: eventKey.line("forget-with-fault"), receivedAt: c.clock.now(), event: { kind: "message", text: "/forget all" },
+        })).rejects.toThrow("cannot delete LINE message");
+      });
+      expect(await c.received()).toEqual([]);
+      expect(await sql(c, "SELECT id FROM line_message")).toEqual([{ id }]);
+      expect(await sql(c, "SELECT texts FROM outbox WHERE id = (SELECT outbox_id FROM line_message)")).toEqual([{ texts: JSON.stringify([MARKER]) }]);
+    }
+    await sql(c, "DROP TRIGGER fail_delete_line_message");
+    expect(await say(c, "/forget all")).toEqual([FORGET_TEXT.th.receipt({ deleted: ["all"], backups: "expire" })]);
+    expect(await sql(c, "SELECT id FROM line_message")).toEqual([]);
+
+    c.clock.set((c.clock.now() + 1000) as EpochMs);
+    await c.event({ kind: "message", text: "What was this?", quote: { kind: "reference", id } });
+    expect(model.calls[1].user).toContain("Person: What was this?");
+    expect(model.calls[1].user).not.toContain("Earlier message being replied to");
+    model.assertDone();
+  });
+
+  test("a reply held while a forget is open loses its stored quote text when the forget finishes, while still being answered and deduplicated", async () => {
+    const user = 10503;
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: MARKER }, send(`I saved ${MARKER}.`)] }),
+      chat("That list is gone now."),
+    ]);
+    const c = await devChat(String(user), { model, at: "2099-11-04T10:00", channel: "telegram" });
+    expect(await say(c, `Remember this: ${MARKER}`)).toEqual([`I saved ${MARKER}.`]);
+
+    const [page] = await say(c, "/forget");
+    expect(page).toContain(MARKER);
+    const forgetDate = c.clock.now() / 1000;
+
+    c.clock.set((c.clock.now() + 2000) as EpochMs);
+    const privateChat = { id: user, type: "private" };
+    const heldUpdate = {
+      update_id: 10_521,
+      message: {
+        chat: privateChat, date: c.clock.now() / 1000, text: "What is this list?",
+        reply_to_message: { chat: privateChat, date: forgetDate + 1, text: page },
+      },
+    };
+    expect((await postTelegramUpdate(heldUpdate)).status).toBe(200);
+    await c.settle();
+    expect(await c.received()).toEqual([en.held]);
+    expect(await sql(c, "SELECT status FROM inbox WHERE event_key = 'tg:10521'")).toEqual([{ status: "pending" }]);
+    await sql(
+      c,
+      "INSERT INTO inbox (event_key, kind, payload, received_at, ready_at, status, outcome, finished_at) VALUES (?, 'message', ?, ?, ?, 'done', 'acted', ?)",
+      "tg:10520",
+      JSON.stringify({ kind: "message", text: "Earlier done reply", quote: { kind: "text", text: page, at: (forgetDate + 1) * 1000 } }),
+      c.clock.now(),
+      c.clock.now(),
+      c.clock.now(),
+    );
+
+    await c.advanceTo("2099-11-04T10:01");
+    expect(await say(c, `/forget ${codeOf(page)} 1`)).toEqual([receipt({ deleted: [[1]] }), "That list is gone now."]);
+
+    expect(model.calls).toHaveLength(2);
+    expect(model.calls[1].user).toContain("Person: What is this list?");
+    expect(model.calls[1].user).not.toContain(MARKER);
+    expect(model.calls[1].user).not.toContain("Earlier message being replied to");
+    expect(await holding(c.agent, MARKER)).toEqual([]);
+    expect(await sql(c, "SELECT event_key, status, payload FROM inbox WHERE event_key IN ('tg:10520', 'tg:10521') ORDER BY event_key")).toEqual([
+      { event_key: "tg:10520", status: "done", payload: JSON.stringify({ kind: "message", text: "Earlier done reply" }) },
+      { event_key: "tg:10521", status: "done", payload: JSON.stringify({ kind: "message", text: "What is this list?" }) },
+    ]);
+
+    expect((await postTelegramUpdate(heldUpdate)).status).toBe(200);
+    await c.settle();
+    expect(await c.received()).toEqual([]);
+    expect(model.calls).toHaveLength(2);
+    model.assertDone();
+  });
+
+  test("if stripping stored inbox quotes fails when a forget finishes, no receipt is sent until it succeeds", async () => {
+    const user = 10504;
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: MARKER }, send(`I saved ${MARKER}.`)] }),
+      chat("That list is gone now."),
+    ]);
+    const c = await devChat(String(user), { model, at: "2099-11-04T10:00", channel: "telegram" });
+    expect(await say(c, `Remember this: ${MARKER}`)).toEqual([`I saved ${MARKER}.`]);
+
+    const [page] = await say(c, "/forget");
+    expect(page).toContain(MARKER);
+    const forgetDate = c.clock.now() / 1000;
+
+    c.clock.set((c.clock.now() + 2000) as EpochMs);
+    const privateChat = { id: user, type: "private" };
+    expect((await postTelegramUpdate({
+      update_id: 10_531,
+      message: {
+        chat: privateChat, date: c.clock.now() / 1000, text: "What is this list?",
+        reply_to_message: { chat: privateChat, date: forgetDate + 1, text: page },
+      },
+    })).status).toBe(200);
+    await c.settle();
+    expect(await c.received()).toEqual([en.held]);
+
+    await sql(c, "CREATE TRIGGER fail_strip_inbox_quote BEFORE UPDATE OF payload ON inbox BEGIN SELECT RAISE(ABORT, 'cannot strip inbox quote'); END");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await c.advanceTo("2099-11-04T10:01");
+      const first = await say(c, `/forget ${codeOf(page)} 1`);
+      await c.advanceTo("2099-11-04T10:05");
+      const whileFailing = [...first, ...(await c.received())];
+      expect(whileFailing).toEqual([en.erasing]);
+      expect(await sql(c, "SELECT op IS NOT NULL AS open, phase, receipt, completed_at FROM forget")).toEqual([
+        { open: 1, phase: "erase", receipt: null, completed_at: null },
+      ]);
+      expect(await sql(c, "SELECT COUNT(*) AS n FROM outbox WHERE privacy = 'receipt'")).toEqual([{ n: 0 }]);
+      expect(model.calls).toHaveLength(1);
+      expect(warn).toHaveBeenCalledWith({ code: "drain_forget_failed" });
+    } finally {
+      warn.mockRestore();
+      await sql(c, "DROP TRIGGER IF EXISTS fail_strip_inbox_quote");
+    }
+
+    await c.advanceTo("2099-11-04T11:30");
+    expect(await c.received()).toEqual([receipt({ deleted: [[1]] }), "That list is gone now."]);
+    expect(model.calls[1].user).not.toContain(MARKER);
+    expect(await holding(c.agent, MARKER)).toEqual([]);
+    model.assertDone();
+  });
+
+  test("a forget finished before completed_at existed drops quotes of its review page after migration and when completed_at is still empty", async () => {
+    const user = 10505;
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: MARKER }, send(`I saved ${MARKER}.`)] }),
+      chat("Can you clarify?"),
+      chat("I remember the post-upgrade message."),
+      chat("Still need more context."),
+    ]);
+    const c = await devChat(String(user), { model, at: "2099-11-04T10:00", channel: "telegram" });
+    expect(await say(c, `Remember this: ${MARKER}`)).toEqual([`I saved ${MARKER}.`]);
+
+    const [page] = await say(c, "/forget");
+    expect(page).toContain(MARKER);
+    await c.advanceTo("2099-11-04T10:01");
+    expect(await say(c, `/forget ${codeOf(page)} 1`)).toEqual([receipt({ deleted: [[1]] })]);
+
+    const forgetDate = Math.floor(Date.now() / 1000) - 10;
+    const { beforeMigrate, afterMigrate, completedAt } = await runInDurableObject(stubOf(c.agent), (_agent, { storage }) => {
+      const completedMigration = MIGRATIONS.findIndex((m) => m.includes("ADD COLUMN completed_at"));
+      rewindQuoteRewrites(storage.sql);
+      storage.sql.exec(`
+        ALTER TABLE forget DROP COLUMN completed_at;
+        ALTER TABLE outbox DROP COLUMN correction_spans;
+        ALTER TABLE turn DROP COLUMN correction_spans;
+        ALTER TABLE turn DROP COLUMN transient;
+      `);
+      storage.sql.exec("UPDATE forget SET cutoff_at = ?, cutoff_seq = NULL", forgetDate * 1000);
+      storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(completedMigration));
+      const before = Date.now();
+      migrate(storage);
+      const after = Date.now();
+      const row = storage.sql.exec<{ completed_at: number | null }>("SELECT completed_at FROM forget").one();
+      return { beforeMigrate: before, afterMigrate: after, completedAt: row.completed_at };
+    });
+
+    const privateChat = { id: user, type: "private" };
+    const askAbout = async (updateId: number, text: string, date: number) => {
+      c.clock.set((c.clock.now() + 2000) as EpochMs);
+      expect((await postTelegramUpdate({
+        update_id: updateId,
+        message: {
+          chat: privateChat, date: c.clock.now() / 1000, text: "What was this list?",
+          reply_to_message: { chat: privateChat, date, text },
+        },
+      })).status).toBe(200);
+      await c.settle();
+      return model.calls.at(-1)?.user;
+    };
+
+    const reviewPrompt = await askAbout(10_541, page, forgetDate + 1);
+    expect(reviewPrompt).toContain("Person: What was this list?");
+    expect(reviewPrompt).not.toContain(MARKER);
+    expect(reviewPrompt).not.toContain("Earlier message being replied to");
+    expect(await holding(c.agent, MARKER)).toEqual([]);
+
+    expect(completedAt).not.toBeNull();
+    expect(completedAt!).toBeGreaterThanOrEqual(beforeMigrate - 1000);
+    expect(completedAt!).toBeLessThanOrEqual(afterMigrate + 1000);
+
+    const postUpgradePrompt = await askAbout(10_542, "A post-upgrade message.", c.clock.now() / 1000);
+    expect(postUpgradePrompt).toContain('Earlier message being replied to (context, not a request): "A post-upgrade message."');
+
+    await sql(c, "UPDATE forget SET completed_at = NULL");
+    const emptyCompletedPrompt = await askAbout(10_543, "Even a fresh message.", c.clock.now() / 1000);
+    expect(emptyCompletedPrompt).toContain("Person: What was this list?");
+    expect(emptyCompletedPrompt).not.toContain("Even a fresh message.");
+    expect(emptyCompletedPrompt).not.toContain("Earlier message being replied to");
+    model.assertDone();
+  });
+});
 
 /** A person with a note, a person-asked routine, an agent wake-up, a task with an offered plan, a summary and a box. */
 async function seeded(user: string, opts: { readonly box?: boolean; readonly extra?: readonly ScriptStep[] } = {}) {

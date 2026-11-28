@@ -10,6 +10,7 @@ const DevBody = z.object({
   text: z.string().min(1).max(4000),
   id: z.string().min(1).max(100),
   at: z.number().int().positive().optional(),
+  quote: z.object({ kind: z.literal("text"), text: z.string().min(1).max(4000), at: z.number().int().positive() }).optional(),
 });
 
 export function devIdentity(user: string): Identity | null {
@@ -22,7 +23,7 @@ export function devChannel(devMode: boolean): ChannelAdapter {
     async receive(req: Request): Promise<Received> {
       const parsed = DevBody.safeParse(await req.json().catch(() => null));
       if (!parsed.success) return { kind: "accepted", envelopes: [], ignored: 1 };
-      const { user, text, id } = parsed.data;
+      const { user, text, id, quote } = parsed.data;
       const at = (parsed.data.at ?? Date.now()) as EpochMs;
       const reply = { token: `dev:${id}`, expiresAt: (at + REPLY_TTL_MS) as EpochMs };
       const b = text.startsWith("/tap ") ? parseButton(text.slice("/tap ".length).trim()) : null;
@@ -33,7 +34,7 @@ export function devChannel(devMode: boolean): ChannelAdapter {
             ? { kind: "lifecycle", change: "follow", at, reply }
             : b
               ? { kind: "choice", choice: b.choice, at, reply, ...(b.epoch === 0 ? {} : { epoch: b.epoch }) }
-              : { kind: "message", text, reply };
+              : { kind: "message", text, reply, ...(quote ? { quote: { ...quote, at: quote.at as EpochMs } } : {}) };
       const identity: Identity = { channel: "dev", channelUserId: user };
       return {
         kind: "accepted",

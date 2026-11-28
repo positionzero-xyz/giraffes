@@ -1593,6 +1593,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
     const boxRequests: string[] = [];
     let appExists = true;
     let volumeState = "created";
+    let volumeListDown = false;
     const incarnation = crypto.randomUUID();
     const host = flyHost(flyConfig, async (url, init) => {
       const path = new URL(url).pathname;
@@ -1609,6 +1610,10 @@ describe("confirming disk deletion on automatic reclaim", () => {
         return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
       }
       if (method === "GET" && path === `/v1/apps/${app}/volumes`) {
+        if (volumeListDown) {
+          volumeListDown = false;
+          return new Response(null, { status: 500 });
+        }
         return Response.json([{ id: "vol_1", state: volumeState, attached_machine_id: machine }]);
       }
       if (method === "DELETE" && (path.endsWith("/volumes/vol_1") || path.endsWith("/machines/machine_1"))) {
@@ -1637,6 +1642,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
       requests, boxRequests,
       destructive: () => requests.filter((request) => request === "box wipe" || request.startsWith("DELETE")),
       confirmVolumeGone: () => { volumeState = "destroyed"; },
+      failNextVolumeList: () => { volumeListDown = true; },
       restoreBox: () => { boxFailure = undefined; },
     };
   }
@@ -1841,8 +1847,13 @@ describe("confirming disk deletion on automatic reclaim", () => {
   test.each([false, true])("a dead removed box finishes erasure after one hour without claiming a wipe (restart: %s)", async (restart) => {
     const person = await eraseDeadRemovedBox("erase-dead-removed-" + restart);
     const { c, deps, startedAt, destructive, requests, boxRequests, slot } = person;
-    await driveRetirement(person, deps, startedAt + 10 * 60_000);
-    await driveRetirement(person, deps, startedAt + hour - 1, restart);
+    const tries = [
+      startedAt,
+      ...await driveRetirement(person, deps, startedAt + 10 * 60_000),
+      ...await driveRetirement(person, deps, startedAt + hour - 1, restart),
+      startedAt + hour,
+    ];
+    expect(Math.max(...tries.slice(1).map((at, i) => at - tries[i]))).toBeLessThanOrEqual(10 * 60_000);
     expect(destructive()).toEqual([]);
     expect(await c.received()).toEqual([]);
     expect(await slot()).not.toBeNull();
@@ -1852,20 +1863,20 @@ describe("confirming disk deletion on automatic reclaim", () => {
     const diskCheck = requests.indexOf(volumeList, requests.indexOf(volumeDelete) + 1);
     expect(diskCheck).toBeGreaterThan(requests.indexOf(volumeDelete));
     expect(diskCheck).toBeLessThan(requests.indexOf(appDelete));
-    expect(boxRequests.length).toBeLessThan(12);
+    expect(boxRequests.length).toBeLessThanOrEqual(13);
     const receipts = await c.received();
     expect(receipts).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
     expect(receipts[0]).toContain(ACCOUNT_COPY.en.reclaimedBox);
     expect(await slot()).toBeNull();
   });
 
-  test("a box that comes back during the erase grace period is wiped normally after backed-off retries", async () => {
-    const person = await eraseDeadRemovedBox("erase-recovered-removed");
+  test.each([20, 40])("a box that comes back at minute %i of the erase grace period is wiped within ten minutes", async (minute) => {
+    const person = await eraseDeadRemovedBox("erase-recovered-removed-" + minute);
     const { c, deps, startedAt, destructive, restoreBox, slot } = person;
-    const attempts = await driveRetirement(person, deps, startedAt + 20 * 60_000);
+    const attempts = await driveRetirement(person, deps, startedAt + minute * 60_000);
     expect(destructive()).toEqual([]);
     restoreBox();
-    await driveRetirement(person, deps, startedAt + 45 * 60_000);
+    await driveRetirement(person, deps, startedAt + (minute + 10) * 60_000);
     expect(destructive()[0]).toBe("box wipe");
     expect(destructive().at(-1)).toBe(appDelete);
     const receipts = await c.received();
@@ -1884,12 +1895,49 @@ describe("confirming disk deletion on automatic reclaim", () => {
     expect(await slot()).not.toBeNull();
 
     const attempts = await driveRetirement(person, deps, startedAt + 6 * hour, true);
+    expect(attempts.slice(0, 3).map((at) => (at - startedAt - hour) / 1000)).toEqual([15, 45, 105]);
     expect(await c.received()).toEqual([]);
     expect(await slot()).not.toBeNull();
     expect(destructive()).not.toContain(appDelete);
     expect(destructive().filter((request) => request === volumeDelete).length).toBeGreaterThan(1);
     expect(attempts.length).toBeLessThan(12);
     expect(attempts.at(-1)! - attempts.at(-2)!).toBe(hour);
+  });
+
+  async function expectErasedWithinAMinuteOfTheHour(person: Awaited<ReturnType<typeof eraseDeadRemovedBox>>, restart: boolean) {
+    const { c, deps, startedAt, destructive, slot } = person;
+    await driveRetirement(person, deps, startedAt + hour + 60_000, restart);
+    expect(destructive().at(-1)).toBe(appDelete);
+    const receipts = await c.received();
+    expect(receipts).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
+    expect(receipts[0]).toContain(ACCOUNT_COPY.en.reclaimedBox);
+    expect(await slot()).toBeNull();
+  }
+
+  test.each([false, true])("a disk delete that fails once after the hour is retried within seconds (restart: %s)", async (restart) => {
+    const person = await eraseDeadRemovedBox("erase-disk-fails-once-" + restart, true);
+    const { c, deps, startedAt, destructive, confirmVolumeGone, slot } = person;
+    await driveRetirement(person, deps, startedAt + hour, restart);
+    expect(destructive()).toContain(volumeDelete);
+    expect(destructive()).not.toContain(appDelete);
+    expect(await c.received()).toEqual([]);
+    expect(await slot()).not.toBeNull();
+
+    confirmVolumeGone();
+    await expectErasedWithinAMinuteOfTheHour(person, restart);
+  });
+
+  test.each([false, true])("a Fly check that fails once at the end of the hour is retried within seconds (restart: %s)", async (restart) => {
+    const person = await eraseDeadRemovedBox("erase-check-fails-once-" + restart);
+    const { c, deps, startedAt, destructive, failNextVolumeList, slot } = person;
+    await driveRetirement(person, deps, startedAt + hour - 1, restart);
+    failNextVolumeList();
+    await driveRetirement(person, deps, startedAt + hour, restart);
+    expect(destructive()).toEqual([]);
+    expect(await c.received()).toEqual([]);
+    expect(await slot()).not.toBeNull();
+
+    await expectErasedWithinAMinuteOfTheHour(person, restart);
   });
 
   test.each([false, true])("removal after setup fails on the last alarm step frees the slot (restart: %s)", async (restart) => {

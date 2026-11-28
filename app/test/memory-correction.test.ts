@@ -7,7 +7,7 @@ import { MIGRATIONS, migrate } from "../src/agent/schema";
 import { AgentStore } from "../src/agent/store";
 import type { AgentKey, EpochMs } from "../src/domain";
 import type { ScriptStep } from "../src/model/scripted";
-import { cancel, chat, devChat, fakeBox, holding, local, propose, rewindQuoteRewrites, schedule, scripted, send, turn, type DevChat } from "./testkit";
+import { cancel, chat, devChat, fakeBox, hold, holding, local, postTelegramUpdate, propose, rewindQuoteRewrites, schedule, scripted, send, turn, type DevChat } from "./testkit";
 
 const WRONG = "Zanzibar";
 const RIGHT = "Mombasa";
@@ -468,6 +468,126 @@ describe("don't remember", () => {
     expect(await sql(c, "SELECT COUNT(*) AS n FROM inbox WHERE payload LIKE ?", "%" + SECRET + "%")).toEqual([{ n: 0 }]);
   });
 
+  test.each(["after the reply", "while the reply is pending"] as const)(
+    "keeps private Telegram edits %s out of history and the summary input",
+    async (when) => {
+      const pending = when === "while the reply is pending";
+      const user = pending ? 10512 : 10511;
+      const privateTurn = turn({ actions: [dontRemember(), send("Got it.")] });
+      const model = scripted(
+        [pending ? hold(privateTurn) : privateTurn, chat("Okay."), chat("Okay.")],
+        { compaction: [{ kind: "output", value: { summary: "The person chats about the weather." } }] },
+      );
+      const c = await devChat(String(user), { model, at: "2099-11-04T10:00", channel: "telegram" });
+      const original = { chat: { id: user, type: "private" }, message_id: 81, date: c.clock.now() / 1000 };
+      const editedText = "The revised hint is " + SECRET;
+
+      expect((await postTelegramUpdate({
+        update_id: 1, message: { ...original, text: "Don't remember this: my hint is daisy." },
+      })).status).toBe(200);
+      try {
+        if (pending) await expect.poll(() => model.calls.length).toBe(1);
+        else await c.settle();
+        c.clock.set(local("2099-11-04T10:01"));
+        expect((await postTelegramUpdate({
+          update_id: 2, edited_message: { ...original, edit_date: c.clock.now() / 1000, text: editedText },
+        })).status).toBe(200);
+      } finally {
+        model.release();
+      }
+      await c.settle();
+      expect.soft(await c.received()).toEqual(["Got it."]);
+      expect.soft((await c.snapshot()).turns.map((t) => t.text).join("\n")).not.toContain(editedText);
+      expect.soft(await sql(c, "SELECT payload FROM inbox WHERE payload LIKE ?", `%${SECRET}%`)).toEqual([]);
+
+      await sql(c, `INSERT INTO turn (role, text, at, event_key)
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 60) SELECT 'person', 'weather chat ' || i, ?, 'dev:filler' FROM n`, c.clock.now());
+      await c.alarm();
+
+      const compaction = model.calls.find((call) => call.purpose === "compaction");
+      expect(compaction?.user).toContain("weather chat 1");
+      expect.soft(compaction?.user).not.toContain(editedText);
+      expect(await sql(c, "SELECT summary FROM memory")).toEqual([{ summary: "The person chats about the weather." }]);
+
+      const ordinaryEdit = "Actually, expect rain.";
+      expect((await postTelegramUpdate({
+        update_id: 3, edited_message: { ...original, message_id: 82, edit_date: c.clock.now() / 1000, text: ordinaryEdit },
+      })).status).toBe(200);
+      await c.settle();
+      expect(model.calls.at(-1)?.user).toContain(ordinaryEdit);
+      expect((await c.snapshot()).turns.some((t) => t.text.includes(ordinaryEdit))).toBe(true);
+    },
+  );
+
+  test.each([
+    { scenario: "original first", user: 10513, editFirst: false, failCommit: false },
+    { scenario: "edit first", user: 10514, editFirst: true, failCommit: false },
+    { scenario: "after a failed commit", user: 10516, editFirst: false, failCommit: true },
+  ])("keeps a private edit out of history when batched with its original ($scenario)", async ({ user, editFirst, failCommit }) => {
+    const originalText = "Don't remember this: my hint is daisy.";
+    const editedText = "The revised hint is " + SECRET;
+    const privateTurn = turn({ actions: [dontRemember(), send("Got it.")] });
+    const model = scripted([
+      hold(chat("First turn completed.")),
+      privateTurn,
+      ...(failCommit ? [privateTurn] : []),
+      chat("Ordinary follow-up answered."),
+    ], { compaction: [{ kind: "output", value: { summary: "The person chats about the weather." } }] });
+    const c = await devChat(String(user), { model, at: "2099-11-04T10:00", channel: "telegram" });
+    const original = { chat: { id: user, type: "private" }, message_id: 81, date: c.clock.now() / 1000 };
+    const update = { update_id: 41, message: { ...original, text: originalText } };
+    const edit = { update_id: 42, edited_message: { ...original, edit_date: original.date, text: editedText } };
+
+    let drain: Promise<void> | undefined;
+    try {
+      await c.post("Hold this turn.");
+      await expect.poll(() => model.calls.length).toBe(1);
+      for (const event of editFirst ? [edit, update] : [update, edit]) {
+        expect((await postTelegramUpdate(event)).status).toBe(200);
+      }
+      expect(await sql(c, "SELECT event_key, status FROM inbox WHERE event_key IN ('tg:41', 'tg:42') ORDER BY event_key"))
+        .toEqual([{ event_key: "tg:41", status: "pending" }, { event_key: "tg:42", status: "pending" }]);
+      if (failCommit) {
+        drain = c.alarm();
+        await sql(c, `CREATE TRIGGER fail_private_commit BEFORE UPDATE OF status ON inbox
+          WHEN NEW.status = 'done' AND NEW.event_key = 'tg:42' BEGIN SELECT RAISE(ABORT, 'injected commit failure'); END`);
+      }
+    } finally {
+      model.release();
+    }
+    if (failCommit) {
+      await drain;
+      expect(await sql(c, "SELECT status, attempts FROM inbox WHERE event_key IN ('tg:41', 'tg:42') ORDER BY event_key"))
+        .toEqual([{ status: "processing", attempts: 1 }, { status: "processing", attempts: 1 }]);
+      expect(await sql(c, "SELECT text FROM turn WHERE event_key IN ('tg:41', 'tg:42')")).toEqual([]);
+      expect(await sql(c, "SELECT id FROM private_quote_id")).toEqual([]);
+      await sql(c, "DROP TRIGGER fail_private_commit");
+    }
+    await c.settle();
+    expect(model.calls).toHaveLength(failCommit ? 3 : 2);
+    expect(model.calls[1].user).toContain(originalText);
+    expect(model.calls[1].user).toContain(editedText);
+    expect(await c.received()).toEqual(["First turn completed.", "Got it."]);
+    expect.soft(await holding(c.agent, originalText)).toEqual([]);
+    expect.soft(await holding(c.agent, editedText)).toEqual([]);
+    const history = (await c.snapshot()).turns.map((t) => t.text);
+    expect.soft(history).not.toContain(originalText);
+    expect.soft(history).not.toContain(editedText);
+
+    expect(await later(c, "An ordinary follow-up.")).toContain("Ordinary follow-up answered.");
+    expect.soft(model.calls.at(-1)?.user).not.toContain(originalText);
+    expect.soft(model.calls.at(-1)?.user).not.toContain(editedText);
+
+    await sql(c, `INSERT INTO turn (role, text, at, event_key)
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 60) SELECT 'person', 'weather chat ' || i, ?, 'dev:filler' FROM n`, c.clock.now());
+    await c.alarm();
+    const compaction = model.calls.find((call) => call.purpose === "compaction");
+    expect(compaction?.user).toContain("weather chat 1");
+    expect.soft(compaction?.user).not.toContain(originalText);
+    expect.soft(compaction?.user).not.toContain(editedText);
+    expect(await sql(c, "SELECT summary FROM memory")).toEqual([{ summary: "The person chats about the weather." }]);
+  });
+
   test("clears the quote on a transient turn and drops a later quote of that message", async () => {
     const model = scripted([turn({ actions: [dontRemember(), send("Got it.")] }), chat("I see.")]);
     const c = await devChat("unsaved-telegram-quote", { model, at: "2099-11-04T10:00", channel: "telegram" });
@@ -593,5 +713,28 @@ describe("don't remember", () => {
     const next = box.parses.at(-1);
     expect(next?.agent?.session).toBeNull();
     expect(next?.user.toLowerCase()).not.toContain(SECRET);
+  });
+
+  test("the box does not resume a session that saw a private Telegram edit", async () => {
+    const user = 10515;
+    const box = fakeBox({ signedIn: true });
+    const c = await devChat(String(user), { model: scripted([]), at: "2099-11-04T10:00", channel: "telegram", box: box.deps });
+    await c.say("/claude");
+    await c.received();
+    const editedText = "Don't remember the revised hint: " + SECRET;
+    box.replies.push({ kind: "reply", step: turn({ actions: [dontRemember(), send("Got it.")] }) });
+    expect((await postTelegramUpdate({
+      update_id: 43,
+      edited_message: { chat: { id: user, type: "private" }, message_id: 81, date: c.clock.now() / 1000, edit_date: c.clock.now() / 1000, text: editedText },
+    })).status).toBe(200);
+    await c.settle();
+    expect(await c.received()).toEqual(["Got it."]);
+    expect(box.parses.at(-1)?.user).toContain(editedText);
+
+    box.replies.push({ kind: "reply", step: chat("Hello.") });
+    expect(await later(c, "Hello")).toEqual(["Hello."]);
+    const next = box.parses.at(-1);
+    expect(next?.agent?.session).toBeNull();
+    expect(next?.user).not.toContain(editedText);
   });
 });

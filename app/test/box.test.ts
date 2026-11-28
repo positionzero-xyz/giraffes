@@ -2084,7 +2084,12 @@ describe("confirming disk deletion on automatic reclaim", () => {
     expect(await slot()).not.toBeNull();
   });
 
-  test.each([false, true])("removal after setup fails on the last alarm step frees the slot (restart: %s)", async (restart) => {
+  test.each([
+    { who: "person", restart: false },
+    { who: "person", restart: true },
+    { who: "operator", restart: false },
+    { who: "operator", restart: true },
+  ] as const)("removal by the $who after setup fails on the last alarm step frees the slot (restart: $restart)", async ({ who, restart }) => {
     let advanceClock = (_ms: number) => {};
     let tries = 0;
     const fly = flyReclaim({
@@ -2096,21 +2101,33 @@ describe("confirming disk deletion on automatic reclaim", () => {
         throw new Error("Fly timed out");
       },
     });
-    const person = await startReclaim("remove-after-last-step-" + restart, null, fly.deps);
+    const person = await startReclaim(`remove-after-last-step-${who}-${restart}`, null, fly.deps);
     const { c, ledger } = person;
     advanceClock = (ms) => c.clock.set((c.clock.now() + ms) as EpochMs);
     await c.alarm();
     expect(tries).toBe(3);
     expect((await c.snapshot()).box?.state).toBe("reclaiming");
     expect(fly.boxRequests).toEqual([]);
+    expect(fly.destructive()).toEqual([]);
 
-    await c.say("/claude remove");
-    expect(await c.received()).toEqual([say("removing")]);
+    if (who === "operator") {
+      await c.remove();
+    } else {
+      await c.say("/claude remove");
+      expect(await c.received()).toEqual([say("removing")]);
+    }
     await driveRetirement(person, fly.deps, c.clock.now() + 2 * 60_000, restart);
     expect(fly.destructive()).toEqual(["DELETE /v1/apps/" + app + "/machines/machine_1", volumeDelete, appDelete]);
-    expect(await c.received()).toEqual([say("removed")]);
+    const diskCheck = fly.requests.indexOf(volumeList, fly.requests.indexOf(volumeDelete) + 1);
+    expect(diskCheck).toBeGreaterThan(fly.requests.indexOf(volumeDelete));
+    expect(diskCheck).toBeLessThan(fly.requests.indexOf(appDelete));
+    expect(await c.received()).toEqual(who === "operator" ? [] : [say("removed")]);
     expect((await c.snapshot()).box).toBeNull();
     expect(ledger.boxes.has(c.agent)).toBe(false);
+    if (who === "person") {
+      await c.say("/claude");
+      expect(await c.received()).toEqual([say("setting_up")]);
+    }
   });
 
   test("a saved retirement from before the failed-setup flag still requires a wipe", async () => {

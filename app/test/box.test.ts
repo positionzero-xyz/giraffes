@@ -11,7 +11,7 @@ import { Agent } from "../src/agent/agent";
 import { MIGRATIONS } from "../src/agent/schema";
 import type { StripeReply } from "../src/billing/stripe";
 import { loadConfig, type Env } from "../src/config";
-import type { AgentKey, EpochMs } from "../src/domain";
+import { personAgentKey, type AgentKey, type EpochMs } from "../src/domain";
 import { NOTICES } from "../src/notices";
 import {
   billingOn,
@@ -1853,6 +1853,35 @@ describe("confirming disk deletion on automatic reclaim", () => {
   }
 
   const hour = 60 * 60_000;
+
+  test("account erase backs off when its static box never answers", async () => {
+    const user = "erase-dead-static";
+    const host = staticHost({ url: "http://static.box.test", appPrefix: "gbox-" });
+    const requests: string[] = [];
+    const client = boxClient(async (url) => {
+      requests.push(new URL(url).pathname);
+      throw new TypeError("box unreachable");
+    });
+    const onlyFor = personAgentKey({ channel: "dev", channelUserId: user });
+    const deps = { host, client, secret: BOX_SECRET, onlyFor, maxBoxes: 10 };
+    const person = await startReclaim(user, null, deps, { signedIn: true });
+    const { c } = person;
+    const startedAt = c.clock.now();
+
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erasure confirmation");
+    await c.tap(confirm.data);
+    expect(requests).toEqual(["/health"]);
+    expect(await c.received()).toEqual([ACCOUNT_COPY.en.confirm]);
+
+    await driveRetirement(person, deps, startedAt + 2 * hour, true);
+    const afterTwoHours = requests.length;
+    await driveRetirement(person, deps, startedAt + 3 * hour, true);
+    expect(requests.length, "box requests over three hours").toBe(10);
+    expect(requests.length - afterTwoHours, "box requests in the third hour").toBe(1);
+    expect(await c.received()).toEqual([]);
+  });
 
   test.each([
     {

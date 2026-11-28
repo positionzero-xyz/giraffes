@@ -652,9 +652,10 @@ export class Agent extends DurableObject<Env> {
       (box.kind === "relocate" && box.resume !== "wipe-fly")) &&
       (box.target?.disk != null || (box.target?.disks?.length ?? 0) > 0);
     let delay = box.kind === "unverified" && job.billing.kind === "done" ? ACCOUNT_RECEIPT_MS : ACCOUNT_RETRY_MS;
-    if (wipeDeadline !== null || removingDisk) {
+    const wipingStaticBox = box.kind === "wipe-static";
+    if (wipingStaticBox || wipeDeadline !== null || removingDisk) {
       const graceLeft = wipeDeadline === null ? 0 : wipeDeadline - now;
-      const waitingFor = graceLeft > 0 ? "box-wipe" : "disk-delete";
+      const waitingFor = wipingStaticBox || graceLeft > 0 ? "box-wipe" : "disk-delete";
       const attempts = job.boxRetry?.waitingFor === waitingFor ? job.boxRetry.attempts : 0;
       delay = reclaimBackoff(attempts);
       if (graceLeft > 0) delay = Math.min(delay, ACCOUNT_WIPE_RETRY_MAX_MS, graceLeft);

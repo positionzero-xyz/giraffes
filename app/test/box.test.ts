@@ -35,6 +35,7 @@ import {
   turn,
   type MemoryLedger,
   ticketOpens,
+  type BoxReplyStep,
   type FakeBox,
 } from "./testkit";
 
@@ -694,6 +695,27 @@ describe("a turn on the person's own Claude Code session", () => {
     return { box, c };
   }
 
+  const quietReply = (): BoxReplyStep => ({ kind: "reply", step: turn({ actions: [quiet()] }) });
+
+  async function planProposed(user: string) {
+    const { box, c } = await signedIn(user, "2099-11-04T08:00");
+    box.replies.push(
+      { kind: "reply", step: turn({ actions: [send("Morning! The long weekend is close, so I sketched a trip.")], tasks: [propose(TRIP, TITLE, PLAN)] }) },
+      quietReply(),
+      quietReply(),
+      quietReply(),
+      quietReply(),
+      quietReply(),
+    );
+    await c.advanceTo("2099-11-04T09:00");
+    expect(c.channel.delivered.at(-1)).toMatchObject({
+      text: `Morning! The long weekend is close, so I sketched a trip.\n${PLAN}`,
+      button: { label: NOTICE.acceptButton, data: "a:1.1" },
+    });
+    await c.received();
+    return c;
+  }
+
   test("its tool calls are applied like any turn's actions: the reminder is pending, the note kept, and the reply sent", async () => {
     const { box, c } = await signedIn("agt");
     box.replies.push({
@@ -870,6 +892,36 @@ describe("a turn on the person's own Claude Code session", () => {
       ["plan_accepted", "choice"],
     ]);
     expect(c.logs("unasked").map((u) => [u.status, u.purpose])).toEqual([["sent", "task_followup"]]);
+  });
+
+  test("an Accept tap 47 hours after the plan still completes it", async () => {
+    const c = await planProposed("tap-47");
+
+    await c.advanceTo("2099-11-06T08:00");
+    await c.tap("a:1.1");
+
+    expect(await c.received()).toEqual([NOTICE.planAccepted(TITLE)]);
+    expect((await c.snapshot()).tasks[0].status).toBe("completed");
+  });
+
+  test("an Accept tap 49 hours after the plan leaves it open", async () => {
+    const c = await planProposed("tap-49");
+
+    await c.advanceTo("2099-11-06T10:00");
+    await c.tap("a:1.1");
+
+    expect(await c.received()).toEqual([NOTICE.planChanged]);
+    expect((await c.snapshot()).tasks[0].status).toBe("open");
+  });
+
+  test("an Accept tap days later leaves the plan open", async () => {
+    const c = await planProposed("late-plan");
+
+    await c.advanceTo("2099-11-07T10:00");
+    await c.tap("a:1.1");
+
+    expect(await c.received()).toEqual([NOTICE.planChanged]);
+    expect((await c.snapshot()).tasks[0].status).toBe("open");
   });
 
   test("a box check-in that names an open task is a follow-up on it and changes nothing else", async () => {

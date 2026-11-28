@@ -24,7 +24,7 @@ export const TASKS = {
   maxPlanChars: 1500,
   minPlanLines: 2,
   minPlanChars: 80,
-  typedAcceptWithinMs: 48 * 60 * 60 * 1000,
+  acceptWithinMs: 48 * 60 * 60 * 1000,
 } as const;
 
 export type TaskOp = {
@@ -55,6 +55,7 @@ export type TappedProposal = {
   readonly version: number;
   readonly status: ProposalStatus;
   readonly taskStatus: TaskStatus;
+  readonly sentAt: EpochMs | null;
 };
 
 export type TaskView = {
@@ -80,6 +81,11 @@ export const NO_TASKS: TaskCommit = { open: [], propose: null, facts: [] };
 export type AcceptReply = { readonly kind: "accepted"; readonly title: string } | { readonly kind: "plan_changed" };
 
 export type TaskEffects = { readonly commit: TaskCommit; readonly replies: readonly AcceptReply[] };
+
+function withinAcceptWindow(sentAt: EpochMs | null, acceptedAt: EpochMs): boolean {
+  const second = (t: EpochMs) => Math.floor(t / 1000);
+  return sentAt !== null && second(sentAt) <= second(acceptedAt) && acceptedAt - sentAt <= TASKS.acceptWithinMs;
+}
 
 export const TASK_REJECTIONS = [
   "task_limit",
@@ -116,6 +122,12 @@ export function taskEffects(view: TaskView): TaskEffects {
     const p = view.tapped.find((x) => x.id === named);
     if (!p || decided.has(p.id)) continue;
     const cause: FactCause = { key: item.key, kind: "choice", at: e.at };
+    const tapInWindow = withinAcceptWindow(p.sentAt, e.at);
+    if ((p.status === "open" || p.status === "closed") && !tapInWindow) {
+      decided.add(p.id);
+      if (p.status === "open") replies.push({ kind: "plan_changed" });
+      continue;
+    }
     switch (p.status) {
       case "open":
         accept(p, "tap", cause);
@@ -137,13 +149,11 @@ export function taskEffects(view: TaskView): TaskEffects {
 
   const [first, ...rest] = view.batch.items;
   const a = view.acceptable;
-  const second = (t: EpochMs) => Math.floor(t / 1000);
   if (
     a !== null &&
     first.event.kind === "message" &&
     !decided.has(a.id) &&
-    second(a.sentAt) <= second(first.receivedAt) &&
-    first.receivedAt - a.sentAt <= TASKS.typedAcceptWithinMs &&
+    withinAcceptWindow(a.sentAt, first.receivedAt) &&
     isPlainAccept(first.event.text) &&
     !rest.some((i) => i.event.kind === "message" && rejectsOrAmends(i.event.text))
   ) {

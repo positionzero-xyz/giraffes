@@ -716,6 +716,23 @@ describe("a turn on the person's own Claude Code session", () => {
     return c;
   }
 
+  test("a box notice produced by an alarm waits for quiet hours", async () => {
+    const box = fakeBox({ signedIn: true });
+    box.reachable = false;
+    const c = await devChat("quiet-box", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up")]);
+
+    box.reachable = true;
+    c.clock.set(local("2099-11-04T23:00"));
+    await c.alarm();
+
+    const connected = () => c.channel.delivered.filter((d) => d.text === say("connected")).map((d) => d.at);
+    expect(connected()).toEqual([]);
+    await c.advanceTo("2099-11-05T08:00");
+    expect(connected()).toEqual([local("2099-11-05T08:00")]);
+  });
+
   test("its tool calls are applied like any turn's actions: the reminder is pending, the note kept, and the reply sent", async () => {
     const { box, c } = await signedIn("agt");
     box.replies.push({

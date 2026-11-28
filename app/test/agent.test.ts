@@ -27,6 +27,8 @@ const until = async (done: () => boolean) => {
   if (!done()) throw new Error("condition never became true");
 };
 
+const plusMs = (t: EpochMs, ms: number): EpochMs => (t + ms) as EpochMs;
+
 describe("conversation", () => {
   test("a message gets a reply", async () => {
     const model = scripted([chat("Hi! What can I do for you?")]);
@@ -55,6 +57,68 @@ describe("conversation", () => {
     expect(model.calls[1].user).toContain("You: First answer.");
     expect(model.calls[1].user).toContain("## New\nPerson: second question");
     model.assertDone();
+  });
+
+  test("four plain messages sent a second apart get one reply that covers all four", async () => {
+    const model = scripted([
+      chat("One answer covering the whole request."),
+      chat("A second answer."),
+      chat("A third answer."),
+      chat("A fourth answer."),
+    ]);
+    const c = await devChat("quick-batch", { model, at: "2099-11-04T10:00" });
+    const start = c.clock.now();
+
+    await c.post("tomorrow");
+    c.clock.set(plusMs(start, 1_000));
+    await c.post("call the bank");
+    c.clock.set(plusMs(start, 2_000));
+    await c.post("around 10");
+    c.clock.set(plusMs(start, 3_000));
+    await c.post("please");
+    c.clock.set(plusMs(start, 4_000));
+    await c.settle();
+    expect(model.calls).toHaveLength(0);
+
+    c.clock.set(plusMs(start, 5_000));
+    await c.settle();
+
+    expect(await c.received()).toEqual(["One answer covering the whole request."]);
+    expect(model.calls).toHaveLength(1);
+    const user = model.calls[0].user;
+    for (const text of ["tomorrow", "call the bank", "around 10", "please"]) expect(user).toContain(`Person: ${text}`);
+  });
+
+  test("a single plain message waits for its quiet window and never past the ceiling", async () => {
+    const model = scripted([chat("Got it.")]);
+    const c = await devChat("quick-single", { model, at: "2099-11-04T10:00" });
+    const start = c.clock.now();
+
+    await c.post("one request");
+    await c.settle();
+    expect(model.calls).toHaveLength(0);
+    c.clock.set(plusMs(start, 1_999));
+    await c.settle();
+    expect(model.calls).toHaveLength(0);
+
+    c.clock.set(plusMs(start, 2_000));
+    await c.settle();
+
+    expect(await c.received()).toEqual(["Got it."]);
+    expect(model.calls).toHaveLength(1);
+    expect(c.channel.delivered[0].at).toBe(plusMs(start, 2_000));
+    expect(c.channel.delivered[0].at).toBeLessThanOrEqual(plusMs(start, 6_000));
+  });
+
+  test("a command still starts at once", async () => {
+    const c = await devChat("quick-command", { model: scripted([]), at: "2099-11-04T10:00" });
+    const start = c.clock.now();
+
+    await c.post("/key remove");
+    await c.settle();
+
+    expect(await c.received()).toEqual([NOTICE.noKey]);
+    expect(c.channel.delivered[0].at).toBe(start);
   });
 
   test("a reply quote reaches the model as context, not as the person's new words", async () => {

@@ -12,7 +12,7 @@ import type { Agent, AgentSnapshot, BillingDeps, BoxDeps } from "../src/agent/ag
 import type { TurnOutput } from "../src/agent/turn";
 import { boxClient } from "../src/box/client";
 import type { BoxHost, FlyBoxRetirement, HostResult } from "../src/box/host";
-import { boxName, type BoxName } from "../src/box/names";
+import { boxName, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
 import type { ChannelAdapter } from "../src/channels/channel";
 import type { AdmissionMode } from "../src/agent/admission";
 import { eventKey, parseChoice, personAgentKey, type AgentKey, type ChannelEvent, type EpochMs, type Identity, type LocalDateTime, type MicroUsd, type ProviderMessageReference } from "../src/domain";
@@ -416,6 +416,14 @@ export type FakeBox = {
   readonly ensureCalls: string[];
   /** The image each `ensure` put on its machine. */
   readonly ensuredWith: string[];
+  /** The key each `ensure` put in its machine's BOX_TOKEN. */
+  readonly ensuredKeys: string[];
+  /** The key each live box holds. A call under any other key is answered 401, as the real box does. */
+  readonly keys: Map<string, string>;
+  /** Calls the box answered 401 because they carried another key. */
+  readonly refusedKeys: string[];
+  /** The person opens a sign-in link on the box: true when the box accepts its ticket and signs them in. */
+  signInWith(link: string, now: EpochMs): Promise<boolean>;
   /** BOX_IMAGE as the host sees it; changing it stands for a deploy with a new image. */
   image: string;
   readonly destroyCalls: string[];
@@ -445,6 +453,15 @@ export type FakeBox = {
   nameOf(user: string): Promise<BoxName>;
 };
 
+/** The box's own ticket check: the ticket in a sign-in link opens a box only under the key that box holds, and only before it expires. */
+export async function ticketOpens(link: string, keys: ReadonlyMap<string, string>, now: EpochMs): Promise<boolean> {
+  const url = new URL(link);
+  const key = keys.get(url.hostname.split(".")[0]);
+  const ticket = url.hash.replace(/^#t=/, "");
+  const exp = Number(ticket.split(".")[0]);
+  return key !== undefined && Number.isSafeInteger(exp) && now < exp && ticket === (await signinTicket(key as BoxToken, exp as EpochMs));
+}
+
 /** A BoxHost and the box's HTTP server behind the real box client, wired through a fake fetch. */
 export function fakeBox(
   opts: {
@@ -463,6 +480,14 @@ export function fakeBox(
     created: new Set<string>(),
     ensureCalls: [] as string[],
     ensuredWith: [] as string[],
+    ensuredKeys: [] as string[],
+    keys: new Map<string, string>(),
+    refusedKeys: [] as string[],
+    async signInWith(link: string, now: EpochMs): Promise<boolean> {
+      const opened = await ticketOpens(link, box.keys, now);
+      if (opened) box.signedIn = true;
+      return opened;
+    },
     image: "registry.test/box:1",
     destroyCalls: [] as string[],
     healthCalls: [] as string[],
@@ -487,7 +512,7 @@ export function fakeBox(
     },
     nameFor: (agent) => boxName(BOX_SECRET, "gbox-", agent),
     urlOf: (name) => `https://${name}.box.test`,
-    async ensure(name): Promise<HostResult> {
+    async ensure(name, token): Promise<HostResult> {
       box.ensureCalls.push(name);
       const step = steps.shift() ?? "ok";
       if (step === "die") {
@@ -497,6 +522,8 @@ export function fakeBox(
       if (step !== "ok") return { ok: false, ...step };
       box.created.add(name);
       box.ensuredWith.push(box.image);
+      box.ensuredKeys.push(token);
+      box.keys.set(name, token);
       return { ok: true };
     },
     async destroy(name): Promise<HostResult> {
@@ -504,6 +531,7 @@ export function fakeBox(
       const step = destroySteps.shift() ?? "ok";
       if (step === "fail") return { ok: false, retryable: true, detail: "DELETE /apps: 503" };
       box.created.delete(name);
+      box.keys.delete(name);
       if (step === "die") throw new Error("the host step died after destroying the app");
       return { ok: true };
     },
@@ -531,6 +559,11 @@ export function fakeBox(
     if (url.pathname === "/health") box.healthCalls.push(name);
     if (!box.created.has(name) || !box.reachable) throw new TypeError("fetch failed: no such host");
     const authorization = new Headers(init?.headers).get("authorization");
+    const key = box.keys.get(name);
+    if (key !== undefined && authorization !== `Bearer ${key}`) {
+      box.refusedKeys.push(`${init?.method ?? "GET"} ${url.pathname}`);
+      return Response.json({ error: "unauthorized" }, { status: 401 });
+    }
     if (url.pathname === "/health") {
       return Response.json({ ok: true, signedIn: box.signedIn, authMethod: box.signedIn ? "claude.ai" : "none", version: "test", box: retiring.get(name) ?? opts.volume });
     }

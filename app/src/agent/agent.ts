@@ -1973,6 +1973,7 @@ export class Agent extends DurableObject<Env> {
         return this.#store.markSent(row.id, delivery.via, after, unaskedLog("sent", day), page?.next, delivery.providerMessages ?? []);
       case "retry":
       case "in_doubt": {
+        this.#store.blockUnconfirmedQuote(row.id, after);
         const at = (after + delivery.afterMs) as EpochMs;
         // A receipt that may have gone out isn't sent twice, since Telegram has no idempotency key; /forget status offers it.
         if (row.privacy === "receipt" && (delivery.kind === "in_doubt" || row.to.channel === "telegram")) {

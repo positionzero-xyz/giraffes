@@ -62,6 +62,7 @@ import {
 } from "./tasks";
 import type { AdmissionCommit } from "./admission";
 import { FORGET_TEXT } from "./forget-text";
+import { checkCorrection, interpolated, joinTracked, tracked, type Correction, type CorrectionSpan, type TrackedText } from "./correct";
 
 export const TURN = {
   recentNotes: 50,
@@ -69,6 +70,7 @@ export const TURN = {
   maxSendsPerTurn: 3,
   maxTextChars: 600,
   maxNoteBytes: 300,
+  maxCorrectionBytes: 300,
   /** The newest message is always shown whole; the earlier ones in its batch are cut to these. */
   messageBytes: 2_000,
   batchBytes: 4_000,
@@ -102,6 +104,11 @@ const ActionSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("cancel_wakeup"), key: Slug }),
   z.object({ type: z.literal("remember"), note: z.string().min(1).describe(atMostBytes(TURN.maxNoteBytes)) }),
+  z.object({
+    type: z.literal("correct"),
+    wrong: z.string().describe("The wrong words as one line from your memory, pending wake-ups or open tasks, at least 3 characters. For a shorter word, include the words next to it exactly as saved"),
+    right: z.string().describe(`The words that replace them, on one line. ${atMostBytes(TURN.maxCorrectionBytes)}`),
+  }),
   z.object({ type: z.literal("quiet") }),
   z.object({
     type: z.literal("set_locale"),
@@ -109,6 +116,7 @@ const ActionSchema = z.discriminatedUnion("type", [
     language: z.enum(LANGUAGES).describe("The language of code-written notices"),
   }),
   z.object({ type: z.literal("forget") }),
+  z.object({ type: z.literal("dont_remember") }),
 ]);
 
 const TaskOpSchema = z.object({
@@ -123,8 +131,12 @@ const AGENT_ACTIONS: Readonly<Partial<Record<z.infer<typeof ActionSchema>["type"
   schedule_wakeup: "Schedule a reminder, or a routine the person asked for, in their local time.",
   cancel_wakeup: "Cancel a pending wake-up by its key. Cancelling a routine's key ends the routine.",
   remember: "Keep a durable note about the person that will matter in a week.",
+  correct:
+    "The person says something you saved is wrong. Code replaces the wrong words with the right ones everywhere they were kept, this turn's messages included, so don't repeat the wrong words in your reply.",
   set_locale: "Set the person's IANA time zone and the language of code-written notices.",
   forget: "The person asked you to forget, delete or stop remembering something. Code then tells them how to choose what goes; nothing else you do this turn is kept.",
+  dont_remember:
+    "The person asked you not to remember or save what they say now. Code keeps only your reply, cancels, a locale change and reminders they asked for from this turn, and leaves it out of your long-term memory.",
 };
 
 export type AgentTool = { readonly name: string; readonly description: string; readonly inputSchema: JsonSchema };
@@ -398,7 +410,7 @@ export function renderBoxTurn(
   };
 }
 
-export type NewTurn = TurnRow & {
+export type NewTurn = TurnRow & TrackedText & {
   readonly eventKey: EventKey;
   readonly boxView?: { readonly kind: "input" } | { readonly kind: "reply"; readonly notice: string | null };
 };
@@ -408,6 +420,7 @@ export type Asked = { readonly intent: Exclude<Intent, "unasked"> } | { readonly
 
 export type Outbound = Asked & {
   readonly texts: readonly [string, ...string[]];
+  readonly spans: readonly (readonly CorrectionSpan[])[];
   readonly triggerKind: AgentEventKind;
   readonly reply?: ReplyHandle;
   readonly link: TaskTarget | null;
@@ -428,12 +441,16 @@ export type TurnCommit = {
   readonly outcome: TurnOutcome;
   readonly waitForAccess?: { readonly kind: "connection" } | { readonly kind: "budget"; readonly budget: string };
   readonly turns: readonly NewTurn[];
+  /** The person asked not to be remembered: compaction drops these turns unread instead of summarizing them. */
+  readonly transient: boolean;
   readonly outbound: Outbound | null;
   readonly wakeupsCancel: readonly WakeupKey[];
   readonly wakeupsAdd: readonly ReminderAdd[];
   readonly wakeupsRetime: readonly { readonly key: WakeupKey; readonly dueAt: EpochMs }[];
   readonly locale: { readonly tz: TimeZone; readonly language: Language } | null;
   readonly notes: readonly string[];
+  /** Applied last, so they also reach what this turn writes. */
+  readonly corrections: readonly Correction[];
   readonly tasks: TaskCommit;
   /** The event that caused this turn, which the store records as the cause of the facts it adds. */
   readonly trigger: FactCause;
@@ -497,10 +514,11 @@ function newestReply(view: TurnView): ReplyHandle | undefined {
 
 type OutboundTask = Pick<Outbound, "link" | "choice">;
 
-function outbound(texts: readonly string[], asked: Asked, view: TurnView, task: OutboundTask): Outbound | null {
-  const ts = nonEmpty(texts);
-  if (ts === null) return null;
-  const base = { ...asked, texts: ts, triggerKind: trigger(view).kind, ...task, replyOnly: false };
+function outbound(parts: readonly TrackedText[], asked: Asked, view: TurnView, task: OutboundTask): Outbound | null {
+  const texts = nonEmpty(parts.map((part) => part.text));
+  if (texts === null) return null;
+  const spans = parts.map((part) => part.spans ?? []);
+  const base = { ...asked, texts, spans, triggerKind: trigger(view).kind, ...task, replyOnly: false };
   const reply = asked.intent === "reply" ? newestReply(view) : undefined;
   return reply ? { ...base, reply } : base;
 }
@@ -509,8 +527,8 @@ function causeOf(view: TurnView): FactCause {
   return { key: view.batch.items[0].key, kind: trigger(view).kind, at: view.now };
 }
 
-function acceptNotice(t: Notices, r: AcceptReply): string {
-  return r.kind === "accepted" ? t.planAccepted(r.title) : t.planChanged;
+function acceptNotice(t: Notices, r: AcceptReply): TrackedText {
+  return r.kind === "accepted" ? interpolated(t.planAccepted(r.title), r.title) : { text: t.planChanged };
 }
 
 function personTurns(view: TurnView, boxView?: NewTurn["boxView"]): NewTurn[] {
@@ -519,7 +537,10 @@ function personTurns(view: TurnView, boxView?: NewTurn["boxView"]): NewTurn[] {
   for (const [at, item] of view.batch.items.entries()) {
     const seenWhole = boxView !== undefined && whole[at] === true ? boxView : undefined;
     const e = item.event;
-    if (e.kind === "message") turns.push({ role: "person", text: e.text, at: item.receivedAt, eventKey: item.key, boxView: seenWhole });
+    if (e.kind === "message") {
+      const text = e.redacted ? { text: e.text } : tracked(e.text, "person");
+      turns.push({ role: "person", ...text, at: item.receivedAt, eventKey: item.key, boxView: seenWhole });
+    }
     if (e.kind === "choice") {
       const text =
         e.choice.kind === "accept"
@@ -565,12 +586,14 @@ function lateTrigger(view: TurnView): { readonly dueAt: EpochMs } | null {
   return (e.kind === "wakeup" || e.kind === "checkin") && isLate(e) ? e : null;
 }
 
-function triggerNote(e: AgentEvent, tz: TimeZone): string | null {
+function triggerNote(e: AgentEvent, tz: TimeZone): TrackedText | null {
   switch (e.kind) {
     case "wakeup":
-      return `Wake-up "${e.key}" (due ${human(e.dueAt, tz)}): ${e.note}`;
+      return joinTracked([
+        { text: 'Wake-up "' }, tracked(e.key, "erase"), { text: `" (due ${human(e.dueAt, tz)}): ` }, tracked(e.note, "erase"),
+      ], "");
     case "checkin":
-      return "Daily check-in";
+      return { text: "Daily check-in" };
     case "message":
     case "lifecycle":
     case "choice":
@@ -582,6 +605,7 @@ function triggerNote(e: AgentEvent, tz: TimeZone): string | null {
 
 export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   if (out.actions.some((a) => a.type === "forget")) return planWithoutModel(given, { kind: "forget_offer" });
+  const transient = out.actions.some((a) => a.type === "dont_remember");
   const actions = out.actions.slice(0, TURN.maxActions);
   const setLocale = actions.findLast((a) => a.type === "set_locale");
   const language = setLocale?.language ?? given.language;
@@ -593,15 +617,24 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   const pending = new Map<WakeupKey, NewWakeup>(view.pending.map((w) => [w.key, w]));
   const sends: string[] = [];
   const notes: string[] = [];
+  const corrections: Correction[] = [];
+  let correctionRefused = false;
+  const saved = [
+    view.summary,
+    ...view.notes,
+    ...view.pending.flatMap((w) => (w.kind === "reminder" ? [w.key, w.note] : [])),
+    ...view.openTasks.flatMap((t) => [t.ref, t.title]),
+  ];
   const cancelled = new Map<WakeupKey, NewWakeup>();
   const adds = new Map<WakeupKey, ReminderAdd>();
   const askedFor = new Set<WakeupKey>();
   const rejected: { action: string; reason: ActionRejection }[] = [];
-  const notices = new Set<string>();
+  const notices = new Map<string, TrackedText>();
+  const addNotice = (text: string) => notices.set(text, { text });
   const reject = (action: string, reason: ActionRejection, tellPerson: boolean) => {
     rejected.push({ action, reason });
     const notice = REJECTION_NOTICE[reason];
-    if (tellPerson && notice !== null) notices.add(t[notice]);
+    if (tellPerson && notice !== null) addNotice(t[notice]);
   };
   const keepCancelled = (key: WakeupKey | null, asked: boolean) => {
     if (key === null || adds.has(key)) return;
@@ -609,7 +642,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
     if (original === undefined) return;
     cancelled.delete(key);
     pending.set(key, original);
-    if (asked) notices.add(t.reminderKept(human(original.dueAt, given.tz)));
+    if (asked) addNotice(t.reminderKept(human(original.dueAt, given.tz)));
   };
   const fit = (text: string, max: number, action: string): string => {
     if (text.length <= max) return text;
@@ -623,8 +656,11 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   };
 
   const fx = taskEffects(view);
-  for (const r of fx.replies) notices.add(acceptNotice(t, r));
-  const planned = planTasks(out.tasks, view, causeOf(view), fx.commit);
+  for (const r of fx.replies) {
+    const notice = acceptNotice(t, r);
+    notices.set(notice.text, notice);
+  }
+  const planned = planTasks(transient ? [] : out.tasks, view, causeOf(view), fx.commit);
   const tasks = planned.commit;
   for (const r of planned.rejected) reject(r.action, r.reason, false);
   const sendCap = TURN.maxSendsPerTurn - (tasks.propose ? 1 : 0);
@@ -641,6 +677,10 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
         else reject("send", "too_many_sends", false);
         break;
       case "schedule_wakeup": {
+        if (transient && !a.asked) {
+          keepCancelled(parseWakeupKey(a.key), false);
+          break;
+        }
         const origin = wakeupOrigin(first.kind, a.asked);
         const note = fitBytes(a.note, TURN.maxNoteBytes, actionLabel(a));
         const admission = admitReminder({ key: a.key, at: a.at, note, origin, repeat: a.repeat ?? null }, { now: view.now, tz: view.tz, pending });
@@ -666,23 +706,35 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
         break;
       }
       case "remember":
-        notes.push(fitBytes(a.note, TURN.maxNoteBytes, "remember"));
+        if (!transient) notes.push(fitBytes(a.note, TURN.maxNoteBytes, "remember"));
         break;
+      case "correct": {
+        const checked = checkCorrection(a, saved, TURN.maxCorrectionBytes);
+        if (first.kind !== "message") reject("correct", "tool_refused", false);
+        else if (checked.ok) corrections.push(checked.correction);
+        else {
+          reject("correct", checked.why === "malformed" ? "tool_refused" : "not_pending", false);
+          correctionRefused = true;
+        }
+        break;
+      }
       case "quiet":
       case "set_locale":
       case "forget":
+      case "dont_remember":
         break;
       default:
         assertNever(a);
     }
   }
+  if (correctionRefused && corrections.length === 0) addNotice(t.correctionNotMade);
   for (const { name, input } of out.refusedCalls ?? []) {
     const isSchedule = name === "schedule_wakeup";
     const key = (isSchedule || name === "cancel_wakeup") && typeof input.key === "string" ? parseWakeupKey(input.key) : null;
     const asked = isSchedule && input.asked === true;
     const replacement = key !== null && adds.has(key);
     reject(refusedLabel(name, input, key), "tool_refused", asked && !replacement);
-    if (asked && replacement) notices.add(t.reminderAttemptFailed);
+    if (asked && replacement) addNotice(t.reminderAttemptFailed);
     if (isSchedule) keepCancelled(key, asked);
   }
   const fresh = [...adds.keys()].filter((key) => !cancelled.has(key));
@@ -698,53 +750,58 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
           .filter((w) => !adds.has(w.key))
           .map((w) => ({ key: w.key, dueAt: retime(w, given.tz, view.tz, view.now, view.checkinLocal) }));
 
-  const agentTexts = [...sends];
+  const agentTexts = sends.map((text) => tracked(text, "send"));
   const late = lateTrigger(view);
   let lateNotice: string | null = null;
   if (late && agentTexts.length > 0) {
     const written = out.lateNotice?.trim();
-    lateNotice = written ? fit(written, TURN.maxLateNoticeChars, "late_notice") : t.lateFallback(human(late.dueAt, view.tz));
-    agentTexts[0] = `${lateNotice}\n${agentTexts[0]}`;
+    const lead = written
+      ? tracked(fit(written, TURN.maxLateNoticeChars, "late_notice"), "late")
+      : { text: t.lateFallback(human(late.dueAt, view.tz)) };
+    lateNotice = lead.text;
+    agentTexts[0] = joinTracked([lead, agentTexts[0]]);
   }
-  const noticeText = (agentTexts.length > 0 || intent === "reply") && notices.size > 0 ? [...notices].join("\n") : null;
+  const noticeText = (agentTexts.length > 0 || intent === "reply") && notices.size > 0 ? joinTracked([...notices.values()]) : null;
   if (noticeText !== null && agentTexts.length >= sendCap) {
     agentTexts.pop();
     rejected.push({ action: "send", reason: "too_many_sends" });
   }
-  const plan = tasks.propose?.text ?? null;
+  const plan = tasks.propose ? tracked(tasks.propose.text, "plan") : null;
   const said = [...agentTexts, ...(noticeText === null ? [] : [noticeText]), ...(plan === null ? [] : [plan])];
   const requestedReminder = said.length === 0 ? textWithoutModel(view, null) : null;
   const texts = requestedReminder === null ? said : [requestedReminder];
   const [lead, ...rest] = texts;
-  const delivered = view.batch.items[0].catchUp && lead !== undefined ? [`${t.catchUp}\n${lead}`, ...rest] : texts;
+  const delivered = view.batch.items[0].catchUp && lead !== undefined ? [joinTracked([{ text: t.catchUp }, lead]), ...rest] : texts;
 
   const effects = lifecycleEffects(view);
   const input = { kind: "input" } as const;
   const turns = personTurns(view, input);
   const note = said.length > 0 ? triggerNote(first, view.tz) : null;
-  if (note !== null) turns.push({ role: "note", text: note, at: view.now, eventKey: view.batch.items[0].key, boxView: batchWhole(view)[0] === true ? input : undefined });
+  if (note !== null) turns.push({ role: "note", ...note, at: view.now, eventKey: view.batch.items[0].key, boxView: batchWhole(view)[0] === true ? input : undefined });
   for (const [i, text] of agentTexts.entries()) {
-    turns.push({ role: "agent", text, at: view.now, eventKey: view.batch.items[0].key, boxView: { kind: "reply", notice: i === 0 ? lateNotice : null } });
+    turns.push({ role: "agent", ...text, at: view.now, eventKey: view.batch.items[0].key, boxView: { kind: "reply", notice: i === 0 ? lateNotice : null } });
   }
-  if (noticeText !== null) turns.push({ role: "note", text: noticeText, at: view.now, eventKey: view.batch.items[0].key });
-  if (plan !== null) turns.push({ role: "agent", text: plan, at: view.now, eventKey: view.batch.items[0].key, boxView: { kind: "reply", notice: null } });
-  if (requestedReminder !== null) turns.push({ role: "note", text: requestedReminder, at: view.now, eventKey: view.batch.items[0].key });
+  if (noticeText !== null) turns.push({ role: "note", ...noticeText, at: view.now, eventKey: view.batch.items[0].key });
+  if (plan !== null) turns.push({ role: "agent", ...plan, at: view.now, eventKey: view.batch.items[0].key, boxView: { kind: "reply", notice: null } });
+  if (requestedReminder !== null) turns.push({ role: "note", ...requestedReminder, at: view.now, eventKey: view.batch.items[0].key });
 
   const locale = setLocale ? { tz: view.tz, language } : null;
   const changedTasks = tasks.open.length > 0 || tasks.facts.length > 0;
   const acted =
-    texts.length > 0 || adds.size > 0 || cancelled.size > 0 || notes.length > 0 || effects.reachability !== null || locale !== null || changedTasks;
+    texts.length > 0 || adds.size > 0 || cancelled.size > 0 || notes.length > 0 || corrections.length > 0 || effects.reachability !== null || locale !== null || changedTasks;
   const link = linkOf(view, tasks, out.about);
   return {
     batchKeys: batchKeys(view),
     outcome: acted ? "acted" : "quiet",
     turns,
+    transient,
     outbound: outbound(delivered, askedOf(intent, purposeOf(view, tasks, link)), view, { link, choice: plan === null ? null : "accept_pending" }),
     wakeupsCancel: [...cancelled.keys()],
     wakeupsAdd: [...adds.values()],
     wakeupsRetime,
     locale,
     notes,
+    corrections,
     tasks,
     trigger: causeOf(view),
     ...effects,
@@ -783,18 +840,18 @@ export function bypassModel(view: TurnView): Extract<NoModelReason, { kind: "blo
 }
 
 /** What the person must do before anyone answers, which a follow needs too: it is the first thing a new person sends. */
-function accessNotice(view: TurnView, notice: string | null): string | null {
+function accessNotice(view: TurnView, notice: string | null): TrackedText | null {
   const e = trigger(view);
-  return e.kind === "lifecycle" && e.change === "follow" ? notice : textWithoutModel(view, notice);
+  return e.kind === "lifecycle" && e.change === "follow" && notice !== null ? { text: notice } : textWithoutModel(view, notice);
 }
 
-function textWithoutModel(view: TurnView, notice: string | null): string | null {
+function textWithoutModel(view: TurnView, notice: string | null): TrackedText | null {
   const e = trigger(view);
-  if (e.kind === "message") return notice;
+  if (e.kind === "message") return notice === null ? null : { text: notice };
   if (e.kind !== "wakeup" || e.origin !== "person") return null;
   const t = NOTICES[view.language];
   const late = isLate(e) ? `${t.lateFallback(human(e.dueAt, view.tz))}\n` : "";
-  return `${late}${t.reminder(e.note)}`;
+  return interpolated(`${late}${t.reminder(e.note)}`, e.note);
 }
 
 /**
@@ -811,7 +868,7 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
     : undefined;
   const fx = keepInHistory && why.kind !== "forget_offer" ? taskEffects(view) : { commit: NO_TASKS, replies: [] };
   let outcome: TurnOutcome;
-  let text: string | null = null;
+  let text: TrackedText | null = null;
   let note: string | null = null;
   switch (why.kind) {
     case "block":
@@ -847,16 +904,16 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
       break;
     case "command":
       outcome = "no_model";
-      text = why.text;
+      text = { text: why.text };
       note = why.note;
       break;
     case "feedback":
       outcome = "no_model";
-      text = why.text;
+      text = { text: why.text };
       break;
     case "forget_offer":
       outcome = "no_model";
-      text = FORGET_TEXT[view.language].offer;
+      text = { text: FORGET_TEXT[view.language].offer };
       break;
     case "admission":
       return planAdmissionTurn(view, why);
@@ -864,23 +921,28 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
       return assertNever(why);
   }
   const confirmed = fx.replies.map((r) => acceptNotice(t, r));
-  const joined = (lead: string | null) => [lead, ...confirmed].filter((x) => x !== null).join("\n") || null;
+  const joined = (lead: TrackedText | null) => {
+    const result = joinTracked(lead === null ? confirmed : [lead, ...confirmed]);
+    return result.text === "" ? null : result;
+  };
   const said = joined(text);
   const turns = keepInHistory && !waitForAccess ? personTurns(view) : [];
-  const kept = joined(note ?? text);
-  if (keepInHistory && kept !== null) turns.push({ role: "note", text: kept, at: view.now, eventKey: view.batch.items[0].key });
+  const kept = joined(note === null ? text : { text: note });
+  if (keepInHistory && kept !== null) turns.push({ role: "note", ...kept, at: view.now, eventKey: view.batch.items[0].key });
   const out = outbound(said === null ? [] : [said], askedOf(intentOf(trigger(view)), purposeOf(view, fx.commit, null)), view, { link: null, choice: null });
   return {
     batchKeys: batchKeys(view),
     outcome,
     ...(waitForAccess ? { waitForAccess } : {}),
     turns,
+    transient: false,
     outbound: out && replyOutsideBeta ? { ...out, replyOnly: true } : out,
     wakeupsCancel: [],
     wakeupsAdd: [],
     wakeupsRetime: [],
     locale: null,
     notes: [],
+    corrections: [],
     tasks: fx.commit,
     trigger: causeOf(view),
     ...lifecycleEffects(view),
@@ -890,17 +952,19 @@ export function planWithoutModel(view: TurnView, why: NoModelReason): TurnCommit
 }
 
 function planAdmissionTurn(view: TurnView, why: Extract<NoModelReason, { kind: "admission" }>): TurnCommit {
-  const out = outbound(why.text === null ? [] : [why.text], { intent: "reply" }, view, { link: null, choice: why.consent ? "consent" : null });
+  const out = outbound(why.text === null ? [] : [{ text: why.text }], { intent: "reply" }, view, { link: null, choice: why.consent ? "consent" : null });
   return {
     batchKeys: batchKeys(view),
     outcome: "not_admitted",
     turns: [],
+    transient: false,
     outbound: out && { ...out, replyOnly: true },
     wakeupsCancel: [],
     wakeupsAdd: [],
     wakeupsRetime: [],
     locale: null,
     notes: [],
+    corrections: [],
     tasks: NO_TASKS,
     trigger: causeOf(view),
     reachability: lifecycleEffects(view).reachability,

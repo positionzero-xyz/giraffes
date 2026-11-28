@@ -51,14 +51,14 @@ describe("LINE webhook", () => {
           identity,
           key: "line:01HZEVT0000000000000000001",
           receivedAt: T,
-          event: { kind: "message", text: "remind me at 6pm", reply: { token: "reply-token-1", expiresAt: T + 60_000 } },
+          event: { kind: "message", text: "remind me at 6pm", messageId: "1", reply: { token: "reply-token-1", expiresAt: T + 60_000 } },
         },
         {
           agent,
           identity,
           key: "line:01HZEVT0000000000000000002",
           receivedAt: T + 1000,
-          event: { kind: "message", text: "[sent a sticker]", reply: { token: "reply-token-2", expiresAt: T + 61_000 } },
+          event: { kind: "message", text: "[sent a sticker]", messageId: "2", reply: { token: "reply-token-2", expiresAt: T + 61_000 } },
         },
         {
           agent,
@@ -342,8 +342,8 @@ describe("Telegram webhook", () => {
 
   test("private messages, /start and membership changes become domain events", async () => {
     const cases: [object, object][] = [
-      [{ update_id: 1, message: { message_id: 1, date: DATE, chat: privateChat, from, text: "hello" } }, envelope("tg:1", { kind: "message", text: "hello" })],
-      [{ update_id: 2, message: { message_id: 2, date: DATE, chat: privateChat, from, photo: [{ file_id: "x" }] } }, envelope("tg:2", { kind: "message", text: "[sent a photo]" })],
+      [{ update_id: 1, message: { message_id: 1, date: DATE, chat: privateChat, from, text: "hello" } }, envelope("tg:1", { kind: "message", text: "hello", messageId: "1" })],
+      [{ update_id: 2, message: { message_id: 2, date: DATE, chat: privateChat, from, photo: [{ file_id: "x" }] } }, envelope("tg:2", { kind: "message", text: "[sent a photo]", messageId: "2" })],
       [
         { update_id: 3, message: { message_id: 3, date: DATE, chat: privateChat, from, text: "/start invite-42" } },
         envelope("tg:3", { kind: "lifecycle", change: "follow", at: DATE * 1000 }),
@@ -388,7 +388,8 @@ describe("Telegram webhook", () => {
         envelope("tg:20", {
           kind: "message",
           text: "move this to 5",
-          quote: { kind: "text", text: "I'll remind you at 4.", at: (DATE - 100) * 1000 },
+          messageId: "42",
+          quote: { kind: "text", id: "41", text: "I'll remind you at 4.", at: (DATE - 100) * 1000 },
         }),
       ],
     });
@@ -405,7 +406,7 @@ describe("Telegram webhook", () => {
     expect(received).toEqual({
       kind: "accepted",
       ignored: 0,
-      envelopes: [{ ...envelope("tg:21", { kind: "message", text: "actually, make it 5", edited: true }), receivedAt: (DATE - 100) * 1000 }],
+      envelopes: [{ ...envelope("tg:21", { kind: "message", text: "actually, make it 5", edited: true, messageId: "43" }), receivedAt: (DATE - 100) * 1000 }],
     });
   });
 
@@ -433,7 +434,7 @@ describe("Telegram webhook", () => {
     expect(received).toEqual({
       kind: "accepted",
       ignored: 0,
-      envelopes: [{ ...envelope("tg:22", { kind: "message", text: "/start", edited: true }), receivedAt: (DATE - 100) * 1000 }],
+      envelopes: [{ ...envelope("tg:22", { kind: "message", text: "/start", edited: true, messageId: "44" }), receivedAt: (DATE - 100) * 1000 }],
     });
   });
 

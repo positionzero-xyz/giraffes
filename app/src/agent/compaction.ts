@@ -32,8 +32,11 @@ export type CompactionInput = {
   readonly throughSeq: number;
   /** Turns not yet in the summary. */
   readonly turnCount: number;
-  /** Oldest first. Rows at or below `throughSeq` are long ones a placeholder stands for, kept until a page can take them. */
-  readonly oldestTurns: readonly (TurnRow & { readonly seq: number })[];
+  /**
+   * Oldest first. Rows at or below `throughSeq` are long ones a placeholder stands for, kept until a page can take them.
+   * A transient row is from a turn the person asked not to be remembered.
+   */
+  readonly oldestTurns: readonly (TurnRow & { readonly seq: number; readonly transient: boolean })[];
   readonly noteCount: number;
   readonly oldestNotes: readonly { readonly id: number; readonly text: string }[];
 };
@@ -60,7 +63,8 @@ const placeholder = (t: TurnRow) => turnLine(t, `[long message on ${stamp(t).sli
 /**
  * Folds whole turns, oldest first, then whole notes, until `budgetBytes` is full, so everything the model is asked to
  * fold is exactly what it saw. A turn too big for even an empty page is folded as a placeholder line, and its row is
- * kept for a later page that can take it. `force`: the next turn's history doesn't fit, so fold even below the trigger.
+ * kept for a later page that can take it. A transient turn is deleted with the page and never shown to the model.
+ * `force`: the next turn's history doesn't fit, so fold even below the trigger.
  */
 export function planCompaction(input: CompactionInput, budgetBytes: number, force = false): CompactionPlan | null {
   const overTurns = input.turnCount > COMPACTION.triggerTurns || (force && input.turnCount > 0);
@@ -82,8 +86,8 @@ export function planCompaction(input: CompactionInput, budgetBytes: number, forc
   for (const t of overTurns ? input.oldestTurns : []) {
     const old = t.seq <= input.throughSeq;
     if (!old && taken >= maxTurns) break;
-    turnLines.push(turnLine(t));
-    if (fits()) {
+    if (!t.transient) turnLines.push(turnLine(t));
+    if (t.transient || fits()) {
       foldSeqs.push(t.seq);
     } else {
       turnLines.pop();

@@ -2,7 +2,7 @@ export const ROUTINE_OUTBOX = `o.trigger_kind = 'wakeup' AND EXISTS (
   SELECT 1 FROM wakeup WHERE id = CAST(substr(o.event_key, length('wake:') + 1) AS INTEGER) AND repeat IS NOT NULL
 )`;
 
-export const MIGRATIONS: readonly string[] = [
+const SHARED_MIGRATIONS: readonly string[] = [
   `
   CREATE TABLE agent (
     one              INTEGER PRIMARY KEY CHECK (one = 1),
@@ -635,6 +635,9 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE outbox ADD COLUMN privacy TEXT CHECK (privacy IN ('page', 'notice', 'receipt'));
   ALTER TABLE outbox ADD COLUMN epoch INTEGER CHECK ((privacy IS NULL) = (epoch IS NULL));
   `,
+];
+
+const REPLY_QUOTE_MIGRATIONS = [
   `
   CREATE TABLE line_message (
     id          TEXT PRIMARY KEY,
@@ -648,8 +651,90 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE forget ADD COLUMN completed_at INTEGER;
   UPDATE forget SET completed_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) WHERE receipt IS NOT NULL AND completed_at IS NULL;
   `,
-  `
+];
+
+const BOX_SETUP_MIGRATION = `
   ALTER TABLE box ADD COLUMN setup TEXT;
+`;
+
+// A Telegram date covers its whole second. A LINE quote supplies an id and no date.
+export function privateQuoteMatch(id: string, at: string): string {
+  return `EXISTS (SELECT 1 FROM private_quote_id WHERE id = ${id})
+    OR EXISTS (
+      SELECT 1 FROM private_quote_window
+      WHERE (${id} IS NULL OR id_missing = 1) AND start_at <= ${at} + 999 AND end_at >= ${at}
+    )`;
+}
+
+export const DROP_PRIVATE_INBOX_QUOTES = `
+  UPDATE inbox SET payload = json_remove(payload, '$.quote')
+  WHERE CASE WHEN json_valid(payload) THEN
+    ${privateQuoteMatch("json_extract(payload, '$.quote.id')", "json_extract(payload, '$.quote.at')")}
+  END
+`;
+
+export const MIGRATIONS: readonly string[] = [
+  ...SHARED_MIGRATIONS,
+  ...REPLY_QUOTE_MIGRATIONS,
+  BOX_SETUP_MIGRATION,
+  `
+  ALTER TABLE turn ADD COLUMN transient INTEGER NOT NULL DEFAULT 0 CHECK (transient IN (0, 1));
+  `,
+  `
+  ALTER TABLE turn ADD COLUMN correction_spans TEXT;
+  ALTER TABLE outbox ADD COLUMN correction_spans TEXT;
+  `,
+  `
+  ALTER TABLE outbox ADD COLUMN transient INTEGER NOT NULL DEFAULT 0 CHECK (transient IN (0, 1));
+  UPDATE outbox SET transient = 1 WHERE EXISTS (
+    SELECT 1 FROM turn WHERE turn.event_key = outbox.event_key AND transient = 1 AND outbox.privacy IS NULL
+  );
+  ALTER TABLE forget ADD COLUMN quote_rewrites_before INTEGER;
+  UPDATE forget SET quote_rewrites_before = (
+    SELECT MAX(at) FROM (
+      SELECT at FROM turn WHERE transient = 1
+      UNION ALL SELECT received_at FROM inbox WHERE kind = 'message' AND payload = '{}'
+    )
+  );
+  CREATE TABLE quote_rewrite (
+    digest     TEXT PRIMARY KEY,
+    text       TEXT,
+    expires_at INTEGER CHECK ((text IS NULL) = (expires_at IS NULL))
+  );
+  `,
+  `
+  CREATE INDEX turn_event_key ON turn (event_key);
+  CREATE INDEX outbox_event_key ON outbox (event_key);
+  ALTER TABLE outbox ADD COLUMN telegram_message_id TEXT;
+  CREATE INDEX outbox_telegram_message ON outbox (telegram_message_id) WHERE telegram_message_id IS NOT NULL;
+  CREATE TABLE private_quote_id (id TEXT PRIMARY KEY);
+  CREATE TABLE private_quote_window (
+    start_at   INTEGER NOT NULL,
+    end_at     INTEGER NOT NULL CHECK (end_at >= start_at),
+    id_missing INTEGER NOT NULL CHECK (id_missing IN (0, 1)),
+    PRIMARY KEY (start_at, end_at, id_missing)
+  );
+
+  UPDATE outbox SET transient = 1 WHERE transient = 0 AND privacy IS NULL AND EXISTS (
+    SELECT 1 FROM turn WHERE turn.event_key = outbox.event_key AND transient = 1
+  );
+  INSERT OR IGNORE INTO private_quote_window (start_at, end_at, id_missing)
+    SELECT at, at, 1 FROM turn WHERE role = 'person' AND transient = 1;
+  INSERT OR IGNORE INTO private_quote_window (start_at, end_at, id_missing)
+    SELECT received_at, MAX(received_at, COALESCE(finished_at, received_at)), 1
+    FROM inbox WHERE kind = 'message' AND payload = '{}';
+  INSERT OR IGNORE INTO private_quote_window (start_at, end_at, id_missing)
+    SELECT created_at, MAX(created_at, COALESCE(closed_at, created_at)) + 1000, 1
+    FROM outbox WHERE transient = 1;
+  INSERT OR IGNORE INTO private_quote_id (id)
+    SELECT l.id FROM line_message l JOIN outbox o ON o.id = l.outbox_id WHERE o.transient = 1;
+  DELETE FROM line_message WHERE outbox_id IN (SELECT id FROM outbox WHERE transient = 1);
+
+  -- A legacy digest may have outlived its turn and inbox row. Only quotes we can prove safe may cross this cutoff.
+  UPDATE forget SET quote_rewrites_before = MAX(COALESCE(quote_rewrites_before, 0), CAST(unixepoch('subsec') * 1000 AS INTEGER))
+    WHERE EXISTS (SELECT 1 FROM quote_rewrite WHERE text IS NULL);
+  DELETE FROM quote_rewrite WHERE text IS NULL;
+  ${DROP_PRIVATE_INBOX_QUOTES};
   `,
 ];
 
@@ -657,11 +742,35 @@ export function migrate(storage: DurableObjectStorage): void {
   const sql = storage.sql;
   sql.exec("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
   const row = sql.exec<{ v: string }>("SELECT v FROM meta WHERE k = 'schema_version'").toArray()[0];
-  for (let i = row ? Number(row.v) : 0; i < MIGRATIONS.length; i++) {
+  const record = (version: number) =>
+    sql.exec("INSERT INTO meta (k, v) VALUES ('schema_version', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v", String(version));
+  let version = row ? Number(row.v) : 0;
+  const shared = SHARED_MIGRATIONS.length;
+  const afterQuotes = shared + REPLY_QUOTE_MIGRATIONS.length;
+  // These versions were also issued with transient and correction columns in place of the reply-quote migrations.
+  if (version > shared && version <= afterQuotes &&
+      sql.exec("SELECT 1 FROM pragma_table_info('turn') WHERE name = 'transient'").toArray().length > 0 &&
+      sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'line_message'").toArray().length === 0) {
+    version += REPLY_QUOTE_MIGRATIONS.length + 1;
+    storage.transactionSync(() => {
+      for (const migration of REPLY_QUOTE_MIGRATIONS) sql.exec(migration);
+      sql.exec(BOX_SETUP_MIGRATION);
+      record(version);
+    });
+  } else if (version > afterQuotes && version < MIGRATIONS.length &&
+      sql.exec("SELECT 1 FROM pragma_table_info('box') WHERE name = 'setup'").toArray().length === 0) {
+    // The PR already applied this version's correction migration before main added box.setup.
+    version++;
+    storage.transactionSync(() => {
+      sql.exec(BOX_SETUP_MIGRATION);
+      record(version);
+    });
+  }
+  for (let i = version; i < MIGRATIONS.length; i++) {
     const migration = MIGRATIONS[i];
     storage.transactionSync(() => {
       sql.exec(migration);
-      sql.exec("INSERT INTO meta (k, v) VALUES ('schema_version', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v", String(i + 1));
+      record(i + 1);
     });
   }
 }

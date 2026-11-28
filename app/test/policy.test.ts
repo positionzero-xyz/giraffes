@@ -181,8 +181,10 @@ describe("agent tools", () => {
       ["schedule_wakeup", ["key", "at", "note", "asked", "task"]],
       ["cancel_wakeup", ["key"]],
       ["remember", ["note"]],
+      ["correct", ["wrong", "right"]],
       ["set_locale", ["timeZone", "language"]],
       ["forget", []],
+      ["dont_remember", []],
       ["task", ["op", "ref", "kind", "title", "plan"]],
     ]);
     const task = AGENT_TOOLS.find((t) => t.name === "task")?.inputSchema;
@@ -600,7 +602,7 @@ describe("alarm and compaction", () => {
   });
 
   test("compaction folds the oldest turns, keeping the newest 30, once there are more than 60", () => {
-    const oldestTurns = Array.from({ length: 30 }, (_, i) => ({ seq: i + 1, role: "person" as const, text: `t${i + 1}`, at: NOW }));
+    const oldestTurns = Array.from({ length: 30 }, (_, i) => ({ seq: i + 1, role: "person" as const, text: `t${i + 1}`, at: NOW, transient: false }));
     const input = { summary: "", throughSeq: 0, oldestTurns, noteCount: 0, oldestNotes: [] };
     expect(planCompaction({ ...input, turnCount: 60 }, Infinity)).toBeNull();
     expect(planCompaction({ ...input, turnCount: 61 }, Infinity)?.foldThroughSeq).toBe(30);
@@ -608,7 +610,7 @@ describe("alarm and compaction", () => {
 
   test("a compaction page folds only as many whole turns as its budget holds, and a turn too big for any page as a placeholder", () => {
     const long = "ก".repeat(5_000);
-    const oldestTurns = Array.from({ length: 30 }, (_, i) => ({ seq: i + 1, role: "person" as const, text: `${i + 1} ${long}`, at: NOW }));
+    const oldestTurns = Array.from({ length: 30 }, (_, i) => ({ seq: i + 1, role: "person" as const, text: `${i + 1} ${long}`, at: NOW, transient: false }));
     const plan = planCompaction({ summary: "", throughSeq: 0, oldestTurns, turnCount: 61, noteCount: 0, oldestNotes: [] }, 24_000);
     const text = renderPrompt(plan!.prompt);
     expect(bytesOf(text)).toBeLessThanOrEqual(24_000);

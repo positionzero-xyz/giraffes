@@ -5,6 +5,8 @@ import { erasePersonLedger, personLedgerTables } from "../src/ledger/erase";
 import { personAgentKey } from "../src/domain";
 import type { AgentEvent, MessageQuote, TaskFact } from "../src/domain";
 import type { BoxReplyBackfill } from "../src/agent/turn";
+import { DELETED_ON_CORRECTION } from "../src/agent/correct";
+import { CAPPED_WORD_COLUMNS } from "../src/agent/store";
 
 type Classification = {
   saved?: string;
@@ -26,7 +28,7 @@ const durable = {
   checkout_session: { identity: "id event_key", operational: "created_at closed" },
   forget: {
     secret: "code reply_token reply_expires", identity: "op",
-    operational: "one epoch opened_at cutoff_at cutoff_seq completed_at phase listed deleted retry_at attempts notice_at notices held_told_at receipt",
+    operational: "one epoch opened_at cutoff_at cutoff_seq completed_at phase listed deleted retry_at attempts notice_at notices held_told_at receipt quote_rewrites_before",
   },
   inbox: { chat: "payload", identity: "event_key", operational: "seq kind received_at ready_at status attempts outcome finished_at catch_up catch_up_budget" },
   key_revision: { operational: "one revision" },
@@ -42,14 +44,17 @@ const durable = {
     operational: "one kid backup_asked_at revision connected_at fault failures rest_until told_on unreadable_under",
   },
   outbox: {
-    chat: "texts", secret: "reply_token reply_expires", identity: "id event_key task_id saved_snapshot",
-    operational: "trigger_kind intent ready_at status admitted_day in_doubt attempts via drop_reason created_at closed_at purpose choice reply_only saved_item saved_offset privacy epoch",
+    chat: "texts", secret: "reply_token reply_expires", identity: "id event_key task_id saved_snapshot telegram_message_id",
+    operational: "trigger_kind intent ready_at status admitted_day in_doubt attempts via drop_reason created_at closed_at purpose choice reply_only saved_item saved_offset privacy epoch correction_spans transient",
   },
   outside_approval: { identity: "id write_id owner_key decided_by", operational: "status expires_at created_at decided_at consumed_at" },
   outside_write: { saved: "args receipt", identity: "id intent operation_id", operational: "provider action epoch status attempt in_doubt lease_until failure created_at updated_at" },
   owned_group: { identity: "group_key", operational: "version" },
   plan: { identity: "own_subscription seat_subscription seat_owner", operational: "one trial_ends_at own_plan updated_at" },
+  private_quote_id: { identity: "id" },
+  private_quote_window: { operational: "start_at end_at id_missing" },
   proposal: { chat: "text", identity: "id task_id outbox_id", operational: "version kind status created_at decided_at" },
+  quote_rewrite: { chat: "text", operational: "digest expires_at" },
   rate_event: { identity: "id", operational: "kind at" },
   reservation: { privateConfig: "model", identity: "id instance", operational: "month scope purpose backend estimate_micro created_at" },
   routine_delivery: { identity: "sending_id", operational: "at" },
@@ -58,7 +63,7 @@ const durable = {
   spend_month: { operational: "scope month spent_micro" },
   task: { saved: "ref kind title status opened_at touched_at closed_at", identity: "id cause_key" },
   task_fact: { saved: "kind ref detail completes person_decision cause_kind cause_at at", identity: "id task_id cause_key" },
-  turn: { chat: "text", identity: "event_key", operational: "seq role at" },
+  turn: { chat: "text", identity: "event_key", operational: "seq role at transient correction_spans" },
   wakeup: { saved: "key note due_at status repeat repeat_anchor", identity: "id task_id created_by", operational: "kind origin created_at closed_at bookkeeping" },
 } satisfies Record<string, Classification>;
 
@@ -115,6 +120,24 @@ test("every Durable Object and D1 column has a data classification, including in
   expect(names.flat().sort()).toEqual(classifiedColumns(d1));
 });
 
+test("a correction rewrites or deletes every chat and saved column that can hold the person's words", () => {
+  const notWords = [
+    "agent.tz", "agent.checkin_local", "agent.language",
+    "task.kind", "task.status", "task.opened_at", "task.touched_at", "task.closed_at",
+    "task_fact.kind", "task_fact.ref", "task_fact.detail", "task_fact.completes", "task_fact.person_decision", "task_fact.cause_kind", "task_fact.cause_at", "task_fact.at",
+    "wakeup.due_at", "wakeup.status", "wakeup.repeat", "wakeup.repeat_anchor",
+  ];
+  const personal = Object.entries(durable).flatMap(([table, groups]: [string, Classification]) =>
+    [groups.chat, groups.saved].flatMap((columns) => columns?.split(" ").map((c) => `${table}.${c}`) ?? []),
+  );
+  const handled = [
+    ...Object.entries(CAPPED_WORD_COLUMNS).flatMap(([table, columns]) => Object.keys(columns).map((c) => `${table}.${c}`)),
+    "inbox.payload", "outbox.texts", "quote_rewrite.text", "turn.text", "task.ref", "wakeup.key",
+    ...Object.entries(DELETED_ON_CORRECTION).flatMap(([table, columns]) => columns.map((c) => `${table}.${c}`)),
+  ];
+  expect([...handled, ...notWords].sort()).toEqual(personal.sort());
+});
+
 test("ledger erase covers every person table and removes indirect enrollment and billing links", async () => {
   const person = personAgentKey({ channel: "telegram", channelUserId: "100" });
   const remaining = personAgentKey({ channel: "telegram", channelUserId: "200" });
@@ -166,7 +189,7 @@ test("ledger erase covers every person table and removes indirect enrollment and
 
 type Fields<T> = { [K in keyof T]-?: keyof Classification };
 const inbox = {
-  message: { kind: "operational", text: "chat", reply: "secret", redacted: "operational", edited: "operational", quote: "chat" },
+  message: { kind: "operational", text: "chat", reply: "secret", redacted: "operational", edited: "operational", messageId: "identity", quote: "chat" },
   lifecycle: { kind: "operational", change: "operational", at: "operational", reply: "secret", code: "secret" },
   choice: { kind: "operational", choice: "identity", at: "operational", reply: "secret", epoch: "operational" },
   wakeup: { kind: "operational", wakeupId: "identity", key: "saved", origin: "operational", note: "saved", dueAt: "saved",
@@ -175,7 +198,7 @@ const inbox = {
 } satisfies { [K in AgentEvent["kind"]]: Fields<Extract<AgentEvent, { kind: K }>> };
 const quote = {
   reference: { kind: "operational", id: "identity" },
-  text: { kind: "operational", text: "chat", at: "operational" },
+  text: { kind: "operational", text: "chat", at: "operational", id: "identity" },
 } satisfies { [K in MessageQuote["kind"]]: Fields<Extract<MessageQuote, { kind: K }>> };
 const fact = { kind: "saved", ref: "saved", detail: "saved", cause: "saved" } satisfies Fields<TaskFact>;
 const backfill = { seq: "identity", notice: "chat" } satisfies Fields<BoxReplyBackfill>;

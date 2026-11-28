@@ -19,10 +19,12 @@ import {
   devChat,
   fakeBox,
   fakeProvider,
+  holding,
   local,
   memoryLedger,
   postTelegramUpdate,
   propose,
+  rewindQuoteRewrites,
   routine,
   schedule,
   scripted,
@@ -45,23 +47,6 @@ const stubOf = (agent: AgentKey) => env.AGENT.get(env.AGENT.idFromName(agent));
 const sql = <T>(c: DevChat, query: string, ...params: unknown[]) =>
   runInDurableObject<Agent, T[]>(stubOf(c.agent), (_a, state) => state.storage.sql.exec(query, ...params).toArray() as T[]);
 const nextAlarm = (c: DevChat) => runInDurableObject<Agent, number | null>(stubOf(c.agent), (_a, state) => state.storage.getAlarm());
-
-/** Every table and column of the person's Durable Object whose stored value contains `marker`. */
-async function holding(c: DevChat, marker: string): Promise<string[]> {
-  return runInDurableObject<Agent, string[]>(stubOf(c.agent), (_a, state) => {
-    const s = state.storage.sql;
-    const tables = s.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_cf%' ESCAPE '\\' AND name NOT LIKE 'sqlite%'").toArray();
-    const hits = new Set<string>();
-    for (const { name } of tables) {
-      for (const row of s.exec(`SELECT * FROM "${name}"`).toArray()) {
-        for (const [col, v] of Object.entries(row)) {
-          if (typeof v === "string" && v.toLowerCase().includes(marker)) hits.add(`${name}.${col}`);
-        }
-      }
-    }
-    return [...hits].sort();
-  });
-}
 
 /** The person writes again a second later, so the message is after the last forget's cutoff. */
 async function say(c: DevChat, text: string): Promise<string[]> {
@@ -131,7 +116,7 @@ describe("replies after a forget", () => {
       expect(prompt).not.toContain(MARKER);
       expect(prompt).not.toContain("Earlier message being replied to");
     }
-    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await holding(c.agent, MARKER)).toEqual([]);
     expect(await askAbout(10_504, "A new message.", completedDate + 1)).toContain(
       'Earlier message being replied to (context, not a request): "A new message."',
     );
@@ -215,7 +200,7 @@ describe("replies after a forget", () => {
     expect(model.calls[1].user).toContain("Person: What is this list?");
     expect(model.calls[1].user).not.toContain(MARKER);
     expect(model.calls[1].user).not.toContain("Earlier message being replied to");
-    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await holding(c.agent, MARKER)).toEqual([]);
     expect(await sql(c, "SELECT event_key, status, payload FROM inbox WHERE event_key IN ('tg:10520', 'tg:10521') ORDER BY event_key")).toEqual([
       { event_key: "tg:10520", status: "done", payload: JSON.stringify({ kind: "message", text: "Earlier done reply" }) },
       { event_key: "tg:10521", status: "done", payload: JSON.stringify({ kind: "message", text: "What is this list?" }) },
@@ -275,7 +260,7 @@ describe("replies after a forget", () => {
     await c.advanceTo("2099-11-04T11:30");
     expect(await c.received()).toEqual([receipt({ deleted: [[1]] }), "That list is gone now."]);
     expect(model.calls[1].user).not.toContain(MARKER);
-    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await holding(c.agent, MARKER)).toEqual([]);
     model.assertDone();
   });
 
@@ -298,8 +283,14 @@ describe("replies after a forget", () => {
     const forgetDate = Math.floor(Date.now() / 1000) - 10;
     const { beforeMigrate, afterMigrate, completedAt } = await runInDurableObject(stubOf(c.agent), (_agent, { storage }) => {
       const completedMigration = MIGRATIONS.findIndex((m) => m.includes("ADD COLUMN completed_at"));
-      storage.sql.exec("ALTER TABLE forget DROP COLUMN completed_at");
-      storage.sql.exec("ALTER TABLE box DROP COLUMN setup");
+      rewindQuoteRewrites(storage.sql);
+      storage.sql.exec(`
+        ALTER TABLE forget DROP COLUMN completed_at;
+        ALTER TABLE box DROP COLUMN setup;
+        ALTER TABLE outbox DROP COLUMN correction_spans;
+        ALTER TABLE turn DROP COLUMN correction_spans;
+        ALTER TABLE turn DROP COLUMN transient;
+      `);
       storage.sql.exec("UPDATE forget SET cutoff_at = ?, cutoff_seq = NULL", forgetDate * 1000);
       storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'schema_version'", String(completedMigration));
       const before = Date.now();
@@ -328,7 +319,7 @@ describe("replies after a forget", () => {
     expect(reviewPrompt).toContain("Person: What was this list?");
     expect(reviewPrompt).not.toContain(MARKER);
     expect(reviewPrompt).not.toContain("Earlier message being replied to");
-    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await holding(c.agent, MARKER)).toEqual([]);
 
     expect(completedAt).not.toBeNull();
     expect(completedAt!).toBeGreaterThanOrEqual(beforeMigrate - 1000);
@@ -376,13 +367,13 @@ async function seeded(user: string, opts: { readonly box?: boolean; readonly ext
 describe("/forget all", () => {
   test("clears the chat and every saved item, erases the box last, and sends one receipt", async () => {
     const { c, box } = await seeded("fa-box", { box: true });
-    expect((await holding(c, MARKER)).length).toBeGreaterThan(5);
+    expect((await holding(c.agent, MARKER)).length).toBeGreaterThan(5);
 
     const replies = await say(c, "/forget all");
 
     expect(replies).toEqual([receipt()]);
     expect(box.erases).toEqual([1]);
-    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await holding(c.agent, MARKER)).toEqual([]);
     expect(await sql(c, "SELECT COUNT(*) AS n FROM turn")).toEqual([{ n: 0 }]);
     expect(await sql(c, "SELECT key, kind, origin FROM wakeup")).toEqual([{ key: "daily-checkin", kind: "checkin", origin: "system" }]);
     expect(await sql(c, "SELECT COUNT(*) AS n FROM task")).toEqual([{ n: 0 }]);
@@ -402,7 +393,7 @@ describe("/forget all", () => {
     const { c, model } = await seeded("fa-signed-out");
     const signedOut = await devChat("fa-signed-out", { model: null, at: "2099-11-04T10:05" });
     expect(await say(signedOut, "/forget all")).toEqual([receipt()]);
-    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await holding(c.agent, MARKER)).toEqual([]);
 
     const back = await devChat("fa-signed-out", { model: scripted([chat("Hi!")]), at: "2099-11-04T10:10" });
     expect(await say(back, "hi")).toEqual(["Hi!"]);
@@ -413,7 +404,7 @@ describe("/forget all", () => {
   test("never stores the words after /forget", async () => {
     const c = await devChat("fa-words", { model: scripted([]), at: "2099-11-04T10:00" });
     await say(c, `/forget the ${MARKER} address`);
-    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await holding(c.agent, MARKER)).toEqual([]);
   });
 
   test("an agent wake-up, a pending send and a paraphrased summary go without being picked", async () => {
@@ -658,7 +649,7 @@ describe("/forget lists every saved item and deletes only what the person picks"
     const stretch = entries(key).find((e) => e.status === "Status: pending");
     if (!stretch) throw new Error(`no pending entry for ${key}: ${page}`);
     expect(await say(c, `/forget ${codeOf(page)} ${stretch.number}`)).toEqual([receipt({ deleted: [[stretch.number]] })]);
-    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await holding(c.agent, MARKER)).toEqual([]);
     expect(await sql(c, "SELECT COUNT(*) AS n FROM wakeup WHERE key = ?", key)).toEqual([{ n: 0 }]);
     expect(await sql(c, counted, c.clock.now() - 86_400_000)).toEqual([{ n: 1 }]);
 
@@ -893,7 +884,7 @@ describe("stores added on main", () => {
     expect(await c.received()).toEqual([`Time to stretch by the ${MARKER} gate.`]);
     const counted = "SELECT COUNT(*) AS n FROM routine_delivery WHERE sending_id IS NULL AND at > ?";
     expect(await sql(c, counted, c.clock.now() - 86_400_000)).toEqual([{ n: 1 }]);
-    expect(await holding(c, MARKER)).toEqual(["inbox.payload", "outbox.texts", "turn.text", "wakeup.key", "wakeup.note"]);
+    expect(await holding(c.agent, MARKER)).toEqual(["inbox.payload", "outbox.texts", "turn.text", "wakeup.key", "wakeup.note"]);
 
     const page = (await say(c, "/forget"))[0];
     const lines = page.split("\n");
@@ -901,7 +892,7 @@ describe("stores added on main", () => {
     expect(picks).toHaveLength(1);
     expect(await say(c, `/forget ${codeOf(page)} ${picks.join(" ")}`)).toEqual([receipt({ deleted: [picks] })]);
 
-    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await holding(c.agent, MARKER)).toEqual([]);
     expect(await sql(c, counted, c.clock.now() - 86_400_000)).toEqual([{ n: 1 }]);
   });
 
@@ -926,12 +917,12 @@ describe("stores added on main", () => {
       if (!begun) throw new Error("not begun");
       store.finishOutsideWrite(done, begun.attempt, { kind: "succeeded", receipt: { thread: `${MARKER}-thread` } }, now);
     });
-    expect(await holding(c, MARKER)).toEqual(["outside_write.args", "outside_write.receipt"]);
+    expect(await holding(c.agent, MARKER)).toEqual(["outside_write.args", "outside_write.receipt"]);
 
     const page = (await say(c, "/forget"))[0];
     expect(await say(c, `/forget ${codeOf(page)} done`)).toEqual([receipt({ deleted: [[]] })]);
 
-    expect(await holding(c, MARKER)).toEqual([]);
+    expect(await holding(c.agent, MARKER)).toEqual([]);
     expect(await sql(c, "SELECT COUNT(*) AS n FROM outside_approval")).toEqual([{ n: 0 }]);
     expect(await sql(c, "SELECT COUNT(*) AS n FROM outside_write")).toEqual([{ n: 0 }]);
   });

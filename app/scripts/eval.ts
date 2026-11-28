@@ -288,7 +288,7 @@ async function runOne(t: Target, mode: SchemaMode, f: Fixture, rep: number): Pro
     return finish(base, out.last, out.attempts, sink, utf8.encode(TURN_SYSTEM + user).length, started, (v) => turnChecks(f, planTurn(v as Parameters<typeof planTurn>[0], view)));
   }
   const tz = tzOf(f);
-  const oldest = (f.history ?? []).map((h, i) => ({ seq: i + 1, role: h.role, text: h.text, at: at(h.at, tz) }));
+  const oldest = (f.history ?? []).map((h, i) => ({ seq: i + 1, role: h.role, text: h.text, at: at(h.at, tz), transient: false }));
   const plan = planCompaction(
     { summary: f.memory?.summary ?? "", throughSeq: 0, turnCount: f.turns, oldestTurns: oldest, noteCount: f.memory?.notes.length ?? 0, oldestNotes: (f.memory?.notes ?? []).map((text, i) => ({ id: i + 1, text })) },
     PROMPT_FLOOR_BYTES.compaction - utf8.encode(COMPACTION_SYSTEM).length,

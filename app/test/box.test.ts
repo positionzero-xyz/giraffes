@@ -801,7 +801,7 @@ describe("a turn on the person's own Claude Code session", () => {
     const s = await c.snapshot();
     expect(s.pendingWakeups.filter((w) => w.kind === "reminder").map((w) => [w.key, w.origin])).toEqual([["call-clinic", "person"]]);
     expect(s.memoryNotes).toEqual(["Allergic to peanuts."]);
-    expect(box.parses[0].agent?.tools).toEqual(["schedule_wakeup", "cancel_wakeup", "remember", "set_locale", "forget", "task"]);
+    expect(box.parses[0].agent?.tools).toEqual(["schedule_wakeup", "cancel_wakeup", "remember", "correct", "set_locale", "forget", "dont_remember", "task"]);
   });
 
   test("a refused box reminder is corrected in the same reply and every refusal is logged", async () => {
@@ -1349,7 +1349,7 @@ describe("connecting a Claude plan", () => {
         user: expect.stringContaining("Person: hello"),
         agent: {
           append: expect.stringContaining("You are Giraffe"),
-          tools: ["schedule_wakeup", "cancel_wakeup", "remember", "set_locale", "forget", "task"],
+          tools: ["schedule_wakeup", "cancel_wakeup", "remember", "correct", "set_locale", "forget", "dont_remember", "task"],
           session: null,
           sessionOwner: await boxSessionOwner(BOX_SECRET, "p:dev:fin" as AgentKey),
           resumed: false,

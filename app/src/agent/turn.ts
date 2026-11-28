@@ -624,6 +624,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
   const sends: string[] = [];
   const notes: string[] = [];
   const corrections: Correction[] = [];
+  let correctionRefused = false;
   const saved = [
     view.summary,
     ...view.notes,
@@ -719,7 +720,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
         else if (checked.ok) corrections.push(checked.correction);
         else {
           reject("correct", checked.why === "malformed" ? "tool_refused" : "not_pending", false);
-          addNotice(t.correctionNotMade);
+          correctionRefused = true;
         }
         break;
       }
@@ -732,6 +733,7 @@ export function planTurn(out: TurnOutput, given: TurnView): TurnCommit {
         assertNever(a);
     }
   }
+  if (correctionRefused && corrections.length === 0) addNotice(t.correctionNotMade);
   for (const { name, input } of out.refusedCalls ?? []) {
     const isSchedule = name === "schedule_wakeup";
     const key = (isSchedule || name === "cancel_wakeup") && typeof input.key === "string" ? parseWakeupKey(input.key) : null;

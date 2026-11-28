@@ -306,6 +306,17 @@ describe("a short word", () => {
     expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: "Nickname is Joe." }]);
   });
 
+  test("says nothing changed only when no correction in the turn went through", async () => {
+    const model = scripted([
+      turn({ actions: [{ type: "remember", note: "Nickname is Jo." }, send("Noted.")] }),
+      turn({ actions: [correct("Jo", "Joe"), correct("Nickname is Jo", "Nickname is Joe"), send("Got it, Joe.")] }),
+    ]);
+    const c = await devChat("correct-short-mixed", { model, at: "2099-11-04T10:00" });
+    await later(c, "Call me Jo.");
+    expect(await later(c, "Sorry, it is Joe, not Jo.")).toEqual(["Got it, Joe."]);
+    expect(await sql(c, "SELECT text FROM memory_note")).toEqual([{ text: "Nickname is Joe." }]);
+  });
+
   test("a Thai person hears in Thai that a refused correction changed nothing", async () => {
     const model = scripted([
       turn({ actions: [{ type: "set_locale", timeZone: "Asia/Bangkok", language: "th" }, { type: "remember", note: "แพ้ปู" }, send("รับทราบค่ะ")] }),

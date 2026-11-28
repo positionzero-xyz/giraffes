@@ -208,7 +208,20 @@ export async function readTicket(secrets: KeySecrets, token: string, now: EpochM
 
 export const KEY_REMOVED = "<a key, removed>";
 
-const PREFIXED = /(?<![A-Za-z0-9_-])(?:sk-ant-|sk-or-|oc_sk_|sk-)[A-Za-z0-9_-]{16,}/g;
+// These formats can be recognized inside URLs and across punctuation, before the token heuristics run.
+const KNOWN_FORMAT = new RegExp(
+  [
+    String.raw`-----BEGIN ([A-Z ]*PRIVATE KEY)-----[\s\S]*?-----END \1-----`,
+    String.raw`(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.(?:[A-Za-z0-9_-]*\.(?:[A-Za-z0-9_-]+\.){2}[A-Za-z0-9_-]+|[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)`,
+    String.raw`(?<=\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s:/@?#]*:)[^\s/?#]+(?=@)`,
+    String.raw`(?<![A-Za-z0-9_-])(?:xox[abposre]|xapp)-[A-Za-z0-9-]{10,}`,
+    String.raw`(?<=\bhooks\.slack\.com\/services\/)[A-Za-z0-9_\/-]+`,
+    String.raw`(?<![A-Za-z0-9_-])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9_-])`,
+    String.raw`(?<![A-Za-z0-9_-])(?:sk-ant-|sk-or-|oc_sk_|sk-|sk_live_|sk_test_|rk_live_|rk_test_|gh[pousr]_|github_pat_|glpat-|gsk_|hf_|xai-|AIza)[A-Za-z0-9_-]{16,}`,
+  ].join("|"),
+  "g",
+);
+const AWS_SECRET = /(?<=\baws[_ ]secret(?:[_ ]access[_ ]key)?[ \t]*[:=][ \t]*)[A-Za-z0-9/+=]{40,}/gi;
 /** Not after a slash, dot or @, so a link's path, a host name or an address is left alone; after = or : it counts. */
 const LONG_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-]|[/=:@.][A-Za-z0-9_-])/g;
 /** Apple and Google app passwords are sixteen lowercase letters shown as four groups of four. */
@@ -218,13 +231,81 @@ const CONTEXT_TOKEN = /(?<![A-Za-z0-9_\-/.@])[A-Za-z0-9][A-Za-z0-9_-]{11,30}(?![
 /** Thai has no word breaks, so its hints go without `\b`; a bare รหัส (code) counts only on its own, not in รหัสพัสดุ (tracking code). */
 const HINT = String.raw`\b(?:app[- ]password|password|passcode|passwd|pwd|pw|api[- ]key|token|secret)\b|รหัสผ่าน|พาสเวิร์ด|รหัส(?=[\s:=]|คือ|$)`;
 const HINT_GLOBAL = new RegExp(HINT, "gi");
-/** `password: x`, `password=x`, `รหัสผ่าน icloud: x`: a label, so the value after it is the secret whatever it looks like. */
+/** Punctuation labels override the ordinary-word exemption for candidates from the token patterns. */
 const LABEL_GAP = /^\s*(?:[^\s:=]{1,16}\s*)?[:=]\s*$/;
 /** `password is x`, `password for gmail is x`, `รหัสผ่านคือ x`. */
 const SAID_GAP = /^\s*(?:(?:\S+\s+){0,3})(?:is|was|คือ|เป็น)\s*$/i;
 /** `Mistral-Small-2603`, `deepseek-v4-1-flash-1017`, `Llama-4-Maverick-17B`: words and versions joined by dashes name a model. */
 const PRODUCT_PART = String.raw`(?:[A-Z][A-Za-z0-9]*|[a-z]+|\d+[A-Za-z]{0,2}|v\d+(?:\.\d+)?)`;
 const PRODUCT_NAME = new RegExp(String.raw`^(?:${PRODUCT_PART})(?:-(?:${PRODUCT_PART}))+$`);
+
+/** A Latin service name may sit between a Thai label and its value (`รหัสผ่าน wifi คือ`); after a bare รหัส only wifi does, since รหัส alone also means a promo or tracking code. */
+const PASSWORD_WORD = String.raw`(?<![A-Za-z0-9])(?:(?:app[- _])?(?:password|passcode|passwd|pwd|pw|pass)|pin)\b|(?:รหัสผ่าน(?:แอป)?|พาสเวิร์ด)(?:[ \t]*[A-Za-z][A-Za-z0-9._-]{0,15})?|รหัส(?:แอป)?(?:[ \t]*(?:wi-?fi|ไวไฟ))?(?=[\s:=]|คือ|เป็น)`;
+const WRAPPED_PHRASE = String.raw`(?:"[^"\r\n]+"|“[^”\r\n]+”|'[^'\r\n]+'|‘[^’\r\n]+’|\([^()\r\n]+\)|\[[^\[\]\r\n]+\]|\{[^{}\r\n]+\})(?=[.,!?;:)\]}>]*(?:\s|$))`;
+const LABELLED_VALUE = new RegExp(
+  String.raw`((?:${PASSWORD_WORD})(?:[ \t]+for[ \t]+[^\s:=]+)?["']?[ \t]*` +
+    String.raw`([:=][ \t\r\n]{0,31}|\b(?:is|was)[ \t]*[:=][ \t\r\n]{0,31}|\b(?:is|was)[ \t]+|(?:คือ|เป็น)[ \t]*)` +
+    String.raw`(?:(?:copy|paste|enter|type|please|plse):?[ \t]+)?)(${WRAPPED_PHRASE}|(?:${KEY_REMOVED}|\S)+)`,
+  "gi",
+);
+const PASSWORD_ADVICE = /^(?:use|choose|avoid|must|should|can|could)[ \t]|^(?:at[ \t]+least|do[ \t]+not)\b/i;
+const GROUPED_VALUE_START = /^[a-z]{4}(?:[- \t\u00a0]+[a-z]{4}){3}(?![A-Za-z0-9_-])/;
+const APP_PASSWORD_SHAPE = /^(?:[a-z]{4}(?:[- \t\u00a0]+[a-z]{4}){3}|[a-z]{16})$/;
+/** Apostrophes, dots, dashes, slashes, money signs and emoji appear in prose (`N/A`, `$200`, `✅`), so they don't make a value look generated. */
+const SYMBOL = /[^\p{L}\p{M}\p{N}\p{Sc}\p{Extended_Pictographic}\s_'.\/\u200d\ufe0f-]/u;
+const REVERSE_TOKEN = /(?<![A-Za-z0-9_\-/.@])[a-z]{16}(?=["'”’)\]}>]?[ \t]+(?:is|was)[ \t]+(?:(?:my|the|your)[ \t]+)?(?:access[ -]token|api[ -]key|token|app[ -]password)\b)/gi;
+const VALUE_WRAPPERS = new Map([
+  ["(", ")"], ["[", "]"], ["{", "}"], ["<", ">"], ['"', '"'], ["'", "'"], ["“", "”"], ["‘", "’"], ["`", "`"],
+]);
+const QUOTES = new Set(['"', "'", "“", "‘", "`"]);
+
+/** Letters and digits interleaved at least three times, as in `7f3a9c2e1b`, not a word and a number like `summer2026`. */
+const interleaved = (t: string) => (t.match(/[A-Za-z](?=\d)|\d(?=[A-Za-z])/g)?.length ?? 0) >= 3;
+
+/**
+ * The value after a label is removed only when it looks like a credential itself; otherwise the later passes decide, as
+ * they did before this label rule existed. A plain word after a label (`password: same as last time`) stays.
+ */
+function labelledValue(before: string, separator: string, raw: string, after: string): string | null {
+  if (raw.includes(KEY_REMOVED)) return null;
+  const closing = VALUE_WRAPPERS.get(raw[0]);
+  const wrapperEnd = closing === undefined ? -1 : raw.indexOf(closing, 1);
+  const wrapped = wrapperEnd > 1 && /^[.,!?;:)\]}>]*$/.test(raw.slice(wrapperEnd + 1));
+  const value = wrapped ? raw.slice(1, wrapperEnd) : raw;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return null;
+
+  const explicit = /[:=]/.test(separator);
+  const onLine = after.split(/[\r\n]/, 1)[0];
+  if (explicit && PASSWORD_ADVICE.test(raw + onLine)) return null;
+  // Leave a space-grouped app password that isn't closed in quotes for the four-group matcher.
+  if (!wrapped && /\s/.test(GROUPED_VALUE_START.exec((raw + onLine).replace(/^[("'“‘[{<`]/, ""))?.[0] ?? "")) return null;
+
+  const core = wrapped ? value : value.replace(/^[("'“‘[{<`]+/, "").replace(/[.,;:!?…)"'”’\]}>`]+$/, "");
+  // Quoted or bracketed, a value still needs a credential's shape (`password: "none"` stays), and one with spaces counts
+  // only as an app password, since a quoted phrase is far more often prose (`"ask me after 7pm"`) than a passphrase.
+  const quoted = wrapped && QUOTES.has(raw[0]);
+  if (core.length < (quoted ? 1 : 4)) return null;
+  const prose = wrapped && core.split(/[-\s]+/).filter((w) => COMMON_FOUR_LETTER_WORDS.has(w)).length >= 2;
+  const appPassword = APP_PASSWORD_SHAPE.test(core) && !prose;
+  if (/\s/.test(core) && !appPassword) return null;
+
+  const endsStatement = onLine.trim() === "";
+  const removed = wrapped ? before + raw[0] + KEY_REMOVED + raw.slice(wrapperEnd) : before + KEY_REMOVED;
+  if (/^pin/i.test(before)) return /^\d{4,8}$/.test(core) && endsStatement ? removed : null;
+
+  const upperAndLower = /[a-z]/.test(core) && /[A-Z]/.test(core);
+  const mixedSymbol = upperAndLower && SYMBOL.test(core);
+  const shaped = appPassword || (/\p{L}/u.test(core) && /\d/.test(core)) || /^\d{4,}$/.test(core) || mixedSymbol;
+  // A copula can introduce ordinary prose, so mid-sentence it needs a value no word looks like.
+  const strong = mixedSymbol || (upperAndLower && /\d/.test(core));
+  let counts = quoted || explicit ? shaped : strong || (endsStatement && shaped);
+  // `pass` alone is also a ticket (`boarding pass: TG628`, `season pass: summer2026`), so its value must look generated.
+  if (/^pass\b/i.test(before)) counts &&= /[a-z]/.test(core) && core.length >= 7 && (interleaved(core) || (mixedSymbol && /\d/.test(core)));
+  return counts ? removed : null;
+}
+
+const TOKEN_LABELLED =
+  /(?<![A-Za-z0-9])((?:(?:access|auth|bearer|api|session|refresh|bot)[ _-]?)?token|(?:client[ _-])?secret(?:[ _-](?:access[ _-])?key)?|api[ _-]?key)((?:[ \t]+(?:is|was))?[ \t]*[:=][ \t]*|[ \t]+(?:is|was)[ \t]+)([A-Za-z0-9_\-+/=]{8,})(?![A-Za-z0-9_\-+/=]|[.(\[][A-Za-z0-9_])/gi;
 
 /* About 660 words, so a group of a random app password is one by chance about 1 time in 700; two groups that are words means prose. */
 const COMMON_FOUR_LETTER_WORDS = new Set(
@@ -340,7 +421,15 @@ export function redactSecrets(text: string): { readonly text: string; readonly f
   let found = false;
   const secret = (replacement: string | null, original: string) => (replacement === null ? original : ((found = true), replacement));
   const out = text
-    .replace(PREFIXED, () => ((found = true), KEY_REMOVED))
+    .replace(KNOWN_FORMAT, (m) => secret(KEY_REMOVED, m))
+    .replace(AWS_SECRET, (m) => secret(KEY_REMOVED, m))
+    .replace(LABELLED_VALUE, (m, before: string, separator: string, raw: string, offset: number, whole: string) =>
+      secret(labelledValue(before, separator, raw, whole.slice(offset + m.length)), m),
+    )
+    .replace(TOKEN_LABELLED, (m, label: string, separator: string, value: string) =>
+      secret(interleaved(value) ? label + separator + KEY_REMOVED : null, m),
+    )
+    .replace(REVERSE_TOKEN, (m) => secret(KEY_REMOVED, m))
     .replace(GROUPED_APP_PASSWORD, (m, offset, whole) => secret(groupedAppPassword(m, offset, whole), m))
     .replace(CONTEXT_TOKEN, (m, offset, whole) => secret(shortSecret(m, offset, whole), m))
     .replace(LONG_TOKEN, (m, offset, whole) => secret(longSecret(m, offset, whole), m));

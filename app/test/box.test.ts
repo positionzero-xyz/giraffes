@@ -1561,20 +1561,24 @@ describe("connecting a Claude plan", () => {
 });
 
 describe("confirming disk deletion on automatic reclaim", () => {
-  async function startReclaim(user: string, reason: ReclaimReason | null, box: NonNullable<Parameters<typeof devChat>[1]["box"]>) {
+  async function startReclaim(
+    user: string, reason: ReclaimReason | null, box: NonNullable<Parameters<typeof devChat>[1]["box"]>,
+    opts: { signedIn?: true; channel?: "line" } = {},
+  ) {
     const ledger = memoryLedger();
-    const c = await devChat(user, { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", ledger, box });
+    const c = await devChat(user, { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", ledger, box, channel: opts.channel });
     await c.say("hello");
     await c.received();
     const now = c.clock.now();
     const name = box.host.kind === "fly" ? app : await box.host.nameFor(c.agent);
     await ledger.claimBox({ agent: c.agent, name, host: box.host.kind, at: now, max: 10 });
     const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+    const stateName = opts.signedIn ? "signed_in" : reason === null ? "provisioning" : "reclaiming";
     await runInDurableObject(stub, (_agent, state) => {
       state.storage.sql.exec(
         `INSERT INTO box (one, name, host, url, state, state_at, attempts, next_at, reclaim_reason)
          VALUES (1, ?, ?, ?, ?, ?, 0, ?, ?)`,
-        name, box.host.kind, box.host.urlOf(name), reason === null ? "provisioning" : "reclaiming", now, now, reason,
+        name, box.host.kind, box.host.urlOf(name), stateName, now, opts.signedIn ? null : now, reason,
       );
     });
     return { c, ledger, stub };
@@ -1782,7 +1786,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
     expect(boxRequests).toEqual(["/health", "/health", "/health"]);
     const receipt = await c.received();
     expect(receipt).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
-    expect(receipt[0]).toContain(ACCOUNT_COPY.en.reclaimedBox);
+    expect(receipt[0]).toContain(ACCOUNT_COPY.en.deletedUnwipedBox);
     expect(await testEnv.LEDGER.prepare("SELECT name FROM boxes WHERE name = ?").bind(app).first()).toBeNull();
   });
 
@@ -1838,6 +1842,38 @@ describe("confirming disk deletion on automatic reclaim", () => {
 
   const hour = 60 * 60_000;
 
+  test.each([
+    {
+      language: "en", channel: undefined,
+      disclosure: "Giraffe deleted your box and its disk while erasing your account. Giraffe could not verify a disk wipe.",
+    },
+    {
+      language: "th", channel: "line",
+      disclosure: "Giraffe ลบกล่องของคุณพร้อมดิสก์ระหว่างการลบบัญชีนี้ Giraffe ไม่สามารถยืนยันได้ว่าข้อมูลบนดิสก์ถูกลบแล้ว",
+    },
+  ] as const)("direct erase of a used, never-removed dead box sends the $language receipt", async ({ language, channel, disclosure }) => {
+    const { deps, destructive } = flyReclaim({ machine: "machine_1", boxFailure: "health", keepVolumeAfterDelete: false });
+    const person = await startReclaim(`erase-dead-direct-${language}`, null, deps, { signedIn: true, channel });
+    const { c } = person;
+    const startedAt = c.clock.now();
+    const copy = ACCOUNT_COPY[language];
+    await testEnv.LEDGER.prepare("INSERT INTO boxes (agent_key, name, host, created_at) VALUES (?, ?, 'fly', ?)")
+      .bind(c.agent, app, startedAt).run();
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erasure confirmation");
+    await c.tap(confirm.data);
+    await c.received();
+
+    await driveRetirement(person, deps, startedAt + hour - 1, true);
+    expect(destructive()).toEqual([]);
+    expect(await c.received()).toEqual([]);
+
+    await driveRetirement(person, deps, startedAt + hour, true);
+    expect(destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
+    expect(await c.received()).toEqual([expect.stringContaining(`${copy.receipt}\n\n${disclosure}\n\n${copy.flyCopies}`)]);
+  });
+
   test.each([false, true])("a dead removed box finishes erasure after one hour without claiming a wipe (restart: %s)", async (restart) => {
     const person = await eraseDeadRemovedBox("erase-dead-removed-" + restart);
     const { c, deps, startedAt, destructive, requests, boxRequests, slot } = person;
@@ -1855,7 +1891,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
     expect(boxRequests.length).toBeLessThan(12);
     const receipts = await c.received();
     expect(receipts).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
-    expect(receipts[0]).toContain(ACCOUNT_COPY.en.reclaimedBox);
+    expect(receipts[0]).toContain(ACCOUNT_COPY.en.deletedUnwipedBox);
     expect(await slot()).toBeNull();
   });
 
@@ -1870,7 +1906,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
     expect(destructive().at(-1)).toBe(appDelete);
     const receipts = await c.received();
     expect(receipts).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
-    expect(receipts[0]).not.toContain(ACCOUNT_COPY.en.reclaimedBox);
+    expect(receipts[0]).not.toContain("could not verify a disk wipe");
     expect(await slot()).toBeNull();
     expect(attempts.slice(0, 4).map((at) => (at - startedAt) / 1000)).toEqual([15, 45, 105, 225]);
   });

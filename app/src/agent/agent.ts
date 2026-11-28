@@ -604,7 +604,7 @@ export class Agent extends DurableObject<Env> {
         current = { ...current, billing };
         this.ctx.storage.kv.put(ERASE_JOB, current);
       }
-      while (current.box.kind !== "none" && current.box.kind !== "wiped" && current.box.kind !== "reclaimed") {
+      while ("box" in current.box) {
         const now = this.#deps.clock.now();
         if (current.boxRetry && now < current.boxRetry.nextAt) {
           const delay = current.boxRetry.nextAt - now;
@@ -814,6 +814,7 @@ export class Agent extends DurableObject<Env> {
       case "remove-app": {
         const removed = await fly?.removeRetiredApp(box.name);
         if (removed?.ok) {
+          if (eraseAccount && step.wipeSkipped) return { kind: "deleted-without-wipe", host: "fly" };
           return step.target.disk === null || step.wipeSkipped
             ? { kind: "reclaimed", host: "fly" }
             : { kind: "wiped", host: "fly" };
@@ -835,6 +836,7 @@ export class Agent extends DurableObject<Env> {
       texts: [[
         copy.receipt,
         ...(job.box?.kind === "reclaimed" ? [copy.reclaimedBox] : []),
+        ...(job.box?.kind === "deleted-without-wipe" ? [copy.deletedUnwipedBox] : []),
         ...(job.box?.host === "fly" ? [copy.flyCopies] : []),
         ...(job.endedSubscription ? [copy.subscriptionEnded] : []),
         copy.stripeRecords,

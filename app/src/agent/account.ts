@@ -30,7 +30,7 @@ export type EraseBoxTarget = EraseBoxReference & { readonly url: string };
 export type EraseBox =
   | { readonly kind: "none" }
   | { readonly kind: "unverified"; readonly box: EraseBoxReference }
-  | { readonly kind: "wiped" | "reclaimed"; readonly host: BoxHostKind }
+  | EraseBoxReceipt
   /**
    * Box state invariants:
    * - App absence needs app-level evidence: a 404 on the app plus a successful org app list that
@@ -62,7 +62,10 @@ type EraseLedger =
   | { readonly kind: "sweep" | "detach"; readonly invitees: readonly AgentKey[]; readonly members: readonly AgentKey[] }
   | { readonly kind: "done" };
 
-type EraseBoxReceipt = { readonly kind: "wiped" | "reclaimed"; readonly host: BoxHostKind };
+// Keep the earlier outcomes readable as stored. A legacy reclaimed receipt has no evidence of who removed the box.
+type EraseBoxReceipt =
+  | { readonly kind: "wiped" | "reclaimed"; readonly host: BoxHostKind }
+  | { readonly kind: "deleted-without-wipe"; readonly host: "fly" };
 
 type ErasureIdentity = {
   readonly id: OutboxId;
@@ -110,6 +113,7 @@ export const ACCOUNT_COPY = {
     startButton: "Start",
     receipt: "Giraffe stopped and deleted your live Giraffe data. Cloudflare restore copies can remain for up to 30 days. Your chat and AI providers may keep copies under their own policies.",
     reclaimedBox: "Your box was removed earlier. Giraffe could not verify a disk wipe.",
+    deletedUnwipedBox: "Giraffe deleted your box and its disk while erasing your account. Giraffe could not verify a disk wipe.",
     flyCopies: "Fly may retain older disk copies for up to 60 days after removal.",
     subscriptionEnded: "Any Giraffe subscriptions you owned have ended.",
     stripeRecords: "If you requested a payment link, Stripe may keep checkout records and historical chat account references, even if you didn’t pay. Stripe may also keep required payment records.",
@@ -124,6 +128,7 @@ export const ACCOUNT_COPY = {
     startButton: "เริ่ม",
     receipt: "Giraffe หยุดทำงานและลบข้อมูลบัญชีที่ใช้งานอยู่แล้ว ข้อมูลสำหรับกู้คืนของ Cloudflare อาจคงอยู่ได้ถึง 30 วัน ผู้ให้บริการแชตและ AI อาจเก็บข้อมูลตามนโยบายของตน",
     reclaimedBox: "กล่องของคุณถูกนำออกไปก่อนหน้านี้ Giraffe ไม่สามารถยืนยันได้ว่าข้อมูลบนดิสก์ถูกลบแล้ว",
+    deletedUnwipedBox: "Giraffe ลบกล่องของคุณพร้อมดิสก์ระหว่างการลบบัญชีนี้ Giraffe ไม่สามารถยืนยันได้ว่าข้อมูลบนดิสก์ถูกลบแล้ว",
     flyCopies: "Fly อาจเก็บสำเนาดิสก์เดิมไว้ถึง 60 วันหลังจากนำกล่องออก",
     subscriptionEnded: "แพ็กเกจ Giraffe แบบชำระเงินที่คุณเป็นเจ้าของสิ้นสุดแล้ว",
     stripeRecords: "หากคุณเคยขอลิงก์ชำระเงิน Stripe อาจเก็บบันทึกการเปิดหน้าชำระเงินและข้อมูลอ้างอิงบัญชีแชตเดิม แม้ว่าคุณจะไม่ได้ชำระเงิน และอาจเก็บบันทึกการชำระเงินที่จำเป็น",

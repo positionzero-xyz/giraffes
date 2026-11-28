@@ -43,11 +43,13 @@ export type EraseBox =
     readonly kind: "relocate";
     readonly box: EraseBoxTarget;
     readonly target: FlyDiskRetirement;
-    readonly resume: "wipe-fly" | "remove-volume" | "remove-app";
-  }
+  } & (
+    | { readonly resume: "wipe-fly"; readonly wipeFailures?: number }
+    | { readonly resume: "remove-volume" | "remove-app"; readonly wipeSkipped?: true }
+  )
   | { readonly kind: "locate" | "wipe-static"; readonly box: EraseBoxTarget }
-  | { readonly kind: "wipe-fly"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement; readonly verify?: boolean }
-  | { readonly kind: "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement };
+  | { readonly kind: "wipe-fly"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement; readonly verify?: boolean; readonly wipeFailures?: number }
+  | { readonly kind: "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement; readonly wipeSkipped?: true };
 
 export type EraseBilling =
   | { readonly kind: "pending"; readonly checkouts: readonly CheckoutId[]; readonly subscriptions: readonly SubscriptionId[]; readonly endedSubscription: boolean; readonly stripeRetained: boolean }

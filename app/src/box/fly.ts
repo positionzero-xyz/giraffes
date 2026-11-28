@@ -345,8 +345,8 @@ export function flyHost(cfg: FlyConfig, fetch: Fetch, log: StepLog = () => {}, t
       const volumes = await retirementVolumes(name);
       if (failed(volumes)) return volumes;
       const disks = target.disks ?? (target.disk ? [target.disk] : []);
-      // Only the disk whose wipe was proven may be deleted. A persisted target from an older
-      // revision may list extra live volumes; hold rather than promote them to trusted.
+      // A persisted target from an older revision may list extra live volumes.
+      // Only the saved mounted disk is authorized for deletion.
       if (target.disk !== null && disks.some((id) => id !== target.disk)) {
         return fail(true, "retirement target includes an unproven disk");
       }

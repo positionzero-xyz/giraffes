@@ -3,8 +3,8 @@ import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import { boxClient } from "../src/box/client";
 import { flyHost, machineConfig, type FlyConfig } from "../src/box/fly";
-import type { Fetch } from "../src/box/host";
-import { BOX, boxMessage, type BoxSay } from "../src/box/machine";
+import { staticHost, type Fetch } from "../src/box/host";
+import { BOX, boxMessage, type BoxSay, type ReclaimReason } from "../src/box/machine";
 import { boxName, boxSessionOwner, boxToken, signinTicket, type BoxName, type BoxToken } from "../src/box/names";
 import { MIGRATIONS } from "../src/agent/schema";
 import { loadConfig, type Env } from "../src/config";
@@ -1559,13 +1559,34 @@ describe("connecting a Claude plan", () => {
 });
 
 describe("confirming disk deletion on automatic reclaim", () => {
-  test.each([
-    { reason: "retired", notice: say("retired"), machine: "machine_1" },
-    { reason: "unused", notice: say("reclaimed"), machine: "machine_1" },
-    { reason: "failed", notice: say("setup_failed"), machine: null },
-  ])("keeps a $reason box reserved while its volume is still live", async ({ reason, notice, machine }) => {
+  async function startReclaim(user: string, reason: ReclaimReason, box: NonNullable<Parameters<typeof devChat>[1]["box"]>) {
     const ledger = memoryLedger();
+    const c = await devChat(user, { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", ledger, box });
+    await c.say("hello");
+    await c.received();
+    const now = c.clock.now();
+    const name = box.host.kind === "fly" ? app : await box.host.nameFor(c.agent);
+    await ledger.claimBox({ agent: c.agent, name, host: box.host.kind, at: now, max: 10 });
+    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
+    await runInDurableObject(stub, (_agent, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO box (one, name, host, url, state, state_at, attempts, next_at, reclaim_reason)
+         VALUES (1, ?, ?, ?, 'reclaiming', ?, 0, ?, ?)`,
+        name, box.host.kind, box.host.urlOf(name), now, now, reason,
+      );
+    });
+    return { c, ledger };
+  }
+
+  function flyReclaim({
+    machine, boxFailure, relistAfterAppDelete = false,
+  }: {
+    machine: string | null;
+    boxFailure?: "health" | "erase";
+    relistAfterAppDelete?: boolean;
+  }) {
     const requests: string[] = [];
+    const boxRequests: string[] = [];
     let appExists = true;
     let volumeState = "created";
     const incarnation = crypto.randomUUID();
@@ -1577,6 +1598,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
       if (path === `/v1/apps/${app}`) {
         if (method === "DELETE") {
           appExists = false;
+          if (relistAfterAppDelete) volumeState = "created";
           return new Response(null, { status: 202 });
         }
         return appExists ? Response.json({ organization: { slug: "giraffes" } }) : new Response(null, { status: 404 });
@@ -1585,14 +1607,18 @@ describe("confirming disk deletion on automatic reclaim", () => {
         return Response.json([{ id: "vol_1", state: volumeState, attached_machine_id: machine }]);
       }
       if (method === "DELETE" && (path.endsWith("/volumes/vol_1") || path.endsWith("/machines/machine_1"))) {
+        if (path.endsWith("/volumes/vol_1") && relistAfterAppDelete) volumeState = "destroyed";
         return new Response(null, { status: 202 });
       }
       return new Response(null, { status: 500 });
     });
     const client = boxClient(async (url, init) => {
       const path = new URL(url).pathname;
+      boxRequests.push(path);
+      if (boxFailure === "health") return new Response(null, { status: 503 });
       if (path === "/health") return Response.json({ ok: true, signedIn: false, authMethod: "none", box: incarnation });
       if (path === "/erase") {
+        if (boxFailure === "erase") return new Response(null, { status: 412 });
         const payload = JSON.parse(String(init?.body));
         if (payload.scope === "account" && payload.box === incarnation) {
           requests.push("box wipe");
@@ -1601,31 +1627,29 @@ describe("confirming disk deletion on automatic reclaim", () => {
       }
       return new Response(null, { status: 500 });
     });
-    const c = await devChat(`reclaim-${reason}`, {
-      model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", ledger,
-      box: { host, client, secret: BOX_SECRET, onlyFor: null, maxBoxes: 10 },
-    });
-    await c.say("hello");
-    await c.received();
-    const now = c.clock.now();
-    await ledger.claimBox({ agent: c.agent, name: app, host: "fly", at: now, max: 10 });
-    const stub = testEnv.AGENT.get(testEnv.AGENT.idFromName(c.agent));
-    await runInDurableObject(stub, (_agent, state) => {
-      state.storage.sql.exec(
-        `INSERT INTO box (one, name, host, url, state, state_at, attempts, next_at, reclaim_reason)
-         VALUES (1, ?, 'fly', ?, 'reclaiming', ?, 0, ?, ?)`,
-        app, host.urlOf(app), now, now, reason,
-      );
-    });
+    return {
+      deps: { host, client, secret: BOX_SECRET, onlyFor: null, maxBoxes: 10 },
+      requests, boxRequests,
+      destructive: () => requests.filter((request) => request === "box wipe" || request.startsWith("DELETE")),
+      confirmVolumeGone: () => { volumeState = "destroyed"; },
+    };
+  }
 
+  const volumeList = `GET /v1/apps/${app}/volumes`;
+  const volumeDelete = `DELETE /v1/apps/${app}/volumes/vol_1`;
+  const appDelete = `DELETE /v1/apps/${app}`;
+  test.each([
+    { reason: "retired", notice: say("retired"), machine: "machine_1" },
+    { reason: "unused", notice: say("reclaimed"), machine: "machine_1" },
+    { reason: "failed", notice: say("setup_failed"), machine: null },
+  ] satisfies { reason: ReclaimReason; notice: string; machine: string | null }[])("keeps a $reason box reserved while its volume is still live", async ({ reason, notice, machine }) => {
+    const { deps, destructive, confirmVolumeGone } = flyReclaim({ machine });
+    const { c, ledger } = await startReclaim(`reclaim-${reason}`, reason, deps);
     await c.alarm();
 
     expect(await c.received()).toEqual([]);
     expect((await c.snapshot()).box?.state).toBe("reclaiming");
     expect(ledger.boxes.has(c.agent)).toBe(true);
-    const volumeDelete = `DELETE /v1/apps/${app}/volumes/vol_1`;
-    const appDelete = `DELETE /v1/apps/${app}`;
-    const destructive = () => requests.filter((request) => request === "box wipe" || request.startsWith("DELETE"));
     const firstDeletes = machine ? ["box wipe", `DELETE /v1/apps/${app}/machines/${machine}`, volumeDelete] : [volumeDelete];
     expect(destructive()).toEqual(firstDeletes);
 
@@ -1635,13 +1659,77 @@ describe("confirming disk deletion on automatic reclaim", () => {
     expect(destructive().filter((request) => request === volumeDelete).length).toBeGreaterThan(1);
     expect(destructive()).not.toContain(appDelete);
 
-    volumeState = "destroyed";
+    confirmVolumeGone();
     await c.advanceTo("2099-11-04T10:03");
     expect(await c.received()).toEqual([notice]);
     expect((await c.snapshot()).box).toBeNull();
     expect(ledger.boxes.has(c.agent)).toBe(false);
     expect(destructive().filter((request) => request === "box wipe")).toHaveLength(machine ? 1 : 0);
     expect(destructive().at(-1)).toBe(appDelete);
+  });
+
+  test.each<"health" | "erase">(["health", "erase"])(
+    "a failed setup with permanent %s failure skips the wipe after three tries and waits for disk confirmation",
+    async (boxFailure) => {
+      const { deps, requests, boxRequests, destructive, confirmVolumeGone } = flyReclaim({
+        machine: "machine_1", boxFailure, relistAfterAppDelete: true,
+      });
+      const { c, ledger } = await startReclaim(`reclaim-failed-${boxFailure}`, "failed", deps);
+
+      await c.alarm();
+      expect(destructive()).toEqual([]);
+      await c.advanceTo("2099-11-04T10:01");
+      expect(destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
+      const failedPath = `/${boxFailure}`;
+      expect(boxRequests.filter((path) => path === failedPath)).toHaveLength(3);
+      expect(requests.at(-1)).toBe(volumeList);
+      expect(await c.received()).toEqual([]);
+      expect((await c.snapshot()).box?.state).toBe("reclaiming");
+      expect(ledger.boxes.has(c.agent)).toBe(true);
+
+      confirmVolumeGone();
+      await c.advanceTo("2099-11-04T10:03");
+      expect(requests.at(-1)).toBe(volumeList);
+      expect(await c.received()).toEqual([say("setup_failed")]);
+      expect((await c.snapshot()).box).toBeNull();
+      expect(ledger.boxes.has(c.agent)).toBe(false);
+      await c.advanceTo("2099-11-04T11:00");
+      expect(await c.received()).toEqual([]);
+      expect(boxRequests.filter((path) => path === failedPath)).toHaveLength(3);
+    },
+  );
+
+  test("a lapsed box with permanent health failure keeps its slot without deleting anything", async () => {
+    const { deps, boxRequests, destructive } = flyReclaim({ machine: "machine_1", boxFailure: "health" });
+    const { c, ledger } = await startReclaim("reclaim-lapsed-dead", "retired", deps);
+    await c.alarm();
+    await c.advanceTo("2099-11-05T12:00");
+
+    expect(boxRequests.filter((path) => path === "/health").length).toBeGreaterThan(3);
+    expect(destructive()).toEqual([]);
+    expect(await c.received()).toEqual([]);
+    expect((await c.snapshot()).box?.state).toBe("reclaiming");
+    expect(ledger.boxes.has(c.agent)).toBe(true);
+  });
+
+  test.each([
+    { reason: "retired", notice: say("retired") },
+    { reason: "unused", notice: say("reclaimed") },
+    { reason: "failed", notice: say("setup_failed") },
+  ] satisfies { reason: ReclaimReason; notice: string }[])("releases a $reason slot for an ownerless shared box without touching the box", async ({ reason, notice }) => {
+    const requests: string[] = [];
+    const host = staticHost({ url: "http://static.box.test", appPrefix: "gbox-" });
+    const client = boxClient(async (url) => {
+      requests.push(url);
+      return new Response(null, { status: 503 });
+    });
+    const { c, ledger } = await startReclaim(`reclaim-shared-${reason}`, reason, { host, client, secret: BOX_SECRET, onlyFor: null, maxBoxes: 10 });
+
+    await c.alarm();
+    expect(requests).toEqual([]);
+    expect(await c.received()).toEqual([notice]);
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
   });
 });
 

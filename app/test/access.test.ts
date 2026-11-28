@@ -3,7 +3,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, test } from "vitest";
 import { kidOf } from "../src/access/key";
 import type { Agent } from "../src/agent/agent";
-import { AgentStore } from "../src/agent/store";
+import { AgentStore, MESSAGE_QUIET_WINDOW_MS } from "../src/agent/store";
 import { TURN_SYSTEM } from "../src/agent/prompt";
 import { loadConfig, type Env } from "../src/config";
 import type { AgentKey, EpochMs, MicroUsd, UtcMonth } from "../src/domain";
@@ -196,7 +196,7 @@ describe("a person's own key", () => {
     await c.say("hello");
     await c.advanceTo("2099-11-04T10:05");
 
-    expect(await c.received()).toEqual([NOTICE.keyRateLimited("OpenCode Go", "2099-11-04 11:00"), NOTICE.failed]);
+    expect(await c.received()).toEqual([NOTICE.keyRateLimited("OpenCode Go", "2099-11-04 11:01"), NOTICE.failed]);
     expect(provider.seen).toHaveLength(1);
   });
 
@@ -204,7 +204,7 @@ describe("a person's own key", () => {
     const provider = fakeProvider([{ kind: "status", status: 429, retryAfter: "14400" }]);
     const c = await devChat(user, { model: null, provider, at: "2099-11-04T19:58", ...(channel === undefined ? {} : { channel }) });
     await giveKey(c.agent);
-    c.clock.set((local("2099-11-05T00:00") - 14_400_000 + deadlineOffsetMs) as EpochMs);
+    c.clock.set((local("2099-11-05T00:00") - 14_400_000 + deadlineOffsetMs - MESSAGE_QUIET_WINDOW_MS) as EpochMs);
 
     await c.say("hello");
 
@@ -232,7 +232,7 @@ describe("a person's own key", () => {
     await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_a, state) => {
       state.storage.sql.exec("UPDATE agent SET tz = 'Europe/London'");
     });
-    c.clock.set((local("2099-11-05T06:59") + 30_000) as EpochMs);
+    c.clock.set((local("2099-11-05T06:59") + 30_000 - MESSAGE_QUIET_WINDOW_MS) as EpochMs);
 
     await c.say("one more thing");
 

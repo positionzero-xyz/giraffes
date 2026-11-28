@@ -444,7 +444,7 @@ describe("trial and lapse", () => {
     c.clock.set(local("2099-11-19T08:00"));
     await c.say("anyone?");
 
-    expect(await c.received()).toEqual([NOTICE.lapsed, boxMessage("retiring", "en", null, "2 December 2099").text, NOTICE.lapsed]);
+    expect(await c.received()).toEqual([boxMessage("retiring", "en", null, "2 December 2099").text, NOTICE.lapsed, NOTICE.lapsed]);
     expect(model.calls).toHaveLength(1);
     expect(box.parses).toEqual([]);
     expect(c.logs("turn").filter((t) => t.eventKind === "message").map((t) => t.outcome)).toEqual(["acted", "no_model", "lapsed", "lapsed", "lapsed"]);

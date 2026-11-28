@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, test, vi } from "vitest";
 import { AGENT_SYSTEM } from "../src/agent/prompt";
 import { MIGRATIONS, migrate } from "../src/agent/schema";
-import { AgentStore } from "../src/agent/store";
+import { AgentStore, MESSAGE_QUIET_WINDOW_MS } from "../src/agent/store";
 import { TURN } from "../src/agent/turn";
 import type { ChannelAdapter, ChannelRegistry } from "../src/channels/channel";
 import { lineChannel } from "../src/channels/line";
@@ -17,7 +17,7 @@ import { costOf } from "../src/policy/spend";
 import { fromLocal, toLocal } from "../src/policy/time";
 import type { Env } from "../src/config";
 import worker from "../src/worker";
-import { cancel, chat, devChat, hold, local, memoryLedger, postTelegramUpdate, quiet, rewindForgetCommandSchema, routine, schedule, scripted, send, throws, turn, wall } from "./testkit";
+import { cancel, chat, devChat, hold, local, memoryLedger, postTelegramUpdate, quiet, rewindForgetCommandSchema, routine, schedule, scripted, send, throws, turn, wall, type DevChat } from "./testkit";
 
 const NOTICE = NOTICES.en;
 const inputThatSpendsTheCap = (DEV_CAP_MICRO * 1_000_000) / HAIKU_5_5.inputPerM;
@@ -47,9 +47,13 @@ describe("conversation", () => {
     const c = await devChat("ben", { model, at: "2099-11-04T10:00" });
 
     await c.post("first question");
+    c.clock.set(plusMs(c.clock.now(), MESSAGE_QUIET_WINDOW_MS));
+    const firstDrain = c.alarm();
     await until(() => model.calls.length === 1);
     await c.post("second question");
     model.release();
+    await firstDrain;
+    c.clock.set(plusMs(c.clock.now(), MESSAGE_QUIET_WINDOW_MS));
     await c.settle();
 
     expect(await c.received()).toEqual(["First answer.", "Second answer."]);
@@ -69,13 +73,13 @@ describe("conversation", () => {
     const c = await devChat("quick-batch", { model, at: "2099-11-04T10:00" });
     const start = c.clock.now();
 
-    await c.post("tomorrow");
+    await c.post("tomorrow", { advanceClock: false });
     c.clock.set(plusMs(start, 1_000));
-    await c.post("call the bank");
+    await c.post("call the bank", { advanceClock: false });
     c.clock.set(plusMs(start, 2_000));
-    await c.post("around 10");
+    await c.post("around 10", { advanceClock: false });
     c.clock.set(plusMs(start, 3_000));
-    await c.post("please");
+    await c.post("please", { advanceClock: false });
     c.clock.set(plusMs(start, 4_000));
     await c.settle();
     expect(model.calls).toHaveLength(0);
@@ -94,7 +98,7 @@ describe("conversation", () => {
     const c = await devChat("quick-single", { model, at: "2099-11-04T10:00" });
     const start = c.clock.now();
 
-    await c.post("one request");
+    await c.post("one request", { advanceClock: false });
     await c.settle();
     expect(model.calls).toHaveLength(0);
     c.clock.set(plusMs(start, 1_999));
@@ -119,6 +123,21 @@ describe("conversation", () => {
 
     expect(await c.received()).toEqual([NOTICE.noKey]);
     expect(c.channel.delivered[0].at).toBe(start);
+  });
+
+  test("a command behind waiting plain messages ends their quiet window without changing their order", async () => {
+    const model = scripted([chat("Plain answer.")]);
+    const c = await devChat("quick-command-order", { model, at: "2099-11-04T10:00" });
+    const start = c.clock.now();
+
+    await c.post("plain question", { advanceClock: false });
+    c.clock.set(plusMs(start, 1_000));
+    await c.post("/key remove");
+    await c.settle();
+
+    expect(await c.received()).toEqual(["Plain answer.", NOTICE.noKey]);
+    expect(c.channel.delivered.map((d) => d.at)).toEqual([plusMs(start, 1_000), plusMs(start, 1_000)]);
+    expect(model.calls).toHaveLength(1);
   });
 
   test("a reply quote reaches the model as context, not as the person's new words", async () => {
@@ -187,9 +206,12 @@ describe("working on it", () => {
     const c = await devChat("ida", { model, at: "2099-11-04T10:00", channel });
 
     await c.post("what's on today?");
+    c.clock.set(plusMs(c.clock.now(), MESSAGE_QUIET_WINDOW_MS));
+    const drain = c.alarm();
     await until(() => c.channel.shown.length >= 3);
     expect(await c.received()).toEqual([]);
     model.release();
+    await drain;
     await c.settle();
     const shownByReply = c.channel.shown.length;
     await new Promise((r) => setTimeout(r, 50));
@@ -355,9 +377,9 @@ describe("reminders", () => {
   });
 
   test("the agent's own wake-up can't re-arm itself for the minute it fires in", async () => {
-    const again = turn({ actions: [schedule("check", "2099-11-04T10:01", "Check again", false)] });
+    const again = turn({ actions: [schedule("check", "2099-11-04T10:02", "Check again", false)] });
     const model = scripted([
-      turn({ actions: [schedule("check", "2099-11-04T10:01", "Check the thing", false), send("OK.")] }),
+      turn({ actions: [schedule("check", "2099-11-04T10:02", "Check the thing", false), send("OK.")] }),
       again,
     ]);
     const c = await devChat("lou", { model, at: "2099-11-04T10:00" });
@@ -900,11 +922,12 @@ describe("time zone and language", () => {
     model.assertDone();
   });
 
-  async function telegramMessage(chatId: number, updateId: number, text: string, languageCode: unknown) {
+  async function telegramMessage(c: DevChat, chatId: number, updateId: number, text: string, languageCode: unknown) {
+    const sentAt = Date.UTC(2099, 10, 4, 3) as EpochMs;
     const body = {
       update_id: updateId,
       message: {
-        date: Date.UTC(2099, 10, 4, 3) / 1000,
+        date: sentAt / 1000,
         chat: { id: chatId, type: "private" },
         from: { id: chatId, is_bot: false, first_name: "Pim", language_code: languageCode },
         text,
@@ -912,6 +935,8 @@ describe("time zone and language", () => {
     };
     const response = await postTelegramUpdate(body);
     expect(response.status).toBe(200);
+    const start = plusMs(sentAt, MESSAGE_QUIET_WINDOW_MS);
+    if (!text.trimStart().startsWith("/") && start > c.clock.now()) c.clock.set(start);
   }
 
   test.each([
@@ -925,7 +950,7 @@ describe("time zone and language", () => {
   ])("a new Telegram person's $text notice uses their $code language before a model call", async ({ text, code, notice }) => {
     const c = await devChat("777000111", { model: null, at: "2099-11-04T10:00", channel: "telegram" });
 
-    await telegramMessage(777000111, 1, text, code);
+    await telegramMessage(c, 777000111, 1, text, code);
     await c.settle();
 
     expect(await c.received()).toEqual([expect.stringMatching(notice)]);
@@ -984,11 +1009,11 @@ describe("time zone and language", () => {
     const model = scripted([turn({ actions: [locale("Asia/Bangkok", "en"), send("English from now on.")] })]);
     const c = await devChat("777000111", { model, at: "2099-11-04T10:00", channel: "telegram" });
 
-    await telegramMessage(777000111, 1, "คุยภาษาอังกฤษนะ", "th");
+    await telegramMessage(c, 777000111, 1, "คุยภาษาอังกฤษนะ", "th");
     await c.settle();
     expect(await c.received()).toEqual(["English from now on."]);
 
-    await telegramMessage(777000111, 2, "/key", "th");
+    await telegramMessage(c, 777000111, 2, "/key", "th");
     await c.settle();
     expect(await c.received()).toEqual([expect.stringMatching(/^Add your API key/)]);
     model.assertDone();
@@ -1367,6 +1392,7 @@ describe("reachability", () => {
       update_id: 10_511,
       message: { chat: privateChat, date: c.clock.now() / 1000, text: "Are you there?" },
     })).status).toBe(200);
+    c.clock.set(plusMs(c.clock.now(), MESSAGE_QUIET_WINDOW_MS));
     await c.settle();
     expect(model.calls).toHaveLength(2);
     expect(await c.received()).toEqual(["Welcome back!"]);
@@ -1396,10 +1422,11 @@ describe("housekeeping", () => {
     const model = scripted(replies, { compaction: [throws(), throws()] });
     const c = await devChat("oli", { model, at: "2099-11-04T10:00" });
     const compactions = () => model.calls.filter((call) => call.purpose === "compaction").length;
-    for (let i = 0; i < 30; i++) await c.say(`message ${i}`);
+    for (let i = 0; i < 30; i++) await c.say(`message ${i}`, { at: local("2099-11-04T10:00") });
     expect(compactions()).toBe(0);
 
     await c.post("message 30");
+    c.clock.set(plusMs(c.clock.now(), MESSAGE_QUIET_WINDOW_MS));
     for (let i = 0; i < 5; i++) await c.alarm();
 
     expect(compactions()).toBe(1);
@@ -1425,7 +1452,7 @@ describe("housekeeping", () => {
     const replies = Array.from({ length: 31 }, (_, i) => chat(`Reply ${i}.`));
     const model = scripted(replies, { compaction: [{ kind: "fail", failure: "invalid_output" }, { kind: "output", value: { summary: "Summary." } }] });
     const c = await devChat("cyd", { model, at: "2099-11-04T10:00" });
-    for (let i = 0; i < 31; i++) await c.say(`message ${i}`);
+    for (let i = 0; i < 31; i++) await c.say(`message ${i}`, { at: local("2099-11-04T10:00") });
 
     await c.advanceTo("2099-11-04T12:00");
 

@@ -113,13 +113,14 @@ describe("work that began before a forget can't save or send after it", () => {
 
     await c.post("where do I live again?", { at: t });
     await until(() => model.calls.length === 1);
-    await c.post("what's the weather tomorrow?", { at: (t + 5000) as EpochMs });
+    await c.post("what's the weather tomorrow?", { at: (t + 5000) as EpochMs, advanceClock: false });
     const { op } = await begin(c, { at: (t + 1000) as EpochMs, seq: null });
     model.release();
     await c.settle();
     expect(await c.received()).toEqual([]);
 
     await end(c, op);
+    c.clock.set((t + 7000) as EpochMs);
     await c.settle();
     expect(await c.received()).toEqual(["Tomorrow looks sunny."]);
     expect(model.calls[1].user).not.toContain("where do I live");
@@ -477,6 +478,7 @@ describe("the provider cutoff", () => {
     const c = await devChat("Ucutoffline", { model: scripted([chat("Got it."), chat("Hello again!")]), channel: "line", at: "2099-11-04T10:00" });
     const t0 = c.clock.now();
     expect(await enqueue(lineEnvelope(c, "seen-before", t0))).toBe("queued");
+    c.clock.set((c.clock.now() + 2000) as EpochMs);
     await c.settle();
     await c.received();
 
@@ -494,6 +496,7 @@ describe("the provider cutoff", () => {
     expect(await stored(c, "line:seen-before")).toBe(0);
 
     expect(await enqueue(lineEnvelope(c, "after", cutoff + 1))).toBe("queued");
+    c.clock.set((c.clock.now() + 2000) as EpochMs);
     await c.settle();
     expect(await c.received()).toEqual(["Hello again!"]);
   });

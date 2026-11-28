@@ -2144,7 +2144,7 @@ export class Agent extends DurableObject<Env> {
     const now = this.#deps.clock.now();
     const catchUp = await this.#catchUpAccess(now);
     if (this.#erasure()) return;
-    const r = this.#store.readiness(now);
+    const r = this.#store.readiness(now, catchUp?.budget ?? null);
     const a = this.#store.agent();
     const held = this.#store.held();
     const fireTimes = a && !held && !r.channelEventWaiting ? r.earliestWakeups.map((w) => fireAt(w, a.tz)) : [];

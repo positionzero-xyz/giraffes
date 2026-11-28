@@ -4,9 +4,9 @@ import { ADMISSION } from "../src/agent/admission";
 import { loadConfig, type Env } from "../src/config";
 import { MIGRATIONS, migrate } from "../src/agent/schema";
 import { AgentStore } from "../src/agent/store";
-import { eventKey, type AgentKey, type InviteCode } from "../src/domain";
+import { eventKey, type AgentKey, type EpochMs, type InviteCode } from "../src/domain";
 import { NOTICES } from "../src/notices";
-import { chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, postTelegramUpdate, rewindForgetCommandSchema, type DevChat, type MemoryLedger, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
+import { advancePastQuietWindow, chat, devChat, fakeBox, fakeProvider, giveKey, local, memoryLedger, postTelegramUpdate, rewindForgetCommandSchema, type DevChat, type MemoryLedger, schedule, scripted, send, STRIPE_VARS, turn } from "./testkit";
 
 const t = NOTICES.en;
 const FULL_BETA = "The beta is full right now. There's no date for new places yet. To check again, send your invite code here.";
@@ -74,6 +74,7 @@ describe("admission to the beta", () => {
       { ADMISSION: "beta" },
     );
     expect(response.status).toBe(200);
+    advancePastQuietWindow(c.clock, "hello", Date.UTC(2099, 10, 4, 3) as EpochMs);
     await c.settle();
 
     expect(await c.received()).toEqual([notice]);

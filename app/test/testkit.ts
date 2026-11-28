@@ -22,7 +22,7 @@ import type { QuotaReading } from "../src/policy/quota";
 import { DEFAULT_TIME_ZONE, fromLocal, toLocal } from "../src/policy/time";
 import { devLane, DEV_URL_SCRIPTED, type IncludedConfig, type KeysConfig } from "../src/access/access";
 import { seal } from "../src/access/key";
-import { AgentStore } from "../src/agent/store";
+import { AgentStore, MESSAGE_QUIET_WINDOW_MS } from "../src/agent/store";
 import { MIGRATIONS } from "../src/agent/schema";
 import { connect, SecretKey, type Fetch, type ProviderTimeouts, type SchemaMode } from "../src/model/client";
 import { defaultModelOf, PROVIDERS, type ProviderId } from "../src/model/providers";
@@ -247,7 +247,7 @@ export type DevChat = {
   readonly model: ScriptedModel;
   readonly clock: FakeClock;
   readonly channel: ScriptedChannel;
-  post(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<Response>;
+  post(text: string, opts?: { readonly id?: string; readonly at?: EpochMs; readonly advanceClock?: boolean }): Promise<Response>;
   say(text: string, opts?: { readonly id?: string; readonly at?: EpochMs }): Promise<void>;
   /** The person taps a button whose data is `data`, such as "a:1.1". */
   tap(data: string): Promise<void>;
@@ -261,6 +261,12 @@ export type DevChat = {
   snapshot(): Promise<AgentSnapshot>;
   logs<S extends LogRow["stream"]>(stream: S): Extract<LogRow, { stream: S }>[];
 };
+
+export function advancePastQuietWindow(clock: FakeClock, text: string, at: EpochMs): void {
+  if (text.trimStart().startsWith("/")) return;
+  const start = (at + MESSAGE_QUIET_WINDOW_MS) as EpochMs;
+  if (start > clock.now()) clock.set(start);
+}
 
 let messageIds = 0;
 
@@ -305,6 +311,7 @@ export async function devChat(
   const keyOf = (id: string) => (identity.channel === "line" ? eventKey.line(id) : eventKey.telegram(++messageIds));
   let seen = 0;
   const nextAlarm = () => runInDurableObject(stub, (_agent, state) => state.storage.getAlarm());
+  const pastQuietWindow = (text: string, at: EpochMs) => advancePastQuietWindow(clock, text, at);
 
   const chat: DevChat = {
     agent: personAgentKey(identity),
@@ -312,15 +319,25 @@ export async function devChat(
     clock,
     channel,
     async post(text, o = {}) {
-      const body = { user, text, id: o.id ?? `m${++messageIds}`, at: o.at ?? clock.now() };
-      if (identity.channel === "dev") return SELF.fetch("https://agent.test/webhook/dev", { method: "POST", body: JSON.stringify(body) });
-      const at = body.at as EpochMs;
-      await stub.enqueue({ agent: personAgentKey(identity), identity, key: keyOf(body.id), receivedAt: at, event: { kind: "message", text } });
-      return new Response("ok");
+      const at = o.at ?? clock.now();
+      const body = { user, text, id: o.id ?? `m${++messageIds}`, at };
+      const res = identity.channel === "dev"
+        ? await SELF.fetch("https://agent.test/webhook/dev", { method: "POST", body: JSON.stringify(body) })
+        : (await stub.enqueue({ agent: personAgentKey(identity), identity, key: keyOf(body.id), receivedAt: at, event: { kind: "message", text } }), new Response("ok"));
+      if ((o.advanceClock ?? true) && !text.trimStart().startsWith("/")) {
+        const before = clock.now();
+        pastQuietWindow(text, at);
+        if (clock.now() !== before) {
+          await runInDurableObject(stub, (agent, state) => state.waitUntil(agent.alarm()));
+        }
+      }
+      return res;
     },
     async say(text, o) {
+      const at = o?.at ?? clock.now();
       const res = await chat.post(text, o);
       if (!res.ok) throw new Error(`webhook answered ${res.status}`);
+      pastQuietWindow(text, at);
       await chat.settle();
     },
     async tap(data) {
@@ -331,7 +348,9 @@ export async function devChat(
     async event(e) {
       const id = `e${++messageIds}`;
       const key = identity.channel === "dev" ? eventKey.dev(id) : keyOf(id);
-      await stub.enqueue({ agent: personAgentKey(identity), identity, key, receivedAt: clock.now(), event: e });
+      const at = clock.now();
+      await stub.enqueue({ agent: personAgentKey(identity), identity, key, receivedAt: at, event: e });
+      if (e.kind === "message") pastQuietWindow(e.text, at);
       await chat.settle();
     },
     async remove() {

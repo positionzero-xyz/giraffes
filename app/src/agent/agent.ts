@@ -611,7 +611,8 @@ export class Agent extends DurableObject<Env> {
           return await this.#retryErasure(current.billing.kind === "pending" ? Math.min(delay, ACCOUNT_RETRY_MS) : delay);
         }
         const box = await this.#retireBoxStep({ ...current, eraseAccount: true });
-        if (box.kind === "relocate" || box === current.box) {
+        const awaitingDiskConfirmation = box.kind === "remove-volume" && current.box.kind === "remove-volume";
+        if (box.kind === "relocate" || box === current.box || awaitingDiskConfirmation) {
           return await this.#holdEraseBox({ ...current, box });
         }
         current = { ...current, box };
@@ -764,11 +765,11 @@ export class Agent extends DurableObject<Env> {
           // A disk that disappears before the box acknowledged a wipe never becomes a wiped box.
           return step.resume === "wipe-fly"
             ? { kind: "reclaimed", host: "fly" }
-            : { kind: "remove-app", box, target: step.target, wipeSkipped: step.wipeSkipped };
+            : { kind: "remove-app", box, target: step.target, wipeSkipped: step.wipeSkipped, diskDeleteAccepted: step.diskDeleteAccepted };
         }
         return step.resume === "wipe-fly"
           ? { kind: "wipe-fly", box, target: step.target, verify: true, wipeFailures: step.wipeFailures, wipeFailedAt: step.wipeFailedAt }
-          : { kind: step.resume, box, target: step.target, wipeSkipped: step.wipeSkipped };
+          : { kind: step.resume, box, target: step.target, wipeSkipped: step.wipeSkipped, diskDeleteAccepted: step.diskDeleteAccepted };
       }
       case "wipe-static":
       case "wipe-fly": {
@@ -806,21 +807,26 @@ export class Agent extends DurableObject<Env> {
       }
       case "remove-volume": {
         const retired = await fly?.retireWipedDisk(box.name, step.target);
-        if (retired?.ok) return { ...step, kind: "remove-app" };
-        return retired && !retired.ok && retired.missing
-          ? { kind: "relocate", box, target: step.target, resume: "remove-volume", wipeSkipped: step.wipeSkipped }
+        const progress = eraseAccount && step.wipeSkipped && retired?.diskDeleteAccepted
+          ? { ...step, diskDeleteAccepted: true } satisfies EraseBox
           : step;
+        if (retired?.ok) return { ...progress, kind: "remove-app" };
+        return retired?.missing
+          ? { ...progress, kind: "relocate", resume: "remove-volume" }
+          : progress;
       }
       case "remove-app": {
         const removed = await fly?.removeRetiredApp(box.name);
         if (removed?.ok) {
-          if (eraseAccount && step.wipeSkipped) return { kind: "deleted-without-wipe", host: "fly" };
+          if (eraseAccount && step.wipeSkipped && step.diskDeleteAccepted) {
+            return { kind: "reclaimed", host: "fly", deletedWithoutWipe: true };
+          }
           return step.target.disk === null || step.wipeSkipped
             ? { kind: "reclaimed", host: "fly" }
             : { kind: "wiped", host: "fly" };
         }
         return removed && !removed.ok && removed.missing
-          ? { kind: "relocate", box, target: step.target, resume: "remove-app", wipeSkipped: step.wipeSkipped }
+          ? { ...step, kind: "relocate", resume: "remove-app" }
           : step;
       }
     }
@@ -835,8 +841,7 @@ export class Agent extends DurableObject<Env> {
       id: job.id, to: job.to, intent: "requested", reply: job.reply,
       texts: [[
         copy.receipt,
-        ...(job.box?.kind === "reclaimed" ? [copy.reclaimedBox] : []),
-        ...(job.box?.kind === "deleted-without-wipe" ? [copy.deletedUnwipedBox] : []),
+        ...(job.box?.kind === "reclaimed" ? [job.box.deletedWithoutWipe ? copy.deletedUnwipedBox : copy.reclaimedBox] : []),
         ...(job.box?.host === "fly" ? [copy.flyCopies] : []),
         ...(job.endedSubscription ? [copy.subscriptionEnded] : []),
         copy.stripeRecords,

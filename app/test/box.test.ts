@@ -1,5 +1,5 @@
 import { env as testEnv, runInDurableObject } from "cloudflare:test";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import { boxClient } from "../src/box/client";
 import { flyHost, machineConfig, type FlyConfig } from "../src/box/fly";
@@ -242,7 +242,7 @@ describe("fly host", () => {
     const found = await host.retirementTarget(app);
     expect(found).toEqual({ ok: true, target: { disk: "vol_1", machine: "machine_1", disks: ["vol_1"] } });
     if (!found.ok) throw new Error(found.detail);
-    expect(await host.retireWipedDisk(app, found.target)).toMatchObject({ ok: false, retryable: true });
+    expect(await host.retireWipedDisk(app, found.target)).toMatchObject({ ok: false, retryable: true, diskDeleteAccepted: true });
     expect(requests).toContain(`DELETE /v1/apps/${app}/volumes/vol_1`);
     expect(requests).not.toContain(`DELETE /v1/apps/${app}`);
     volumeLive = false;
@@ -323,7 +323,7 @@ describe("fly host", () => {
     const found = await host.retirementTarget(app);
     expect(found).toEqual({ ok: true, target: { disk: null, machine: null, disks: ["vol_old"] } });
     if (!found.ok) throw new Error(found.detail);
-    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true });
+    expect(await host.retireWipedDisk(app, found.target)).toEqual({ ok: true, diskDeleteAccepted: true });
     expect(deletes).toEqual([`/v1/apps/${app}/volumes/vol_old`]);
   });
 
@@ -1872,6 +1872,33 @@ describe("confirming disk deletion on automatic reclaim", () => {
     await driveRetirement(person, deps, startedAt + hour, true);
     expect(destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, volumeDelete, appDelete]);
     expect(await c.received()).toEqual([expect.stringContaining(`${copy.receipt}\n\n${disclosure}\n\n${copy.flyCopies}`)]);
+  });
+
+  test("erasing a dead box keeps the earlier wording when the disk disappears before cleanup", async () => {
+    const fly = flyReclaim({ machine: "machine_1", boxFailure: "health" });
+    const person = await startReclaim("erase-dead-disk-gone", null, fly.deps, { signedIn: true });
+    const { c } = person;
+    const startedAt = c.clock.now();
+    await testEnv.LEDGER.prepare("INSERT INTO boxes (agent_key, name, host, created_at) VALUES (?, ?, 'fly', ?)")
+      .bind(c.agent, app, startedAt).run();
+    await c.say("/erase");
+    const confirm = c.channel.delivered.at(-1)?.button;
+    if (!confirm) throw new Error("missing erasure confirmation");
+    await c.tap(confirm.data);
+    await c.received();
+
+    await driveRetirement(person, fly.deps, startedAt + hour - 1, true);
+    expect(fly.destructive()).toEqual([]);
+    vi.spyOn(fly.deps.client, "health").mockImplementationOnce(async () => {
+      fly.confirmVolumeGone();
+      return { kind: "unavailable", detail: "box offline" };
+    });
+    await driveRetirement(person, fly.deps, startedAt + hour, true);
+
+    expect(fly.destructive()).toEqual([`DELETE /v1/apps/${app}/machines/machine_1`, appDelete]);
+    const { reclaimedBox, flyCopies } = ACCOUNT_COPY.en;
+    expect(await c.received()).toEqual([expect.stringContaining(`${reclaimedBox}\n\n${flyCopies}`)]);
+    expect(await testEnv.LEDGER.prepare("SELECT name FROM boxes WHERE name = ?").bind(app).first()).toBeNull();
   });
 
   test.each([false, true])("a dead removed box finishes erasure after one hour without claiming a wipe (restart: %s)", async (restart) => {

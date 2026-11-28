@@ -48,11 +48,16 @@ export type EraseBox =
     readonly target: FlyDiskRetirement;
   } & (
     | { readonly resume: "wipe-fly"; readonly wipeFailures?: number; readonly wipeFailedAt?: EpochMs }
-    | { readonly resume: "remove-volume" | "remove-app"; readonly wipeSkipped?: true }
+    | ({ readonly resume: "remove-volume" | "remove-app" } & EraseDiskRemoval)
   )
   | { readonly kind: "locate" | "wipe-static"; readonly box: EraseBoxTarget }
   | { readonly kind: "wipe-fly"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement; readonly verify?: boolean; readonly wipeFailures?: number; readonly wipeFailedAt?: EpochMs }
-  | { readonly kind: "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement; readonly wipeSkipped?: true };
+  | ({ readonly kind: "remove-volume" | "remove-app"; readonly box: EraseBoxTarget; readonly target: FlyDiskRetirement } & EraseDiskRemoval);
+
+type EraseDiskRemoval = {
+  readonly wipeSkipped?: true;
+  readonly diskDeleteAccepted?: true;
+};
 
 export type EraseBilling =
   | { readonly kind: "pending"; readonly checkouts: readonly CheckoutId[]; readonly subscriptions: readonly SubscriptionId[]; readonly endedSubscription: boolean; readonly stripeRetained: boolean }
@@ -62,10 +67,10 @@ type EraseLedger =
   | { readonly kind: "sweep" | "detach"; readonly invitees: readonly AgentKey[]; readonly members: readonly AgentKey[] }
   | { readonly kind: "done" };
 
-// Keep the earlier outcomes readable as stored. A legacy reclaimed receipt has no evidence of who removed the box.
+// Older deployments must be able to finish a job that has already retired its box.
 type EraseBoxReceipt =
-  | { readonly kind: "wiped" | "reclaimed"; readonly host: BoxHostKind }
-  | { readonly kind: "deleted-without-wipe"; readonly host: "fly" };
+  | { readonly kind: "wiped"; readonly host: BoxHostKind }
+  | { readonly kind: "reclaimed"; readonly host: BoxHostKind; readonly deletedWithoutWipe?: true };
 
 type ErasureIdentity = {
   readonly id: OutboxId;

@@ -537,7 +537,7 @@ describe("admission to the beta", () => {
     expect(await doRows(c.agent, "SELECT status, drop_reason FROM outbox")).toEqual([{ status: "dropped", drop_reason: "removed" }]);
 
     await runInDurableObject(env.AGENT.get(env.AGENT.idFromName(c.agent)), (_a, state) =>
-      new AgentStore(state.storage).notifyOnce("late", eventKey.billing("late"), { texts: ["A late push."], note: "A late push." }, local("2099-11-04T10:01")),
+      new AgentStore(state.storage).notifyOnce("late", eventKey.billing("late"), { texts: ["A late push."], note: "A late push." }, local("2099-11-04T10:01"), "background"),
     );
     c.clock.set(local("2099-11-04T10:30"));
     await c.settle();

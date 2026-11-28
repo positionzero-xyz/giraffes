@@ -795,7 +795,7 @@ describe("every key write is compare-and-set on the key's revision", () => {
       const now = local("2099-11-04T10:00");
       const writes = [
         store.reseal({ kid: "stale", iv: new Uint8Array(12), ciphertext: new Uint8Array(4) }, stale),
-        store.restKey("credential", null, { key: eventKey.access("stale"), message: { texts: ["stale"], note: "stale" } }, "2099-11-04" as LocalDate, now, stale),
+        store.restKey("credential", null, { key: eventKey.access("stale"), message: { texts: ["stale"], note: "stale" } }, "2099-11-04" as LocalDate, now, "background", stale),
         store.setBackup(true, now, stale),
         store.setKeyCap(1 as MicroUsd, stale),
         store.removeKey(stale),

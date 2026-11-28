@@ -716,6 +716,78 @@ describe("a turn on the person's own Claude Code session", () => {
     return c;
   }
 
+  test("a box notice produced by an alarm waits for quiet hours", async () => {
+    const box = fakeBox({ signedIn: true });
+    box.reachable = false;
+    const c = await devChat("quiet-box", { model: scripted([]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("/claude");
+    expect(await c.received()).toEqual([say("setting_up")]);
+
+    box.reachable = true;
+    c.clock.set(local("2099-11-04T23:00"));
+    await c.alarm();
+
+    const connected = () => c.channel.delivered.filter((d) => d.text === say("connected")).map((d) => d.at);
+    expect(connected()).toEqual([]);
+    await c.advanceTo("2099-11-05T08:00");
+    expect(connected()).toEqual([local("2099-11-05T08:00")]);
+  });
+
+  test("a notice answering /claude goes out during quiet hours while the alarm's connected notice waits", async () => {
+    const box = fakeBox({ signedIn: true });
+    box.reachable = false;
+    const c = await devChat("quiet-box-answer", { model: scripted([chat("Hi.")]), at: "2099-11-04T10:00", box: box.deps });
+    await c.say("Hi");
+    await c.received();
+    await giveKey(c.agent);
+
+    c.clock.set(local("2099-11-04T23:00"));
+    await c.say("/claude");
+
+    expect(await c.received()).toEqual([say("setting_up"), NOTICE.backupAsk("OpenCode Go")]);
+    box.reachable = true;
+    await c.alarm();
+    const connected = () => c.channel.delivered.filter((d) => d.text === say("connected")).map((d) => d.at);
+    expect(connected()).toEqual([]);
+    await c.advanceTo("2099-11-05T08:00");
+    expect(connected()).toEqual([local("2099-11-05T08:00")]);
+  });
+
+  test("an alarm notice is not dropped or counted when the day's unasked cap is already used", async () => {
+    const box = fakeBox({ signedIn: true });
+    box.reachable = false;
+    const model = scripted([
+      turn({ actions: [
+        schedule("cap-one", "2099-11-04T11:00", "One", false),
+        schedule("cap-two", "2099-11-04T12:00", "Two", false),
+        schedule("cap-three", "2099-11-04T13:00", "Three", false),
+        send("Watching."),
+      ] }),
+      chat("One."),
+      chat("Two."),
+      chat("Three."),
+    ]);
+    const c = await devChat("quiet-box-cap", { model, at: "2099-11-04T10:00", box: box.deps });
+    await c.say("Watch these for me");
+    expect(await c.received()).toEqual(["Watching."]);
+    await c.advanceTo("2099-11-04T15:00");
+    expect(await c.received()).toEqual(["One.", "Two.", "Three."]);
+    expect((await c.snapshot()).unaskedSentToday).toBe(3);
+    const unaskedRows = c.logs("unasked").length;
+
+    c.clock.set(local("2099-11-04T23:00"));
+    await c.say("/claude");
+    await c.received();
+    box.reachable = true;
+    await c.alarm();
+
+    const connected = () => c.channel.delivered.filter((d) => d.text === say("connected")).map((d) => d.at);
+    expect(connected()).toEqual([]);
+    await c.advanceTo("2099-11-05T08:00");
+    expect(connected()).toEqual([local("2099-11-05T08:00")]);
+    expect(c.logs("unasked")).toHaveLength(unaskedRows);
+  });
+
   test("its tool calls are applied like any turn's actions: the reminder is pending, the note kept, and the reply sent", async () => {
     const { box, c } = await signedIn("agt");
     box.replies.push({

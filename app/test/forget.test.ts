@@ -363,7 +363,7 @@ describe("branches that tell the person something", () => {
     await c.received();
     const { op } = await begin(c);
     await runInDurableObject<Agent, void>(stubOf(c.agent), (_a, state) =>
-      new AgentStore(state.storage).notifyOnce("plan", eventKey.billing("plan"), { texts: ["Your plan changed."], note: "Your plan changed." }, c.clock.now()),
+      new AgentStore(state.storage).notifyOnce("plan", eventKey.billing("plan"), { texts: ["Your plan changed."], note: "Your plan changed." }, c.clock.now(), "background"),
     );
     await c.settle();
     const alarm = await nextAlarm(c);

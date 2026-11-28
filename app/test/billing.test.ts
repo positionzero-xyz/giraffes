@@ -1230,6 +1230,22 @@ describe("checkout and the portal", () => {
 });
 
 describe("stripe webhook", () => {
+  test("a plan notice produced by a Stripe event waits for quiet hours", async () => {
+    const kit = billingOn();
+    const c = await devChat("quiet-plan", { model: scripted([]), at: "2099-11-04T22:00", billing: kit.deps });
+    await c.say("/plan");
+    await c.received();
+
+    c.clock.set(local("2099-11-04T23:00"));
+    expect((await stripeChange(kit, { user: "quiet-plan", sub: "sub_quiet_plan", plan: "standard", status: "active", type: "customer.subscription.created" })).status).toBe(200);
+    await c.settle();
+
+    const active = () => c.channel.delivered.filter((d) => d.text === NOTICE.planActive("Standard")).map((d) => d.at);
+    expect(active()).toEqual([]);
+    await c.advanceTo("2099-11-05T08:00");
+    expect(active()).toEqual([local("2099-11-05T08:00")]);
+  });
+
   test("a bad, stale or missing signature is refused and changes nothing", async () => {
     const kit = billingOn({ TRIAL_DAYS: "0" });
     const c = await devChat("fay", { model: scripted([]), at: "2099-11-04T10:00", billing: kit.deps });

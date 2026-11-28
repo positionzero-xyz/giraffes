@@ -9,7 +9,7 @@ import { modelCallRow, type Backend, type ModelCallStatus } from "../ledger/ledg
 import { NOTICES, type KeyPageError } from "../notices";
 import { OUTPUTS, outputOf, type Output } from "../agent/purposes";
 import type { Claim } from "../agent/forget";
-import type { AgentStore, Reservation } from "../agent/store";
+import type { AgentStore, NoticeTrigger, Reservation } from "../agent/store";
 import {
   jsonSchemaOf,
   looseUser,
@@ -148,6 +148,7 @@ export type AccessDeps = {
   readonly clock: Clock;
   /** Random per DO instance; marks this instance's reservations so recovery leaves them alone. */
   readonly instance: string;
+  readonly noticeTrigger: NoticeTrigger;
 };
 
 export type CallRequest<P extends Purpose> = {
@@ -494,7 +495,7 @@ export class ModelAccess {
     const text = this.#faultText(k, fault, until);
     const today = localDate(now, store.agent()?.tz ?? DEFAULT_TIME_ZONE);
     const notice = claim.live() ? { key: eventKey.access(`fault:${now}`), message: { texts: [text] as const, note: text } } : null;
-    const r = store.restKey(fault, until, notice, today, now, k.revision, under);
+    const r = store.restKey(fault, until, notice, today, now, this.deps.noticeTrigger, k.revision, under);
     if (r === "stale") return { kind: "next", transient: true };
     return r === "told" ? { kind: "next", told: true, transient } : { kind: "next", notice: text, transient };
   }

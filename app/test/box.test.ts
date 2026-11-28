@@ -1979,7 +1979,7 @@ describe("confirming disk deletion on automatic reclaim", () => {
     expect(destructive().at(-1)).toBe(appDelete);
     const receipts = await c.received();
     expect(receipts).toEqual([expect.stringContaining(ACCOUNT_COPY.en.receipt)]);
-    expect(receipts[0]).toContain(ACCOUNT_COPY.en.reclaimedBox);
+    expect(receipts[0]).toContain(ACCOUNT_COPY.en.deletedUnwipedBox);
     expect(await slot()).toBeNull();
   }
 

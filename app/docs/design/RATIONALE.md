@@ -203,7 +203,7 @@ Every provider attempt has a timeout through `AbortSignal` that covers the heade
 
 ### What it does not do
 
-No turn runs inside the webhook request. There are no lock rows, no stored alarm time, no model-chosen ids or time zones, no mutable counters for anything countable, no D1 write inside a turn, no Cloudflare Queues and no Agents SDK.
+No turn runs inside the webhook request. There are no lock rows, no stored alarm time, no model-chosen ids or time zones, no mutable counters for anything countable, no Cloudflare Queues and no Agents SDK. A turn still writes D1 where the write itself is the cross-user decision the turn needs: beta invite issuance and seat claims, billing invite and join writes, and box inventory claims. Those conditional writes decide the reply and can't be deferred to `log_outbox`; ordinary facts still ship later through it.
 
 ## Tradeoffs accepted
 

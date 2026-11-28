@@ -406,6 +406,21 @@ describe("removing a replacement box while its setup still retries", () => {
     },
   );
 
+  test("a replacement with its own setup that answers again while it is being removed is wiped with its own key before its disk goes", async () => {
+    const { c, fly, ledger, opened } = await replacementInSetup("setup-retry-answers");
+    expect(opened).toBe(false);
+    const mark = fly.requests.length;
+    await c.say("/claude remove");
+    expect(await c.received()).toEqual([say("removing")]);
+    expect(fly.since(mark).filter((r) => r === "box /health"), "the first wipe try found the box down").toHaveLength(1);
+    fly.box.reachable = true;
+    await c.advanceTo(at("10:08"));
+    expect(fly.wipedBeforeDelete(mark)).toBe(true);
+    expect(fly.since(mark)).not.toContain("box refused the key");
+    expect((await c.snapshot()).box).toBeNull();
+    expect(ledger.boxes.has(c.agent)).toBe(false);
+  });
+
   test("a replacement with its own setup whose setup fails is deleted without waiting for a wipe, since the earlier box's live link can't open it", async () => {
     const { c, fly, ledger, opened } = await replacementInSetup("setup-retry-failed");
     const mark = fly.requests.length;

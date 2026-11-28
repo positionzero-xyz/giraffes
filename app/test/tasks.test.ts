@@ -54,6 +54,7 @@ const tapped = (status: TappedProposal["status"], taskStatus: TappedProposal["ta
   version: 1,
   status,
   taskStatus,
+  sentAt: (NOW - HOUR) as EpochMs,
 });
 
 describe("accepting a plan", () => {
@@ -92,7 +93,7 @@ describe("accepting a plan", () => {
     expect(typed.commit.facts.map((f) => [f.target, f.fact.kind, f.fact.detail])).toEqual([[{ id: 7 }, "plan_accepted", { via: "typed", version: 1 }]]);
 
     expect(taskEffects(view({ event: message("ok") })).commit).toEqual(NO_TASKS);
-    const stale = { ...acceptable, sentAt: (NOW - TASKS.typedAcceptWithinMs - 1) as EpochMs };
+    const stale = { ...acceptable, sentAt: (NOW - TASKS.acceptWithinMs - 1) as EpochMs };
     expect(taskEffects(view({ event: message("ok"), acceptable: stale })).commit).toEqual(NO_TASKS);
     expect(taskEffects(view({ event: message("ok but Saturday"), acceptable })).commit).toEqual(NO_TASKS);
     const amended = [item(message("ok")), item(message("but make it Sunday"), NOW, "dev:2")];

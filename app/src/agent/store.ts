@@ -956,13 +956,15 @@ export class AgentStore {
     const ids = batch.items.flatMap((i) => (i.event.kind === "choice" && i.event.choice.kind === "accept" ? [i.event.choice.proposal] : []));
     if (ids.length === 0) return [];
     return this.sql
-      .exec<{ id: ProposalId; task_id: TaskId; version: number; status: ProposalStatus; task_status: TaskStatus }>(
-        `SELECT p.id, p.task_id, p.version, p.status, t.status AS task_status FROM proposal p JOIN task t ON t.id = p.task_id
+      .exec<{ id: ProposalId; task_id: TaskId; version: number; status: ProposalStatus; task_status: TaskStatus; sent_at: EpochMs | null }>(
+        `SELECT p.id, p.task_id, p.version, p.status, t.status AS task_status,
+                CASE WHEN o.status = 'sent' THEN o.closed_at ELSE NULL END AS sent_at
+         FROM proposal p JOIN task t ON t.id = p.task_id LEFT JOIN outbox o ON o.id = p.outbox_id
          WHERE p.id IN (${placeholders(ids.length)})`,
         ...ids,
       )
       .toArray()
-      .map((r) => ({ id: r.id, task: r.task_id, version: r.version, status: r.status, taskStatus: r.task_status }));
+      .map((r) => ({ id: r.id, task: r.task_id, version: r.version, status: r.status, taskStatus: r.task_status, sentAt: r.sent_at }));
   }
 
   tasks(): readonly TaskSnapshot[] {

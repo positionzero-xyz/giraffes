@@ -54,7 +54,7 @@ const zoned = (at: EpochMs, zone: TimeZone) => `${toLocal(at, zone)} ${zone} (${
 
 type Reminder = {
   key: string; note: string; due_at: EpochMs; status: string; repeat: "daily" | "weekdays" | "weekly" | null;
-  repeat_anchor: import("../domain").LocalDateTime | null;
+  repeat_anchor: import("../domain").LocalDateTime | null; time_zone: TimeZone | null;
 };
 
 function itemText(sql: SqlStorage, item: SavedItem, a: AgentRow): string {
@@ -63,11 +63,12 @@ function itemText(sql: SqlStorage, item: SavedItem, a: AgentRow): string {
     case "note":
       return sql.exec<{ text: string }>("SELECT text FROM memory_note WHERE id = ?", item.id).one().text;
     case "reminder": {
-      const r = sql.exec<Reminder>("SELECT key, note, due_at, status, repeat, repeat_anchor FROM wakeup WHERE id = ?", item.id).one();
-      const lines = [r.note, `${t.key}: ${r.key}`, `${t.status}: ${r.status}`, `${t.due}: ${zoned(r.due_at, a.tz)}`];
+      const r = sql.exec<Reminder>("SELECT key, note, due_at, status, repeat, repeat_anchor, time_zone FROM wakeup WHERE id = ?", item.id).one();
+      const zone = r.time_zone ?? a.tz;
+      const lines = [r.note, `${t.key}: ${r.key}`, `${t.status}: ${r.status}`, `${t.due}: ${zoned(r.due_at, zone)}`];
       lines.push(`${t.repeat}: ${r.repeat ?? "—"}`);
-      if (r.repeat_anchor !== null) lines.push(`${t.anchor}: ${r.repeat_anchor}`);
-      if (r.status === "pending" && a.tz !== DEFAULT_TIME_ZONE) {
+      if (r.repeat_anchor !== null) lines.push(`${t.anchor}: ${r.repeat_anchor} ${zone}`);
+      if (r.status === "pending" && r.time_zone === null && a.tz !== DEFAULT_TIME_ZONE) {
         const due = fromLocal(toLocal(r.due_at, a.tz), DEFAULT_TIME_ZONE);
         lines.push(`${t.defaultDue}: ${zoned(due, DEFAULT_TIME_ZONE)}`);
       }

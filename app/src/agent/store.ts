@@ -585,7 +585,11 @@ export class AgentStore {
     return this.tx(() => {
       const forget = this.forget();
       if (coveredByForget(envelope, forget)) return "stale";
-      if (envelope.event.kind === "message") {
+      const event = envelope.event;
+      if (event.kind === "message") {
+        if (event.edited && event.messageId !== undefined && this.sql.exec(
+          "SELECT 1 FROM private_quote_id WHERE id = ?", event.messageId,
+        ).toArray().length > 0) return "stale";
         this.sql.exec(
           `INSERT INTO plan (one, trial_ends_at, updated_at) VALUES (1, ?, ?)
            ON CONFLICT (one) DO UPDATE SET trial_ends_at = COALESCE(plan.trial_ends_at, excluded.trial_ends_at)`,
@@ -617,7 +621,6 @@ export class AgentStore {
         }
       }
       if (privacy) return this.privacy(envelope, privacy, now);
-      const event = envelope.event;
       const safe = event.kind === "message" && event.quote?.kind === "text"
         ? { ...event, quote: this.incomingQuote(event.quote, forget, now) } : event;
       const stored = this.insertInbox(envelope.key, safe, envelope.receivedAt, now);
@@ -1118,6 +1121,10 @@ export class AgentStore {
            WHERE kind = 'message' AND event_key IN (SELECT value FROM json_each(?))`, JSON.stringify(commit.batchKeys),
         );
         for (const { at, id } of messages) this.blockQuoteWindow(Math.min(at, now), Math.max(at, now), id === null ? [] : [id]);
+        this.sql.exec(
+          `DELETE FROM inbox WHERE status = 'pending' AND kind = 'message' AND json_extract(payload, '$.edited') = 1
+           AND json_extract(payload, '$.messageId') IN (SELECT id FROM private_quote_id)`,
+        );
         this.sql.exec(DROP_PRIVATE_INBOX_QUOTES);
       }
       if (commit.outbound) {

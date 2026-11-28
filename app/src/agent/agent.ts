@@ -251,7 +251,7 @@ export class Agent extends DurableObject<Env> {
     });
   }
 
-  /** "stale": the person's last forget already covers this event, so nothing of it was stored. */
+  /** "stale": a privacy rule covers this event, so nothing of it was stored. */
   async enqueue(given: InboundEnvelope): Promise<"queued" | "duplicate" | "stale"> {
     const now = this.#deps.clock.now();
     const control = await this.#accountControl(given, now);
